@@ -123,9 +123,10 @@ The pipeline runs these steps in order:
 3. **Review** - AI code review of your diff
 4. **Test** - baseline tests plus evidence checks when intent is known
 5. **Document** - updates docs and reports unresolved gaps
-6. **Lint** - your linters (configured command or agent-detected)
-7. **Push** - to the configured push target
-8. **PR** - create or update the pull request
-9. **CI** - poll CI, watch PR mergeability, auto-fix failures
+6. **Retrospect** - optionally records process notes in run history; skipped unless `retrospect.enabled` is true
+7. **Lint** - your linters (configured command or agent-detected)
+8. **Push** - to the configured push target
+9. **PR** - create or update the pull request
+10. **CI** - poll CI, watch PR mergeability, auto-fix failures
 
 Steps that find issues pause for your approval. See the [Pipeline concept page](/no-mistakes/concepts/pipeline/) for the overview and [Pipeline Steps](/no-mistakes/reference/pipeline-steps/) for each step's exact behavior.
