@@ -377,7 +377,11 @@ func TestWaitForProcessExitRetriesTransientInspectionErrors(t *testing.T) {
 		daemonProcessRunning = originalProcessRunning
 	})
 
-	waitForProcessExit(4242, 50*time.Millisecond)
+	// Use a generous timeout so the three scripted checks always complete:
+	// waitForProcessExit returns as soon as check 3 reports "not running",
+	// so a large budget never slows the happy path but avoids flaking under
+	// load when a 10ms inter-check sleep balloons past a tight deadline.
+	waitForProcessExit(4242, 5*time.Second)
 
 	if checks < 3 {
 		t.Fatalf("waitForProcessExit stopped after %d checks, want at least 3", checks)
