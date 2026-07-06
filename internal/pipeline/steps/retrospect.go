@@ -113,13 +113,15 @@ Rules:
 
 // retrospectiveWorktreeSnapshot fingerprints the run worktree so the step can
 // verify the agent stayed read-only: head catches created or amended commits
-// (which the push step would otherwise push), status catches path-level
-// changes, and diff catches content edits to files that were already dirty
-// and so keep an identical porcelain line.
+// (which the push step would otherwise push), content catches every tracked
+// or untracked change `git add -A` could stage - including edits to files
+// that were already dirty or untracked and new files inside untracked
+// directories, which keep an identical porcelain line - and status catches
+// index-state changes (staging) that leave content untouched.
 type retrospectiveWorktreeSnapshot struct {
-	head   string
-	status string
-	diff   string
+	head    string
+	status  string
+	content string
 }
 
 func snapshotRetrospectiveWorktree(sctx *pipeline.StepContext) (retrospectiveWorktreeSnapshot, error) {
@@ -131,11 +133,11 @@ func snapshotRetrospectiveWorktree(sctx *pipeline.StepContext) (retrospectiveWor
 	if err != nil {
 		return retrospectiveWorktreeSnapshot{}, err
 	}
-	diff, err := git.DiffHead(sctx.Ctx, sctx.WorkDir)
+	content, err := git.WorktreeContentHash(sctx.Ctx, sctx.WorkDir)
 	if err != nil {
 		return retrospectiveWorktreeSnapshot{}, err
 	}
-	return retrospectiveWorktreeSnapshot{head: head, status: status, diff: diff}, nil
+	return retrospectiveWorktreeSnapshot{head: head, status: status, content: content}, nil
 }
 
 func parseRetrospectiveOutput(result *agent.Result) retrospectiveOutput {

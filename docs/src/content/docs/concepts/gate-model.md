@@ -17,7 +17,7 @@ flowchart TD
   gate --> hook["post-receive hook"]
   hook --> daemon["Daemon"]
   daemon --> worktree["Disposable worktree"]
-  worktree --> pipeline["intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci"]
+  worktree --> pipeline["intent -> rebase -> review -> test -> document -> retrospect -> lint -> push -> pr -> ci"]
   pipeline --> target["Push target"]
   daemon --> db["SQLite state"]
   daemon --> ipc["IPC socket"]
@@ -54,7 +54,7 @@ That is a core design choice, not an implementation detail.
 2. Git writes the push into the local bare gate repo, so the push itself stays fast.
 3. The gate repo's `post-receive` hook notifies the daemon.
 4. The daemon creates a detached worktree for this run.
-5. The pipeline runs in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`.
+5. The pipeline runs in order: `intent -> rebase -> review -> test -> document -> retrospect -> lint -> push -> pr -> ci`.
 6. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.

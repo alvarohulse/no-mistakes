@@ -119,6 +119,100 @@ func TestRetrospectStep_RejectsAgentCommit(t *testing.T) {
 	}
 }
 
+func TestRetrospectStep_RejectsAgentEditToUntrackedFile(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	untrackedPath := filepath.Join(dir, "NOTES.md")
+	if err := os.WriteFile(untrackedPath, []byte("untracked before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(untrackedPath, []byte("untracked after retrospective\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"edited untracked file"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for edit to untracked file")
+	}
+	if !strings.Contains(err.Error(), "retrospective step left worktree changes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrospectStep_RejectsAgentFileInUntrackedDir(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	untrackedDir := filepath.Join(dir, "evidence")
+	if err := os.MkdirAll(untrackedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(untrackedDir, "run.log"), []byte("evidence before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(untrackedDir, "RETRO.md"), []byte("notes\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"wrote notes in untracked dir"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for new file inside untracked dir")
+	}
+	if !strings.Contains(err.Error(), "retrospective step left worktree changes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrospectStep_AllowsUnchangedDirtyAndUntrackedState(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("dirty before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untrackedDir := filepath.Join(dir, "evidence")
+	if err := os.MkdirAll(untrackedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(untrackedDir, "run.log"), []byte("evidence before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statusBefore := gitStatusPorcelain(t, dir)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"no retrospective notes"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+
+	outcome, err := (&RetrospectStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || outcome.Skipped {
+		t.Fatalf("outcome = %#v, want completed", outcome)
+	}
+	if statusAfter := gitStatusPorcelain(t, dir); statusAfter != statusBefore {
+		t.Fatalf("snapshot mutated worktree state:\nbefore: %q\nafter: %q", statusBefore, statusAfter)
+	}
+}
+
 func TestRetrospectStep_RejectsAgentEditToAlreadyDirtyFile(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

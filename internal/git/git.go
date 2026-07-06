@@ -329,6 +329,44 @@ func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
 	return out != "", nil
 }
 
+// WorktreeContentHash returns a tree hash fingerprinting the full working-tree
+// content that `git add -A` could stage: tracked files plus untracked
+// non-ignored files, including files inside untracked directories. It stages
+// the worktree into a temporary index and writes the resulting tree, so it
+// detects content edits that leave `git status --porcelain` and `git diff HEAD`
+// unchanged (e.g. rewriting an already-untracked file). The real index is
+// never touched. Gitignored content is excluded on purpose: it matches the
+// staging surface of `git add -A`, and ephemeral ignored writes (caches,
+// tool state) should not change the fingerprint.
+func WorktreeContentHash(ctx context.Context, dir string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "no-mistakes-index-")
+	if err != nil {
+		return "", fmt.Errorf("create temp index dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	env := append(NonInteractiveEnv(dir), "GIT_INDEX_FILE="+filepath.Join(tmpDir, "index"))
+
+	add := exec.CommandContext(ctx, "git", "add", "-A")
+	add.Dir = dir
+	add.Env = env
+	if out, err := add.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git add -A (temp index): %w: %s", err, safeurl.RedactText(strings.TrimSpace(string(out))))
+	}
+
+	writeTree := exec.CommandContext(ctx, "git", "write-tree")
+	writeTree.Dir = dir
+	writeTree.Env = env
+	out, err := writeTree.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("git write-tree (temp index): %w: %s", err, safeurl.RedactText(stderr))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // CreateBranch creates a new branch with the given name and switches to it.
 // Fails if the branch already exists.
 func CreateBranch(ctx context.Context, dir, name string) error {
