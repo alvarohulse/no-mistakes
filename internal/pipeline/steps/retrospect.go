@@ -42,7 +42,7 @@ func (s *RetrospectStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutc
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
-	beforeStatus, err := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+	before, err := snapshotRetrospectiveWorktree(sctx)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot worktree before retrospective: %w", err)
 	}
@@ -79,11 +79,14 @@ Rules:
 		OnChunk:    sctx.LogChunk,
 	})
 
-	afterStatus, statusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
-	if statusErr != nil {
-		return nil, fmt.Errorf("snapshot worktree after retrospective: %w", statusErr)
+	after, snapErr := snapshotRetrospectiveWorktree(sctx)
+	if snapErr != nil {
+		return nil, fmt.Errorf("snapshot worktree after retrospective: %w", snapErr)
 	}
-	if afterStatus != beforeStatus {
+	if after.head != before.head {
+		return nil, fmt.Errorf("retrospective step changed HEAD")
+	}
+	if after != before {
 		return nil, fmt.Errorf("retrospective step left worktree changes")
 	}
 
@@ -106,6 +109,33 @@ Rules:
 	}
 
 	return &pipeline.StepOutcome{FixSummary: summary}, nil
+}
+
+// retrospectiveWorktreeSnapshot fingerprints the run worktree so the step can
+// verify the agent stayed read-only: head catches created or amended commits
+// (which the push step would otherwise push), status catches path-level
+// changes, and diff catches content edits to files that were already dirty
+// and so keep an identical porcelain line.
+type retrospectiveWorktreeSnapshot struct {
+	head   string
+	status string
+	diff   string
+}
+
+func snapshotRetrospectiveWorktree(sctx *pipeline.StepContext) (retrospectiveWorktreeSnapshot, error) {
+	head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return retrospectiveWorktreeSnapshot{}, err
+	}
+	status, err := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return retrospectiveWorktreeSnapshot{}, err
+	}
+	diff, err := git.DiffHead(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return retrospectiveWorktreeSnapshot{}, err
+	}
+	return retrospectiveWorktreeSnapshot{head: head, status: status, diff: diff}, nil
 }
 
 func parseRetrospectiveOutput(result *agent.Result) retrospectiveOutput {

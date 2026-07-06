@@ -92,3 +92,57 @@ func TestRetrospectStep_RejectsAgentWorktreeChanges(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRetrospectStep_RejectsAgentCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "RETRO.md"), []byte("notes\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "RETRO.md")
+			gitCmd(t, dir, "commit", "-m", "retrospective notes")
+			return &agent.Result{Output: json.RawMessage(`{"summary":"committed notes"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for agent-created commit")
+	}
+	if !strings.Contains(err.Error(), "retrospective step changed HEAD") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrospectStep_RejectsAgentEditToAlreadyDirtyFile(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	dirtyPath := filepath.Join(dir, "feature.txt")
+	if err := os.WriteFile(dirtyPath, []byte("dirty before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(dirtyPath, []byte("dirty after retrospective\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"edited dirty file"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for edit to already-dirty file")
+	}
+	if !strings.Contains(err.Error(), "retrospective step left worktree changes") {
+		t.Fatalf("error = %v", err)
+	}
+}

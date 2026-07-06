@@ -115,7 +115,7 @@ Optionally records process notes after documentation without mixing those notes 
 - Skips by default unless `retrospect.enabled` is true
 - Asks the agent for a concise retrospective summary and optional process notes
 - Logs the retrospective output into the run history; it does not edit files or create commits
-- Fails if the agent leaves worktree changes, so retrospective side effects cannot be silently committed by the push step
+- Fails if the agent leaves worktree changes, edits already-dirty files, or moves HEAD (for example by creating a commit), so retrospective side effects cannot be silently pushed by the push step
 
 Use this for agent/process learning that belongs in pipeline history, not in project docs.
 

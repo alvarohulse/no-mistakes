@@ -1,6 +1,6 @@
 ---
 title: Pipeline
-description: The nine steps that run on every gated push.
+description: The ten steps that run on every gated push.
 ---
 
 The pipeline runs a fixed, opinionated sequence of steps. Order is not configurable. What each step runs *is*.
@@ -11,7 +11,7 @@ intent → rebase → review → test → document → retrospect → lint → p
 
 ```mermaid
 flowchart LR
-  intent["Intent"] --> rebase["Rebase"] --> review["Review"] --> test["Test"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"] --> ci["CI"]
+  intent["Intent"] --> rebase["Rebase"] --> review["Review"] --> test["Test"] --> document["Document"] --> retrospect["Retrospect"] --> lint["Lint"] --> push["Push"] --> pr["PR"] --> ci["CI"]
   review -. findings .-> action["Approve / fix / skip / abort"]
   test -. findings .-> action
   document -. findings .-> action
@@ -31,7 +31,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
-## The nine steps
+## The ten steps
 
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|
@@ -40,10 +40,11 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 | 3 | **Review** | AI code review of your diff | `0` (requires approval) |
 | 4 | **Test** | Run baseline tests and gather evidence for available intent | `3` |
 | 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
-| 6 | **Lint** | Run lint/static analysis | `3` |
-| 7 | **Push** | Safely push the validated branch to the configured target | n/a |
-| 8 | **PR** | Create or update the pull request | n/a |
-| 9 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
+| 6 | **Retrospect** | Optionally record process notes in run history; skipped unless `retrospect.enabled` is true | n/a |
+| 7 | **Lint** | Run lint/static analysis | `3` |
+| 8 | **Push** | Safely push the validated branch to the configured target | n/a |
+| 9 | **PR** | Create or update the pull request | n/a |
+| 10 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
 
 ## Why these steps, in this order
 
@@ -53,6 +54,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
   If there's no diff left after the rebase, the pipeline skips the rest.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
 - **Document after test** so docs are updated against code that's known to work.
+- **Retrospect after document** so optional process notes are captured once docs are settled, in run history rather than in documentation output. It is skipped unless `retrospect.enabled` is true.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.
   The push and CI auto-fix paths refuse to overwrite commits that reached the configured push target out of band.
@@ -79,6 +81,7 @@ You can't reorder steps. You *can*:
 - Set explicit `commands.test`, `commands.lint`, `commands.format`.
 - Store test evidence locally by default or opt into committed in-repo evidence with `test.evidence.store_in_repo`.
 - Control auto-fix limits per step.
+- Enable the optional retrospective step with `retrospect.enabled`.
 - Ignore paths during review and documentation checks.
 - Disable or tune transcript-based intent extraction when intent is not supplied directly.
 - Skip steps for one run with `no-mistakes --skip <steps>`, `git push -o no-mistakes.skip=<steps>`, `no-mistakes axi run --skip <steps>`, or from the TUI.
@@ -88,7 +91,7 @@ See [Configuration](/no-mistakes/guides/configuration/).
 ## What you can't configure
 
 - The step order.
-- Skipping specific steps permanently - per-run skips are allowed, but the pipeline itself always has all nine.
+- Skipping specific steps permanently - per-run skips are allowed, but the pipeline itself always has all ten.
 - Adding new steps.
 
 This is intentional. The pipeline is opinionated so that "passed the gate" means the same thing across repos.

