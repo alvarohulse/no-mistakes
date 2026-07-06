@@ -421,8 +421,19 @@ func (c *Config) configuredAgents() []types.AgentName {
 }
 
 func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (string, error)) (types.AgentName, error) {
-	probed := make([]string, 0, len(agentProbeOrder))
+	probed := make([]string, 0, len(agentProbeOrder)+1)
 	for _, name := range agentProbeOrder {
+		if name == types.AgentCursor {
+			available, bins, err := c.cursorAvailable(lookPath)
+			probed = append(probed, bins...)
+			if err != nil {
+				return "", err
+			}
+			if available {
+				return name, nil
+			}
+			continue
+		}
 		bin := string(name)
 		if b, ok := defaultBinary[name]; ok {
 			bin = b
@@ -487,6 +498,14 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
 		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
+	if name == types.AgentCursor {
+		available, bins, err := c.cursorAvailable(lookPath)
+		probe := strings.Join(bins, ", ")
+		if err != nil {
+			return "", false, probe, err
+		}
+		return name, available, probe, nil
+	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
 	if err != nil {
@@ -530,6 +549,45 @@ func (c *Config) AgentPathFor(name types.AgentName) string {
 		return b
 	}
 	return string(name)
+}
+
+// cursorAvailable reports whether both binaries the cursor agent needs are on
+// PATH: the acpx shim it launches and the underlying cursor-agent that acpx
+// drives. It returns the binaries it considered (for diagnostics) and any
+// lookup error other than not-found. Probing stops at the first missing binary,
+// so a machine with only one of the pair resolves as unavailable rather than
+// selecting cursor and failing at runtime.
+func (c *Config) cursorAvailable(lookPath func(string) (string, error)) (bool, []string, error) {
+	bins := c.cursorBinaries()
+	for _, bin := range bins {
+		if _, err := lookPath(bin); err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+				return false, bins, nil
+			}
+			return false, bins, fmt.Errorf("resolve %s agent from %q: %w", types.AgentCursor, bin, err)
+		}
+	}
+	return true, bins, nil
+}
+
+// cursorBinaries lists the PATH binaries the cursor agent depends on: the
+// underlying cursor-agent and the acpx shim, in that order.
+func (c *Config) cursorBinaries() []string {
+	return []string{c.cursorAgentBinary(), c.AgentPathFor(types.AgentCursor)}
+}
+
+// cursorAgentBinary returns the underlying cursor-agent binary acpx spawns. It
+// is the first token of the "cursor" ACP registry override command when set,
+// otherwise the default "cursor-agent".
+func (c *Config) cursorAgentBinary() string {
+	if c.ACPRegistryOverrides != nil {
+		if override := strings.TrimSpace(c.ACPRegistryOverrides["cursor"]); override != "" {
+			if fields := strings.Fields(override); len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+	return "cursor-agent"
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in
