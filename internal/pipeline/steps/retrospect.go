@@ -113,11 +113,12 @@ Rules:
 
 // retrospectiveWorktreeSnapshot fingerprints the run worktree so the step can
 // verify the agent stayed read-only: head catches created or amended commits
-// (which the push step would otherwise push), content catches every tracked
-// or untracked change `git add -A` could stage - including edits to files
-// that were already dirty or untracked and new files inside untracked
-// directories, which keep an identical porcelain line - and status catches
-// index-state changes (staging) that leave content untouched.
+// (which the push step would otherwise push), content catches every change
+// the push step could stage - the `git add -A` surface plus the force-added
+// in-repo evidence directory, so edits to already-dirty or untracked files,
+// new files inside untracked directories (which keep an identical porcelain
+// line), and gitignored writes under the evidence directory all count - and
+// status catches index-state changes (staging) that leave content untouched.
 type retrospectiveWorktreeSnapshot struct {
 	head    string
 	status  string
@@ -133,7 +134,11 @@ func snapshotRetrospectiveWorktree(sctx *pipeline.StepContext) (retrospectiveWor
 	if err != nil {
 		return retrospectiveWorktreeSnapshot{}, err
 	}
-	content, err := git.WorktreeContentHash(sctx.Ctx, sctx.WorkDir)
+	var forceInclude []string
+	if pathspec := inRepoEvidencePathspec(sctx.Ctx, sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence); pathspec != "" {
+		forceInclude = append(forceInclude, pathspec)
+	}
+	content, err := git.WorktreeContentHash(sctx.Ctx, sctx.WorkDir, forceInclude...)
 	if err != nil {
 		return retrospectiveWorktreeSnapshot{}, err
 	}

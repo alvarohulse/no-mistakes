@@ -337,8 +337,12 @@ func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
 // unchanged (e.g. rewriting an already-untracked file). The real index is
 // never touched. Gitignored content is excluded on purpose: it matches the
 // staging surface of `git add -A`, and ephemeral ignored writes (caches,
-// tool state) should not change the fingerprint.
-func WorktreeContentHash(ctx context.Context, dir string) (string, error) {
+// tool state) should not change the fingerprint. Callers whose staging
+// surface goes beyond `git add -A` pass forceInclude pathspecs, staged with
+// `git add -f` so gitignored content under them is fingerprinted too (e.g.
+// the in-repo evidence directory the push step force-adds). Each forceInclude
+// pathspec must match at least one file, per standard `git add` semantics.
+func WorktreeContentHash(ctx context.Context, dir string, forceInclude ...string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "no-mistakes-index-")
 	if err != nil {
 		return "", fmt.Errorf("create temp index dir: %w", err)
@@ -351,6 +355,15 @@ func WorktreeContentHash(ctx context.Context, dir string) (string, error) {
 	add.Env = env
 	if out, err := add.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git add -A (temp index): %w: %s", err, safeurl.RedactText(strings.TrimSpace(string(out))))
+	}
+
+	if len(forceInclude) > 0 {
+		forceAdd := exec.CommandContext(ctx, "git", append([]string{"add", "-f", "--"}, forceInclude...)...)
+		forceAdd.Dir = dir
+		forceAdd.Env = env
+		if out, err := forceAdd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git add -f (temp index): %w: %s", err, safeurl.RedactText(strings.TrimSpace(string(out))))
+		}
 	}
 
 	writeTree := exec.CommandContext(ctx, "git", "write-tree")

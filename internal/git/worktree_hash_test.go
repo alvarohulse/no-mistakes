@@ -97,6 +97,43 @@ func TestWorktreeContentHash_DetectsTrackedEdit(t *testing.T) {
 	}
 }
 
+func TestWorktreeContentHash_ForceIncludeDetectsIgnoredContentEdit(t *testing.T) {
+	dir := worktreeHashTestRepo(t)
+	ctx := context.Background()
+	writeFile(t, filepath.Join(dir, ".gitignore"), "*.png\n")
+	run(t, dir, "git", "add", ".gitignore")
+	run(t, dir, "git", "commit", "-m", "ignore pngs")
+	writeFile(t, filepath.Join(dir, "evidence", "shot.png"), "png before\n")
+
+	plainBefore, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	before, err := WorktreeContentHash(ctx, dir, "evidence")
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	if before == plainBefore {
+		t.Fatal("force-included hash should differ from plain hash when ignored content exists")
+	}
+
+	writeFile(t, filepath.Join(dir, "evidence", "shot.png"), "png after\n")
+	plainAfter, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	if plainBefore != plainAfter {
+		t.Fatal("plain hash changed for gitignored content that git add -A cannot stage")
+	}
+	after, err := WorktreeContentHash(ctx, dir, "evidence")
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	if before == after {
+		t.Fatal("force-included hash did not change after editing ignored file in force-included dir")
+	}
+}
+
 func TestWorktreeContentHash_IgnoresGitignoredFiles(t *testing.T) {
 	dir := worktreeHashTestRepo(t)
 	ctx := context.Background()

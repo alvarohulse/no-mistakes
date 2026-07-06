@@ -213,6 +213,118 @@ func TestRetrospectStep_AllowsUnchangedDirtyAndUntrackedState(t *testing.T) {
 	}
 }
 
+func TestRetrospectStep_RejectsAgentIgnoredEditInStoreInRepoEvidenceDir(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.png\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore pngs")
+	headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	evidenceDir := filepath.Join(dir, "evidence", "feature")
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ignoredPath := filepath.Join(evidenceDir, "run.png")
+	if err := os.WriteFile(ignoredPath, []byte("evidence before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(ignoredPath, []byte("evidence edited by retrospective\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"edited ignored evidence"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for ignored edit inside in-repo evidence dir")
+	}
+	if !strings.Contains(err.Error(), "retrospective step left worktree changes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrospectStep_RejectsAgentIgnoredFileInNewStoreInRepoEvidenceDir(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.png\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore pngs")
+	headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			evidenceDir := filepath.Join(dir, "evidence", "feature")
+			if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(evidenceDir, "retro.png"), []byte("notes\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"wrote ignored evidence"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+
+	_, err := (&RetrospectStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected error for ignored file in newly created in-repo evidence dir")
+	}
+	if !strings.Contains(err.Error(), "retrospective step left worktree changes") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetrospectStep_AllowsUntouchedIgnoredEvidenceContent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.png\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore pngs")
+	headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	evidenceDir := filepath.Join(dir, "evidence", "feature")
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidenceDir, "run.png"), []byte("evidence before retrospective\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"no retrospective notes"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Retrospect.Enabled = true
+	sctx.Run.Branch = "feature"
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+
+	outcome, err := (&RetrospectStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || outcome.Skipped {
+		t.Fatalf("outcome = %#v, want completed", outcome)
+	}
+}
+
 func TestRetrospectStep_RejectsAgentEditToAlreadyDirtyFile(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

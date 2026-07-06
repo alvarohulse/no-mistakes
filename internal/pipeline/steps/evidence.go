@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,29 @@ func resolveTestEvidenceLocation(workDir, branch, runID string, ev config.Eviden
 	}
 	parts := append([]string{workDir}, relParts...)
 	return testEvidenceLocation{Dir: filepath.Join(parts...), StoreInRepo: true}
+}
+
+// inRepoEvidencePathspec returns the worktree-relative pathspec of the in-repo
+// test-evidence directory that the push step force-adds with `git add -f`, or
+// "" when push would not force-add anything. It is the single definition of
+// the push staging surface beyond `git add -A`: the push step stages it and
+// the retrospective read-only guard fingerprints it, so the two cannot drift.
+func inRepoEvidencePathspec(ctx context.Context, workDir, branch, runID string, ev config.Evidence) string {
+	location := resolveTestEvidenceLocation(workDir, branch, runID, ev)
+	if !location.StoreInRepo {
+		return ""
+	}
+	if gitIgnoresPath(ctx, workDir, location.Dir) {
+		return ""
+	}
+	if !dirHasFiles(location.Dir) {
+		return ""
+	}
+	rel, err := filepath.Rel(workDir, location.Dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return ""
+	}
+	return filepath.ToSlash(rel)
 }
 
 func repoPathHasSymlink(workDir, rel string) bool {

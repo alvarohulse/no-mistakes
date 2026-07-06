@@ -120,22 +120,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 }
 
 func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {
-	ctx := sctx.Ctx
-	location := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
-	if !location.StoreInRepo {
+	pathspec := inRepoEvidencePathspec(sctx.Ctx, sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
+	if pathspec == "" {
 		return nil
 	}
-	if gitIgnoresPath(ctx, sctx.WorkDir, location.Dir) {
-		return nil
-	}
-	if !dirHasFiles(location.Dir) {
-		return nil
-	}
-	rel, err := filepath.Rel(sctx.WorkDir, location.Dir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil
-	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-f", "--", filepath.ToSlash(rel)); err != nil {
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "add", "-f", "--", pathspec); err != nil {
 		return fmt.Errorf("stage test evidence: %w", err)
 	}
 	return nil
