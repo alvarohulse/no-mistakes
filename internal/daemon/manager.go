@@ -162,15 +162,15 @@ func branchFromRef(ref string) string {
 // trustedSHA is empty when the default branch is unknown, the fetch failed,
 // or the ref did not resolve — every one of those failure modes returns nil
 // here so the caller (EffectiveRepoConfig) fails closed: the pushed branch's
-// commands and agent are dropped and the run proceeds on built-in defaults.
-// None of these are fatal, since the pushed-branch copy is still read for
-// non-executing fields.
+// commands, agent, and prompts are dropped and the run proceeds on built-in
+// defaults. None of these are fatal, since the pushed-branch copy is still
+// read for non-steering fields.
 func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
 	if trustedSHA == "" {
 		// No trusted SHA means no freshly-fetched default-branch commit to
 		// read from. Return nil so EffectiveRepoConfig forces empty
-		// commands/agent — the secure default — instead of falling back to a
-		// potentially stale origin/<defaultBranch> ref.
+		// commands/agent/prompts — the secure default — instead of falling
+		// back to a potentially stale origin/<defaultBranch> ref.
 		return nil
 	}
 	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
@@ -335,10 +335,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// than the origin/<defaultBranch> remote-tracking ref) is what makes a
 	// fetch failure fail closed: if the fetch errors or the ref does not
 	// resolve, trustedSHA stays empty, loadTrustedRepoConfig returns nil, and
-	// EffectiveRepoConfig drops the pushed branch's commands/agent. Without
-	// the resolve, a stale origin/<defaultBranch> left in the shared bare
-	// repo by a previous run could serve a trusted copy that the live default
-	// branch has already removed — silently running stale shell.
+	// EffectiveRepoConfig drops the pushed branch's commands/agent/prompts.
+	// Without the resolve, a stale origin/<defaultBranch> left in the shared
+	// bare repo by a previous run could serve a trusted copy that the live
+	// default branch has already removed — silently running stale shell.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
 		if err := git.FetchRemoteBranch(ctx, wtDir, "origin", repo.DefaultBranch); err != nil {
@@ -373,20 +373,22 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("load_repo_config")
 		return "", fmt.Errorf("load repo config: %w", err)
 	}
-	// SECURITY: load the code-executing selection fields (commands.* and
-	// agent) from the trusted default-branch copy of .no-mistakes.yaml rather
-	// than the pushed SHA. The worktree is checked out at headSHA (the
-	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/agent and let any pushed SHA run arbitrary shell
-	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
-	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
-	// EffectiveRepoConfig replaces commands + agent with the trusted
-	// default-branch values unless the maintainer has explicitly opted in.
+	// SECURITY: load the code-executing and agent-steering fields (commands.*,
+	// agent, and prompts) from the trusted default-branch copy of
+	// .no-mistakes.yaml rather than the pushed SHA. The worktree is checked
+	// out at headSHA (the contributor's branch), so reading repoCfg above
+	// would honor a contributor's commands/agent/prompts and let any pushed
+	// SHA run arbitrary shell (sh -c), pick the launched agent (incl. acp:
+	// targets), or steer that agent on the daemon host with the maintainer's
+	// env (GH_TOKEN, SSH agent, ...). EffectiveRepoConfig replaces commands +
+	// agent + prompts with the trusted default-branch values unless the
+	// maintainer has explicitly opted in.
 	//
 	// allow_repo_commands is itself read ONLY from the trusted copy: a
 	// contributor cannot self-enable it from the pushed branch. With no
 	// trusted copy (fetch failed, no default branch, or no file on it) the
-	// opt-in is false and commands/agent are forced empty — fail closed.
+	// opt-in is false and commands/agent/prompts are forced empty — fail
+	// closed.
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)

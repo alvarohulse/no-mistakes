@@ -75,12 +75,13 @@ type RepoConfig struct {
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
-	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format} and agent) from a contributor's
-	// pushed branch instead of the trusted default-branch copy. It is read
-	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
-	// the pushed SHA), so a contributor cannot self-enable. Default false:
-	// the pushed branch controls nothing that executes.
+	// AllowRepoCommands opts in to honoring the code-executing and
+	// agent-steering fields (commands.{test,lint,format}, agent, and prompts)
+	// from a contributor's pushed branch instead of the trusted default-branch
+	// copy. It is read ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (never the pushed SHA), so a contributor cannot
+	// self-enable. Default false: the pushed branch controls nothing that
+	// executes or steers the launched agent.
 	AllowRepoCommands bool         `yaml:"allow_repo_commands"`
 	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
 	Intent            IntentRaw    `yaml:"intent"`
@@ -831,18 +832,19 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The code-executing selection fields — Commands (run verbatim via sh -c on
-// the daemon host) and Agent/Agents (select which processes launch with the
-// maintainer's credentials, including fallback lists and acp: targets) — are
-// taken only from the trusted copy when it is present, so a contributor's
-// pushed branch cannot inject shell or pick an agent. When allowRepoCommands is
-// true the maintainer has explicitly opted in (via allow_repo_commands on the
-// TRUSTED default-branch copy) to honoring the pushed-branch copy wholesale.
-// When there is no trusted copy and the maintainer has not opted in, both
+// The code-executing and agent-steering fields — Commands (run verbatim via
+// sh -c on the daemon host), Agent/Agents (select which processes launch with
+// the maintainer's credentials, including fallback lists and acp: targets),
+// and Prompts (steer those launched agents) — are taken only from the trusted
+// copy when it is present, so a contributor's pushed branch cannot inject
+// shell, pick an agent, or steer it. When allowRepoCommands is true the
+// maintainer has explicitly opted in (via allow_repo_commands on the TRUSTED
+// default-branch copy) to honoring the pushed-branch copy wholesale. When
+// there is no trusted copy and the maintainer has not opted in, all three
 // fields are forced empty (Agent "" and nil Agents inherit the global agent;
-// Commands{} yields built-in defaults) rather than falling back to the pushed
-// branch — this blocks the supply-chain vector for repos that ship
-// .no-mistakes.yaml only on feature branches.
+// Commands{} yields built-in defaults; PromptConfig{} appends nothing) rather
+// than falling back to the pushed branch — this blocks the supply-chain
+// vector for repos that ship .no-mistakes.yaml only on feature branches.
 //
 // Non-steering fields (ignore patterns, auto-fix, intent, test) are always
 // taken from the pushed copy, matching prior behavior, since they cannot run
