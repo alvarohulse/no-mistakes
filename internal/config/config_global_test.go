@@ -177,6 +177,36 @@ log_level: "debug"
 	}
 }
 
+func TestLoadGlobal_PromptsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `prompts:
+  shared: |
+    global shared
+  review: |
+    global review
+  ci: |
+    global ci
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Prompts.Shared != "global shared\n" {
+		t.Errorf("prompts.shared = %q", cfg.Prompts.Shared)
+	}
+	if cfg.Prompts.Review != "global review\n" {
+		t.Errorf("prompts.review = %q", cfg.Prompts.Review)
+	}
+	if cfg.Prompts.CI != "global ci\n" {
+		t.Errorf("prompts.ci = %q", cfg.Prompts.CI)
+	}
+}
+
 func TestLoadGlobal_AgentAcceptsList(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

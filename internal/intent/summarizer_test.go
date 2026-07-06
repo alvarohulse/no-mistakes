@@ -73,6 +73,50 @@ func TestAgentSummarizer_PromptRequiresPlainTextSummary(t *testing.T) {
 	}
 }
 
+func TestAgentSummarizer_AppendsPromptConfigBeforeTranscript(t *testing.T) {
+	fa := &fakeAgent{output: `{"summary": "user wanted to add foo"}`}
+	s := NewAgentSummarizer(fa, "", "Additional prompt config:\ncustom intent guidance\n")
+	_, err := s.Summarize(context.Background(), &Session{
+		Messages: []Message{{Role: RoleUser, Text: "please add a foo helper"}},
+	})
+	if err != nil {
+		t.Fatalf("summarize: %v", err)
+	}
+	configIndex := strings.Index(fa.lastPrompt, "custom intent guidance")
+	transcriptIndex := strings.Index(fa.lastPrompt, "Transcript begins below the line")
+	if configIndex < 0 {
+		t.Fatalf("prompt missing prompt config:\n%s", fa.lastPrompt)
+	}
+	if transcriptIndex < 0 {
+		t.Fatalf("prompt missing transcript boundary:\n%s", fa.lastPrompt)
+	}
+	if configIndex > transcriptIndex {
+		t.Fatalf("prompt config should appear before transcript data block:\n%s", fa.lastPrompt)
+	}
+}
+
+func TestAgentDisambiguator_AppendsPromptConfig(t *testing.T) {
+	fa := &fakeAgent{}
+	fa.run = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "custom intent guidance") {
+			t.Fatalf("prompt missing prompt config:\n%s", opts.Prompt)
+		}
+		out := []byte(`{"agent_name":"claude","session_id":"s1","confidence":0.82,"reason":"closer user request"}`)
+		return &agent.Result{Output: out, Text: string(out)}, nil
+	}
+
+	d := NewAgentDisambiguator(fa, "", "Additional prompt config:\ncustom intent guidance\n")
+	selected, err := d.Disambiguate(context.Background(), []string{"foo.go"}, []*Match{
+		{Session: &Session{SessionID: "s1", AgentName: "claude", Messages: []Message{{Role: RoleUser, Text: "please add foo"}}}},
+	})
+	if err != nil {
+		t.Fatalf("disambiguate: %v", err)
+	}
+	if selected.AgentName != "claude" || selected.SessionID != "s1" {
+		t.Fatalf("selected = %q, want s1", selected)
+	}
+}
+
 // CWD must reach the underlying agent. Backends like opencode spawn a
 // long-lived server on first Run() and lock its cwd; if the summarizer's
 // CWD is empty, the server starts in the daemon's cwd and every later

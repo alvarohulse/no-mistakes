@@ -391,6 +391,7 @@ Instructions:
 		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
 	prompt += userIntentPromptSection(sctx)
+	prompt += configuredPromptSection(sctx, types.StepRebase)
 
 	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:     prompt,

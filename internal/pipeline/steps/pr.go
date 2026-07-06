@@ -143,6 +143,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseSHA stri
 Pipeline results (reference these naturally in the summary if relevant):
 %s`, pipelineMD)
 	}
+	promptSections := pipelineContext + userIntentPromptSection(sctx) + executionContextPromptSection() + configuredPromptSection(sctx, s.Name())
 
 	prompt := fmt.Sprintf(`Draft a pull request title and summary for the full branch delta.
 
@@ -165,7 +166,7 @@ Commit history:
 %s
 
 Diff stat:
-%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, sctx.Repo.DefaultBranch, conventional.ReleaseTypeRule, commitLog, diffStat, pipelineContext, userIntentPromptSection(sctx), executionContextPromptSection())
+%s%s`, branch, baseSHA, sctx.Run.HeadSHA, sctx.Repo.DefaultBranch, conventional.ReleaseTypeRule, commitLog, diffStat, promptSections)
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 

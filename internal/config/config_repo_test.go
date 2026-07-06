@@ -74,6 +74,36 @@ ignore_patterns:
 	}
 }
 
+func TestLoadRepo_PromptsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".no-mistakes.yaml")
+	data := `prompts:
+  shared: |
+    repo shared
+  test: |
+    repo test
+  pr: |
+    repo pr
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadRepo(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Prompts.Shared != "repo shared\n" {
+		t.Errorf("prompts.shared = %q", cfg.Prompts.Shared)
+	}
+	if cfg.Prompts.Test != "repo test\n" {
+		t.Errorf("prompts.test = %q", cfg.Prompts.Test)
+	}
+	if cfg.Prompts.PR != "repo pr\n" {
+		t.Errorf("prompts.pr = %q", cfg.Prompts.PR)
+	}
+}
+
 func TestLoadRepo_AgentAcceptsList(t *testing.T) {
 	dir := t.TempDir()
 	data := `agent: [codex, claude]

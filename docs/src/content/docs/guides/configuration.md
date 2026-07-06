@@ -15,6 +15,7 @@ work. Config exists for the parts that genuinely vary by machine or repo:
 - where test evidence artifacts should be stored
 - how aggressive the auto-fix loop should be
 - whether no-mistakes should infer intent from recent local agent transcripts
+- extra prompt guidance for pipeline agents
 
 Config is split across two files:
 
@@ -107,6 +108,13 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+# Optional prompt additions. Built-in prompts stay authoritative.
+prompts:
+  shared: |
+    Always included in model prompts.
+  review: |
+    Review-specific additions.
 ```
 
 See [Global Config Reference](/no-mistakes/reference/global-config/) for the full field listing.
@@ -155,6 +163,13 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+
+# Optional repo-specific prompt additions.
+prompts:
+  shared: |
+    Always included in model prompts.
+  test: |
+    Test-specific additions.
 ```
 
 See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full field listing.
@@ -168,6 +183,7 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 - `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.
 - `intent` from the repo config overlays global intent settings. Fields not set in the repo config fall through to the global default, except `intent.disabled_readers`, which adds to globally disabled readers.
 - `test.evidence` from the repo config overlays global test evidence settings. Fields not set in the repo config fall through to the global default.
+- `prompts` appends global and repo guidance in order: global shared, repo shared, global step-specific, repo step-specific.
 - `commands` and `ignore_patterns` are repo-only fields.
 - `ci_timeout` and `auto_fix.ci` are the canonical keys; `babysit_timeout` and `auto_fix.babysit` are still accepted as legacy aliases.
 - If `commands.test` is set, the test step runs it first as the baseline; when user intent is available, the agent may still run afterward to gather evidence-oriented validation.
@@ -181,6 +197,8 @@ baseline behavior, while leaving commands empty asks the agent to fill in the ga
 For tests, available user intent can also trigger an evidence-oriented agent follow-up after the baseline command succeeds.
 By default, evidence stays in a temporary local directory; opt into `test.evidence.store_in_repo` when your team wants evidence artifacts committed, pushed, and linked directly from PRs.
 For lint, that gap includes safe formatter and linter fixes during the initial lint pass.
+
+Repo `prompts` are read from the trusted default-branch `.no-mistakes.yaml` alongside `commands` and `agent`, unless `allow_repo_commands: true` is set there.
 
 ## Ignore pattern rules
 

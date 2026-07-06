@@ -40,14 +40,15 @@ var disambiguatorSchema = json.RawMessage(`{
 }`)
 
 type agentDisambiguator struct {
-	agent agent.Agent
-	cwd   string
+	agent         agent.Agent
+	cwd           string
+	promptSection string
 }
 
 // NewAgentDisambiguator wraps an agent.Agent as a Disambiguator. The agent is
 // run in cwd so it can inspect changed repository files progressively.
-func NewAgentDisambiguator(a agent.Agent, cwd string) Disambiguator {
-	return &agentDisambiguator{agent: a, cwd: cwd}
+func NewAgentDisambiguator(a agent.Agent, cwd string, promptSection ...string) Disambiguator {
+	return &agentDisambiguator{agent: a, cwd: cwd, promptSection: firstPromptSection(promptSection)}
 }
 
 func (d *agentDisambiguator) Disambiguate(ctx context.Context, diffFiles []string, candidates []*Match) (choice DisambiguationChoice, retErr error) {
@@ -98,7 +99,7 @@ func (d *agentDisambiguator) Disambiguate(ctx context.Context, diffFiles []strin
 	}
 
 	result, err := d.agent.Run(ctx, agent.RunOpts{
-		Prompt:     buildDisambiguationPrompt(diffFiles, candidates, packetPaths),
+		Prompt:     buildDisambiguationPrompt(diffFiles, candidates, packetPaths, d.promptSection),
 		CWD:        d.cwd,
 		JSONSchema: disambiguatorSchema,
 	})
@@ -282,7 +283,7 @@ func writeDisambiguationPacket(dir string, index int, candidate *Match) (string,
 	return path, nil
 }
 
-func buildDisambiguationPrompt(diffFiles []string, candidates []*Match, packetPaths []string) string {
+func buildDisambiguationPrompt(diffFiles []string, candidates []*Match, packetPaths []string, promptSection string) string {
 	var sb strings.Builder
 	sb.WriteString("Choose which recent agent session most likely produced the current change.\n\n")
 	sb.WriteString("Rules:\n")
@@ -317,6 +318,7 @@ func buildDisambiguationPrompt(diffFiles []string, candidates []*Match, packetPa
 	}
 	sb.WriteString("\nReturn {\"agent_name\":\"...\",\"session_id\":\"...\",\"confidence\":0.0," +
 		"\"reason\":\"short explanation\"}.\n")
+	sb.WriteString(promptSection)
 	return sb.String()
 }
 

@@ -51,6 +51,12 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+prompts:
+  shared: |
+    Always included in model prompts.
+  review: |
+    Review-specific additions.
 ```
 
 ## Fields
@@ -280,6 +286,32 @@ Branch slashes become nested directories, unsafe branch characters are replaced,
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
 These are global defaults. Per-repo config can override either field.
+
+### prompts
+
+Global prompt additions appended to no-mistakes' built-in pipeline prompts.
+
+Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
+`prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
+
+Per-repo prompt config combines with global prompt config in this order:
+
+1. global `prompts.shared`
+2. repo `prompts.shared`
+3. global `prompts.<step>`
+4. repo `prompts.<step>`
+
+| Field | Applies to |
+|---|---|
+| `prompts.shared` | Every pipeline model prompt |
+| `prompts.intent` | Intent summarization and disambiguation |
+| `prompts.rebase` | Rebase conflict resolution |
+| `prompts.review` | Review and review-fix prompts |
+| `prompts.test` | Test evidence and test-fix prompts |
+| `prompts.document` | Documentation update prompt |
+| `prompts.lint` | Lint agent and lint-fix prompts |
+| `prompts.pr` | PR title/body prompt |
+| `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
 
 ## Environment variables
 

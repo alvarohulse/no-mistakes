@@ -17,6 +17,7 @@ It tells agents to keep intentional source, project, user-data, and system file 
 The only intentional out-of-worktree write it allows is test evidence under the managed temporary `no-mistakes-evidence` directory when a testing prompt asks for it; when in-repo evidence is enabled, test evidence stays inside the configured evidence directory instead.
 Incidental temp or cache writes from normal development tools are still allowed.
 Testing prompts also ask agents to remove transient working-tree artifacts they created, such as downloaded models, caches, build outputs, large binaries, or generated data directories, before reporting completion.
+You can append extra prompt guidance with global or repo-level `prompts`; built-in prompts, output schemas, safety rules, and worktree boundaries remain authoritative. Repo prompt config is read from the trusted default-branch `.no-mistakes.yaml` alongside `commands` and `agent`, unless that trusted file opts into `allow_repo_commands: true`.
 
 ## How to choose quickly
 

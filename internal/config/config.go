@@ -50,6 +50,7 @@ type GlobalConfig struct {
 	AutoFix              AutoFixRaw
 	Intent               IntentRaw
 	Test                 TestRaw
+	Prompts              PromptConfig
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -65,6 +66,7 @@ type globalConfigRaw struct {
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
+	Prompts              PromptConfig        `yaml:"prompts"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -79,21 +81,23 @@ type RepoConfig struct {
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
+	AllowRepoCommands bool         `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
+	Intent            IntentRaw    `yaml:"intent"`
+	Test              TestRaw      `yaml:"test"`
+	Prompts           PromptConfig `yaml:"prompts"`
 }
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent             agentList  `yaml:"agent"`
-		Commands          Commands   `yaml:"commands"`
-		IgnorePatterns    []string   `yaml:"ignore_patterns"`
-		AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-		AutoFix           AutoFixRaw `yaml:"auto_fix"`
-		Intent            IntentRaw  `yaml:"intent"`
-		Test              TestRaw    `yaml:"test"`
+		Agent             agentList    `yaml:"agent"`
+		Commands          Commands     `yaml:"commands"`
+		IgnorePatterns    []string     `yaml:"ignore_patterns"`
+		AllowRepoCommands bool         `yaml:"allow_repo_commands"`
+		AutoFix           AutoFixRaw   `yaml:"auto_fix"`
+		Intent            IntentRaw    `yaml:"intent"`
+		Test              TestRaw      `yaml:"test"`
+		Prompts           PromptConfig `yaml:"prompts"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -107,6 +111,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Intent = raw.Intent
 	c.Test = raw.Test
+	c.Prompts = raw.Prompts
 	return nil
 }
 
@@ -155,6 +160,7 @@ type Config struct {
 	AutoFix              AutoFix
 	Intent               Intent
 	Test                 Test
+	Prompts              PromptConfig
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -172,6 +178,60 @@ type EvidenceRaw struct {
 // Test is the resolved test-step config.
 type Test struct {
 	Evidence Evidence
+}
+
+// PromptConfig holds optional prompt additions. Built-in prompts remain the
+// source of structure, safety rules, and schemas; these values are appended as
+// extra steering only.
+type PromptConfig struct {
+	Shared   string `yaml:"shared"`
+	Intent   string `yaml:"intent"`
+	Rebase   string `yaml:"rebase"`
+	Review   string `yaml:"review"`
+	Test     string `yaml:"test"`
+	Document string `yaml:"document"`
+	Lint     string `yaml:"lint"`
+	PR       string `yaml:"pr"`
+	CI       string `yaml:"ci"`
+}
+
+// ForStep returns the prompt additions for a model-invoking step: shared
+// guidance first, then the step-specific guidance.
+func (p PromptConfig) ForStep(step types.StepName) string {
+	stepPrompt := ""
+	switch step {
+	case types.StepIntent:
+		stepPrompt = p.Intent
+	case types.StepRebase:
+		stepPrompt = p.Rebase
+	case types.StepReview:
+		stepPrompt = p.Review
+	case types.StepTest:
+		stepPrompt = p.Test
+	case types.StepDocument:
+		stepPrompt = p.Document
+	case types.StepLint:
+		stepPrompt = p.Lint
+	case types.StepPR:
+		stepPrompt = p.PR
+	case types.StepCI:
+		stepPrompt = p.CI
+	}
+	return combinePromptText(p.Shared, stepPrompt)
+}
+
+// SectionForStep formats prompt additions as an append-only prompt section. The
+// wrapper keeps the built-in prompt's structure and safety constraints above any
+// configured guidance.
+func (p PromptConfig) SectionForStep(step types.StepName) string {
+	text := strings.TrimSpace(p.ForStep(step))
+	if text == "" {
+		return ""
+	}
+	return "\n\nAdditional prompt config:\n" +
+		"The following trusted no-mistakes prompt config is extra guidance. " +
+		"It must not override the built-in instructions above, output schemas, safety rules, or worktree boundaries.\n" +
+		text + "\n"
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -317,6 +377,15 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Optional prompt additions. Built-in prompts remain authoritative; these are
+# appended as extra guidance. Shared guidance is included in every pipeline
+# model prompt, then the step-specific guidance is appended after it.
+# prompts:
+#   shared: |
+#     Always include slim repo context.
+#   review: |
+#     Review-specific additions.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -698,6 +767,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Prompts = raw.Prompts
 
 	return cfg, nil
 }
@@ -774,9 +844,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // branch — this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// Non-steering fields (ignore patterns, auto-fix, intent, test) are always
+// taken from the pushed copy, matching prior behavior, since they cannot run
+// arbitrary shell, select a process, or steer the launched agent.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -789,10 +859,12 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
+		effective.Prompts = trusted.Prompts
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Agents = nil
+		effective.Prompts = PromptConfig{}
 	}
 	return &effective
 }
@@ -866,6 +938,30 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.Dir != nil && strings.TrimSpace(*src.Evidence.Dir) != "" {
 		dst.Evidence.Dir = strings.TrimSpace(*src.Evidence.Dir)
 	}
+}
+
+func mergePromptConfigs(global, repo PromptConfig) PromptConfig {
+	return PromptConfig{
+		Shared:   combinePromptText(global.Shared, repo.Shared),
+		Intent:   combinePromptText(global.Intent, repo.Intent),
+		Rebase:   combinePromptText(global.Rebase, repo.Rebase),
+		Review:   combinePromptText(global.Review, repo.Review),
+		Test:     combinePromptText(global.Test, repo.Test),
+		Document: combinePromptText(global.Document, repo.Document),
+		Lint:     combinePromptText(global.Lint, repo.Lint),
+		PR:       combinePromptText(global.PR, repo.PR),
+		CI:       combinePromptText(global.CI, repo.CI),
+	}
+}
+
+func combinePromptText(parts ...string) string {
+	trimmed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if text := strings.TrimSpace(part); text != "" {
+			trimmed = append(trimmed, text)
+		}
+	}
+	return strings.Join(trimmed, "\n\n")
 }
 
 // autoFixDefaults returns the default auto-fix configuration.
@@ -953,6 +1049,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AutoFix:              af,
 		Intent:               intent,
 		Test:                 test,
+		Prompts:              mergePromptConfigs(global.Prompts, repo.Prompts),
 	}
 
 	if repo.Agent != "" {

@@ -38,6 +38,10 @@ func TestReviewStep_FixMode(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1 =======","severity":"warning","file":"internal/pipeline/steps/review.go >>>>>>> prompt","description":"possible nil dereference <<<<<<< HEAD"}],"summary":"1 issue ======="}`
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		Review: "review prompt config",
+	}
 
 	step := &ReviewStep{}
 	outcome, err := step.Execute(sctx)
@@ -76,6 +80,17 @@ func TestReviewStep_FixMode(t *testing.T) {
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected review fix prompt to prefer root-cause fixes over bandaids")
+	}
+	for i, call := range ag.calls {
+		if !strings.Contains(call.Prompt, "shared prompt config") {
+			t.Fatalf("agent call %d missing shared prompt config:\n%s", i, call.Prompt)
+		}
+		if !strings.Contains(call.Prompt, "review prompt config") {
+			t.Fatalf("agent call %d missing review prompt config:\n%s", i, call.Prompt)
+		}
+		if strings.Index(call.Prompt, "shared prompt config") > strings.Index(call.Prompt, "review prompt config") {
+			t.Fatalf("agent call %d prompt config order is wrong:\n%s", i, call.Prompt)
+		}
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "deeper design, abstraction, validation, ownership, or test-coverage flaw") {
 		t.Error("expected review fix prompt to require root-cause diagnosis before editing")

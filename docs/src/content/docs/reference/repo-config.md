@@ -6,9 +6,9 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: code-executing fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, both fields are forced empty — the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands` and `agent` you want the gate to run to your default branch. Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials, and `prompts` steer that launched agent. To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed). If the fetch fails, these fields are forced empty — the run proceeds on built-in defaults rather than falling back to a potentially stale or hostile copy. Commit the `commands`, `agent`, and `prompts` you want the gate to run to your default branch. Non-steering fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch.
 
-If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
+If you genuinely want per-branch `commands`, `agent`, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
 
 ```yaml
@@ -43,6 +43,12 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+
+prompts:
+  shared: |
+    Always included in model prompts.
+  review: |
+    Review-specific additions.
 ```
 
 ## Fields
@@ -71,14 +77,14 @@ The list is filtered to entries available to the daemon at run startup, and the 
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring code-executing and agent-steering fields (`commands.{test,lint,format}`, `agent`, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 |---|---|
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands` and `agent` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### commands.test
 
@@ -192,3 +198,30 @@ By default, test evidence stays in a temporary directory keyed by run ID and is 
 Set `store_in_repo: true` to write evidence under `<dir>/<branch-slug>` inside the worktree so push can commit and publish it with the branch.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+
+### prompts
+
+Append repo-specific guidance to no-mistakes' built-in agent prompts.
+
+Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
+`prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
+Repo prompt config is agent-steering config, so it is read from the trusted default-branch copy unless `allow_repo_commands: true` is set there.
+
+Global prompt config and repo prompt config combine in this order:
+
+1. global `prompts.shared`
+2. repo `prompts.shared`
+3. global `prompts.<step>`
+4. repo `prompts.<step>`
+
+| Field | Applies to |
+|---|---|
+| `prompts.shared` | Every pipeline model prompt |
+| `prompts.intent` | Intent summarization and disambiguation |
+| `prompts.rebase` | Rebase conflict resolution |
+| `prompts.review` | Review and review-fix prompts |
+| `prompts.test` | Test evidence and test-fix prompts |
+| `prompts.document` | Documentation update prompt |
+| `prompts.lint` | Lint agent and lint-fix prompts |
+| `prompts.pr` | PR title/body prompt |
+| `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
