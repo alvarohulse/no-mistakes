@@ -37,7 +37,7 @@ local.
 
 If you are not sure where to start, configure these in this order:
 
-1. Set `commands.test` and `commands.lint` in repo config so the gate runs the exact commands your repo expects.
+1. Set `commands.test` and `commands.lint` in repo config so the gate runs the exact commands your repo expects, and add `commands.setup` and `commands.build` when the gate worktree needs bootstrap or compile steps.
 2. Override `agent` per repo only when one codebase clearly works better with a different tool or fallback order.
 3. Tune `auto_fix` after you have seen how much automation you actually want.
 
@@ -129,8 +129,10 @@ Azure DevOps uses the `az` CLI with the `azure-devops` extension; for non-intera
 # Override the agent, or ordered fallback list, for this repo and its setup-wizard suggestions.
 agent: codex
 
-# Explicit commands for test/lint/format steps.
+# Explicit commands for setup/build/test/lint/format steps.
 commands:
+  setup: "npm ci"
+  build: "npm run build"
   lint: "golangci-lint run ./..."
   test: "go test -race ./..."
   format: "gofmt -w ."
@@ -170,6 +172,7 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 - `test.evidence` from the repo config overlays global test evidence settings. Fields not set in the repo config fall through to the global default.
 - `commands` and `ignore_patterns` are repo-only fields.
 - `ci_timeout` and `auto_fix.ci` are the canonical keys; `babysit_timeout` and `auto_fix.babysit` are still accepted as legacy aliases.
+- If `commands.setup` or `commands.build` is empty, that step is skipped; there is no agent fallback for setup or build.
 - If `commands.test` is set, the test step runs it first as the baseline; when user intent is available, the agent may still run afterward to gather evidence-oriented validation.
 - If `commands.test` is empty, the agent detects and runs relevant tests itself.
 - If `commands.lint` is empty, the agent detects relevant linters and formatters, applies safe fixes, verifies them, commits any agent changes, and reports only unresolved issues.

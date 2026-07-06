@@ -92,7 +92,7 @@ func readTestFile(t *testing.T, path string) string {
 
 func writeFileCommand(path, content string) string {
 	if runtime.GOOS == "windows" {
-		return "echo|set /p=" + content + " > " + shellQuote(path)
+		return "echo|set /p=" + content + ">" + shellQuote(path)
 	}
 	return "printf " + shellQuote(content) + " > " + shellQuote(path)
 }

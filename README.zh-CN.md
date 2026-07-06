@@ -53,8 +53,8 @@
             ▼
    ┌───────────────────────────────────────────────┐
    │  用完即弃的 worktree —— 你的工作原地不动          │
-   │  setup → build → review → test → docs → lint │
-   │  push → PR → CI                              │
+   │  setup → build → review → test → docs → lint  │
+   │  → push → PR → CI                             │
    └───────────────────────────────────────────────┘
             │  每项检查变绿
             ▼
