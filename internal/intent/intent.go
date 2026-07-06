@@ -45,6 +45,11 @@ type ExtractParams struct {
 	Cache Cache
 	// Summarizer turns the chosen session's text into a short summary.
 	Summarizer Summarizer
+	// PromptSection is the configured prompt addition the Summarizer and
+	// Disambiguator were built with. It is folded into the summary cache key
+	// so a prompt config change invalidates summaries produced under the old
+	// prompt instead of serving them stale.
+	PromptSection string
 	// Disambiguator optionally chooses among multiple plausible sessions when
 	// file-overlap scoring is not decisive enough to pick one safely.
 	Disambiguator Disambiguator
@@ -140,7 +145,7 @@ func Extract(ctx context.Context, p ExtractParams) (*Result, error) {
 		return nil, err
 	}
 
-	key := cacheKeyFor(match.Session)
+	key := cacheKeyFor(match.Session, p.PromptSection)
 	if cached, ok := p.Cache.Get(key); ok && cached != "" {
 		return &Result{
 			Summary:   cached,

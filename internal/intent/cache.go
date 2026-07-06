@@ -57,8 +57,11 @@ func (c memCache) Put(key, summary, _, _ string) { c[key] = summary }
 // cacheKeyFor derives a deterministic cache key. We include the agent name,
 // session id, last-message key, and message count - the latter two are
 // independent stale-detection signals so a buggy reader that fails to
-// update LastMsgKey on append still gets cache misses on growth.
-func cacheKeyFor(s *Session) string {
+// update LastMsgKey on append still gets cache misses on growth. The
+// configured prompt section is included because it changes the summarizer
+// prompt: a cached summary produced under a different prompt config would
+// otherwise be served unchanged, silently ignoring the new guidance.
+func cacheKeyFor(s *Session, promptSection string) string {
 	h := sha256.New()
 	h.Write([]byte(s.AgentName))
 	h.Write([]byte{'|'})
@@ -67,5 +70,7 @@ func cacheKeyFor(s *Session) string {
 	h.Write([]byte(s.LastMsgKey))
 	h.Write([]byte{'|'})
 	h.Write([]byte(strconv.Itoa(len(s.Messages))))
+	h.Write([]byte{'|'})
+	h.Write([]byte(promptSection))
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }

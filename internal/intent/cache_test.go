@@ -17,7 +17,7 @@ func TestMemCache_GetPut(t *testing.T) {
 func TestCacheKeyFor_DistinguishesSessionGrowth(t *testing.T) {
 	a := &Session{AgentName: "claude", SessionID: "s1", LastMsgKey: "k1", Messages: []Message{{}}}
 	b := &Session{AgentName: "claude", SessionID: "s1", LastMsgKey: "k1", Messages: []Message{{}, {}}}
-	if cacheKeyFor(a) == cacheKeyFor(b) {
+	if cacheKeyFor(a, "") == cacheKeyFor(b, "") {
 		t.Error("session growth must change the cache key")
 	}
 }
@@ -25,7 +25,17 @@ func TestCacheKeyFor_DistinguishesSessionGrowth(t *testing.T) {
 func TestCacheKeyFor_StableForSameSession(t *testing.T) {
 	a := &Session{AgentName: "claude", SessionID: "s1", LastMsgKey: "k1", Messages: []Message{{Text: "x"}}}
 	b := &Session{AgentName: "claude", SessionID: "s1", LastMsgKey: "k1", Messages: []Message{{Text: "y"}}}
-	if cacheKeyFor(a) != cacheKeyFor(b) {
+	if cacheKeyFor(a, "") != cacheKeyFor(b, "") {
 		t.Error("identical metadata must produce the same cache key")
+	}
+}
+
+func TestCacheKeyFor_DistinguishesPromptSection(t *testing.T) {
+	s := &Session{AgentName: "claude", SessionID: "s1", LastMsgKey: "k1", Messages: []Message{{Text: "x"}}}
+	if cacheKeyFor(s, "") == cacheKeyFor(s, "custom intent guidance") {
+		t.Error("prompt section change must change the cache key")
+	}
+	if cacheKeyFor(s, "custom intent guidance") != cacheKeyFor(s, "custom intent guidance") {
+		t.Error("identical prompt section must produce the same cache key")
 	}
 }

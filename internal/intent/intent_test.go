@@ -152,17 +152,18 @@ func TestExtract_CacheHitSkipsSummarizer(t *testing.T) {
 	// Pre-populate cache with the key the extractor will compute. Note we need
 	// to set AgentName first because Discover does it inside Extract; mimic.
 	sess.AgentName = "claude"
-	cache.Put(cacheKeyFor(sess), "cached", "claude", "s1")
+	cache.Put(cacheKeyFor(sess, "custom intent guidance"), "cached", "claude", "s1")
 
 	got, err := Extract(context.Background(), ExtractParams{
-		OriginCWD:  "/tmp/repo",
-		DiffFiles:  []string{"foo.go"},
-		HeadTime:   time.Now(),
-		BaseTime:   time.Now().Add(-time.Hour),
-		Threshold:  0.1,
-		Readers:    []Reader{r},
-		Cache:      cache,
-		Summarizer: sum,
+		OriginCWD:     "/tmp/repo",
+		DiffFiles:     []string{"foo.go"},
+		HeadTime:      time.Now(),
+		BaseTime:      time.Now().Add(-time.Hour),
+		Threshold:     0.1,
+		Readers:       []Reader{r},
+		Cache:         cache,
+		Summarizer:    sum,
+		PromptSection: "custom intent guidance",
 	})
 	if err != nil {
 		t.Fatalf("extract: %v", err)
@@ -172,6 +173,44 @@ func TestExtract_CacheHitSkipsSummarizer(t *testing.T) {
 	}
 	if sum.calls != 0 {
 		t.Errorf("summarizer should not have been called, got %d calls", sum.calls)
+	}
+}
+
+func TestExtract_PromptSectionChangeBustsCachedSummary(t *testing.T) {
+	sess := &Session{
+		SessionID:    "s1",
+		LastActivity: time.Now(),
+		LastMsgKey:   "k1",
+		Messages:     []Message{{Role: RoleUser, Text: "x", FilePaths: []string{"foo.go"}}},
+	}
+	r := &staticReader{name: "claude", sessions: []*Session{sess}}
+	sum := &fixedSummarizer{summary: "fresh"}
+	cache := NewMemCache()
+	sess.AgentName = "claude"
+	cache.Put(cacheKeyFor(sess, "old intent guidance"), "stale", "claude", "s1")
+
+	got, err := Extract(context.Background(), ExtractParams{
+		OriginCWD:     "/tmp/repo",
+		DiffFiles:     []string{"foo.go"},
+		HeadTime:      time.Now(),
+		BaseTime:      time.Now().Add(-time.Hour),
+		Threshold:     0.1,
+		Readers:       []Reader{r},
+		Cache:         cache,
+		Summarizer:    sum,
+		PromptSection: "new intent guidance",
+	})
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if got.Summary != "fresh" {
+		t.Errorf("expected re-summarized result after prompt section change, got %q", got.Summary)
+	}
+	if sum.calls != 1 {
+		t.Errorf("summarizer calls = %d, want 1", sum.calls)
+	}
+	if cached, ok := cache.Get(cacheKeyFor(sess, "new intent guidance")); !ok || cached != "fresh" {
+		t.Errorf("fresh summary not cached under the new prompt section key: (%q, %v)", cached, ok)
 	}
 }
 

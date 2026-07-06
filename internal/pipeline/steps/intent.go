@@ -219,6 +219,7 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 		Cache:         intent.NewDBCache(sctx.DB),
 		Summarizer:    intent.NewAgentSummarizer(sctx.Agent, sctx.WorkDir, promptSection),
 		Disambiguator: intent.NewAgentDisambiguator(sctx.Agent, sctx.WorkDir, promptSection),
+		PromptSection: promptSection,
 		Logf: func(format string, args ...any) {
 			sctx.Log(fmt.Sprintf("intent "+format, args...))
 		},
