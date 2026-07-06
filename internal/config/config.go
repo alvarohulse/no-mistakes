@@ -252,8 +252,9 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>
+# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
 # "auto" detects the first available native agent on your system
+# "cursor" uses the Cursor AI editor's headless agent (cursor-agent) via acpx
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
@@ -327,6 +328,7 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentOpenCode: "opencode",
 	types.AgentPi:       "pi",
 	types.AgentCopilot:  "copilot",
+	types.AgentCursor:   "cursor-agent",
 }
 
 // agentProbeOrder is the priority order for auto-detecting agents.
@@ -337,6 +339,7 @@ var agentProbeOrder = []types.AgentName{
 	types.AgentRovoDev,
 	types.AgentPi,
 	types.AgentCopilot,
+	types.AgentCursor,
 }
 
 func isACPAgent(name types.AgentName) bool {
@@ -482,7 +485,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
@@ -505,14 +508,14 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 }
 
 // AgentPath returns the binary path for the configured agent.
-// ACP agents use acpx_path if set, otherwise acpx.
+// ACP agents and the cursor agent use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
 func (c *Config) AgentPath() string {
 	return c.AgentPathFor(c.Agent)
 }
 
 func (c *Config) AgentPathFor(name types.AgentName) string {
-	if isACPAgent(name) {
+	if isACPAgent(name) || name == types.AgentCursor {
 		if c.ACPXPath != "" {
 			return c.ACPXPath
 		}

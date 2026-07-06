@@ -605,8 +605,19 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 		return &piAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentCopilot:
 		return &copilotAgent{bin: bin, extraArgs: extraArgs}, nil
+	case types.AgentCursor:
+		// Cursor runs via the acpx shim against cursor-agent's ACP server.
+		// The registry override lets users point to a non-standard cursor-agent path;
+		// the default is the standard "cursor-agent acp" invocation.
+		rawCommand := "cursor-agent acp"
+		if opts.ACPRegistryOverrides != nil {
+			if override, ok := opts.ACPRegistryOverrides["cursor"]; ok && override != "" {
+				rawCommand = override
+			}
+		}
+		return &acpxAgent{bin: bin, target: "cursor", rawCommand: rawCommand}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 }
 
