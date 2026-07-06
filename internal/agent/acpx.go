@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -31,31 +30,21 @@ func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	// Write the prompt to a temp file so that large prompts don't exceed the
-	// OS command-line length limit (notably 8191 chars on Windows). acpx
-	// accepts "exec -f <file>" as an alternative to passing the text inline.
 	prompt := opts.Prompt
 	if len(opts.JSONSchema) > 0 {
 		prompt = buildACPStructuredPrompt(prompt, opts.JSONSchema)
 	}
-	promptFile, err := os.CreateTemp("", "nm-acpx-prompt-*.txt")
-	if err != nil {
-		return nil, fmt.Errorf("acpx prompt file: %w", err)
-	}
-	promptPath := promptFile.Name()
-	defer os.Remove(promptPath)
-	if _, err := promptFile.WriteString(prompt); err != nil {
-		promptFile.Close()
-		return nil, fmt.Errorf("acpx prompt file write: %w", err)
-	}
-	if err := promptFile.Close(); err != nil {
-		return nil, fmt.Errorf("acpx prompt file close: %w", err)
-	}
 
-	args := a.buildArgs(opts, promptPath)
+	args := a.buildArgs(opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Stdin = nil
+	// The prompt travels on stdin, never as an argv element. Auto-fix prompts
+	// embed the full captured command output and routinely run to hundreds of
+	// KB; passed inline they overflow the OS command-line length limit (ARG_MAX,
+	// 8191 chars on Windows). acpx `exec` reads the prompt from stdin when no
+	// positional prompt is given, so stdin has no such ceiling and no dependency
+	// on a specific prompt-delivery flag.
+	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -93,8 +82,8 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 
 func (a *acpxAgent) Close() error { return nil }
 
-func (a *acpxAgent) buildArgs(opts RunOpts, promptFile string) []string {
-	args := make([]string, 0, 14)
+func (a *acpxAgent) buildArgs(opts RunOpts) []string {
+	args := make([]string, 0, 12)
 	if a.rawCommand != "" {
 		args = append(args, "--agent", a.rawCommand)
 	}
@@ -111,7 +100,7 @@ func (a *acpxAgent) buildArgs(opts RunOpts, promptFile string) []string {
 	if a.rawCommand == "" {
 		args = append(args, a.target)
 	}
-	args = append(args, "exec", "-f", promptFile)
+	args = append(args, "exec")
 	return args
 }
 

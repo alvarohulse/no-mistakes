@@ -292,7 +292,7 @@ acp_registry_overrides:
 
 no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
 Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text.
-The prompt is passed to acpx as `exec -f <file>` rather than inline, so it requires an `acpx` build that supports the `exec -f` flag; this keeps large prompts from exceeding the operating system command-line length limit.
+The prompt is streamed to `acpx exec` on stdin rather than inline; this keeps large prompts from exceeding the operating system command-line length limit and avoids depending on any specific prompt-delivery flag.
 
 ## Checking agent availability
 
