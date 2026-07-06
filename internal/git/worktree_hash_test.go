@@ -134,6 +134,58 @@ func TestWorktreeContentHash_ForceIncludeDetectsIgnoredContentEdit(t *testing.T)
 	}
 }
 
+func TestWorktreeContentHash_DetectsDirtyTrackedButIgnoredFileEdit(t *testing.T) {
+	dir := worktreeHashTestRepo(t)
+	ctx := context.Background()
+	writeFile(t, filepath.Join(dir, ".gitignore"), "secret.txt\n")
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v1\n")
+	run(t, dir, "git", "add", ".gitignore")
+	run(t, dir, "git", "add", "-f", "secret.txt")
+	run(t, dir, "git", "commit", "-m", "track ignored file")
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v2 dirty before snapshot\n")
+
+	statusBefore := run(t, dir, "git", "status", "--porcelain")
+	before, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v3 agent edit\n")
+	if statusAfter := run(t, dir, "git", "status", "--porcelain"); statusAfter != statusBefore {
+		t.Fatalf("porcelain status expected identical before and after the edit:\nbefore: %q\nafter: %q", statusBefore, statusAfter)
+	}
+	after, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	if before == after {
+		t.Fatal("hash did not change after editing dirty tracked-but-gitignored file")
+	}
+}
+
+func TestWorktreeContentHash_DetectsStagedButUncommittedIgnoredFileEdit(t *testing.T) {
+	dir := worktreeHashTestRepo(t)
+	ctx := context.Background()
+	writeFile(t, filepath.Join(dir, ".gitignore"), "secret.txt\n")
+	run(t, dir, "git", "add", ".gitignore")
+	run(t, dir, "git", "commit", "-m", "ignore secret")
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v1\n")
+	run(t, dir, "git", "add", "-f", "secret.txt")
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v2 dirty before snapshot\n")
+
+	before, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "secret.txt"), "v3 agent edit\n")
+	after, err := WorktreeContentHash(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeContentHash failed: %v", err)
+	}
+	if before == after {
+		t.Fatal("hash did not change after editing staged-but-uncommitted gitignored file")
+	}
+}
+
 func TestWorktreeContentHash_IgnoresGitignoredFiles(t *testing.T) {
 	dir := worktreeHashTestRepo(t)
 	ctx := context.Background()

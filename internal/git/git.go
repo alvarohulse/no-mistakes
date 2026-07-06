@@ -334,21 +334,31 @@ func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
 // non-ignored files, including files inside untracked directories. It stages
 // the worktree into a temporary index and writes the resulting tree, so it
 // detects content edits that leave `git status --porcelain` and `git diff HEAD`
-// unchanged (e.g. rewriting an already-untracked file). The real index is
-// never touched. Gitignored content is excluded on purpose: it matches the
-// staging surface of `git add -A`, and ephemeral ignored writes (caches,
-// tool state) should not change the fingerprint. Callers whose staging
-// surface goes beyond `git add -A` pass forceInclude pathspecs, staged with
-// `git add -f` so gitignored content under them is fingerprinted too (e.g.
-// the in-repo evidence directory the push step force-adds). Each forceInclude
-// pathspec must match at least one file, per standard `git add` semantics.
+// unchanged (e.g. rewriting an already-untracked file). The temporary index
+// is seeded from a copy of the real index, never from scratch: `git add -A`
+// only refreshes ignore-matching files that are already tracked, so an
+// unseeded index would silently drop files tracked via a historical
+// `git add -f` (tracked but gitignored) from the fingerprint even though the
+// push step's `git add -A` on the real index stages their edits. The real
+// index is never touched. Gitignored content that is not tracked is excluded
+// on purpose: it matches the staging surface of `git add -A`, and ephemeral
+// ignored writes (caches, tool state) should not change the fingerprint.
+// Callers whose staging surface goes beyond `git add -A` pass forceInclude
+// pathspecs, staged with `git add -f` so gitignored content under them is
+// fingerprinted too (e.g. the in-repo evidence directory the push step
+// force-adds). Each forceInclude pathspec must match at least one file, per
+// standard `git add` semantics.
 func WorktreeContentHash(ctx context.Context, dir string, forceInclude ...string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "no-mistakes-index-")
 	if err != nil {
 		return "", fmt.Errorf("create temp index dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
-	env := append(NonInteractiveEnv(dir), "GIT_INDEX_FILE="+filepath.Join(tmpDir, "index"))
+	tmpIndex := filepath.Join(tmpDir, "index")
+	if err := seedTempIndexFromRealIndex(ctx, dir, tmpIndex); err != nil {
+		return "", err
+	}
+	env := append(NonInteractiveEnv(dir), "GIT_INDEX_FILE="+tmpIndex)
 
 	add := exec.CommandContext(ctx, "git", "add", "-A")
 	add.Dir = dir
@@ -378,6 +388,35 @@ func WorktreeContentHash(ctx context.Context, dir string, forceInclude ...string
 		return "", fmt.Errorf("git write-tree (temp index): %w: %s", err, safeurl.RedactText(stderr))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// seedTempIndexFromRealIndex copies the repository's real index file to
+// tmpIndex so a subsequent `git add -A` under GIT_INDEX_FILE starts from the
+// same tracked set as the real index, keeping tracked-but-gitignored files in
+// the fingerprint. A repository with no index yet (nothing ever staged) leaves
+// tmpIndex absent, which git treats as an empty index.
+func seedTempIndexFromRealIndex(ctx context.Context, dir, tmpIndex string) error {
+	realIndex, err := Run(ctx, dir, "rev-parse", "--git-path", "index")
+	if err != nil {
+		return fmt.Errorf("locate real index: %w", err)
+	}
+	if realIndex == "" {
+		return nil
+	}
+	if !filepath.IsAbs(realIndex) {
+		realIndex = filepath.Join(dir, realIndex)
+	}
+	data, err := os.ReadFile(realIndex)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read real index: %w", err)
+	}
+	if err := os.WriteFile(tmpIndex, data, 0o600); err != nil {
+		return fmt.Errorf("seed temp index: %w", err)
+	}
+	return nil
 }
 
 // CreateBranch creates a new branch with the given name and switches to it.
