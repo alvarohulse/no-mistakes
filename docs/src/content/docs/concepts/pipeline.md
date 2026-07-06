@@ -6,7 +6,7 @@ description: The nine steps that run on every gated push.
 The pipeline runs a fixed, opinionated sequence of steps. Order is not configurable. What each step runs *is*.
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → test → document → retrospect → lint → push → pr → ci
 ```
 
 ```mermaid

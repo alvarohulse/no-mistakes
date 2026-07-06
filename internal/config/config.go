@@ -50,6 +50,7 @@ type GlobalConfig struct {
 	AutoFix              AutoFixRaw
 	Intent               IntentRaw
 	Test                 TestRaw
+	Retrospect           RetrospectRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -65,6 +66,7 @@ type globalConfigRaw struct {
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
+	Retrospect           RetrospectRaw       `yaml:"retrospect"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -74,26 +76,28 @@ type RepoConfig struct {
 	Commands       Commands          `yaml:"commands"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format} and agent) from a contributor's
-	// pushed branch instead of the trusted default-branch copy. It is read
-	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
-	// the pushed SHA), so a contributor cannot self-enable. Default false:
-	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
+	// fields (commands.{test,lint,format}, agent, and retrospect) from a
+	// contributor's pushed branch instead of the trusted default-branch copy. It
+	// is read ONLY from the trusted default-branch copy of .no-mistakes.yaml
+	// (never the pushed SHA), so a contributor cannot self-enable. Default
+	// false: the pushed branch controls nothing that executes or adds agent work.
+	AllowRepoCommands bool          `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw    `yaml:"auto_fix"`
+	Intent            IntentRaw     `yaml:"intent"`
+	Test              TestRaw       `yaml:"test"`
+	Retrospect        RetrospectRaw `yaml:"retrospect"`
 }
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent             agentList  `yaml:"agent"`
-		Commands          Commands   `yaml:"commands"`
-		IgnorePatterns    []string   `yaml:"ignore_patterns"`
-		AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-		AutoFix           AutoFixRaw `yaml:"auto_fix"`
-		Intent            IntentRaw  `yaml:"intent"`
-		Test              TestRaw    `yaml:"test"`
+		Agent             agentList     `yaml:"agent"`
+		Commands          Commands      `yaml:"commands"`
+		IgnorePatterns    []string      `yaml:"ignore_patterns"`
+		AllowRepoCommands bool          `yaml:"allow_repo_commands"`
+		AutoFix           AutoFixRaw    `yaml:"auto_fix"`
+		Intent            IntentRaw     `yaml:"intent"`
+		Test              TestRaw       `yaml:"test"`
+		Retrospect        RetrospectRaw `yaml:"retrospect"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -107,6 +111,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Intent = raw.Intent
 	c.Test = raw.Test
+	c.Retrospect = raw.Retrospect
 	return nil
 }
 
@@ -155,6 +160,7 @@ type Config struct {
 	AutoFix              AutoFix
 	Intent               Intent
 	Test                 Test
+	Retrospect           Retrospect
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -172,6 +178,17 @@ type EvidenceRaw struct {
 // Test is the resolved test-step config.
 type Test struct {
 	Evidence Evidence
+}
+
+// RetrospectRaw is the YAML representation of retrospective-step settings.
+// Pointer fields distinguish "not set" (nil) from explicit false.
+type RetrospectRaw struct {
+	Enabled *bool `yaml:"enabled"`
+}
+
+// Retrospect is the resolved retrospective-step config.
+type Retrospect struct {
+	Enabled bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -303,7 +320,7 @@ auto_fix:
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
-# intent, and feed it to review, test, document, lint, and PR agents so they
+# intent, and feed it to review, test, document, retrospect, lint, and PR agents so they
 # understand what you were trying to do - not just the diff.
 intent:
   enabled: true
@@ -320,6 +337,11 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Optional retrospective step. Disabled by default; enable when you want a
+# non-blocking post-documentation reflection recorded in the run history.
+# retrospect:
+#   enabled: false
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -741,6 +763,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	cfg.Retrospect = raw.Retrospect
 
 	return cfg, nil
 }
@@ -804,22 +827,24 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The code-executing selection fields — Commands (run verbatim via sh -c on
-// the daemon host) and Agent/Agents (select which processes launch with the
-// maintainer's credentials, including fallback lists and acp: targets) — are
-// taken only from the trusted copy when it is present, so a contributor's
-// pushed branch cannot inject shell or pick an agent. When allowRepoCommands is
-// true the maintainer has explicitly opted in (via allow_repo_commands on the
-// TRUSTED default-branch copy) to honoring the pushed-branch copy wholesale.
+// The code-executing and agent-work selection fields — Commands (run verbatim
+// via sh -c on the daemon host), Agent/Agents (select which processes launch
+// with the maintainer's credentials, including fallback lists and acp: targets),
+// and Retrospect (opts into an extra agent invocation) — are taken only from the
+// trusted copy when it is present, so a contributor's pushed branch cannot
+// inject shell, pick an agent, or add agent work. When allowRepoCommands is true
+// the maintainer has explicitly opted in (via allow_repo_commands on the TRUSTED
+// default-branch copy) to honoring the pushed-branch copy wholesale.
 // When there is no trusted copy and the maintainer has not opted in, both
-// fields are forced empty (Agent "" and nil Agents inherit the global agent;
-// Commands{} yields built-in defaults) rather than falling back to the pushed
-// branch — this blocks the supply-chain vector for repos that ship
-// .no-mistakes.yaml only on feature branches.
+// fields are forced empty/disabled (Agent "" and nil Agents inherit the global
+// agent; Commands{} yields built-in defaults; Retrospect{} skips the optional
+// step) rather than falling back to the pushed branch — this blocks the
+// supply-chain vector for repos that ship .no-mistakes.yaml only on feature
+// branches.
 //
 // Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// taken from the pushed copy, matching prior behavior, since they cannot run
+// arbitrary shell, select a process, or add an agent invocation.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -832,10 +857,12 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
+		effective.Retrospect = trusted.Retrospect
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Agents = nil
+		effective.Retrospect = RetrospectRaw{}
 	}
 	return &effective
 }
@@ -911,6 +938,18 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	}
 }
 
+// retrospectDefaults returns the default retrospective-step settings.
+func retrospectDefaults() Retrospect {
+	return Retrospect{Enabled: false}
+}
+
+// applyRetrospectOverrides applies non-nil raw values onto resolved defaults.
+func applyRetrospectOverrides(dst *Retrospect, src *RetrospectRaw) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+}
+
 // autoFixDefaults returns the default auto-fix configuration.
 func autoFixDefaults() AutoFix {
 	return AutoFix{
@@ -982,6 +1021,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
+	retrospect := retrospectDefaults()
+	applyRetrospectOverrides(&retrospect, &global.Retrospect)
+	applyRetrospectOverrides(&retrospect, &repo.Retrospect)
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		Agents:               copyAgents(global.Agents),
@@ -996,6 +1039,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AutoFix:              af,
 		Intent:               intent,
 		Test:                 test,
+		Retrospect:           retrospect,
 	}
 
 	if repo.Agent != "" {

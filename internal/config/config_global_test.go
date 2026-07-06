@@ -29,6 +29,9 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if len(cfg.AgentPathOverride) != 0 {
 		t.Errorf("agent_path_override = %v, want empty", cfg.AgentPathOverride)
 	}
+	if cfg.Retrospect.Enabled != nil {
+		t.Errorf("retrospect.enabled = %v, want nil", *cfg.Retrospect.Enabled)
+	}
 }
 
 func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
@@ -47,6 +50,7 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"ci_timeout:",
 		"log_level: info",
 		"# agent_path_override:",
+		"# retrospect:",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("default config missing %q", want)
@@ -72,6 +76,9 @@ func TestEnsureDefaultGlobalConfig_CreatedConfigIsLoadable(t *testing.T) {
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "info")
+	}
+	if cfg.Retrospect.Enabled != nil {
+		t.Errorf("retrospect.enabled = %v, want nil", *cfg.Retrospect.Enabled)
 	}
 }
 
@@ -151,6 +158,8 @@ agent_path_override:
   codex: /opt/codex
 ci_timeout: "2h30m"
 log_level: "debug"
+retrospect:
+  enabled: true
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -174,6 +183,9 @@ log_level: "debug"
 	}
 	if cfg.AgentPathOverride["codex"] != "/opt/codex" {
 		t.Errorf("codex path = %q, want %q", cfg.AgentPathOverride["codex"], "/opt/codex")
+	}
+	if cfg.Retrospect.Enabled == nil || !*cfg.Retrospect.Enabled {
+		t.Fatalf("retrospect.enabled = %v, want true", cfg.Retrospect.Enabled)
 	}
 }
 

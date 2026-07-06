@@ -152,6 +152,35 @@ func TestMerge_AutoFixRepoOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestMerge_RetrospectDefaultsDisabled(t *testing.T) {
+	global := &GlobalConfig{Agent: types.AgentClaude, CITimeout: 4 * time.Hour, LogLevel: "info"}
+	repo := &RepoConfig{}
+
+	cfg := Merge(global, repo)
+	if cfg.Retrospect.Enabled {
+		t.Fatal("retrospect.enabled = true, want disabled by default")
+	}
+}
+
+func TestMerge_RetrospectRepoOverridesGlobal(t *testing.T) {
+	enabled := true
+	disabled := false
+	global := &GlobalConfig{
+		Agent:      types.AgentClaude,
+		CITimeout:  4 * time.Hour,
+		LogLevel:   "info",
+		Retrospect: RetrospectRaw{Enabled: &enabled},
+	}
+	repo := &RepoConfig{
+		Retrospect: RetrospectRaw{Enabled: &disabled},
+	}
+
+	cfg := Merge(global, repo)
+	if cfg.Retrospect.Enabled {
+		t.Fatal("retrospect.enabled = true, want repo override false")
+	}
+}
+
 func TestAutoFixLimit(t *testing.T) {
 	cfg := &Config{
 		AutoFix: AutoFix{Lint: 5, Test: 2, Review: 0, Document: 1, CI: 3, Rebase: 4},

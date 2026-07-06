@@ -51,6 +51,9 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+retrospect:
+  enabled: false
 ```
 
 ## Fields
@@ -240,7 +243,7 @@ These are global defaults. Per-repo config can override individual steps.
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, document, retrospect, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
 
 | | |
 |---|---|
@@ -282,6 +285,18 @@ Branch slashes become nested directories, unsafe branch characters are replaced,
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
 These are global defaults. Per-repo config can override either field.
+
+### retrospect
+
+Optional retrospective-step settings.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `retrospect.enabled` | `bool` | `false` | Run the retrospective step after documentation |
+
+When enabled, no-mistakes asks the configured agent for a concise process retrospective and records it in run history.
+The step is read-only: it fails if the agent leaves worktree changes, so retrospective notes cannot be silently committed by the push step.
+Per-repo config can override this setting, but repo `retrospect` is trusted from the default branch unless `allow_repo_commands: true` is set there.
 
 ## Environment variables
 

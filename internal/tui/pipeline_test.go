@@ -39,6 +39,7 @@ func TestStepLabel(t *testing.T) {
 		{types.StepTest, "Test"},
 		{types.StepLint, "Lint"},
 		{types.StepDocument, "Document"},
+		{types.StepRetrospect, "Retrospect"},
 		{types.StepPush, "Push"},
 		{types.StepPR, "PR"},
 		{types.StepCI, "CI"},

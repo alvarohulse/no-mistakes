@@ -26,6 +26,9 @@ func TestLoadRepo_Defaults(t *testing.T) {
 	if cfg.Commands.Format != "" {
 		t.Errorf("format = %q, want empty", cfg.Commands.Format)
 	}
+	if cfg.Retrospect.Enabled != nil {
+		t.Errorf("retrospect.enabled = %v, want nil", *cfg.Retrospect.Enabled)
+	}
 	if len(cfg.IgnorePatterns) != 0 {
 		t.Errorf("ignore_patterns = %v, want empty", cfg.IgnorePatterns)
 	}
@@ -42,6 +45,8 @@ commands:
 ignore_patterns:
   - "*.generated.go"
   - "vendor/**"
+retrospect:
+  enabled: true
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -65,6 +70,9 @@ ignore_patterns:
 	}
 	if len(cfg.IgnorePatterns) != 2 {
 		t.Fatalf("ignore_patterns len = %d, want 2", len(cfg.IgnorePatterns))
+	}
+	if cfg.Retrospect.Enabled == nil || !*cfg.Retrospect.Enabled {
+		t.Fatalf("retrospect.enabled = %v, want true", cfg.Retrospect.Enabled)
 	}
 	if cfg.IgnorePatterns[0] != "*.generated.go" {
 		t.Errorf("ignore_patterns[0] = %q", cfg.IgnorePatterns[0])

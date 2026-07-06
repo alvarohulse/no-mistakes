@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → test → document → retrospect → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -107,6 +107,20 @@ Updates matching documentation for code changes and reports only unresolved gaps
 
 **Default auto-fix limit:** not used for automatic document follow-up loops.
 
+## Retrospect
+
+Optionally records process notes after documentation without mixing those notes into documentation output.
+
+**Behavior:**
+- Skips by default unless `retrospect.enabled` is true
+- Asks the agent for a concise retrospective summary and optional process notes
+- Logs the retrospective output into the run history; it does not edit files or create commits
+- Fails if the agent leaves worktree changes, so retrospective side effects cannot be silently committed by the push step
+
+Use this for agent/process learning that belongs in pipeline history, not in project docs.
+
+**Default auto-fix limit:** not applicable.
+
 ## Lint
 
 Runs linters and static analysis.
@@ -146,7 +160,7 @@ Pushes the validated branch to the configured push target.
 A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step never requires approval - it runs automatically after review, test, document, optional retrospect, and lint pass.
 
 ## PR
 
