@@ -53,7 +53,8 @@ Full documentation: <https://kunchenguid.github.io/no-mistakes/>
             ▼
    ┌────────────────────────────────────────────────┐
    │  disposable worktree — your work stays put     │
-   │  review → test → docs → lint → push → PR → CI  │
+   │  setup → build → review → test → docs → lint  │
+   │  push → PR → CI                               │
    └────────────────────────────────────────────────┘
             │  every check green
             ▼

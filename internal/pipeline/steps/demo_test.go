@@ -36,6 +36,8 @@ func TestDemoSteps(t *testing.T) {
 	steps := DemoSteps()
 	want := []types.StepName{
 		types.StepRebase,
+		types.StepSetup,
+		types.StepBuild,
 		types.StepReview,
 		types.StepTest,
 		types.StepDocument,

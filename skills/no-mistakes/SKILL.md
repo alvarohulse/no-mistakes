@@ -1,6 +1,6 @@
 ---
 name: no-mistakes
-description: Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
+description: Validate your code changes through the no-mistakes pipeline - setup, build, automated code review, tests, lint, docs, push, PR, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
 user-invocable: true
 ---
 
@@ -88,8 +88,8 @@ Run the pipeline and decide on its findings as they come up:
    ```sh
    no-mistakes axi run --intent "<what the user set out to accomplish>"
    ```
-   `axi run` and every `axi respond` block synchronously - the review, test,
-   and CI steps can each take **several minutes**, so a single call may not
+   `axi run` and every `axi respond` block synchronously - setup, build,
+   review, test, and CI can each take **several minutes**, so a single call may not
    return for a while. That is normal; allow a long timeout and do not cancel
    or re-issue the command because it seems slow. To check progress without
    disturbing the run, use `no-mistakes axi status` from a separate call.

@@ -43,6 +43,18 @@ func DemoSteps() []pipeline.Step {
 			log:        "Fetching origin...\nChecking default branch...\nRebasing onto origin/main...\nAlready up to date.",
 		},
 		&demoStep{
+			name:       types.StepSetup,
+			delay:      3 * time.Second,
+			displayDur: 10 * time.Second,
+			log:        "Running setup command: npm ci\nInstalled dependencies.",
+		},
+		&demoStep{
+			name:       types.StepBuild,
+			delay:      4 * time.Second,
+			displayDur: 20 * time.Second,
+			log:        "Running build command: npm run build\nBuild completed successfully.",
+		},
+		&demoStep{
 			name:          types.StepReview,
 			delay:         5 * time.Second,
 			fixDelay:      4 * time.Second,

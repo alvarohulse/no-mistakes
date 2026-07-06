@@ -36,6 +36,14 @@ func TestMarkdownFrontmatter(t *testing.T) {
 	}
 }
 
+func TestDescriptionDocumentsSetupBuild(t *testing.T) {
+	for _, want := range []string{"setup", "build"} {
+		if !strings.Contains(Description, want) {
+			t.Errorf("description should mention %q", want)
+		}
+	}
+}
+
 func TestBodyDocumentsTaskFirstFlow(t *testing.T) {
 	md := Markdown()
 	for _, want := range []string{
