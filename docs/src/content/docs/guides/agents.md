@@ -41,6 +41,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
+| Cursor | `cursor-agent` + `acpx` | cursor-agent's ACP server via acpx |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Setting the agent
@@ -165,6 +166,7 @@ By default, `no-mistakes` resolves `agent: auto` by checking for supported nativ
 4. `acli` with `rovodev` support
 5. `pi`
 6. `copilot`
+7. `cursor` (selected only when both `cursor-agent` and `acpx` are present)
 
 The default binary names are:
 
@@ -176,6 +178,7 @@ The default binary names are:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
+| `cursor` | `cursor-agent` + `acpx` |
 | `acp:<target>` | `acpx` |
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
@@ -248,7 +251,7 @@ Use `intent.disabled_readers` to disable specific transcript sources, or set `in
 
 ## Claude
 
-Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
+Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`. The prompt is streamed to `claude` on stdin rather than passed as a `-p` argument, so large auto-fix prompts do not exceed the operating system command-line length limit.
 
 ## Codex
 
@@ -276,6 +279,13 @@ It also adds `--no-color` and `--no-ask-user` so the run is non-interactive, plu
 Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed flags, so user choices such as `--model` or `--effort` take effect.
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
+
+## Cursor
+
+Runs the Cursor CLI's headless agent (`cursor-agent`) through the same `acpx` bridge used for ACP targets, invoking its ACP server (`cursor-agent acp`).
+Unlike `acp:<target>`, `cursor` is a first-class agent that `agent: auto` will select - but only when both `cursor-agent` and `acpx` are on `PATH`, since acpx launches cursor-agent. If either is missing, `auto` skips cursor and `no-mistakes doctor` reports it as not found.
+It uses `acpx_path` for the bridge binary, and the `cursor` key in `acp_registry_overrides` overrides the default `cursor-agent acp` command (for example to pin a specific `cursor-agent` path or add flags).
+Structured output is appended to the prompt and validated from the final assistant text, and the prompt is streamed to acpx on stdin - the same as other acpx targets.
 
 ## ACP via acpx
 
@@ -311,6 +321,7 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – cursor (not found: cursor-agent, acpx)
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
