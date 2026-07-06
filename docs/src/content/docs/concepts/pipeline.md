@@ -31,7 +31,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
-## The Eleven Steps
+## The eleven steps
 
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|

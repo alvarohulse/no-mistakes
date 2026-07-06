@@ -120,12 +120,14 @@ The pipeline runs these steps in order:
 
 1. **Intent** - use agent-supplied intent when present, otherwise infer author intent from recent local agent transcripts
 2. **Rebase** - onto the latest upstream and pushed-branch target
-3. **Review** - AI code review of your diff
-4. **Test** - baseline tests plus evidence checks when intent is known
-5. **Document** - updates docs and reports unresolved gaps
-6. **Lint** - your linters (configured command or agent-detected)
-7. **Push** - to the configured push target
-8. **PR** - create or update the pull request
-9. **CI** - poll CI, watch PR mergeability, auto-fix failures
+3. **Setup** - optional `commands.setup` bootstrap command (skipped when unset)
+4. **Build** - optional `commands.build` build command (skipped when unset)
+5. **Review** - AI code review of your diff
+6. **Test** - baseline tests plus evidence checks when intent is known
+7. **Document** - updates docs and reports unresolved gaps
+8. **Lint** - your linters (configured command or agent-detected)
+9. **Push** - to the configured push target
+10. **PR** - create or update the pull request
+11. **CI** - poll CI, watch PR mergeability, auto-fix failures
 
 Steps that find issues pause for your approval. See the [Pipeline concept page](/no-mistakes/concepts/pipeline/) for the overview and [Pipeline Steps](/no-mistakes/reference/pipeline-steps/) for each step's exact behavior.
