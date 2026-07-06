@@ -95,25 +95,36 @@ func newDoctorCmd() *cobra.Command {
 				}
 
 				agents := []struct {
-					name   string
-					binary string
+					name     string
+					binaries []string
 				}{
-					{"claude", "claude"},
-					{"codex", "codex"},
-					{"rovodev", "acli"},
-					{"opencode", "opencode"},
-					{"pi", "pi"},
-					{"copilot", "copilot"},
-					{"cursor", "cursor-agent"},
+					{"claude", []string{"claude"}},
+					{"codex", []string{"codex"}},
+					{"rovodev", []string{"acli"}},
+					{"opencode", []string{"opencode"}},
+					{"pi", []string{"pi"}},
+					{"copilot", []string{"copilot"}},
+					{"cursor", []string{"cursor-agent", "acpx"}},
 				}
 				fmt.Fprintln(w)
 				fmt.Fprintf(w, "  %s\n", sCyan.Render("Agents"))
 				for _, a := range agents {
 					label := fmt.Sprintf("%-14s", a.name)
-					if path, err := exec.LookPath(a.binary); err != nil {
+					var found, missing []string
+					for _, bin := range a.binaries {
+						if path, err := exec.LookPath(bin); err != nil {
+							missing = append(missing, bin)
+						} else {
+							found = append(found, path)
+						}
+					}
+					switch {
+					case len(missing) == 0:
+						ok(label, strings.Join(found, ", "))
+					case len(a.binaries) > 1:
+						warn(label, "not found ("+strings.Join(missing, ", ")+")")
+					default:
 						warn(label, "not found")
-					} else {
-						ok(label, path)
 					}
 				}
 
