@@ -17,6 +17,8 @@ If you genuinely want per-branch `commands` and `agent` (for example, a single-d
 agent: codex
 
 commands:
+  setup: "npm ci"
+  build: "npm run build"
   lint: "golangci-lint run ./..."
   test: "go test -race ./..."
   format: "gofmt -w ."
@@ -72,7 +74,7 @@ The list is filtered to entries available to the daemon at run startup, and the 
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{setup,build,test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 |---|---|
@@ -80,6 +82,28 @@ Opt in to honoring the code-executing selection fields (`commands.{test,lint,for
 | Default | `false` |
 
 This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands` and `agent` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+
+### commands.setup
+
+Optional setup/bootstrap command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+|---|---|
+| Type | `string` |
+| Default | Empty (step is skipped) |
+
+When set, the setup step runs this exact command after rebase and before build/review/test work.
+
+### commands.build
+
+Optional build command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+|---|---|
+| Type | `string` |
+| Default | Empty (step is skipped) |
+
+When set, the build step runs this exact command after setup and before review/test work.
 
 ### commands.test
 

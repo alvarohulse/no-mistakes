@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → setup → build → review → test → document → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -54,6 +54,30 @@ Fetches the latest authoritative remote state, fetches the configured pushed-bra
 **Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. Commits use the message format `no-mistakes(rebase): <summary>`.
 
 **Default auto-fix limit:** `3`.
+
+## Setup
+
+Runs an optional setup/bootstrap command from `commands.setup`.
+
+**Behavior:**
+- Skips when `commands.setup` is empty
+- Runs the configured command via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows)
+- Captures stdout and stderr in the setup step log
+- Fails the pipeline on non-zero exit
+
+This step is for deterministic bootstrapping such as installing dependencies. Do not rely on it to leave background servers or watchers running after it returns.
+
+## Build
+
+Runs an optional build command from `commands.build`.
+
+**Behavior:**
+- Skips when `commands.build` is empty
+- Runs the configured command via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows)
+- Captures stdout and stderr in the build step log
+- Fails the pipeline on non-zero exit
+
+This step is for first-class compile/build checks before review and test evidence gathering.
 
 ## Review
 

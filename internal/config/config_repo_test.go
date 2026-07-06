@@ -20,6 +20,12 @@ func TestLoadRepo_Defaults(t *testing.T) {
 	if cfg.Commands.Lint != "" {
 		t.Errorf("lint = %q, want empty", cfg.Commands.Lint)
 	}
+	if cfg.Commands.Setup != "" {
+		t.Errorf("setup = %q, want empty", cfg.Commands.Setup)
+	}
+	if cfg.Commands.Build != "" {
+		t.Errorf("build = %q, want empty", cfg.Commands.Build)
+	}
 	if cfg.Commands.Test != "" {
 		t.Errorf("test = %q, want empty", cfg.Commands.Test)
 	}
@@ -36,6 +42,8 @@ func TestLoadRepo_FromFile(t *testing.T) {
 	path := filepath.Join(dir, ".no-mistakes.yaml")
 	data := `agent: codex
 commands:
+  setup: "npm ci"
+  build: "npm run build"
   lint: "golangci-lint run ./..."
   test: "go test -race ./..."
   format: "gofmt -w ."
@@ -53,6 +61,12 @@ ignore_patterns:
 	}
 	if cfg.Agent != types.AgentCodex {
 		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCodex)
+	}
+	if cfg.Commands.Setup != "npm ci" {
+		t.Errorf("setup = %q", cfg.Commands.Setup)
+	}
+	if cfg.Commands.Build != "npm run build" {
+		t.Errorf("build = %q", cfg.Commands.Build)
 	}
 	if cfg.Commands.Lint != "golangci-lint run ./..." {
 		t.Errorf("lint = %q", cfg.Commands.Lint)
@@ -136,6 +150,12 @@ func TestLoadRepo_PartialCommands(t *testing.T) {
 	}
 	if cfg.Commands.Test != "make test" {
 		t.Errorf("test = %q, want %q", cfg.Commands.Test, "make test")
+	}
+	if cfg.Commands.Setup != "" {
+		t.Errorf("setup = %q, want empty", cfg.Commands.Setup)
+	}
+	if cfg.Commands.Build != "" {
+		t.Errorf("build = %q, want empty", cfg.Commands.Build)
 	}
 	if cfg.Commands.Lint != "" {
 		t.Errorf("lint = %q, want empty", cfg.Commands.Lint)

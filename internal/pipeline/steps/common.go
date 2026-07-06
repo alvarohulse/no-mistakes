@@ -130,6 +130,8 @@ func AllSteps() []pipeline.Step {
 	return []pipeline.Step{
 		&IntentStep{},
 		&RebaseStep{},
+		&SetupStep{},
+		&BuildStep{},
 		&ReviewStep{},
 		&TestStep{},
 		&DocumentStep{},

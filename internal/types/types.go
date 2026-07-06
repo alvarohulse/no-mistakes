@@ -29,6 +29,8 @@ type StepName string
 const (
 	StepIntent   StepName = "intent"
 	StepRebase   StepName = "rebase"
+	StepSetup    StepName = "setup"
+	StepBuild    StepName = "build"
 	StepReview   StepName = "review"
 	StepTest     StepName = "test"
 	StepDocument StepName = "document"
@@ -81,20 +83,24 @@ func (s StepName) Order() int {
 		return 1
 	case StepRebase:
 		return 2
-	case StepReview:
+	case StepSetup:
 		return 3
-	case StepTest:
+	case StepBuild:
 		return 4
-	case StepDocument:
+	case StepReview:
 		return 5
-	case StepLint:
+	case StepTest:
 		return 6
-	case StepPush:
+	case StepDocument:
 		return 7
-	case StepPR:
+	case StepLint:
 		return 8
-	case StepCI:
+	case StepPush:
 		return 9
+	case StepPR:
+		return 10
+	case StepCI:
+		return 11
 	default:
 		return 0
 	}
@@ -102,7 +108,7 @@ func (s StepName) Order() int {
 
 // AllSteps returns all pipeline steps in execution order.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRebase, StepSetup, StepBuild, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

@@ -74,7 +74,7 @@ type RepoConfig struct {
 	Commands       Commands          `yaml:"commands"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format} and agent) from a contributor's
+	// fields (commands.{setup,build,test,lint,format} and agent) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -112,6 +112,8 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // Commands holds optional per-repo command overrides.
 type Commands struct {
+	Setup  string `yaml:"setup"`
+	Build  string `yaml:"build"`
 	Lint   string `yaml:"lint"`
 	Test   string `yaml:"test"`
 	Format string `yaml:"format"`
