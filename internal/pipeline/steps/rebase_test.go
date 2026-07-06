@@ -159,6 +159,10 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature"}]}`
 	sctx.UserIntent = "user wanted conflict resolution to preserve the extracted intent"
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		Rebase: "rebase prompt config",
+	}
 
 	step := &RebaseStep{}
 	outcome, err := step.Execute(sctx)
@@ -179,6 +183,12 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "shared prompt config") {
+		t.Fatalf("expected rebase prompt to include shared prompt config, got: %s", ag.calls[0].Prompt)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "rebase prompt config") {
+		t.Fatalf("expected rebase prompt to include rebase prompt config, got: %s", ag.calls[0].Prompt)
 	}
 	// Verify rebase completed - feature is now ahead of origin/main
 	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")

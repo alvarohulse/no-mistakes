@@ -31,6 +31,10 @@ func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "true"})
 	sctx.Fixing = true
 	sctx.PreviousFindings = previousFindings
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		Lint:   "lint prompt config",
+	}
 
 	step := &LintStep{}
 	outcome, err := step.Execute(sctx)
@@ -60,6 +64,12 @@ func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected lint fix prompt to prefer root-cause fixes over bandaids")
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "shared prompt config") {
+		t.Error("expected lint fix prompt to include shared prompt config")
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "lint prompt config") {
+		t.Error("expected lint fix prompt to include lint prompt config")
 	}
 	if strings.Contains(ag.calls[0].Prompt, "Make the minimal change needed") {
 		t.Error("expected lint fix prompt not to prefer narrow minimal changes")

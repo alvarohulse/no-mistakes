@@ -127,6 +127,10 @@ func TestDocumentStep_PromptEmphasizesExhaustiveFixing(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared:   "shared prompt config",
+		Document: "document prompt config",
+	}
 
 	step := &DocumentStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -138,6 +142,8 @@ func TestDocumentStep_PromptEmphasizesExhaustiveFixing(t *testing.T) {
 		"Do not stop after the first documentation gap",
 		"fix all of them yourself",
 		"report only",
+		"shared prompt config",
+		"document prompt config",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("expected document prompt to contain %q\nprompt:\n%s", want, prompt)

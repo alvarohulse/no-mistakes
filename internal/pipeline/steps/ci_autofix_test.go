@@ -1131,6 +1131,10 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 	sctx.UserIntent = "user wanted CI autofix to preserve the extracted intent"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		CI:     "ci prompt config",
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1159,5 +1163,11 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, "user wanted CI autofix to preserve the extracted intent") {
 		t.Errorf("prompt should include extracted user intent, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "shared prompt config") {
+		t.Errorf("prompt should include shared prompt config, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "ci prompt config") {
+		t.Errorf("prompt should include CI prompt config, got:\n%s", capturedPrompt)
 	}
 }

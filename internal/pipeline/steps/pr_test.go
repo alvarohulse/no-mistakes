@@ -1549,6 +1549,10 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		PR:     "pr prompt config",
+	}
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -1557,6 +1561,12 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 
 	if !strings.Contains(capturedPrompt, "## What Changed") {
 		t.Errorf("expected prompt to instruct agent to write ## What Changed, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "shared prompt config") {
+		t.Errorf("expected PR prompt to include shared prompt config, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "pr prompt config") {
+		t.Errorf("expected PR prompt to include PR prompt config, got:\n%s", capturedPrompt)
 	}
 }
 
