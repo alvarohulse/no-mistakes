@@ -9,8 +9,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
+
+type doctorAgentCheck struct {
+	name     string
+	binaries []string
+}
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
@@ -94,18 +100,7 @@ func newDoctorCmd() *cobra.Command {
 					}
 				}
 
-				agents := []struct {
-					name     string
-					binaries []string
-				}{
-					{"claude", []string{"claude"}},
-					{"codex", []string{"codex"}},
-					{"rovodev", []string{"acli"}},
-					{"opencode", []string{"opencode"}},
-					{"pi", []string{"pi"}},
-					{"copilot", []string{"copilot"}},
-					{"cursor", []string{"cursor-agent", "acpx"}},
-				}
+				agents := doctorAgentChecks()
 				fmt.Fprintln(w)
 				fmt.Fprintf(w, "  %s\n", sCyan.Render("Agents"))
 				for _, a := range agents {
@@ -138,4 +133,25 @@ func newDoctorCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+func doctorAgentChecks() []doctorAgentCheck {
+	agents := []doctorAgentCheck{
+		{"claude", []string{"claude"}},
+		{"codex", []string{"codex"}},
+		{"rovodev", []string{"acli"}},
+		{"opencode", []string{"opencode"}},
+		{"pi", []string{"pi"}},
+		{"copilot", []string{"copilot"}},
+	}
+	for _, alias := range types.ACPAliases() {
+		agents = append(agents, doctorAgentCheck{
+			name: string(alias.Name),
+			binaries: []string{
+				alias.DefaultCommandBinary(),
+				"acpx",
+			},
+		})
+	}
+	return agents
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // RunStatus represents the lifecycle state of a pipeline run.
@@ -142,3 +143,40 @@ const (
 	AgentCopilot  AgentName = "copilot"
 	AgentCursor   AgentName = "cursor"
 )
+
+// ACPAlias describes a first-class agent name that resolves to an ACP target.
+type ACPAlias struct {
+	Name           AgentName
+	Target         string
+	DefaultCommand string
+}
+
+var acpAliases = []ACPAlias{
+	{Name: AgentCursor, Target: "cursor", DefaultCommand: "cursor-agent acp"},
+}
+
+// ACPAliasFor returns the ACP alias metadata for a first-class agent name.
+func ACPAliasFor(name AgentName) (ACPAlias, bool) {
+	for _, alias := range acpAliases {
+		if alias.Name == name {
+			return alias, true
+		}
+	}
+	return ACPAlias{}, false
+}
+
+// ACPAliases returns all first-class ACP aliases.
+func ACPAliases() []ACPAlias {
+	out := make([]ACPAlias, len(acpAliases))
+	copy(out, acpAliases)
+	return out
+}
+
+// DefaultCommandBinary returns the executable named by the alias default command.
+func (a ACPAlias) DefaultCommandBinary() string {
+	fields := strings.Fields(a.DefaultCommand)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}

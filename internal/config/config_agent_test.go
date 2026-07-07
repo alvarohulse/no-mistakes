@@ -45,7 +45,7 @@ func TestAgentPath_DefaultBinaries(t *testing.T) {
 	}
 }
 
-func TestAgentPath_ACPUsesAcpxPath(t *testing.T) {
+func TestAgentPath_ACPAndAliasesUseAcpxPath(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  *Config
@@ -53,8 +53,8 @@ func TestAgentPath_ACPUsesAcpxPath(t *testing.T) {
 	}{
 		{name: "default", cfg: &Config{Agent: "acp:gemini"}, want: "acpx"},
 		{name: "override", cfg: &Config{Agent: "acp:gemini", ACPXPath: "/opt/bin/acpx"}, want: "/opt/bin/acpx"},
-		{name: "cursor-default", cfg: &Config{Agent: types.AgentCursor}, want: "acpx"},
-		{name: "cursor-override", cfg: &Config{Agent: types.AgentCursor, ACPXPath: "/opt/bin/acpx"}, want: "/opt/bin/acpx"},
+		{name: "alias-default", cfg: &Config{Agent: types.AgentCursor}, want: "acpx"},
+		{name: "alias-override", cfg: &Config{Agent: types.AgentCursor, ACPXPath: "/opt/bin/acpx"}, want: "/opt/bin/acpx"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -282,7 +282,7 @@ func TestResolveAgent_AutoSkipsRovoDevWithoutSubcommand(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "copilot", "cursor-agent":
+		case "claude", "codex", "opencode", "pi", "copilot", "cursor-agent", "acpx":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil
@@ -314,7 +314,7 @@ func TestResolveAgent_AutoReturnsRovoDevProbeExitError(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "cursor-agent":
+		case "claude", "codex", "opencode", "pi":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return script, nil
@@ -395,9 +395,9 @@ func TestResolveAgent_AutoNoneAvailableIncludesOverridePaths(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_AutoSkipsCursorWithoutAcpx(t *testing.T) {
-	// cursor-agent is on PATH but the acpx shim it runs through is not, so auto
-	// must not select cursor (it would fail at runtime when the daemon execs acpx).
+func TestResolveAgent_AutoSkipsACPAliasWithoutAcpx(t *testing.T) {
+	// cursor is an ACP alias. Its underlying command is on PATH, but the acpx
+	// shim it runs through is not, so auto must not select it.
 	cfg := &Config{Agent: types.AgentAuto}
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		if bin == "cursor-agent" {
@@ -416,7 +416,7 @@ func TestResolveAgent_AutoSkipsCursorWithoutAcpx(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_AutoPicksCursorWhenBothBinariesPresent(t *testing.T) {
+func TestResolveAgent_AutoPicksACPAliasWhenBinariesPresent(t *testing.T) {
 	cfg := &Config{Agent: types.AgentAuto}
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
@@ -436,9 +436,7 @@ func TestResolveAgent_AutoPicksCursorWhenBothBinariesPresent(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_ListSkipsCursorMissingCursorAgent(t *testing.T) {
-	// Explicit cursor in a fallback list: acpx is present but the underlying
-	// cursor-agent is not, so cursor must be skipped in favor of claude.
+func TestResolveAgent_ListSkipsACPAliasMissingCommandBinary(t *testing.T) {
 	cfg := &Config{Agents: []types.AgentName{types.AgentCursor, types.AgentClaude}}
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
@@ -459,7 +457,7 @@ func TestResolveAgent_ListSkipsCursorMissingCursorAgent(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_ListPicksCursorWhenBothBinariesPresent(t *testing.T) {
+func TestResolveAgent_ListPicksACPAliasWhenBinariesPresent(t *testing.T) {
 	cfg := &Config{Agents: []types.AgentName{types.AgentCursor}}
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
@@ -477,9 +475,7 @@ func TestResolveAgent_ListPicksCursorWhenBothBinariesPresent(t *testing.T) {
 	}
 }
 
-func TestResolveAgent_CursorRegistryOverrideBinaryProbed(t *testing.T) {
-	// The "cursor" ACP registry override changes which underlying binary acpx
-	// spawns, so resolution must probe that binary rather than "cursor-agent".
+func TestResolveAgent_ACPAliasRegistryOverrideBinaryProbed(t *testing.T) {
 	cfg := &Config{
 		Agents:               []types.AgentName{types.AgentCursor},
 		ACPRegistryOverrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp --profile work"},
@@ -523,7 +519,7 @@ func TestResolveAgent_AutoPassesContextToRovoDevProbe(t *testing.T) {
 
 	err := cfg.ResolveAgent(ctx, func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "cursor-agent":
+		case "claude", "codex", "opencode", "pi":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil

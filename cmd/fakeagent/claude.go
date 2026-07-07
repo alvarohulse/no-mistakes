@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 )
 
 func runClaude(args []string, scenario *Scenario) int {
@@ -207,11 +205,10 @@ func hasClaudeSchema(args []string) bool {
 	return false
 }
 
-// extractClaudePrompt returns the prompt no-mistakes sent to claude. The real
-// invocation is `claude -p --verbose ...` with the prompt piped on stdin (never
-// an argv element - see internal/agent/claude.go), so we read stdin here. A
-// positional prompt immediately following -p/--print is still honored as a
-// backward-compatible fallback for any caller that passes the prompt in argv.
+// extractClaudePrompt scans for the value following -p, matching the real
+// claude CLI's argv shape (claude -p "<prompt>" --verbose ...). Other
+// flags carrying values are skipped explicitly so we don't accidentally
+// pick up e.g. --output-format's argument.
 func extractClaudePrompt(args []string) string {
 	flagsWithValues := map[string]bool{
 		"--output-format":    true,
@@ -232,26 +229,15 @@ func extractClaudePrompt(args []string) string {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-p", "--print":
-			// -p is a boolean flag; a following non-flag arg is a legacy
-			// positional prompt, otherwise the prompt is on stdin.
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if i+1 < len(args) {
 				return args[i+1]
 			}
-			return readStdinPrompt()
+			return ""
 		}
 		if flagsWithValues[args[i]] {
 			i++ // skip the value
 		}
 	}
-	return readStdinPrompt()
-}
-
-// readStdinPrompt reads the entire prompt piped to the fake agent on stdin.
-func readStdinPrompt() string {
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakeagent: claude read stdin prompt: %v\n", err)
-		return ""
-	}
-	return string(data)
+	fmt.Fprintln(os.Stderr, "fakeagent: claude prompt missing (no -p found)")
+	return ""
 }

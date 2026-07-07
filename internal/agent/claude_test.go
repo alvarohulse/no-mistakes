@@ -12,12 +12,10 @@ import (
 func TestClaudeAgent_BuildArgs(t *testing.T) {
 	ca := &claudeAgent{bin: "/usr/bin/claude"}
 	schema := json.RawMessage(`{"type":"object"}`)
-	args := ca.buildArgs(schema)
+	args := ca.buildArgs("do something", schema)
 
-	// The prompt is delivered on stdin, not argv, so it must never appear in
-	// the argument list (see TestClaudeAgent_Run_LargePromptViaStdin).
 	expected := []string{
-		"-p",
+		"-p", "do something",
 		"--verbose",
 		"--output-format", "stream-json",
 		"--json-schema", `{"type":"object"}`,
@@ -36,7 +34,7 @@ func TestClaudeAgent_BuildArgs(t *testing.T) {
 
 func TestClaudeAgent_BuildArgs_NoSchema(t *testing.T) {
 	ca := &claudeAgent{bin: "claude"}
-	args := ca.buildArgs(nil)
+	args := ca.buildArgs("prompt", nil)
 
 	// Without schema, should not include --json-schema flag
 	for _, arg := range args {
@@ -44,22 +42,19 @@ func TestClaudeAgent_BuildArgs_NoSchema(t *testing.T) {
 			t.Error("should not include --json-schema when schema is nil")
 		}
 	}
-	// -p is present as a bare boolean flag (prompt travels on stdin).
-	if len(args) == 0 || args[0] != "-p" {
-		t.Errorf("missing -p flag: %v", args)
-	}
-	if args[1] != "--verbose" {
-		t.Errorf("expected --verbose immediately after -p (no positional prompt), got %q in %v", args[1], args)
+	// Should still have core args
+	if args[0] != "-p" || args[1] != "prompt" {
+		t.Error("missing -p flag")
 	}
 }
 
 func TestClaudeAgent_BuildArgs_ExtraArgsPrepended(t *testing.T) {
 	ca := &claudeAgent{bin: "claude", extraArgs: []string{"--model", "sonnet"}}
-	args := ca.buildArgs(nil)
+	args := ca.buildArgs("do it", nil)
 
 	expected := []string{
 		"--model", "sonnet",
-		"-p",
+		"-p", "do it",
 		"--verbose",
 		"--output-format", "stream-json",
 		"--dangerously-skip-permissions",
@@ -82,7 +77,7 @@ func TestClaudeAgent_BuildArgs_UserPermissionModeSuppressesDefault(t *testing.T)
 	}
 	for _, extra := range tests {
 		ca := &claudeAgent{bin: "claude", extraArgs: extra}
-		args := ca.buildArgs(nil)
+		args := ca.buildArgs("p", nil)
 
 		dangerCount := 0
 		for _, a := range args {

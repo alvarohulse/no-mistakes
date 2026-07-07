@@ -30,21 +30,10 @@ func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	prompt := opts.Prompt
-	if len(opts.JSONSchema) > 0 {
-		prompt = buildACPStructuredPrompt(prompt, opts.JSONSchema)
-	}
-
 	args := a.buildArgs(opts)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	// The prompt travels on stdin, never as an argv element. Auto-fix prompts
-	// embed the full captured command output and routinely run to hundreds of
-	// KB; passed inline they overflow the OS command-line length limit (ARG_MAX,
-	// 8191 chars on Windows). acpx `exec` reads the prompt from stdin when no
-	// positional prompt is given, so stdin has no such ceiling and no dependency
-	// on a specific prompt-delivery flag.
-	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -83,6 +72,11 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 func (a *acpxAgent) Close() error { return nil }
 
 func (a *acpxAgent) buildArgs(opts RunOpts) []string {
+	prompt := opts.Prompt
+	if len(opts.JSONSchema) > 0 {
+		prompt = buildACPStructuredPrompt(prompt, opts.JSONSchema)
+	}
+
 	args := make([]string, 0, 12)
 	if a.rawCommand != "" {
 		args = append(args, "--agent", a.rawCommand)
@@ -100,7 +94,7 @@ func (a *acpxAgent) buildArgs(opts RunOpts) []string {
 	if a.rawCommand == "" {
 		args = append(args, a.target)
 	}
-	args = append(args, "exec")
+	args = append(args, "exec", prompt)
 	return args
 }
 

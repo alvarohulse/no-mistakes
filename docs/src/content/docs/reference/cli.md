@@ -277,11 +277,11 @@ Checks:
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
-- Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, and `cursor` (which requires both `cursor-agent` and `acpx`)
+- Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
-`doctor` checks `acpx` only as part of the `cursor` agent row and does not validate `acp:<target>` targets. For `agent: acp:<target>`, verify `acpx_path` yourself.
+`doctor` does not validate `acpx` or ACP targets. For `agent: acp:<target>`, verify `acpx_path` yourself.
 
 `doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
 

@@ -585,11 +585,12 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
+	if alias, ok := types.ACPAliasFor(name); ok {
+		rawCommand := acpRawCommand(alias.Target, alias.DefaultCommand, opts.ACPRegistryOverrides)
+		return &acpxAgent{bin: bin, target: alias.Target, rawCommand: rawCommand}, nil
+	}
 	if target, ok := acpTarget(name); ok {
-		rawCommand := ""
-		if opts.ACPRegistryOverrides != nil {
-			rawCommand = opts.ACPRegistryOverrides[target]
-		}
+		rawCommand := acpRawCommand(target, "", opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
 	switch name {
@@ -605,20 +606,18 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 		return &piAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentCopilot:
 		return &copilotAgent{bin: bin, extraArgs: extraArgs}, nil
-	case types.AgentCursor:
-		// Cursor runs via the acpx shim against cursor-agent's ACP server.
-		// The registry override lets users point to a non-standard cursor-agent path;
-		// the default is the standard "cursor-agent acp" invocation.
-		rawCommand := "cursor-agent acp"
-		if opts.ACPRegistryOverrides != nil {
-			if override, ok := opts.ACPRegistryOverrides["cursor"]; ok && override != "" {
-				rawCommand = override
-			}
-		}
-		return &acpxAgent{bin: bin, target: "cursor", rawCommand: rawCommand}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
+}
+
+func acpRawCommand(target, defaultCommand string, overrides map[string]string) string {
+	if overrides != nil {
+		if override, ok := overrides[target]; ok && override != "" {
+			return override
+		}
+	}
+	return defaultCommand
 }
 
 func acpTarget(name types.AgentName) (string, bool) {

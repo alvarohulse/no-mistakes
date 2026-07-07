@@ -25,7 +25,7 @@ func TestNew_KnownAgents(t *testing.T) {
 		{name: "opencode", agent: types.AgentOpenCode, bin: "opencode", wantName: "opencode"},
 		{name: "pi", agent: types.AgentPi, bin: "pi", wantName: "pi"},
 		{name: "copilot", agent: types.AgentCopilot, bin: "copilot", wantName: "copilot"},
-		{name: "cursor", agent: types.AgentCursor, bin: "acpx", wantName: "acp:cursor"},
+		{name: "cursor alias", agent: types.AgentCursor, bin: "acpx", wantName: "acp:cursor"},
 	}
 
 	for _, tt := range tests {
@@ -72,7 +72,7 @@ func TestNewWithOptions_ACPRegistryOverride(t *testing.T) {
 	}
 }
 
-func TestCursorAgentUsesDefaultCursorAgentCommand(t *testing.T) {
+func TestACPAliasUsesDefaultCommand(t *testing.T) {
 	a, err := New(types.AgentCursor, "acpx", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -82,19 +82,19 @@ func TestCursorAgentUsesDefaultCursorAgentCommand(t *testing.T) {
 		t.Fatalf("agent type = %T, want *acpxAgent", a)
 	}
 	if acpx.target != "cursor" {
-		t.Errorf("target = %q, want %q", acpx.target, "cursor")
+		t.Errorf("target = %q, want cursor", acpx.target)
 	}
 	if acpx.rawCommand != "cursor-agent acp" {
-		t.Errorf("rawCommand = %q, want %q", acpx.rawCommand, "cursor-agent acp")
+		t.Errorf("rawCommand = %q, want cursor-agent acp", acpx.rawCommand)
 	}
 	args := acpx.buildArgs(RunOpts{Prompt: "do work"})
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00cursor-agent acp") {
-		t.Fatalf("args = %q, want --agent cursor-agent acp", args)
+		t.Fatalf("args = %q, want alias default command", args)
 	}
 }
 
-func TestCursorAgentRegistryOverrideRespected(t *testing.T) {
+func TestACPAliasRegistryOverrideRespected(t *testing.T) {
 	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{
 		ACPRegistryOverrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp --profile work"},
 	})
@@ -114,13 +114,8 @@ func TestACPAgentBuildArgsUsesExecMode(t *testing.T) {
 	a := &acpxAgent{target: "gemini"}
 	args := a.buildArgs(RunOpts{Prompt: "do work"})
 
-	// Trailing args should be: ... gemini exec (the prompt travels on stdin, so
-	// there is no positional prompt and no -f/--file flag).
-	if got, want := args[len(args)-2:], []string{"gemini", "exec"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("trailing args[-2:] = %q, want %q", got, want)
-	}
-	if strings.Contains(strings.Join(args, "\x00"), "do work") {
-		t.Fatalf("args = %q, prompt must not appear in argv", args)
+	if got, want := args[len(args)-3:], []string{"gemini", "exec", "do work"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("trailing args = %q, want %q", got, want)
 	}
 }
 
@@ -223,14 +218,9 @@ func TestACPAgentRunParsesAcpxJSONOutput(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "acpx")
 	argLog := filepath.Join(dir, "args.txt")
-	stdinLog := filepath.Join(dir, "stdin.txt")
 	t.Setenv("ARG_LOG", argLog)
-	t.Setenv("STDIN_LOG", stdinLog)
 	contents := `#!/bin/sh
-# Log all CLI args.
 printf '%s\n' "$@" > "$ARG_LOG"
-# Capture the prompt, which is streamed on stdin (not passed as an argv element).
-cat > "$STDIN_LOG"
 printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"usage_update","used":123,"size":1000}}}'
 printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"done\":true}"}}}}'
 `
@@ -270,25 +260,10 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"s
 		t.Fatalf("read args: %v", err)
 	}
 	argsText := string(argsData)
-	// The prompt is streamed on stdin, so argv carries only the managed flags,
-	// the target, and the bare `exec` subcommand - never -f/--file or the prompt.
-	for _, want := range []string{"--cwd\n" + dir, "--format\njson", "--json-strict", "gemini", "exec"} {
+	for _, want := range []string{"--cwd\n" + dir, "--format\njson", "--json-strict", "gemini", "do work"} {
 		if !strings.Contains(argsText, want) {
 			t.Errorf("args missing %q in:\n%s", want, argsText)
 		}
-	}
-	argLines := strings.Split(strings.TrimRight(argsText, "\n"), "\n")
-	for _, arg := range argLines {
-		if arg == "-f" || arg == "--file" || strings.Contains(arg, "do work") {
-			t.Errorf("prompt/-f leaked into argv line %q in:\n%s", arg, argsText)
-		}
-	}
-	stdinData, err := os.ReadFile(stdinLog)
-	if err != nil {
-		t.Fatalf("read stdin: %v", err)
-	}
-	if !strings.Contains(string(stdinData), "do work") {
-		t.Errorf("stdin missing prompt %q in:\n%s", "do work", string(stdinData))
 	}
 }
 

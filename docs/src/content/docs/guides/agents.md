@@ -41,7 +41,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Cursor | `cursor-agent` + `acpx` | cursor-agent's ACP server via acpx |
+| Cursor ACP alias | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Setting the agent
@@ -80,8 +80,8 @@ If you install `acpx` separately, you can opt into any ACP target with the `acp:
 agent: acp:gemini
 ```
 
-`agent: auto` only probes native agents.
-It does not auto-select ACP targets.
+`agent: auto` probes native agents and first-class ACP aliases.
+It does not auto-select arbitrary `acp:<target>` entries.
 
 ## Where agent choice matters most
 
@@ -158,7 +158,7 @@ Successful outputs can be `outcome: passed` for a completed run or `outcome: che
 
 ## Binary resolution
 
-By default, `no-mistakes` resolves `agent: auto` by checking for supported native agents on your `PATH` in this order:
+By default, `no-mistakes` resolves `agent: auto` by checking for supported native agents and ACP aliases on your `PATH` in this order:
 
 1. `claude`
 2. `codex`
@@ -166,7 +166,7 @@ By default, `no-mistakes` resolves `agent: auto` by checking for supported nativ
 4. `acli` with `rovodev` support
 5. `pi`
 6. `copilot`
-7. `cursor` (selected only when both `cursor-agent` and `acpx` are present)
+7. `cursor` ACP alias (selected only when both `cursor-agent` and `acpx` are present)
 
 The default binary names are:
 
@@ -178,7 +178,7 @@ The default binary names are:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
-| `cursor` | `cursor-agent` + `acpx` |
+| `cursor` ACP alias | `cursor-agent` + `acpx` |
 | `acp:<target>` | `acpx` |
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
@@ -251,7 +251,7 @@ Use `intent.disabled_readers` to disable specific transcript sources, or set `in
 
 ## Claude
 
-Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`. The prompt is streamed to `claude` on stdin rather than passed as a `-p` argument, so large auto-fix prompts do not exceed the operating system command-line length limit.
+Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
 
 ## Codex
 
@@ -280,12 +280,23 @@ Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 
-## Cursor
+## ACP aliases
 
-Runs the Cursor CLI's headless agent (`cursor-agent`) through the same `acpx` bridge used for ACP targets, invoking its ACP server (`cursor-agent acp`).
-Unlike `acp:<target>`, `cursor` is a first-class agent that `agent: auto` will select - but only when both `cursor-agent` and `acpx` are on `PATH`, since acpx launches cursor-agent. If either is missing, `auto` skips cursor and `no-mistakes doctor` reports it as not found.
-It uses `acpx_path` for the bridge binary, and the `cursor` key in `acp_registry_overrides` overrides the default `cursor-agent acp` command (for example to pin a specific `cursor-agent` path or add flags).
-Structured output is appended to the prompt and validated from the final assistant text, and the prompt is streamed to acpx on stdin - the same as other acpx targets.
+ACP aliases are first-class agent names that resolve to ACP targets.
+`agent: cursor` is the first alias: it is shorthand for the `cursor` ACP target with the default raw command `cursor-agent acp`, not a separate native backend.
+
+Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
+Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their required binaries are present.
+For `cursor`, `auto` requires both `cursor-agent` and `acpx`; if either is missing, `auto` skips the alias and `no-mistakes doctor` reports it as not found.
+
+Override an alias command with the matching target key in `acp_registry_overrides`.
+For example, this keeps the `agent: cursor` shortcut while pointing it at a custom command:
+
+```yaml
+agent: cursor
+acp_registry_overrides:
+  cursor: /opt/cursor/cursor-agent acp --profile work
+```
 
 ## ACP via acpx
 
@@ -302,7 +313,6 @@ acp_registry_overrides:
 
 no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
 Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text.
-The prompt is streamed to `acpx exec` on stdin rather than inline; this keeps large prompts from exceeding the operating system command-line length limit and avoids depending on any specific prompt-delivery flag.
 
 ## Checking agent availability
 
@@ -321,7 +331,6 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
-  – cursor (not found: cursor-agent, acpx)
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
