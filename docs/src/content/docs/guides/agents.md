@@ -316,7 +316,7 @@ Structured output is handled by appending the requested JSON schema to the promp
 
 ## Checking agent availability
 
-Run `no-mistakes doctor` to see which native agent binaries are installed and available:
+Run `no-mistakes doctor` to see which agent binaries are installed and available:
 
 ```
 $ no-mistakes doctor
@@ -331,9 +331,11 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – cursor (not found (cursor-agent, acpx))
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+The `cursor` ACP alias row lists whichever of its two required binaries are missing.
 
 For `agent: acp:<target>`, make sure `acpx` is installed on `PATH` or set `acpx_path` in global config.
-`no-mistakes doctor` does not validate ACP targets.
+`no-mistakes doctor` checks `acpx` only as part of ACP alias rows such as `cursor` and does not validate arbitrary `acp:<target>` targets.

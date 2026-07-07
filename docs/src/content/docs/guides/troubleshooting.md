@@ -96,7 +96,7 @@ agent_path_override:
   claude: /Users/you/.local/bin/claude
 ```
 
-For `agent: acp:<target>`, set `acpx_path` instead:
+For `agent: acp:<target>` and ACP aliases such as `agent: cursor`, set `acpx_path` instead:
 
 ```yaml
 acpx_path: /Users/you/.local/bin/acpx

@@ -24,10 +24,10 @@ no-mistakes doctor
 You need:
 
 - `git`
-- One supported agent binary (`claude`, `codex`, `acli` for Rovo Dev, `opencode`, `pi`, or `copilot`), or a separately installed `acpx` binary for `agent: acp:<target>`
+- One supported agent binary (`claude`, `codex`, `acli` for Rovo Dev, `opencode`, `pi`, or `copilot`); `cursor-agent` plus `acpx` for `agent: cursor`; or a separately installed `acpx` binary for `agent: acp:<target>`
 - For PRs and CI: `gh` (GitHub), `glab` (GitLab), Bitbucket Cloud credentials, or `az` with the `azure-devops` extension (Azure DevOps)
 
-For ACP agents, verify `acpx` or `acpx_path` separately because `no-mistakes doctor` does not validate ACP targets.
+For `agent: acp:<target>`, verify `acpx` or `acpx_path` separately because `no-mistakes doctor` only validates ACP aliases such as `cursor`, not arbitrary ACP targets.
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR/CI setup.
 
