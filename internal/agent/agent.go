@@ -590,7 +590,7 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 		return &acpxAgent{bin: bin, target: alias.Target, rawCommand: rawCommand}, nil
 	}
 	if target, ok := acpTarget(name); ok {
-		rawCommand := acpRawCommand(target, "", opts.ACPRegistryOverrides)
+		rawCommand := acpRawCommand(target, acpDefaultCommand(target), opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
 	switch name {
@@ -618,6 +618,13 @@ func acpRawCommand(target, defaultCommand string, overrides map[string]string) s
 		}
 	}
 	return defaultCommand
+}
+
+func acpDefaultCommand(target string) string {
+	if alias, ok := types.ACPAliasForTarget(target); ok {
+		return alias.DefaultCommand
+	}
+	return ""
 }
 
 func acpTarget(name types.AgentName) (string, bool) {

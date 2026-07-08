@@ -67,6 +67,13 @@ func TestACPAliasFor(t *testing.T) {
 	if alias.DefaultCommandBinary() != "cursor-agent" {
 		t.Fatalf("default command binary = %q, want cursor-agent", alias.DefaultCommandBinary())
 	}
+	targetAlias, ok := ACPAliasForTarget("cursor")
+	if !ok {
+		t.Fatal("cursor target should resolve to an ACP alias")
+	}
+	if targetAlias.Name != AgentCursor {
+		t.Fatalf("target alias name = %q, want %q", targetAlias.Name, AgentCursor)
+	}
 
 	aliases := ACPAliases()
 	if len(aliases) != 1 {

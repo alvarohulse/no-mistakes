@@ -255,6 +255,7 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
 # "auto" detects the first available native agent or ACP alias on your system
 # "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
+# "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 

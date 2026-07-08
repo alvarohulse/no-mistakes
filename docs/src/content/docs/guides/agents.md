@@ -41,7 +41,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Cursor ACP alias | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
+| Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Setting the agent
@@ -178,7 +178,7 @@ The default binary names are:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
-| `cursor` ACP alias | `cursor-agent` + `acpx` |
+| `cursor` | `cursor-agent` + `acpx` |
 | `acp:<target>` | `acpx` |
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
@@ -284,6 +284,7 @@ The Copilot CLI has no output-schema flag, so when structured output is requeste
 
 ACP aliases are first-class agent names that resolve to ACP targets.
 `agent: cursor` is the first alias: it is shorthand for the `cursor` ACP target with the default raw command `cursor-agent acp`, not a separate native backend.
+`agent: acp:cursor` uses that same default command, so either spelling works without an `acp_registry_overrides.cursor` entry.
 
 Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
 Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their required binaries are present.
@@ -302,6 +303,7 @@ acp_registry_overrides:
 
 ACP support is optional and requires a separately installed `acpx` binary.
 Use `agent: acp:<target>` to run a target known to acpx, for example `agent: acp:gemini`.
+When the target matches a first-class alias such as `acp:cursor`, no-mistakes supplies that alias' default raw command.
 
 For custom ACP target commands, define a global override:
 

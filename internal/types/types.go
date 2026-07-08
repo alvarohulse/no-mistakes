@@ -165,6 +165,16 @@ func ACPAliasFor(name AgentName) (ACPAlias, bool) {
 	return ACPAlias{}, false
 }
 
+// ACPAliasForTarget returns the ACP alias metadata for a raw ACP target.
+func ACPAliasForTarget(target string) (ACPAlias, bool) {
+	for _, alias := range acpAliases {
+		if alias.Target == target {
+			return alias, true
+		}
+	}
+	return ACPAlias{}, false
+}
+
 // ACPAliases returns all first-class ACP aliases.
 func ACPAliases() []ACPAlias {
 	out := make([]ACPAlias, len(acpAliases))
