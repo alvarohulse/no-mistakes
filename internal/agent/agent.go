@@ -585,11 +585,7 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
-	if alias, ok := types.ACPAliasFor(name); ok {
-		rawCommand := types.ACPRawCommand(alias.Target, opts.ACPRegistryOverrides)
-		return &acpxAgent{bin: bin, target: alias.Target, rawCommand: rawCommand}, nil
-	}
-	if target, ok := acpTarget(name); ok {
+	if target, ok := types.ACPTargetFor(name); ok {
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
@@ -609,18 +605,6 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
-}
-
-func acpTarget(name types.AgentName) (string, bool) {
-	value := string(name)
-	if !strings.HasPrefix(value, "acp:") {
-		return "", false
-	}
-	target := strings.TrimPrefix(value, "acp:")
-	if target == "" || strings.ContainsAny(target, " \t\r\n") {
-		return "", false
-	}
-	return target, true
 }
 
 // NewNoop returns an agent that does nothing. Used for demo mode where

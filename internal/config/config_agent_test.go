@@ -475,6 +475,71 @@ func TestResolveAgent_ListPicksACPAliasWhenBinariesPresent(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_ListSkipsACPTargetMissingCommandBinary(t *testing.T) {
+	// acp:cursor runs the same raw command as the cursor alias, so list
+	// resolution must skip it when cursor-agent is missing even though acpx
+	// is present.
+	cfg := &Config{Agents: []types.AgentName{"acp:cursor", types.AgentClaude}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentClaude {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentClaude)
+	}
+	if len(cfg.Agents) != 1 || cfg.Agents[0] != types.AgentClaude {
+		t.Fatalf("agents = %v, want [claude]", cfg.Agents)
+	}
+}
+
+func TestResolveAgent_ListKeepsACPTargetWhenBinariesPresent(t *testing.T) {
+	cfg := &Config{Agents: []types.AgentName{"acp:cursor", types.AgentClaude}}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "cursor-agent", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != "acp:cursor" {
+		t.Errorf("agent = %q, want acp:cursor", cfg.Agent)
+	}
+}
+
+func TestResolveAgent_ACPTargetRegistryOverrideBinaryProbed(t *testing.T) {
+	// A registry override makes acp:gemini run `acpx --agent "gemini-cli acp"`,
+	// so the override's binary must be probed alongside acpx.
+	cfg := &Config{
+		Agents:               []types.AgentName{"acp:gemini", types.AgentClaude},
+		ACPRegistryOverrides: map[string]string{"gemini": "gemini-cli acp"},
+	}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		switch bin {
+		case "acpx", "claude":
+			return "/usr/bin/" + bin, nil
+		default:
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Agent != types.AgentClaude {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentClaude)
+	}
+}
+
 func TestResolveAgent_ACPAliasRegistryOverrideBinaryProbed(t *testing.T) {
 	cfg := &Config{
 		Agents:               []types.AgentName{types.AgentCursor},

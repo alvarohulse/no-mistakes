@@ -191,6 +191,24 @@ func (a ACPAlias) DefaultCommandBinary() string {
 	return fields[0]
 }
 
+// ACPTargetFor resolves the ACP target an agent name drives: the alias target
+// for a first-class alias, or the parsed target of an explicit acp:<target>
+// name. Returns false for non-ACP agent names.
+func ACPTargetFor(name AgentName) (string, bool) {
+	if alias, ok := ACPAliasFor(name); ok {
+		return alias.Target, true
+	}
+	value := string(name)
+	if !strings.HasPrefix(value, "acp:") {
+		return "", false
+	}
+	target := strings.TrimPrefix(value, "acp:")
+	if target == "" || strings.ContainsAny(target, " \t\r\n") {
+		return "", false
+	}
+	return target, true
+}
+
 // ACPRawCommand resolves the raw command acpx runs for an ACP target: a
 // non-blank registry override wins, otherwise the alias default command.
 // Empty means acpx dispatches the target through its own registry.
@@ -202,4 +220,14 @@ func ACPRawCommand(target string, overrides map[string]string) string {
 		return alias.DefaultCommand
 	}
 	return ""
+}
+
+// ACPRawCommandBinary returns the executable named by the resolved raw command
+// for an ACP target; empty when acpx dispatches the target through its registry.
+func ACPRawCommandBinary(target string, overrides map[string]string) string {
+	fields := strings.Fields(ACPRawCommand(target, overrides))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }

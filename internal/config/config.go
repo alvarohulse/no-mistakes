@@ -343,12 +343,8 @@ var nativeAgentProbeOrder = []types.AgentName{
 }
 
 func isACPAgent(name types.AgentName) bool {
-	value := string(name)
-	if !strings.HasPrefix(value, "acp:") {
-		return false
-	}
-	target := strings.TrimPrefix(value, "acp:")
-	return target != "" && !strings.ContainsAny(target, " \t\r\n")
+	_, ok := types.ACPTargetFor(name)
+	return ok
 }
 
 var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
@@ -450,7 +446,7 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 		}
 	}
 	for _, alias := range types.ACPAliases() {
-		available, bins, err := c.acpAliasAvailable(alias, lookPath)
+		available, bins, err := c.acpAvailable(alias.Name, lookPath)
 		probed = append(probed, bins...)
 		if err != nil {
 			return "", err
@@ -494,11 +490,11 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		}
 		return resolved, err == nil, "auto", err
 	}
-	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) && !isACPAlias(name) {
+	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
 		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
-	if alias, ok := types.ACPAliasFor(name); ok {
-		available, bins, err := c.acpAliasAvailable(alias, lookPath)
+	if isACPAgent(name) {
+		available, bins, err := c.acpAvailable(name, lookPath)
 		probe := strings.Join(bins, ", ")
 		if err != nil {
 			return "", false, probe, err
@@ -533,7 +529,7 @@ func (c *Config) AgentPath() string {
 }
 
 func (c *Config) AgentPathFor(name types.AgentName) string {
-	if isACPAgent(name) || isACPAlias(name) {
+	if isACPAgent(name) {
 		if c.ACPXPath != "" {
 			return c.ACPXPath
 		}
@@ -550,36 +546,30 @@ func (c *Config) AgentPathFor(name types.AgentName) string {
 	return string(name)
 }
 
-// acpAliasAvailable reports whether the alias' command binary and the acpx shim
-// are on PATH. It returns the binaries it considered for diagnostics.
-func (c *Config) acpAliasAvailable(alias types.ACPAlias, lookPath func(string) (string, error)) (bool, []string, error) {
-	bins := c.acpAliasBinaries(alias)
+// acpAvailable reports whether the binaries an ACP agent name executes — the
+// resolved raw command's executable (when one is set) and the acpx shim — are
+// on PATH. It returns the binaries it considered for diagnostics.
+func (c *Config) acpAvailable(name types.AgentName, lookPath func(string) (string, error)) (bool, []string, error) {
+	bins := c.acpBinaries(name)
 	for _, bin := range bins {
 		if _, err := lookPath(bin); err != nil {
 			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
 				return false, bins, nil
 			}
-			return false, bins, fmt.Errorf("resolve %s agent from %q: %w", alias.Name, bin, err)
+			return false, bins, fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
 		}
 	}
 	return true, bins, nil
 }
 
-func (c *Config) acpAliasBinaries(alias types.ACPAlias) []string {
-	return []string{c.acpAliasCommandBinary(alias), c.AgentPathFor(alias.Name)}
-}
-
-func (c *Config) acpAliasCommandBinary(alias types.ACPAlias) string {
-	fields := strings.Fields(types.ACPRawCommand(alias.Target, c.ACPRegistryOverrides))
-	if len(fields) == 0 {
-		return ""
+func (c *Config) acpBinaries(name types.AgentName) []string {
+	bins := make([]string, 0, 2)
+	if target, ok := types.ACPTargetFor(name); ok {
+		if bin := types.ACPRawCommandBinary(target, c.ACPRegistryOverrides); bin != "" {
+			bins = append(bins, bin)
+		}
 	}
-	return fields[0]
-}
-
-func isACPAlias(name types.AgentName) bool {
-	_, ok := types.ACPAliasFor(name)
-	return ok
+	return append(bins, c.AgentPathFor(name))
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in

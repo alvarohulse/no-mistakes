@@ -86,6 +86,51 @@ func TestACPAliasFor(t *testing.T) {
 	}
 }
 
+func TestACPTargetFor(t *testing.T) {
+	tests := []struct {
+		name       string
+		agent      AgentName
+		wantTarget string
+		wantOK     bool
+	}{
+		{name: "alias name", agent: AgentCursor, wantTarget: "cursor", wantOK: true},
+		{name: "explicit acp alias target", agent: "acp:cursor", wantTarget: "cursor", wantOK: true},
+		{name: "explicit acp target", agent: "acp:gemini", wantTarget: "gemini", wantOK: true},
+		{name: "native agent", agent: AgentClaude, wantTarget: "", wantOK: false},
+		{name: "empty target", agent: "acp:", wantTarget: "", wantOK: false},
+		{name: "whitespace in target", agent: "acp:foo bar", wantTarget: "", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, ok := ACPTargetFor(tt.agent)
+			if target != tt.wantTarget || ok != tt.wantOK {
+				t.Fatalf("ACPTargetFor(%q) = (%q, %v), want (%q, %v)", tt.agent, target, ok, tt.wantTarget, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestACPRawCommandBinary(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		overrides map[string]string
+		want      string
+	}{
+		{name: "alias default without overrides", target: "cursor", overrides: nil, want: "cursor-agent"},
+		{name: "override wins over alias default", target: "cursor", overrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp"}, want: "/opt/cursor/cursor-agent"},
+		{name: "unknown target without override", target: "gemini", overrides: nil, want: ""},
+		{name: "override for unknown target", target: "gemini", overrides: map[string]string{"gemini": "gemini-cli acp"}, want: "gemini-cli"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ACPRawCommandBinary(tt.target, tt.overrides); got != tt.want {
+				t.Fatalf("ACPRawCommandBinary(%q, %v) = %q, want %q", tt.target, tt.overrides, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestACPRawCommand(t *testing.T) {
 	tests := []struct {
 		name      string
