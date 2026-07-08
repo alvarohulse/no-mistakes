@@ -48,8 +48,9 @@ func Init(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.Re
 func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkURL string) (*db.Repo, bool, error) {
 	forkURL = strings.TrimSpace(forkURL)
 
-	// Normalize worktrees back to the main repo root so one repo record works
-	// from either the main checkout or any attached worktree.
+	// Resolve the gate repo root: linked worktrees normalize to the main
+	// checkout so one record covers every attached worktree; git submodule
+	// checkouts stay on the submodule's own working tree root.
 	gitRoot, err := git.FindMainRepoRoot(workDir)
 	if err != nil {
 		return nil, false, fmt.Errorf("find git root: %w", err)
@@ -247,8 +248,8 @@ func reattachRelocatedRepo(ctx context.Context, d *db.DB, p *paths.Paths, absRoo
 // It removes the remote, deletes the bare repo and worktrees,
 // and deletes the repo record from the database.
 func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.Repo, error) {
-	// Normalize worktrees back to the main repo root so eject works no matter
-	// which checkout the user runs it from.
+	// Resolve the gate repo root the same way as init: linked worktrees
+	// normalize to the main checkout; git submodule checkouts stay separate.
 	gitRoot, err := git.FindMainRepoRoot(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("find git root: %w", err)

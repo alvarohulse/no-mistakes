@@ -42,6 +42,8 @@ When you run `no-mistakes init` in a repo:
 If the repo is already initialized, it refreshes the existing gate instead of failing: managed hook installation, push-option support, hook-path isolation, gate and working remotes, origin/default-branch metadata, and the `/no-mistakes` agent skill are repaired or updated where needed.
 If the working repo was renamed or moved and the old path no longer exists, `init` reattaches the existing gate from the leftover `no-mistakes` remote, updates the stored working path, and preserves the repo ID plus run history.
 If the working repo was copied and the original path still exists, `init` treats the copy as a new repo and repoints the copied `no-mistakes` remote to a fresh gate.
+From a git linked worktree, `init` normalizes to the main checkout so one gate record covers every attached worktree.
+From a git submodule checkout, `init` treats the submodule as its own repository.
 If daemon startup fails during a refresh, `init` reports the error but does not eject the pre-existing gate.
 
 After init, your original `origin` still points at the real upstream remote.
