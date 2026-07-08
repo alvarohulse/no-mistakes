@@ -75,6 +75,7 @@ Pipeline agents are prompted to keep intentional writes inside that detached wor
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
 While executing steps, the daemon also owns child-process cleanup.
 Configured commands and one-shot agent subprocesses are terminated as a process tree on completion, failure, or cancellation so leaked test workers, build watchers, or dev servers cannot accumulate across runs.
+On Windows, pipeline subprocesses (agent CLIs, git, helper tools) are started without a visible console window because their stdio is redirected to pipes.
 
 ## Concurrent push handling
 

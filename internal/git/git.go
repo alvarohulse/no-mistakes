@@ -26,7 +26,8 @@ func IsZeroSHA(sha string) bool {
 }
 
 // Run executes a git command in the given directory and returns trimmed stdout.
-// Returns an error that includes the command and stderr on failure.
+// Returns an error that includes the command and stderr on failure. On Windows,
+// shellenv.HideWindow suppresses a console window; stdout/stderr are captured.
 //
 // When dir is itself a bare repository (a gate repo), the repo is named
 // explicitly via --git-dir instead of relying on cwd-based discovery, which
@@ -229,7 +230,8 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 
 // IsDetachedHEAD reports whether the working tree is in a detached-HEAD state
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
-// which fails cleanly when HEAD is not a symbolic ref.
+// which fails cleanly when HEAD is not a symbolic ref. On Windows,
+// shellenv.HideWindow suppresses a console window.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = dir
@@ -438,7 +440,8 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 
 // RefExists reports whether the given ref resolves to a commit. It uses
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
-// result rather than a loud error.
+// result rather than a loud error. On Windows, shellenv.HideWindow suppresses
+// a console window.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Env = NonInteractiveEnv(dir)
