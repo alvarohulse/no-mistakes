@@ -5,7 +5,7 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is agent-agnostic by design. The gate should mean the same thing
 regardless of which agent you prefer. The default `agent: auto` setting picks
-the first supported native agent available on your system.
+the first supported native agent or ACP alias available on your system.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
 code review, evidence-oriented test validation, test or lint detection when you
@@ -197,7 +197,7 @@ agent_path_override:
   copilot: /usr/local/bin/copilot
 ```
 
-For ACP targets, set `acpx_path` instead of `agent_path_override`:
+For ACP targets and ACP aliases such as `cursor`, set `acpx_path` instead of `agent_path_override`:
 
 ```yaml
 acpx_path: /Users/you/bin/acpx

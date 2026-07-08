@@ -53,7 +53,7 @@ Everything else can usually wait.
 # You can also use an ordered fallback list, for example: [codex, claude].
 agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | cursor | acp:<target>
 
-# Optional acpx path and target command overrides for agent: acp:<target>.
+# Optional acpx path and target command overrides for agent: acp:<target> and ACP aliases such as cursor.
 acpx_path: acpx
 acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
