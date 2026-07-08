@@ -20,6 +20,13 @@ func writeStubAcpx(t *testing.T, dir string) string {
 	path := filepath.Join(dir, "acpx")
 	script := `#!/bin/sh
 printf '%s\n' "$@" > "$NM_TEST_ACPX_ARGS_FILE"
+prev=""
+for arg in "$@"; do
+	if [ "$prev" = "-f" ] && [ -n "$NM_TEST_ACPX_PROMPT_FILE" ]; then
+		cp "$arg" "$NM_TEST_ACPX_PROMPT_FILE"
+	fi
+	prev="$arg"
+done
 printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"cursor stub reply"}}}\n'
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -42,7 +49,9 @@ func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			argsFile := filepath.Join(dir, "argv.txt")
+			promptFile := filepath.Join(dir, "prompt.txt")
 			t.Setenv("NM_TEST_ACPX_ARGS_FILE", argsFile)
+			t.Setenv("NM_TEST_ACPX_PROMPT_FILE", promptFile)
 			stub := writeStubAcpx(t, dir)
 
 			a, err := New(tc.agent, stub, nil)
@@ -65,8 +74,15 @@ func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) 
 			if len(argv) < 2 || argv[0] != "--agent" || argv[1] != "cursor-agent acp" {
 				t.Errorf("spawned argv = %q, want leading --agent \"cursor-agent acp\"", argv)
 			}
-			if len(argv) < 2 || argv[len(argv)-2] != "exec" || argv[len(argv)-1] != "review this change" {
-				t.Errorf("spawned argv = %q, want trailing exec <prompt>", argv)
+			if len(argv) < 3 || argv[len(argv)-3] != "exec" || argv[len(argv)-2] != "-f" || argv[len(argv)-1] == "" {
+				t.Errorf("spawned argv = %q, want trailing exec -f <prompt-file>", argv)
+			}
+			promptData, err := os.ReadFile(promptFile)
+			if err != nil {
+				t.Fatalf("stub acpx never copied prompt file: %v", err)
+			}
+			if string(promptData) != "review this change" {
+				t.Errorf("prompt file = %q, want original prompt", promptData)
 			}
 			for _, arg := range argv {
 				if arg == "cursor" {

@@ -313,8 +313,8 @@ acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
 ```
 
-no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
-Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text.
+Spawns an `acpx` subprocess for each invocation with `exec -f <prompt-file>`. The prompt (including any appended JSON schema for structured output) is written to a temporary file first so large prompts do not exceed OS command-line length limits, notably the 8191-character cap on Windows. The temp file is removed when the invocation exits. no-mistakes also passes JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
+Structured output is handled by appending the requested JSON schema to the prompt file and validating the final assistant text.
 
 ## Checking agent availability
 
