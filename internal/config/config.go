@@ -609,6 +609,7 @@ var reservedAgentArgs = map[string]map[string]bool{
 	},
 	string(types.AgentCodex): {
 		"exec":    true,
+		"-":       true,
 		"--json":  true,
 		"--color": true,
 	},
