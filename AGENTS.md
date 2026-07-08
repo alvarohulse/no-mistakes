@@ -111,9 +111,9 @@ Safest local verification sequence after non-trivial changes:
   `TestTerminateShellCommandGroup_*` (the primitive).
 - Never pass an agent prompt as a command-line argument.
   The native argv agents build a small, fixed argv and stream the prompt on **stdin** (`internal/agent/claude.go` sets `cmd.Stdin = strings.NewReader(opts.Prompt)` and `buildArgs` emits a bare boolean `-p`/`--print`; claude reads the prompt from stdin when no positional prompt follows).
-  A failing test/lint step embeds its full captured output in the auto-fix prompt (`Findings.Summary` = the whole command output), which routinely runs to hundreds of KB or megabytes; passed as `-p <prompt>` it overflows the OS `ARG_MAX` and the exec fails with `fork/exec ...: argument list too long` (E2BIG), surfacing as `agent fix tests: claude start: ...` and failing the step.
+  A failing test/lint step embeds its full captured output in the auto-fix prompt (`Findings.Summary` = the whole command output), which routinely runs to hundreds of KB or megabytes; passed as an argv element (`-p <prompt>` for claude, an `exec <prompt>` positional for codex) it overflows the OS `ARG_MAX` and the exec fails with `fork/exec ...: argument list too long` (E2BIG), surfacing as `agent fix tests: claude start: ...` or `agent fix tests: codex start: ...` and failing the step.
   Stdin has no such length ceiling. Regression: `TestClaudeAgent_Run_LargePromptViaStdin` (4 MiB prompt through the real exec path).
-  Codex still passes its prompt as an `exec <prompt>` positional (same latent E2BIG); migrate it to stdin (`codex exec -`) when touched.
+  Codex likewise streams its prompt on **stdin** (`internal/agent/codex.go` sets `cmd.Stdin = strings.NewReader(opts.Prompt)` and `buildArgs` emits the bare `-` positional, so `codex exec -` reads the prompt from stdin). Regression: `TestCodexAgent_Run_LargePromptViaStdin` (4 MiB prompt through the real exec path).
 - Use derived contexts and timeouts for cleanup and HTTP calls.
 - Use `context.Background()` mainly at top-level boundaries, background tasks, or in tests.
 - Protect shared mutable state with `sync.Mutex`, `sync.RWMutex`, `sync.Map`, or `atomic` where appropriate.

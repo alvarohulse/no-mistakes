@@ -12,10 +12,10 @@ import (
 
 func TestCodexAgent_BuildArgs(t *testing.T) {
 	ca := &codexAgent{bin: "codex"}
-	args := ca.buildArgs("fix the bug", "")
+	args := ca.buildArgs("")
 
 	expected := []string{
-		"exec", "fix the bug",
+		"exec", "-",
 		"--json",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--color", "never",
@@ -33,12 +33,12 @@ func TestCodexAgent_BuildArgs(t *testing.T) {
 
 func TestCodexAgent_BuildArgs_ExtraArgsAfterExec(t *testing.T) {
 	ca := &codexAgent{bin: "codex", extraArgs: []string{"-m", "gpt-5.4"}}
-	args := ca.buildArgs("fix it", "")
+	args := ca.buildArgs("")
 
 	expected := []string{
 		"exec",
 		"-m", "gpt-5.4",
-		"fix it",
+		"-",
 		"--json",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--color", "never",
@@ -62,7 +62,7 @@ func TestCodexAgent_BuildArgs_UserExecutionModeSuppressesBypass(t *testing.T) {
 	}
 	for _, extra := range tests {
 		ca := &codexAgent{bin: "codex", extraArgs: extra}
-		args := ca.buildArgs("p", "")
+		args := ca.buildArgs("")
 
 		bypassCount := 0
 		for _, a := range args {
@@ -82,10 +82,10 @@ func TestCodexAgent_BuildArgs_UserExecutionModeSuppressesBypass(t *testing.T) {
 
 func TestCodexAgent_BuildArgs_WithOutputSchema(t *testing.T) {
 	ca := &codexAgent{bin: "codex"}
-	args := ca.buildArgs("review", "/tmp/schema.json")
+	args := ca.buildArgs("/tmp/schema.json")
 
 	want := []string{
-		"exec", "review",
+		"exec", "-",
 		"--json",
 		"--output-schema", "/tmp/schema.json",
 		"--dangerously-bypass-approvals-and-sandbox",

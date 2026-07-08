@@ -36,7 +36,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | Agent | Binary | Protocol |
 |---|---|---|
 | Claude | `claude` | Subprocess per invocation, prompt on stdin, JSONL streaming |
-| Codex | `codex` | Subprocess per invocation, JSONL events |
+| Codex | `codex` | Subprocess per invocation, prompt on stdin, JSONL events |
 | Rovo Dev | `acli` | Persistent HTTP server, SSE streaming |
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
@@ -255,7 +255,7 @@ Spawns a `claude` subprocess for each invocation with `-p` (boolean print mode),
 
 ## Codex
 
-Spawns a `codex` subprocess for each invocation with `exec --json`. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text, with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, then validates the result against the normalized schema.
+Spawns a `codex` subprocess for each invocation with `exec - --json`, piping the prompt on stdin (the `-` positional) so large auto-fix prompts (for example full test or lint output embedded in `Findings.Summary`) do not overflow OS command-line length limits. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text, with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, then validates the result against the normalized schema.
 
 ## Rovo Dev
 

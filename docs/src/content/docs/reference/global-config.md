@@ -144,7 +144,7 @@ User-supplied flags are inserted ahead of no-mistakes' managed flags, so your ch
 | Agent | Reserved flags |
 |---|---|
 | `claude` | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema` |
-| `codex` | `exec`, `--json`, `--color` |
+| `codex` | `exec`, `-`, `--json`, `--color` |
 | `rovodev` | `rovodev`, `serve`, `--disable-session-token` |
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs` |
 | `pi` | `--mode`, `--no-session` |
@@ -155,6 +155,7 @@ For structured `codex` runs, no-mistakes also appends its own `--output-schema <
 Smart defaults:
 
 - For `claude`, no-mistakes passes `-p`/`--print` as a boolean flag and pipes the prompt on stdin (never as an argv element) so large auto-fix prompts do not hit OS command-line length limits.
+- For `codex`, no-mistakes passes the prompt on stdin (the `codex exec -` positional) rather than as an argv element, so large auto-fix prompts do not hit OS command-line length limits.
 - For `claude`, supplying `--permission-mode` (or `--dangerously-skip-permissions`) suppresses the default `--dangerously-skip-permissions`.
 - For `codex`, supplying `--ask-for-approval`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox` suppresses the default `--dangerously-bypass-approvals-and-sandbox`.
 

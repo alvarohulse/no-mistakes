@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -85,6 +86,7 @@ func TestLoadGlobal_AgentArgsOverride_ReservedArgsRejected(t *testing.T) {
 		{"claude", "--output-format=stream-json"},
 		{"claude", "--json-schema"},
 		{"codex", "exec"},
+		{"codex", "-"},
 		{"codex", "--json"},
 		{"codex", "--color"},
 		{"codex", "--color=never"},
@@ -100,7 +102,7 @@ func TestLoadGlobal_AgentArgsOverride_ReservedArgsRejected(t *testing.T) {
 		t.Run(tt.agent+"_"+tt.arg, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.yaml")
-			data := "agent_args_override:\n  " + tt.agent + ":\n    - " + tt.arg + "\n"
+			data := fmt.Sprintf("agent_args_override:\n  %s:\n    - %q\n", tt.agent, tt.arg)
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
