@@ -35,7 +35,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 
 | Agent | Binary | Protocol |
 |---|---|---|
-| Claude | `claude` | Subprocess per invocation, JSONL streaming |
+| Claude | `claude` | Subprocess per invocation, prompt on stdin, JSONL streaming |
 | Codex | `codex` | Subprocess per invocation, JSONL events |
 | Rovo Dev | `acli` | Persistent HTTP server, SSE streaming |
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
@@ -251,7 +251,7 @@ Use `intent.disabled_readers` to disable specific transcript sources, or set `in
 
 ## Claude
 
-Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
+Spawns a `claude` subprocess for each invocation with `-p` (boolean print mode), `--output-format stream-json`, and the prompt piped on stdin so large auto-fix prompts (for example full test or lint output embedded in `Findings.Summary`) do not overflow OS command-line length limits. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
 
 ## Codex
 

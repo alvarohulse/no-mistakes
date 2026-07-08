@@ -24,7 +24,9 @@ var errNoStructuredOutput = errors.New("claude returned no structured output")
 
 const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 
-// claudeAgent spawns the claude CLI for each invocation.
+// claudeAgent spawns the claude CLI for each invocation. The prompt is piped on
+// stdin via bare -p/--print (see buildArgs and runOnce); it is never passed as
+// an argv element.
 type claudeAgent struct {
 	bin       string
 	extraArgs []string
