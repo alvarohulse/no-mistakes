@@ -135,8 +135,10 @@ func FindGitRoot(path string) (string, error) {
 
 // FindMainRepoRoot returns the root of the main working tree for a git
 // repository. For a regular repo this is the same as FindGitRoot. For a
-// worktree it resolves back to the main repository root by inspecting
-// git's common dir.
+// linked worktree it resolves back to the main repository root by inspecting
+// git's common dir. For a git submodule checkout it returns that submodule's
+// working tree root (same as FindGitRoot), not a path under the
+// superproject's .git/modules/ tree.
 //
 // Git submodules are NOT treated as linked worktrees: their common-dir lives
 // under the superproject's .git/modules/ tree, so taking its parent would

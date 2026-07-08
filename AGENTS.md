@@ -131,6 +131,14 @@ Safest local verification sequence after non-trivial changes:
 
 - Agent harnesses (e.g. Claude Code) and hardened CI inject `safe.bareRepository=explicit` via `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, which forbids cwd-based discovery of bare repositories. Every git operation on a gate repo must therefore name it explicitly: `git.Run` detects a bare git dir (`isBareGitDir`: `HEAD` file + `objects/` dir, no `.git` entry) and prepends `--git-dir=<dir>`; working trees and linked worktrees keep normal discovery. Route gate git calls through `git.Run` - never shell out to git in a bare gate repo relying only on `cmd.Dir` or `-C` discovery (issue #362). Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, `TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit`, `TestInitUnderSafeBareRepositoryExplicit`.
 
+**FindMainRepoRoot and Git Submodules**
+
+- `FindMainRepoRoot` resolves linked worktrees back to the main checkout via `--git-common-dir`, but git submodules are not linked worktrees: their common-dir lives under the superproject's `.git/modules/` tree, so taking its parent would return the wrong path. Detect submodules with `--show-superproject-working-tree` and resolve them with `--show-toplevel` (`FindGitRoot`) instead. Linked worktrees keep the common-dir path because their superproject output is empty. Regression: `TestFindMainRepoRoot_Submodule` (issue #328).
+
+**FindMainRepoRoot and Git Submodules**
+
+- `FindMainRepoRoot` resolves linked worktrees back to the main checkout via `--git-common-dir`, but git submodules are not linked worktrees: their common-dir lives under the superproject's `.git/modules/` tree, so taking its parent would return the wrong path. Detect submodules with `--show-superproject-working-tree` and resolve them with `--show-toplevel` (`FindGitRoot`) instead. Linked worktrees keep the common-dir path because their superproject output is empty. Regression: `TestFindMainRepoRoot_Submodule` (issue #328).
+
 **Testing Conventions**
 
 - Tests live next to the code in `*_test.go` files.
