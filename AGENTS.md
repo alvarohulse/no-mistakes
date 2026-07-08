@@ -135,10 +135,6 @@ Safest local verification sequence after non-trivial changes:
 
 - `FindMainRepoRoot` resolves linked worktrees back to the main checkout via `--git-common-dir`, but git submodules are not linked worktrees: their common-dir lives under the superproject's `.git/modules/` tree, so taking its parent would return the wrong path. Detect submodules with `--show-superproject-working-tree` and resolve them with `--show-toplevel` (`FindGitRoot`) instead. Linked worktrees keep the common-dir path because their superproject output is empty. Regression: `TestFindMainRepoRoot_Submodule` (issue #328).
 
-**FindMainRepoRoot and Git Submodules**
-
-- `FindMainRepoRoot` resolves linked worktrees back to the main checkout via `--git-common-dir`, but git submodules are not linked worktrees: their common-dir lives under the superproject's `.git/modules/` tree, so taking its parent would return the wrong path. Detect submodules with `--show-superproject-working-tree` and resolve them with `--show-toplevel` (`FindGitRoot`) instead. Linked worktrees keep the common-dir path because their superproject output is empty. Regression: `TestFindMainRepoRoot_Submodule` (issue #328).
-
 **Testing Conventions**
 
 - Tests live next to the code in `*_test.go` files.
