@@ -172,9 +172,11 @@ func filterStructuredToSchema(structured map[string]any, schemaPath string) (map
 	return filtered, nil
 }
 
-// extractCodexPrompt finds the prompt positional. Real codex argv is
-// `codex exec [user-flags...] <prompt> --json [...]`. The prompt is the
-// first non-flag, non-flag-value positional after "exec".
+// extractCodexPrompt returns the prompt no-mistakes sent to codex. The real
+// invocation is `codex exec [user-flags...] - --json [...]` with the prompt
+// piped on stdin (the "-" positional; see internal/agent/codex.go), so we read
+// stdin here. A positional prompt other than "-" is still honored as a
+// backward-compatible fallback for any caller that passes the prompt in argv.
 func extractCodexPrompt(args []string) string {
 	flagsWithValues := map[string]bool{
 		"-m": true, "--model": true,
@@ -197,10 +199,14 @@ func extractCodexPrompt(args []string) string {
 			i++
 			continue
 		}
+		if a == "-" {
+			// stdin sentinel: no-mistakes piped the prompt on stdin.
+			return readStdinPrompt()
+		}
 		if len(a) > 0 && a[0] == '-' {
 			continue
 		}
 		return a
 	}
-	return ""
+	return readStdinPrompt()
 }

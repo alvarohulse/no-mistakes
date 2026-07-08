@@ -15,7 +15,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-// codexAgent spawns the codex CLI for each invocation.
+// codexAgent spawns the codex CLI for each invocation. The prompt is piped on
+// stdin via the "-" positional (see buildArgs and runOnce); it is never passed
+// as an argv element.
 type codexAgent struct {
 	bin       string
 	extraArgs []string
@@ -57,10 +59,16 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		defer os.Remove(schemaPath)
 	}
 
-	args := a.buildArgs(opts.Prompt, schemaPath)
+	args := a.buildArgs(schemaPath)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Stdin = nil
+	// The prompt travels on stdin, never as an argv element. A failing test
+	// step embeds its full captured output in the fix prompt, which routinely
+	// runs to hundreds of KB; passed as an `exec <prompt>` positional it
+	// overflows the OS ARG_MAX and the exec fails with "argument list too long"
+	// (E2BIG), taking the pipeline step down. `codex exec -` reads the prompt
+	// from stdin, so stdin has no such length ceiling.
+	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
 
@@ -106,14 +114,18 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 func (a *codexAgent) Close() error { return nil }
 
 // buildArgs constructs the codex CLI arguments. User-supplied extraArgs are
-// inserted between "exec" and the prompt so user flags (e.g. -m, --sandbox)
-// take effect. If the user declared their own execution-mode flag, the
-// default --dangerously-bypass-approvals-and-sandbox is not added.
-func (a *codexAgent) buildArgs(prompt, schemaPath string) []string {
+// inserted between "exec" and the prompt-source flag so user flags (e.g. -m,
+// --sandbox) take effect. The prompt itself is delivered on stdin: the "-"
+// argument tells codex to read its instructions from stdin, which sidesteps the
+// OS command-line length limit (ARG_MAX / E2BIG) that a large diff embedded in
+// the prompt would otherwise hit (see the stdin note in runOnce). If the user
+// declared their own execution-mode flag, the default
+// --dangerously-bypass-approvals-and-sandbox is not added.
+func (a *codexAgent) buildArgs(schemaPath string) []string {
 	args := make([]string, 0, len(a.extraArgs)+8)
 	args = append(args, "exec")
 	args = append(args, a.extraArgs...)
-	args = append(args, prompt, "--json")
+	args = append(args, "-", "--json")
 	if schemaPath != "" {
 		args = append(args, "--output-schema", schemaPath)
 	}

@@ -247,10 +247,11 @@ func extractClaudePrompt(args []string) string {
 }
 
 // readStdinPrompt reads the entire prompt piped to the fake agent on stdin.
+// Shared by the claude and codex fakes (both stream the prompt on stdin).
 func readStdinPrompt() string {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakeagent: claude read stdin prompt: %v\n", err)
+		fmt.Fprintf(os.Stderr, "fakeagent: read stdin prompt: %v\n", err)
 		return ""
 	}
 	return string(data)
