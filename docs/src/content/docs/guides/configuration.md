@@ -4,7 +4,7 @@ description: Global and per-repo configuration options.
 ---
 
 Configuration is optional. Without any config files, `no-mistakes` defaults to
-`agent: auto`, which picks the first supported native agent available on your system,
+`agent: auto`, which picks the first supported native agent or ACP alias available on your system,
 with sensible defaults for everything else.
 
 The goal is not to make you configure a mini CI system. The default path should
@@ -49,11 +49,11 @@ Everything else can usually wait.
 # ~/.no-mistakes/config.yaml
 
 # Default agent for all repos and setup-wizard suggestions.
-# "auto" picks the first available native agent on PATH.
+# "auto" picks the first available native agent or ACP alias on PATH.
 # You can also use an ordered fallback list, for example: [codex, claude].
-agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | acp:<target>
+agent: auto  # auto | claude | codex | rovodev | opencode | pi | copilot | cursor | acp:<target>
 
-# Optional acpx path and target command overrides for agent: acp:<target>.
+# Optional acpx path and target command overrides for agent: acp:<target> and ACP aliases such as cursor.
 acpx_path: acpx
 acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
@@ -162,8 +162,8 @@ See [Repo Config Reference](/no-mistakes/reference/repo-config/) for the full fi
 ## Precedence
 
 - Repo `agent` overrides global `agent`, including the full ordered fallback list when one is configured.
-- Global `agent: auto` resolves by checking `claude`, `codex`, `opencode`, `acli` for `rovodev`, `pi`, then `copilot` on `PATH`.
-- ACP agents are opt-in with `agent: acp:<target>` and are not considered by `agent: auto`.
+- Global `agent: auto` resolves by checking `claude`, `codex`, `opencode`, `acli` for `rovodev`, `pi`, `copilot`, then the `cursor` ACP alias on `PATH` (`cursor` is selected only when both `cursor-agent` and `acpx` are present).
+- Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 - `agent_path_override`, `agent_args_override`, `acpx_path`, and `acp_registry_overrides` are global-only fields.
 - `auto_fix` from the repo config overlays global auto_fix. Fields not set in the repo config fall through to the global default.
 - `intent` from the repo config overlays global intent settings. Fields not set in the repo config fall through to the global default, except `intent.disabled_readers`, which adds to globally disabled readers.

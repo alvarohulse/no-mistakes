@@ -278,10 +278,11 @@ Checks:
 - SQLite database
 - Daemon status
 - Native agent binaries: `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`
+- ACP alias binaries: `cursor-agent` plus `acpx` for `cursor`
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
-`doctor` does not validate `acpx` or ACP targets. For `agent: acp:<target>`, verify `acpx_path` yourself.
+`doctor` checks `acpx` only as part of ACP alias rows such as `cursor` and does not validate arbitrary `acp:<target>` targets. For `agent: acp:<target>`, verify `acpx_path` yourself.
 
 `doctor` checks `gh` and `az` availability. For GitLab PR and CI steps, install and authenticate `glab`. For Bitbucket Cloud PR and CI steps, set `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN`. For Azure DevOps PR and CI steps, install the `azure-devops` extension and provide a PAT.
 

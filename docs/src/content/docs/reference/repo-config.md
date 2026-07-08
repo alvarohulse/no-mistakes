@@ -54,12 +54,13 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | | |
 |---|---|
 | Type | `string` or `string[]` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
-`acp:<target>` uses the user-installed `acpx` binary configured in global config.
-ACP agents are opt-in and are not considered by `agent: auto`.
+`auto` resolves to the first supported native agent or ACP alias found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
+`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
+`acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` uses the same default command as `cursor`.
+Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 
 You can also set an ordered fallback list:
 

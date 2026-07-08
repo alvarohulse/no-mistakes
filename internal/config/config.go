@@ -252,17 +252,20 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>
-# "auto" detects the first available native agent on your system
+# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
+# "auto" detects the first available native agent or ACP alias on your system
+# "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
+# "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
-# Optional path to the user-installed acpx binary for acp:<target> agents
+# Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
 
-# Optional ACP target command overrides for acp:<target> agents
+# Optional ACP target command overrides for acp:<target> agents and ACP aliases
 # acp_registry_overrides:
 #   local-gemini: node /opt/mock-acp-agent.mjs
+#   cursor: cursor-agent acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
 # before giving up. The monitor watches CI and auto-rebases when the base branch
@@ -329,8 +332,8 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentCopilot:  "copilot",
 }
 
-// agentProbeOrder is the priority order for auto-detecting agents.
-var agentProbeOrder = []types.AgentName{
+// nativeAgentProbeOrder is the priority order for auto-detecting native agents.
+var nativeAgentProbeOrder = []types.AgentName{
 	types.AgentClaude,
 	types.AgentCodex,
 	types.AgentOpenCode,
@@ -340,12 +343,8 @@ var agentProbeOrder = []types.AgentName{
 }
 
 func isACPAgent(name types.AgentName) bool {
-	value := string(name)
-	if !strings.HasPrefix(value, "acp:") {
-		return false
-	}
-	target := strings.TrimPrefix(value, "acp:")
-	return target != "" && !strings.ContainsAny(target, " \t\r\n")
+	_, ok := types.ACPTargetFor(name)
+	return ok
 }
 
 var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
@@ -418,8 +417,8 @@ func (c *Config) configuredAgents() []types.AgentName {
 }
 
 func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (string, error)) (types.AgentName, error) {
-	probed := make([]string, 0, len(agentProbeOrder))
-	for _, name := range agentProbeOrder {
+	probed := make([]string, 0, len(nativeAgentProbeOrder)+len(types.ACPAliases())+1)
+	for _, name := range nativeAgentProbeOrder {
 		bin := string(name)
 		if b, ok := defaultBinary[name]; ok {
 			bin = b
@@ -444,6 +443,16 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 			return name, nil
 		} else if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
 			return "", fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
+		}
+	}
+	for _, alias := range types.ACPAliases() {
+		available, bins, err := c.acpAvailable(alias.Name, lookPath)
+		probed = append(probed, bins...)
+		if err != nil {
+			return "", err
+		}
+		if available {
+			return alias.Name, nil
 		}
 	}
 	return "", fmt.Errorf("no supported agent found in PATH (looked for: %s); install one or set 'agent' in ~/.no-mistakes/config.yaml", strings.Join(probed, ", "))
@@ -482,7 +491,15 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+	}
+	if isACPAgent(name) {
+		available, bins, err := c.acpAvailable(name, lookPath)
+		probe := strings.Join(bins, ", ")
+		if err != nil {
+			return "", false, probe, err
+		}
+		return name, available, probe, nil
 	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
@@ -505,7 +522,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 }
 
 // AgentPath returns the binary path for the configured agent.
-// ACP agents use acpx_path if set, otherwise acpx.
+// ACP agents and ACP aliases use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
 func (c *Config) AgentPath() string {
 	return c.AgentPathFor(c.Agent)
@@ -527,6 +544,32 @@ func (c *Config) AgentPathFor(name types.AgentName) string {
 		return b
 	}
 	return string(name)
+}
+
+// acpAvailable reports whether the binaries an ACP agent name executes — the
+// resolved raw command's executable (when one is set) and the acpx shim — are
+// on PATH. It returns the binaries it considered for diagnostics.
+func (c *Config) acpAvailable(name types.AgentName, lookPath func(string) (string, error)) (bool, []string, error) {
+	bins := c.acpBinaries(name)
+	for _, bin := range bins {
+		if _, err := lookPath(bin); err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+				return false, bins, nil
+			}
+			return false, bins, fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
+		}
+	}
+	return true, bins, nil
+}
+
+func (c *Config) acpBinaries(name types.AgentName) []string {
+	bins := make([]string, 0, 2)
+	if target, ok := types.ACPTargetFor(name); ok {
+		if bin := types.ACPRawCommandBinary(target, c.ACPRegistryOverrides); bin != "" {
+			bins = append(bins, bin)
+		}
+	}
+	return append(bins, c.AgentPathFor(name))
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in

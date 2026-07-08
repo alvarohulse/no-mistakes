@@ -5,7 +5,7 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is agent-agnostic by design. The gate should mean the same thing
 regardless of which agent you prefer. The default `agent: auto` setting picks
-the first supported native agent available on your system.
+the first supported native agent or ACP alias available on your system.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
 code review, evidence-oriented test validation, test or lint detection when you
@@ -41,6 +41,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
+| Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Setting the agent
@@ -79,8 +80,8 @@ If you install `acpx` separately, you can opt into any ACP target with the `acp:
 agent: acp:gemini
 ```
 
-`agent: auto` only probes native agents.
-It does not auto-select ACP targets.
+`agent: auto` probes native agents and first-class ACP aliases.
+It does not auto-select arbitrary `acp:<target>` entries.
 
 ## Where agent choice matters most
 
@@ -157,7 +158,7 @@ Successful outputs can be `outcome: passed` for a completed run or `outcome: che
 
 ## Binary resolution
 
-By default, `no-mistakes` resolves `agent: auto` by checking for supported native agents on your `PATH` in this order:
+By default, `no-mistakes` resolves `agent: auto` by checking for supported native agents and ACP aliases on your `PATH` in this order:
 
 1. `claude`
 2. `codex`
@@ -165,6 +166,7 @@ By default, `no-mistakes` resolves `agent: auto` by checking for supported nativ
 4. `acli` with `rovodev` support
 5. `pi`
 6. `copilot`
+7. `cursor` ACP alias (selected only when both `cursor-agent` and `acpx` are present)
 
 The default binary names are:
 
@@ -176,6 +178,7 @@ The default binary names are:
 | `opencode` | `opencode` |
 | `pi` | `pi` |
 | `copilot` | `copilot` |
+| `cursor` | `cursor-agent` + `acpx` |
 | `acp:<target>` | `acpx` |
 
 When the daemon is running through a managed service, that `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories. If login-shell resolution fails, the daemon logs a warning and uses a degraded fallback `PATH` that may omit version-manager shim directories. On Windows it reuses the current process environment instead of reloading a login shell. If native agent discovery still does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and use an explicit `agent_path_override`.
@@ -194,7 +197,7 @@ agent_path_override:
   copilot: /usr/local/bin/copilot
 ```
 
-For ACP targets, set `acpx_path` instead of `agent_path_override`:
+For ACP targets and ACP aliases such as `cursor`, set `acpx_path` instead of `agent_path_override`:
 
 ```yaml
 acpx_path: /Users/you/bin/acpx
@@ -277,10 +280,30 @@ Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 
+## ACP aliases
+
+ACP aliases are first-class agent names that resolve to ACP targets.
+`agent: cursor` is the first alias: it is shorthand for the `cursor` ACP target with the default raw command `cursor-agent acp`, not a separate native backend.
+`agent: acp:cursor` uses that same default command, so either spelling works without an `acp_registry_overrides.cursor` entry.
+
+Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
+Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their required binaries are present.
+For `cursor`, `auto` requires both `cursor-agent` and `acpx`; if either is missing, `auto` skips the alias and `no-mistakes doctor` reports it as not found.
+
+Override an alias command with the matching target key in `acp_registry_overrides`.
+For example, this keeps the `agent: cursor` shortcut while pointing it at a custom command:
+
+```yaml
+agent: cursor
+acp_registry_overrides:
+  cursor: /opt/cursor/cursor-agent acp --profile work
+```
+
 ## ACP via acpx
 
 ACP support is optional and requires a separately installed `acpx` binary.
 Use `agent: acp:<target>` to run a target known to acpx, for example `agent: acp:gemini`.
+When the target matches a first-class alias such as `acp:cursor`, no-mistakes supplies that alias' default raw command.
 
 For custom ACP target commands, define a global override:
 
@@ -295,7 +318,7 @@ Structured output is handled by appending the requested JSON schema to the promp
 
 ## Checking agent availability
 
-Run `no-mistakes doctor` to see which native agent binaries are installed and available:
+Run `no-mistakes doctor` to see which agent binaries are installed and available:
 
 ```
 $ no-mistakes doctor
@@ -310,9 +333,11 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – cursor (not found (cursor-agent, acpx))
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+The `cursor` ACP alias row lists whichever of its two required binaries are missing.
 
 For `agent: acp:<target>`, make sure `acpx` is installed on `PATH` or set `acpx_path` in global config.
-`no-mistakes doctor` does not validate ACP targets.
+`no-mistakes doctor` checks `acpx` only as part of ACP alias rows such as `cursor` and does not validate arbitrary `acp:<target>` targets.
