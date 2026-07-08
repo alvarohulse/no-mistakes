@@ -85,3 +85,27 @@ func TestACPAliasFor(t *testing.T) {
 		t.Fatalf("ACPAliases should return a copy, target = %q", alias.Target)
 	}
 }
+
+func TestACPRawCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		overrides map[string]string
+		want      string
+	}{
+		{name: "alias default without overrides", target: "cursor", overrides: nil, want: "cursor-agent acp"},
+		{name: "override wins over alias default", target: "cursor", overrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp"}, want: "/opt/cursor/cursor-agent acp"},
+		{name: "override is trimmed", target: "cursor", overrides: map[string]string{"cursor": "  cursor-agent acp  "}, want: "cursor-agent acp"},
+		{name: "blank override falls back to alias default", target: "cursor", overrides: map[string]string{"cursor": " \t"}, want: "cursor-agent acp"},
+		{name: "unknown target without override", target: "gemini", overrides: nil, want: ""},
+		{name: "blank override for unknown target", target: "gemini", overrides: map[string]string{"gemini": "   "}, want: ""},
+		{name: "override for unknown target", target: "gemini", overrides: map[string]string{"gemini": "node /tmp/mock-acp.mjs"}, want: "node /tmp/mock-acp.mjs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ACPRawCommand(tt.target, tt.overrides); got != tt.want {
+				t.Fatalf("ACPRawCommand(%q, %v) = %q, want %q", tt.target, tt.overrides, got, tt.want)
+			}
+		})
+	}
+}

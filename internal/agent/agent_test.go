@@ -132,6 +132,22 @@ func TestACPAliasRegistryOverrideRespected(t *testing.T) {
 	}
 }
 
+func TestACPAliasBlankRegistryOverrideUsesDefaultCommand(t *testing.T) {
+	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{
+		ACPRegistryOverrides: map[string]string{"cursor": " \t"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	acpx, ok := a.(*acpxAgent)
+	if !ok {
+		t.Fatalf("agent type = %T, want *acpxAgent", a)
+	}
+	if acpx.rawCommand != "cursor-agent acp" {
+		t.Errorf("rawCommand = %q, want cursor-agent acp", acpx.rawCommand)
+	}
+}
+
 func TestACPAgentBuildArgsUsesExecMode(t *testing.T) {
 	a := &acpxAgent{target: "gemini"}
 	args := a.buildArgs(RunOpts{Prompt: "do work"})

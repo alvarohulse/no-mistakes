@@ -570,14 +570,11 @@ func (c *Config) acpAliasBinaries(alias types.ACPAlias) []string {
 }
 
 func (c *Config) acpAliasCommandBinary(alias types.ACPAlias) string {
-	if c.ACPRegistryOverrides != nil {
-		if override := strings.TrimSpace(c.ACPRegistryOverrides[alias.Target]); override != "" {
-			if fields := strings.Fields(override); len(fields) > 0 {
-				return fields[0]
-			}
-		}
+	fields := strings.Fields(types.ACPRawCommand(alias.Target, c.ACPRegistryOverrides))
+	if len(fields) == 0 {
+		return ""
 	}
-	return alias.DefaultCommandBinary()
+	return fields[0]
 }
 
 func isACPAlias(name types.AgentName) bool {

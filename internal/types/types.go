@@ -190,3 +190,16 @@ func (a ACPAlias) DefaultCommandBinary() string {
 	}
 	return fields[0]
 }
+
+// ACPRawCommand resolves the raw command acpx runs for an ACP target: a
+// non-blank registry override wins, otherwise the alias default command.
+// Empty means acpx dispatches the target through its own registry.
+func ACPRawCommand(target string, overrides map[string]string) string {
+	if override := strings.TrimSpace(overrides[target]); override != "" {
+		return override
+	}
+	if alias, ok := ACPAliasForTarget(target); ok {
+		return alias.DefaultCommand
+	}
+	return ""
+}

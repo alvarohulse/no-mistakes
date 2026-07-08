@@ -586,11 +586,11 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
 	if alias, ok := types.ACPAliasFor(name); ok {
-		rawCommand := acpRawCommand(alias.Target, alias.DefaultCommand, opts.ACPRegistryOverrides)
+		rawCommand := types.ACPRawCommand(alias.Target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: alias.Target, rawCommand: rawCommand}, nil
 	}
 	if target, ok := acpTarget(name); ok {
-		rawCommand := acpRawCommand(target, acpDefaultCommand(target), opts.ACPRegistryOverrides)
+		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
 	switch name {
@@ -609,22 +609,6 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
-}
-
-func acpRawCommand(target, defaultCommand string, overrides map[string]string) string {
-	if overrides != nil {
-		if override, ok := overrides[target]; ok && override != "" {
-			return override
-		}
-	}
-	return defaultCommand
-}
-
-func acpDefaultCommand(target string) string {
-	if alias, ok := types.ACPAliasForTarget(target); ok {
-		return alias.DefaultCommand
-	}
-	return ""
 }
 
 func acpTarget(name types.AgentName) (string, bool) {
