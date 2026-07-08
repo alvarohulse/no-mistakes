@@ -596,9 +596,10 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentCopilot):  true,
 }
 
-// reservedAgentArgs lists flags that no-mistakes manages internally and that
-// users cannot override through agent_args_override. A flag is matched by its
-// bare form (e.g. "--color") as well as the "--color=value" form.
+// reservedAgentArgs lists flags and managed arguments (including codex's "-"
+// stdin positional) that no-mistakes manages internally and that users cannot
+// override through agent_args_override. A flag is matched by its bare form
+// (e.g. "--color") as well as the "--color=value" form.
 var reservedAgentArgs = map[string]map[string]bool{
 	string(types.AgentClaude): {
 		"-p":              true,
