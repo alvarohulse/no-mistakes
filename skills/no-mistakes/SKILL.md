@@ -80,6 +80,8 @@ asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
 
+Optional `--pr-note` (or `--pr-note-file <path>` for longer content; mutually exclusive) injects your own text into the pull request the `pr` step opens. It is run-scoped like `--intent`: the note persists on the run and is reused on rerun.
+
 ## Validate and decide
 
 Run the pipeline and decide on its findings as they come up:

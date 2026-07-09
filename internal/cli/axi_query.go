@@ -84,7 +84,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 }
 
 func startRunHelp() string {
-	return `Run no-mistakes axi run --intent "the user's goal" --yes to validate the current branch`
+	return `Run no-mistakes axi run --intent "the user's goal" --yes to validate the current branch; optional --pr-note injects author text into the PR`
 }
 
 func noRunLogsHelp() string {

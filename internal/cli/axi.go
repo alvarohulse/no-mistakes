@@ -169,7 +169,7 @@ func runAxiHome(cmd *cobra.Command) error {
 	help := []string{}
 	switch {
 	case currentActive == nil:
-		help = append(help, `Run `+"`"+`no-mistakes axi run --intent "<what the user set out to accomplish>"`+"`"+` to validate your changes`)
+		help = append(help, `Run `+"`"+`no-mistakes axi run --intent "<what the user set out to accomplish>"`+"`"+` to validate your changes; optional `+"`"+`--pr-note`+"`"+` (or `+"`"+`--pr-note-file`+"`"+`) injects author text into the PR`)
 		if otherActive != nil {
 			help = append(help, fmt.Sprintf("Another active run is on %s; leave it alone unless you are working on that branch", otherActive.Branch))
 		}
