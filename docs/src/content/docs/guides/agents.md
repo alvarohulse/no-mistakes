@@ -146,7 +146,9 @@ If the repo is on the default branch or has uncommitted changes, direct `axi run
 
 To inject your own content into the pull request the `pr` step opens, pass `--pr-note "<text>"` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive).
 The note is reproduced verbatim in a guaranteed `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and is also fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
+Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it is not wrapped in the untrusted "data, not instructions" framing.
 It is run-scoped like `--intent`: the note persists on the run and `axi run` reuses it when reattaching to or re-triggering the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
+When the PR body must be truncated to fit a host's character limit, the generated and pipeline sections are clamped before the author note, so the note is preserved.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
 While a non-terminal run is parked at an `awaiting_approval` or `fix_review` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.

@@ -73,11 +73,15 @@ func newAxiRunCmd() *cobra.Command {
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
-			"--pr-note (or --pr-note-file for longer content) injects your own text\n" +
-			"into the pull request the pr step opens: it is reproduced verbatim in a\n" +
-			"\"## Notes\" section of the PR body and fed to the PR summary as trusted\n" +
-			"author guidance. Both are run-scoped: the note persists on the run and is\n" +
-			"reused on rerun, like --intent.",
+			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
+			"your own text into the pull request the pr step opens: it is reproduced\n" +
+			"verbatim in a \"## Notes\" section after \"## Intent\" and before \"## What\n" +
+			"Changed\", and fed to the PR summary as trusted author guidance (unlike\n" +
+			"inferred intent, it is not wrapped in untrusted framing). Both are\n" +
+			"run-scoped: the note persists on the run and axi run reuses it when\n" +
+			"reattaching to or re-triggering the same head, but no-mistakes rerun and\n" +
+			"the TUI rerun start a fresh run without the note. When the PR body must\n" +
+			"be truncated, generated and pipeline sections are clamped before the note.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -105,7 +109,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
-	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added verbatim to a \"## Notes\" section of the PR body and fed to the PR summary as author guidance (run-scoped; persists on the run and is reused on rerun)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added verbatim to a \"## Notes\" section of the PR body and fed to the PR summary as author guidance (run-scoped; persists on the run; axi run reuses it on reattach, but no-mistakes rerun and the TUI rerun do not)")
 	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note)")
 	return cmd
 }

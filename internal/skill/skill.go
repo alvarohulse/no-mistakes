@@ -119,7 +119,7 @@ asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
 
-Optional ` + "`--pr-note`" + ` (or ` + "`--pr-note-file <path>`" + ` for longer content; mutually exclusive) injects your own text into the pull request the ` + "`pr`" + ` step opens. It is run-scoped like ` + "`--intent`" + `: the note persists on the run and is reused on rerun.
+Optional ` + "`--pr-note`" + ` (or ` + "`--pr-note-file <path>`" + ` for longer content; mutually exclusive) injects your own text into the pull request the ` + "`pr`" + ` step opens. The note is reproduced verbatim in a guaranteed ` + "`## Notes`" + ` section of the PR body, placed after ` + "`## Intent`" + ` and before ` + "`## What Changed`" + `, and is also fed to the PR summary prompt as trusted author guidance (unlike inferred intent, it is not wrapped in untrusted framing). It is run-scoped like ` + "`--intent`" + `: the note persists on the run and ` + "`axi run`" + ` reuses it when reattaching to or re-triggering the same head, but ` + "`no-mistakes rerun`" + ` and the TUI rerun start a fresh run without the note. When the PR body must be truncated, generated and pipeline sections are clamped before the author note.
 
 ## Validate and decide
 
