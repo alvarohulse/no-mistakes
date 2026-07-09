@@ -68,3 +68,48 @@ func TestParseIntentPushOptionsNone(t *testing.T) {
 		t.Fatalf("parseIntentPushOptions(no intent) = %q, want empty", got)
 	}
 }
+
+func TestPRNotePushOptionRoundTrip(t *testing.T) {
+	// Multi-line, markdown-bearing note must survive the line-oriented
+	// push-option transport intact, and must not collide with the intent option.
+	note := "## Notes\n\nrelease: v2, commas, colons: ok\n- bullet"
+	opt := formatPRNotePushOption(note)
+	if opt == "" {
+		t.Fatal("formatPRNotePushOption returned empty for a non-empty note")
+	}
+	got, err := parsePRNotePushOptions([]string{
+		"no-mistakes.skip=test",
+		formatIntentPushOption("some intent"),
+		opt,
+	})
+	if err != nil {
+		t.Fatalf("parsePRNotePushOptions() error = %v", err)
+	}
+	if got != note {
+		t.Fatalf("round-trip note = %q, want %q", got, note)
+	}
+	// The intent parser must not pick up the pr-note option and vice versa.
+	gotIntent, err := parseIntentPushOptions([]string{opt, formatIntentPushOption("some intent")})
+	if err != nil {
+		t.Fatalf("parseIntentPushOptions() error = %v", err)
+	}
+	if gotIntent != "some intent" {
+		t.Fatalf("intent parser leaked pr-note: got %q", gotIntent)
+	}
+}
+
+func TestFormatPRNotePushOptionEmpty(t *testing.T) {
+	if got := formatPRNotePushOption("   "); got != "" {
+		t.Fatalf("formatPRNotePushOption(blank) = %q, want empty", got)
+	}
+}
+
+func TestParsePRNotePushOptionsNone(t *testing.T) {
+	got, err := parsePRNotePushOptions([]string{"no-mistakes.skip=test", "no-mistakes.intent=Zm9v"})
+	if err != nil {
+		t.Fatalf("parsePRNotePushOptions() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("parsePRNotePushOptions(no note) = %q, want empty", got)
+	}
+}

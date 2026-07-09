@@ -405,6 +405,44 @@ func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {
 	waitForRunTerminalState(t, d, result.RunID)
 }
 
+func TestPushReceivedPersistsPRNote(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	_, headSHA := setupTestGitRepo(t, p, d, "pr-note-run-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	const note = "## Notes\n\nrelease note body for the PR"
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:   p.RepoDir("pr-note-run-repo"),
+		Ref:    "refs/heads/main",
+		Old:    "0000000000000000000000000000000000000000",
+		New:    headSHA,
+		PRNote: note,
+	}, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RunID == "" {
+		t.Fatal("expected non-empty run ID")
+	}
+
+	// The operator-supplied note is stamped onto the run before the pipeline
+	// runs, so it is persisted for the PR step to consume.
+	run := waitForRunTerminalState(t, d, result.RunID)
+	if run.PRNote == nil || *run.PRNote != note {
+		t.Fatalf("persisted pr_note = %v, want %q", run.PRNote, note)
+	}
+}
+
 func writeManagerClaudeFixture(t *testing.T, home, repoCWD string, lines []string) {
 	t.Helper()
 	encoded := testClaudeProjectDirName(repoCWD)

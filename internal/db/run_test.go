@@ -33,6 +33,38 @@ func TestRunInsertAndGet(t *testing.T) {
 	}
 }
 
+func TestUpdateRunPRNote_RoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/pr-note", "git@github.com:user/pr-note.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	// A fresh run has no PR note.
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.PRNote != nil {
+		t.Fatalf("expected nil pr_note on fresh run, got %q", *got.PRNote)
+	}
+
+	// Multi-line content with markdown must round-trip verbatim.
+	note := "## Notes\n\nThis PR adds `--pr-note`.\n\nUsage: axi run --pr-note \"hi\""
+	if err := d.UpdateRunPRNote(run.ID, note); err != nil {
+		t.Fatalf("update pr note: %v", err)
+	}
+
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.PRNote == nil || *got.PRNote != note {
+		t.Errorf("pr_note = %v, want %q", got.PRNote, note)
+	}
+}
+
 func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

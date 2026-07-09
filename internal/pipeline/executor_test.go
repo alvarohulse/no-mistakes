@@ -43,6 +43,34 @@ func TestExecutor_StepLifecycleEvents(t *testing.T) {
 	}
 }
 
+// TestExecutor_PropagatesPRNoteToStepContext verifies the executor copies the
+// persisted run.PRNote into StepContext.PRNote so downstream steps (the PR
+// step) can render the operator-supplied note.
+func TestExecutor_PropagatesPRNoteToStepContext(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	note := "author note for the PR"
+	run.PRNote = &note
+
+	var captured string
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			captured = sctx.PRNote
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if captured != note {
+		t.Fatalf("sctx.PRNote = %q, want %q", captured, note)
+	}
+}
+
 func TestExecutor_SuccessfulStepsDoNotEmitTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

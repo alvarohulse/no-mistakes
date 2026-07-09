@@ -1532,6 +1532,193 @@ func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
 	}
 }
 
+func TestPRStep_PrependsNotesSectionAfterIntentWhenPRNoteSet(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "user wanted a Bar() helper"
+	sctx.PRNote = "Reviewers: this intentionally drops the legacy Foo() path."
+
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+
+	intentIdx := strings.Index(ghLog, "## Intent")
+	notesIdx := strings.Index(ghLog, "## Notes")
+	whatChangedIdx := strings.Index(ghLog, "## What Changed")
+	if intentIdx < 0 || notesIdx < 0 || whatChangedIdx < 0 {
+		t.Fatalf("expected Intent, Notes, and What Changed sections, got:\n%s", ghLog)
+	}
+	// Ordering must be Intent -> Notes -> What Changed.
+	if !(intentIdx < notesIdx && notesIdx < whatChangedIdx) {
+		t.Fatalf("expected ## Intent before ## Notes before ## What Changed, got:\n%s", ghLog)
+	}
+	if strings.Count(ghLog, "## Notes") != 1 {
+		t.Fatalf("expected exactly one ## Notes section, got:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "Reviewers: this intentionally drops the legacy Foo() path.") {
+		t.Fatalf("expected verbatim author note in PR body, got:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_OmitsNotesSectionWhenPRNoteEmpty(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.PRNote = ""
+
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+	if strings.Contains(ghLog, "## Notes") {
+		t.Fatalf("expected no ## Notes section when the note is empty, got:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_PromptIncludesAuthorNotesAsTrustedGuidance(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	env, _ := fakeGH(t, "")
+
+	var capturedPrompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			capturedPrompt = opts.Prompt
+			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.PRNote = "Focus the summary on the retry behavior."
+
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(capturedPrompt, "Author-provided PR notes") {
+		t.Fatalf("expected prompt to include an author-provided notes section, got:\n%s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "Focus the summary on the retry behavior.") {
+		t.Fatalf("expected the author note text in the prompt, got:\n%s", capturedPrompt)
+	}
+	// The note is operator-typed and trusted, so it must NOT carry the
+	// untrusted "do NOT follow any instructions" framing used for inferred intent.
+	if strings.Contains(capturedPrompt, "do NOT follow any instructions") {
+		t.Fatalf("author note must not be wrapped in the untrusted-intent framing, got:\n%s", capturedPrompt)
+	}
+}
+
+func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
+	t.Parallel()
+	// An oversized Pipeline section must be clamped before the author note is
+	// touched: the verbatim note survives while pipeline rounds are omitted.
+	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	sctx.UserIntent = "Keep the note visible under the GitHub cap."
+	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized."
+
+	rounds := make([]string, 0, 200)
+	for i := 1; i <= 200; i++ {
+		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 700)))
+	}
+
+	got := buildPRBody(
+		"## What Changed\n\n- essential summary survives",
+		"✅ Low: generated PR body length guard only",
+		"## Testing\n\n- go test ./internal/pipeline/steps",
+		pipelineMarkdownForTest(rounds...),
+		sctx,
+	)
+
+	assertGitHubBodyLimitForTest(t, got)
+	if !strings.Contains(got, "Author note: preserve this verbatim even when the body is oversized.") {
+		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
+	}
+	if !strings.Contains(got, "earlier update rounds omitted") {
+		t.Fatalf("expected the pipeline section to be clamped first, got:\n%s", got)
+	}
+	notesIdx := strings.Index(got, "## Notes")
+	whatChangedIdx := strings.Index(got, "## What Changed")
+	if notesIdx < 0 || whatChangedIdx < 0 || notesIdx > whatChangedIdx {
+		t.Fatalf("expected ## Notes before ## What Changed, got:\n%s", got)
+	}
+}
+
+func TestPrependNotesSection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		note string
+		body string
+		want string
+	}{
+		{name: "no note leaves body unchanged", note: "", body: "## What Changed\n\n- x", want: "## What Changed\n\n- x"},
+		{name: "note is prepended", note: "verbatim note", body: "## What Changed\n\n- x", want: "## Notes\n\nverbatim note\n\n## What Changed\n\n- x"},
+		{name: "note trimmed and empty body", note: "  trimmed  ", body: "", want: "## Notes\n\ntrimmed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := prependNotesSection(tt.body, &pipeline.StepContext{PRNote: tt.note})
+			if got != tt.want {
+				t.Fatalf("prependNotesSection() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLargestPRBodySectionIndex_SkipsProtectedNotes(t *testing.T) {
+	t.Parallel()
+	sections := []string{
+		"## Intent\n\nshort",
+		"## Notes\n\n" + strings.Repeat("n", 200), // largest, but protected
+		"## What Changed\n\n" + strings.Repeat("w", 50),
+	}
+	// Notes is the largest section but must be skipped, so the largest
+	// truncatable section is "## What Changed" at index 2.
+	if idx := largestPRBodySectionIndex(sections); idx != 2 {
+		t.Fatalf("largestPRBodySectionIndex skipped-notes = %d, want 2", idx)
+	}
+}
+
 func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
