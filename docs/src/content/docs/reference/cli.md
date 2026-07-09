@@ -101,7 +101,7 @@ Reattaching to an in-flight run does not require `--intent`.
 `--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive and `--pr-note-file` is read and trimmed) injects author-supplied content into the pull request the `pr` step opens.
 It has two effects: the text is reproduced verbatim in a guaranteed `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and the same text is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
 Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it is not wrapped in the untrusted "data, not instructions" framing.
-Both flags are run-scoped like `--intent`: the note persists on the run and is reused on rerun.
+Both flags are run-scoped like `--intent`: the note persists on the run and `axi run` reuses it when reattaching to or re-triggering the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
 When the PR body must be truncated to fit a host's character limit, the generated and pipeline sections are clamped before the author note, so the note is preserved.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.

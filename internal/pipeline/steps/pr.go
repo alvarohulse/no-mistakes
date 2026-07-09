@@ -258,7 +258,7 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 	if bodyLimit <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Risk Assessment, and Pipeline sections are appended automatically; a Testing section is included when budget allows. Keep the \"## What Changed\" section to a few short bullet points.", bodyLimit)
+	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Notes, Risk Assessment, and Pipeline sections are appended automatically; a Testing section is included when budget allows. Keep the \"## What Changed\" section to a few short bullet points.", bodyLimit)
 }
 
 // assemblePRBody composes the final PR body from its sections and keeps it
@@ -285,6 +285,28 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 }
 
 func clampAssembledPRBody(body string, bodyLimit int) string {
+	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
+		return body
+	}
+
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	if hasNote {
+		if scm.PRBodyLen(noteBlock) > bodyLimit {
+			return scm.ClampPRBody(noteBlock, bodyLimit)
+		}
+		remaining := bodyLimit - scm.PRBodyLen(noteBlock)
+		rest := prefix + suffix
+		if scm.PRBodyLen(rest) <= remaining {
+			return prefix + noteBlock + suffix
+		}
+		truncatedRest := clampAssembledPRBodySections(rest, remaining)
+		return reinsertPRNoteBlock(truncatedRest, noteBlock)
+	}
+
+	return clampAssembledPRBodySections(body, bodyLimit)
+}
+
+func clampAssembledPRBodySections(body string, bodyLimit int) string {
 	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
 		return body
 	}
@@ -751,6 +773,31 @@ func truncatePRBodySections(body string, maxBytes int, marker string) string {
 		return body
 	}
 
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	if hasNote {
+		if len(noteBlock) > maxBytes {
+			return truncateTextAtLineBoundary(noteBlock, maxBytes, marker)
+		}
+		remaining := maxBytes - len(noteBlock)
+		rest := prefix + suffix
+		if len(rest) <= remaining {
+			return prefix + noteBlock + suffix
+		}
+		truncatedRest := truncatePRBodySectionsOnly(rest, remaining, marker)
+		return reinsertPRNoteBlock(truncatedRest, noteBlock)
+	}
+
+	return truncatePRBodySectionsOnly(body, maxBytes, marker)
+}
+
+func truncatePRBodySectionsOnly(body string, maxBytes int, marker string) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(body) <= maxBytes {
+		return body
+	}
+
 	sections := splitPRBodySections(body)
 	if len(sections) <= 1 {
 		return truncateTextAtLineBoundary(body, maxBytes, marker)
@@ -789,6 +836,96 @@ func largestPRBodySectionIndex(sections []string) int {
 		length = len(section)
 	}
 	return index
+}
+
+func isPRNoteBoundaryHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ") {
+		return false
+	}
+	heading := strings.TrimSpace(strings.TrimPrefix(line, "##"))
+	heading = strings.TrimRight(heading, ":.!? ")
+	heading = strings.ToLower(heading)
+	switch heading {
+	case "what changed", "risk assessment", "testing", "tests", "pipeline":
+		return true
+	default:
+		return false
+	}
+}
+
+// splitProtectedPRNoteBlock extracts the author "## Notes" block as one atomic
+// unit, including any internal "## " sub-headings. Returns hasNote=false when
+// the body has no Notes section.
+func splitProtectedPRNoteBlock(body string) (prefix, noteBlock, suffix string, hasNote bool) {
+	if body == "" {
+		return "", "", "", false
+	}
+
+	notesStart := -1
+	for start := 0; start < len(body); {
+		end := strings.IndexByte(body[start:], '\n')
+		lineEnd := len(body)
+		next := len(body)
+		if end >= 0 {
+			lineEnd = start + end
+			next = lineEnd + 1
+		}
+		if strings.EqualFold(strings.TrimSpace(body[start:lineEnd]), "## Notes") {
+			notesStart = start
+			break
+		}
+		start = next
+	}
+	if notesStart < 0 {
+		return body, "", "", false
+	}
+
+	prefix = body[:notesStart]
+	scanStart := notesStart
+	if nl := strings.IndexByte(body[scanStart:], '\n'); nl >= 0 {
+		scanStart += nl + 1
+	} else {
+		return prefix, body[notesStart:], "", true
+	}
+
+	boundaryStart := len(body)
+	for start := scanStart; start < len(body); {
+		end := strings.IndexByte(body[start:], '\n')
+		lineEnd := len(body)
+		next := len(body)
+		if end >= 0 {
+			lineEnd = start + end
+			next = lineEnd + 1
+		}
+		if isPRNoteBoundaryHeading(body[start:lineEnd]) {
+			boundaryStart = start
+			break
+		}
+		start = next
+	}
+
+	return prefix, body[notesStart:boundaryStart], body[boundaryStart:], true
+}
+
+func reinsertPRNoteBlock(body, noteBlock string) string {
+	for start := 0; start < len(body); {
+		end := strings.IndexByte(body[start:], '\n')
+		lineEnd := len(body)
+		next := len(body)
+		if end >= 0 {
+			lineEnd = start + end
+			next = lineEnd + 1
+		}
+		if isPRNoteBoundaryHeading(body[start:lineEnd]) {
+			return body[:start] + noteBlock + body[start:]
+		}
+		start = next
+	}
+	if body == "" {
+		return noteBlock
+	}
+	return body + noteBlock
 }
 
 // isProtectedPRBodySection reports whether section must not be shrunk by the

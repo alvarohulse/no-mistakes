@@ -782,7 +782,7 @@ func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 
 func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	t.Parallel()
-	note := "Author note: preserve this verbatim under the provider cap."
+	note := "Author note: preserve this verbatim under the provider cap.\n\n## Detail A\n\nsubsection A content\n\n## Detail B\n\nsubsection B content"
 	limit := 500
 	sctx := &pipeline.StepContext{
 		UserIntent: "Keep the note visible under the cap.",
@@ -801,7 +801,10 @@ func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T)
 		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
 	}
 	if !strings.Contains(got, note) {
-		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
+		t.Fatalf("expected the full author note with sub-headings to survive clamping, got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Detail A") || !strings.Contains(got, "## Detail B") {
+		t.Fatalf("expected note sub-headings to survive clamping, got:\n%s", got)
 	}
 	if !strings.Contains(got, prTruncationTail()) {
 		t.Fatalf("expected generated sections to be clamped, got:\n%s", got)
@@ -825,7 +828,7 @@ func TestPRBodyBudgetPromptSection(t *testing.T) {
 		t.Fatalf("prBodyBudgetPromptSection(0) = %q, want empty", got)
 	}
 	got := prBodyBudgetPromptSection(4000)
-	if !strings.Contains(got, "4000 characters") || !strings.Contains(got, "What Changed") {
+	if !strings.Contains(got, "4000 characters") || !strings.Contains(got, "What Changed") || !strings.Contains(got, "Notes") {
 		t.Fatalf("prBodyBudgetPromptSection(4000) missing budget guidance: %q", got)
 	}
 }
@@ -1687,7 +1690,7 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	// touched: the verbatim note survives while pipeline rounds are omitted.
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep the note visible under the GitHub cap."
-	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized."
+	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized.\n\n## Detail A\n\nsubsection A content\n\n## Detail B\n\nsubsection B content"
 
 	rounds := make([]string, 0, 200)
 	for i := 1; i <= 200; i++ {
@@ -1705,6 +1708,9 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	assertGitHubBodyLimitForTest(t, got)
 	if !strings.Contains(got, "Author note: preserve this verbatim even when the body is oversized.") {
 		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
+	}
+	if !strings.Contains(got, "## Detail A") || !strings.Contains(got, "## Detail B") {
+		t.Fatalf("expected note sub-headings to survive clamping, got:\n%s", got)
 	}
 	if !strings.Contains(got, "earlier update rounds omitted") {
 		t.Fatalf("expected the pipeline section to be clamped first, got:\n%s", got)
@@ -1735,6 +1741,32 @@ func TestPrependNotesSection(t *testing.T) {
 				t.Fatalf("prependNotesSection() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSplitProtectedPRNoteBlock_PreservesInternalHeadings(t *testing.T) {
+	t.Parallel()
+	note := "## Notes\n\nintro line\n\n## Detail A\n\nsubsection A\n\n## Detail B\n\nsubsection B"
+	body := "## Intent\n\nwanted feature\n\n" + note + "\n\n## What Changed\n\n- change"
+
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	if !hasNote {
+		t.Fatal("expected note block to be found")
+	}
+	if !strings.Contains(noteBlock, "## Detail A") || !strings.Contains(noteBlock, "## Detail B") {
+		t.Fatalf("expected internal sub-headings in note block, got:\n%s", noteBlock)
+	}
+	if !strings.HasPrefix(noteBlock, "## Notes\n\nintro line") {
+		t.Fatalf("noteBlock = %q", noteBlock)
+	}
+	if prefix != "## Intent\n\nwanted feature\n\n" {
+		t.Fatalf("prefix = %q", prefix)
+	}
+	if suffix != "## What Changed\n\n- change" {
+		t.Fatalf("suffix = %q", suffix)
+	}
+	if prefix+noteBlock+suffix != body {
+		t.Fatalf("reassembly mismatch")
 	}
 }
 
