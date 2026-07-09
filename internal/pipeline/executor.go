@@ -208,6 +208,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if run != nil && run.Intent != nil {
 		userIntent = *run.Intent
 	}
+	prNote := ""
+	if run != nil && run.PRNote != nil {
+		prNote = *run.PRNote
+	}
 	sctx := &StepContext{
 		Ctx:          ctx,
 		Run:          run,
@@ -218,6 +222,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		DB:           e.db,
 		StepResultID: sr.ID,
 		UserIntent:   userIntent,
+		PRNote:       prNote,
 		Log: func(text string) {
 			if text != "" {
 				prefix := ""

@@ -57,6 +57,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			prNote, err := parsePRNotePushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 
 			p, err := paths.New()
 			if err != nil {
@@ -77,6 +81,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				New:       newSHA,
 				SkipSteps: skipSteps,
 				Intent:    intent,
+				PRNote:    prNote,
 			}, &result)
 		},
 	}
@@ -155,6 +160,39 @@ func parseIntentPushOptions(options []string) (string, error) {
 		intent = string(decoded)
 	}
 	return intent, nil
+}
+
+// prNotePushOptionPrefix carries an operator-supplied PR note through a git
+// push. The value is base64-encoded so multi-line or special-character notes
+// survive the push-option transport (which is line-oriented), mirroring the
+// intent push option.
+const prNotePushOptionPrefix = "no-mistakes.pr-note="
+
+// formatPRNotePushOption encodes a PR note as a single push option, or returns
+// "" when there is no note to carry.
+func formatPRNotePushOption(note string) string {
+	if strings.TrimSpace(note) == "" {
+		return ""
+	}
+	return prNotePushOptionPrefix + base64.StdEncoding.EncodeToString([]byte(note))
+}
+
+// parsePRNotePushOptions extracts and decodes the PR note push option, if any.
+// The last occurrence wins.
+func parsePRNotePushOptions(options []string) (string, error) {
+	note := ""
+	for _, option := range options {
+		encoded, ok := strings.CutPrefix(option, prNotePushOptionPrefix)
+		if !ok {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return "", fmt.Errorf("decode pr note push option: %w", err)
+		}
+		note = string(decoded)
+	}
+	return note, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {

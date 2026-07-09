@@ -213,12 +213,12 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
+	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
-// optional intent is stamped onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent string) (string, error) {
+// optional intent and PR note are stamped onto the new run.
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -261,13 +261,15 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
-// step uses it instead of inferring from transcripts.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent string) (string, error) {
+// step uses it instead of inferring from transcripts. A non-empty prNote is
+// stamped onto the run so the PR step renders it verbatim and feeds it to the
+// PR summary prompt.
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -314,6 +316,17 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			run.IntentSource = &source
 			score := 1.0
 			run.IntentScore = &score
+		}
+	}
+
+	// Stamp an operator-supplied PR note onto the run so the PR step renders it
+	// verbatim in a "## Notes" section and feeds it to the PR summary prompt. A
+	// persist failure is non-fatal: the PR step simply omits the note.
+	if trimmed := strings.TrimSpace(prNote); trimmed != "" {
+		if err := m.db.UpdateRunPRNote(run.ID, trimmed); err != nil {
+			slog.Warn("failed to persist agent-supplied pr note", "run_id", run.ID, "error", err)
+		} else {
+			run.PRNote = &trimmed
 		}
 	}
 

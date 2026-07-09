@@ -28,11 +28,17 @@ type Run struct {
 	IntentSource       *string
 	IntentSessionID    *string
 	IntentScore        *float64
-	CreatedAt          int64
-	UpdatedAt          int64
+	// PRNote is optional author-supplied content, set per run via
+	// `axi run --pr-note`/`--pr-note-file`. Unlike Intent (inferred from
+	// transcripts), it is operator-typed and trusted: the PR step renders it
+	// verbatim in a "## Notes" section and feeds it to the summary prompt as
+	// author guidance.
+	PRNote    *string
+	CreatedAt int64
+	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -41,6 +47,7 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
+		&r.PRNote,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
@@ -194,6 +201,17 @@ type RunIntent struct {
 	Source    string
 	SessionID string
 	Score     float64
+}
+
+// UpdateRunPRNote persists the author-supplied PR note for a run. The note is
+// operator-typed (via `axi run --pr-note`/`--pr-note-file`) and reused verbatim
+// by the PR step, so it is stored as-is.
+func (d *DB) UpdateRunPRNote(id, note string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET pr_note = ?, updated_at = ? WHERE id = ?`, note, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run pr note: %w", err)
+	}
+	return nil
 }
 
 // UpdateRunIntent persists the inferred user intent for a run.

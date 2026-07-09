@@ -59,6 +59,8 @@ func newAxiRunCmd() *cobra.Command {
 	var autoYes bool
 	var skipValue string
 	var intent string
+	var prNote string
+	var prNoteFile string
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -70,32 +72,63 @@ func newAxiRunCmd() *cobra.Command {
 			"accepting the result) until a decision point or outcome.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
-			"so no-mistakes uses it directly instead of inferring it from transcripts.",
+			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
+			"--pr-note (or --pr-note-file for longer content) injects your own text\n" +
+			"into the pull request the pr step opens: it is reproduced verbatim in a\n" +
+			"\"## Notes\" section of the PR body and fed to the PR summary as trusted\n" +
+			"author guidance. Both are run-scoped: the note persists on the run and is\n" +
+			"reused on rerun, like --intent.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
-				"auto_yes":   autoYes,
-				"has_intent": strings.TrimSpace(intent) != "",
-				"has_skip":   strings.TrimSpace(skipValue) != "",
+				"auto_yes":    autoYes,
+				"has_intent":  strings.TrimSpace(intent) != "",
+				"has_skip":    strings.TrimSpace(skipValue) != "",
+				"has_pr_note": strings.TrimSpace(prNote) != "" || strings.TrimSpace(prNoteFile) != "",
 			}, func() error {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent)
+				note, err := resolvePRNote(prNote, prNoteFile)
+				if err != nil {
+					return emitError(cmd, 2, err.Error(),
+						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
+				}
+				return runAxiRun(cmd, autoYes, skipSteps, intent, note)
 			})
 		},
 	}
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added verbatim to a \"## Notes\" section of the PR body and fed to the PR summary as author guidance (run-scoped; persists on the run and is reused on rerun)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note)")
 	return cmd
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string) error {
+// resolvePRNote resolves the author-supplied PR note from the mutually
+// exclusive --pr-note / --pr-note-file flags. --pr-note-file is intended for
+// longer content: its file is read and trimmed. Returns "" when neither flag
+// is set.
+func resolvePRNote(prNote, prNoteFile string) (string, error) {
+	if prNote != "" && prNoteFile != "" {
+		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")
+	}
+	if prNoteFile != "" {
+		data, err := os.ReadFile(prNoteFile)
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return prNote, nil
+}
+
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote string) error {
 	ctx := cmd.Context()
 	env, err := openAxiEnv(true)
 	if err != nil {
@@ -135,7 +168,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 			return guard(cmd)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, prNote)
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}
@@ -205,9 +238,12 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent string) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
 	if opt := formatIntentPushOption(intent); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatPRNotePushOption(prNote); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
@@ -222,7 +258,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -264,8 +300,8 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent}
+func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string) *ipc.RerunParams {
+	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRNote: prNote}
 }
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or

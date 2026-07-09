@@ -31,6 +31,12 @@ type StepContext struct {
 	// was trying to accomplish, inferred from local agent transcripts. It's
 	// surfaced in step prompts so agents have context beyond the diff.
 	UserIntent string
+	// PRNote is optional, possibly-empty author-supplied content set per run
+	// via `axi run --pr-note`/`--pr-note-file`. Unlike UserIntent (inferred and
+	// therefore untrusted), it is operator-typed and trusted: the PR step
+	// renders it verbatim in a "## Notes" section and feeds it to the PR
+	// summary prompt as author guidance.
+	PRNote string
 }
 
 // StepOutcome is the result of executing a pipeline step.
