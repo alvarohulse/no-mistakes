@@ -143,6 +143,10 @@ Use `no-mistakes axi abort --run <id>` only when you need to cancel a specific a
 When an agent starts a new run, `--intent` is required and should describe what the user wanted to accomplish, not what files changed.
 Agents should prefer a few complete sentences over a terse summary, capturing user decisions, tradeoffs, constraints, ruled-out approaches, and explicit requests that would not be obvious from the diff alone.
 If the repo is on the default branch or has uncommitted changes, direct `axi run` returns a structured error with the command the agent should run instead of silently creating a branch or commit.
+
+To inject your own content into the pull request the `pr` step opens, pass `--pr-note "<text>"` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive).
+The note is reproduced verbatim in a guaranteed `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and is also fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
+It is run-scoped like `--intent`: the note persists on the run and is reused on rerun.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
 While a non-terminal run is parked at an `awaiting_approval` or `fix_review` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.

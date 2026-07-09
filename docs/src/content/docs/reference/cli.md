@@ -80,6 +80,8 @@ An active run on another branch does not block starting validation for the curre
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
+no-mistakes axi run --intent "the user's goal" --pr-note "Reviewers: the legacy Foo() path is dropped on purpose."
+no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 ```
 
 | Flag | Type | Default | Description |
@@ -87,12 +89,20 @@ no-mistakes axi run --intent "the user's goal" --yes
 | `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
+| `--pr-note` | `string` | (none) | Author-supplied text added verbatim to a `## Notes` section of the PR body and fed to the PR summary as author guidance |
+| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`) |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
+
+`--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive and `--pr-note-file` is read and trimmed) injects author-supplied content into the pull request the `pr` step opens.
+It has two effects: the text is reproduced verbatim in a guaranteed `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and the same text is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
+Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it is not wrapped in the untrusted "data, not instructions" framing.
+Both flags are run-scoped like `--intent`: the note persists on the run and is reused on rerun.
+When the PR body must be truncated to fit a host's character limit, the generated and pipeline sections are clamped before the author note, so the note is preserved.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
