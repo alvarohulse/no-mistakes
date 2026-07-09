@@ -266,8 +266,9 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // first drops the Testing section - the only one that embeds artifact and log
 // file contents and is therefore effectively unbounded - so an Azure DevOps PR
 // sheds log dumps while keeping its Intent, What Changed, Risk, and Pipeline
-// narrative intact. ClampPRBody is the final backstop when even that core
-// overruns (e.g. an unusually long Intent).
+// narrative intact. clampAssembledPRBody is the final backstop when even that
+// core overruns: it shrinks generated sections before the author note, and
+// only clamps the note itself when it alone exceeds the cap.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
 	full := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx), sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
@@ -278,9 +279,46 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
-		return scm.ClampPRBody(core, bodyLimit)
+		return clampAssembledPRBody(core, bodyLimit)
 	}
-	return scm.ClampPRBody(full, bodyLimit)
+	return clampAssembledPRBody(full, bodyLimit)
+}
+
+func clampAssembledPRBody(body string, bodyLimit int) string {
+	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
+		return body
+	}
+
+	sections := splitPRBodySections(body)
+	if len(sections) <= 1 {
+		return scm.ClampPRBody(body, bodyLimit)
+	}
+
+	for {
+		joined := joinPRBodySections(sections)
+		if scm.PRBodyLen(joined) <= bodyLimit {
+			return joined
+		}
+
+		i := largestPRBodySectionIndex(sections)
+		if i < 0 {
+			return scm.ClampPRBody(joined, bodyLimit)
+		}
+
+		joinedLen := scm.PRBodyLen(joined)
+		sectionLen := scm.PRBodyLen(sections[i])
+		excess := joinedLen - bodyLimit
+		sectionBudget := sectionLen - excess
+		if sectionBudget < 0 {
+			sectionBudget = 0
+		}
+
+		truncated := scm.ClampPRBody(sections[i], sectionBudget)
+		if scm.PRBodyLen(truncated) >= sectionLen {
+			return scm.ClampPRBody(joined, bodyLimit)
+		}
+		sections[i] = truncated
+	}
 }
 
 func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {

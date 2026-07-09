@@ -780,6 +780,39 @@ func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	}
 }
 
+func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
+	t.Parallel()
+	note := "Author note: preserve this verbatim under the provider cap."
+	limit := 500
+	sctx := &pipeline.StepContext{
+		UserIntent: "Keep the note visible under the cap.",
+		PRNote:     note,
+	}
+
+	got := assemblePRBody(sctx,
+		"## What Changed\n\n- "+strings.Repeat("w", 3000),
+		"low risk: "+strings.Repeat("r", 500),
+		"",
+		"## Pipeline\n\n- "+strings.Repeat("p", 2000),
+		limit,
+	)
+
+	if scm.PRBodyLen(got) > limit {
+		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
+	}
+	if !strings.Contains(got, note) {
+		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
+	}
+	if !strings.Contains(got, prTruncationTail()) {
+		t.Fatalf("expected generated sections to be clamped, got:\n%s", got)
+	}
+	notesIdx := strings.Index(got, "## Notes")
+	whatChangedIdx := strings.Index(got, "## What Changed")
+	if notesIdx < 0 || whatChangedIdx < 0 || notesIdx > whatChangedIdx {
+		t.Fatalf("expected ## Notes before ## What Changed, got:\n%s", got)
+	}
+}
+
 func prTruncationTail() string {
 	// Mirror of scm's truncation marker for assertions; kept here so the test
 	// reads naturally without exporting the constant.
