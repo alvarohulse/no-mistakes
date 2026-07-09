@@ -158,14 +158,14 @@ Rules:
 %s
 - When including a scope, it MUST be a real package/module name that exists in the codebase (for example, a directory under internal/, cmd/, or the equivalent top-level grouping for this project), identified by inspecting the changed paths. Pick the primary module affected by the change, not a secondary or incidental one.
 - Keep the scope at a coarse level, not too granular: a codebase typically has fewer than 10 distinct scopes in use across its history. Prefer a broad module name (e.g. "daemon", "pipeline", "cli") over a narrow file or sub-feature name. If you cannot confidently identify a real primary module, omit the scope and use "type: description".
-- Body: a "## What Changed" section in GitHub-flavored markdown. 1-3 concise bullet points describing the concrete changes in this branch (what code/behavior shifted), not the user's motivation. Do not include Intent, Risk Assessment, Testing, or Pipeline sections - those are prepended/appended separately. The body value must be plain markdown text, never a JSON object or serialized JSON string.
+- Body: a "## What Changed" section in GitHub-flavored markdown. 1-3 concise bullet points describing the concrete changes in this branch (what code/behavior shifted), not the user's motivation. Do not include Intent, Notes, Risk Assessment, Testing, or Pipeline sections - those are prepended/appended separately. The body value must be plain markdown text, never a JSON object or serialized JSON string.
 - Do not invent tests or behavior.
 
 Commit history:
 %s
 
 Diff stat:
-%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, sctx.Repo.DefaultBranch, conventional.ReleaseTypeRule, commitLog, diffStat, pipelineContext, userIntentPromptSection(sctx), executionContextPromptSection())
+%s%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, sctx.Repo.DefaultBranch, conventional.ReleaseTypeRule, commitLog, diffStat, pipelineContext, userIntentPromptSection(sctx), prNotePromptSection(sctx), executionContextPromptSection())
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 
@@ -269,12 +269,12 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // narrative intact. ClampPRBody is the final backstop when even that core
 // overruns (e.g. an unusually long Intent).
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
-	full := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx)
+	full := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx), sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
 	}
 	if testingMD != "" {
-		core := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", pipelineMD), sctx)
+		core := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, "", pipelineMD), sctx), sctx)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
@@ -290,6 +290,7 @@ func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) strin
 
 func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext) string {
 	body = stripGeneratedSections(body)
+	body = prependNotesSection(body, sctx)
 	body = prependIntentSection(body, sctx)
 	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
 }
@@ -740,6 +741,9 @@ func largestPRBodySectionIndex(sections []string) int {
 	index := -1
 	length := 0
 	for i, section := range sections {
+		if isProtectedPRBodySection(section) {
+			continue
+		}
 		if len(section) <= length {
 			continue
 		}
@@ -747,6 +751,18 @@ func largestPRBodySectionIndex(sections []string) int {
 		length = len(section)
 	}
 	return index
+}
+
+// isProtectedPRBodySection reports whether section must not be shrunk by the
+// section-truncation path. The author-supplied "## Notes" section is protected
+// so an oversized body clamps the generated/pipeline sections (and the rest of
+// the narrative) before the operator's verbatim note is ever touched.
+func isProtectedPRBodySection(section string) bool {
+	line := section
+	if i := strings.IndexByte(section, '\n'); i >= 0 {
+		line = section[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "## Notes")
 }
 
 func splitPRBodySections(body string) []string {
@@ -923,7 +939,7 @@ func isGeneratedSectionHeading(line string) bool {
 	heading = strings.ToLower(heading)
 
 	switch heading {
-	case "intent", "risk assessment", "testing", "tests", "pipeline":
+	case "intent", "notes", "risk assessment", "testing", "tests", "pipeline":
 		return true
 	default:
 		return false
@@ -945,6 +961,51 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 		return section
 	}
 	return section + "\n\n" + body
+}
+
+// cleanedPRNote returns the trimmed author-supplied PR note. Unlike the
+// inferred user intent, the note is operator-typed locally and therefore
+// trusted: it is used verbatim (only whitespace-trimmed), with no
+// secret-redaction or adversarial-stripping. Returns "" when no note is set.
+func cleanedPRNote(sctx *pipeline.StepContext) string {
+	if sctx == nil {
+		return ""
+	}
+	return strings.TrimSpace(sctx.PRNote)
+}
+
+// prependNotesSection prepends a "## Notes" section carrying the author-supplied
+// PR note verbatim. Callers place it after the Intent section and before the
+// agent's "## What Changed" body. Returns body unchanged when no note is set.
+func prependNotesSection(body string, sctx *pipeline.StepContext) string {
+	note := cleanedPRNote(sctx)
+	if note == "" {
+		return body
+	}
+	section := "## Notes\n\n" + note
+	if strings.TrimSpace(body) == "" {
+		return section
+	}
+	return section + "\n\n" + body
+}
+
+// prNotePromptSection returns a prompt fragment carrying the author-supplied PR
+// note so the drafting agent keeps its generated summary consistent with it.
+// The fragment is empty when no note is set, so callers can append it
+// unconditionally.
+//
+// Unlike userIntentPromptSection, the note is operator-typed locally for this
+// run, so it is trusted: it is framed as author guidance rather than wrapped in
+// the untrusted "data, not instructions" guard used for the inferred intent.
+func prNotePromptSection(sctx *pipeline.StepContext) string {
+	note := cleanedPRNote(sctx)
+	if note == "" {
+		return ""
+	}
+	return "\n\nAuthor-provided PR notes (written by the operator for this run; trusted guidance. Keep your summary consistent with these notes. This exact text is also reproduced verbatim in a \"## Notes\" section of the PR body, so do not repeat it in \"## What Changed\"):\n" +
+		"-----BEGIN AUTHOR NOTES-----\n" +
+		note + "\n" +
+		"-----END AUTHOR NOTES-----\n"
 }
 
 func fallbackPRContent(sctx *pipeline.StepContext, branch, commitLog, riskLine, testingMD, pipelineMD string, bodyLimit int) prContent {
