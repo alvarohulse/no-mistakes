@@ -7,10 +7,14 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 var taskkillProcessTree = func(pid int) ([]byte, error) {
 	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
+	// HideWindow keeps the internal taskkill cleanup from flashing a console.
+	shellenv.HideWindow(cmd)
 	return cmd.CombinedOutput()
 }
 

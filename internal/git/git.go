@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // EmptyTreeSHA is the well-known SHA of an empty tree in git.
@@ -25,7 +26,8 @@ func IsZeroSHA(sha string) bool {
 }
 
 // Run executes a git command in the given directory and returns trimmed stdout.
-// Returns an error that includes the command and stderr on failure.
+// Returns an error that includes the command and stderr on failure. On Windows,
+// shellenv.HideWindow suppresses a console window; stdout/stderr are captured.
 //
 // When dir is itself a bare repository (a gate repo), the repo is named
 // explicitly via --git-dir instead of relying on cwd-based discovery, which
@@ -39,6 +41,7 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
+	shellenv.HideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
@@ -71,6 +74,7 @@ func isBareGitDir(dir string) bool {
 // InitBare creates a new bare git repository at the given path.
 func InitBare(ctx context.Context, path string) error {
 	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
+	shellenv.HideWindow(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
@@ -121,6 +125,7 @@ func FindGitRoot(path string) (string, error) {
 	}
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Dir = abs
+	shellenv.HideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -160,6 +165,7 @@ func FindMainRepoRoot(path string) (string, error) {
 
 	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
 	cmd.Dir = abs
+	shellenv.HideWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -240,10 +246,12 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 
 // IsDetachedHEAD reports whether the working tree is in a detached-HEAD state
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
-// which fails cleanly when HEAD is not a symbolic ref.
+// which fails cleanly when HEAD is not a symbolic ref. On Windows,
+// shellenv.HideWindow suppresses a console window.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = dir
+	shellenv.HideWindow(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
@@ -448,10 +456,12 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 
 // RefExists reports whether the given ref resolves to a commit. It uses
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
-// result rather than a loud error.
+// result rather than a loud error. On Windows, shellenv.HideWindow suppresses
+// a console window.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Env = NonInteractiveEnv(dir)
+	shellenv.HideWindow(cmd)
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
