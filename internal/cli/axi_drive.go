@@ -31,6 +31,8 @@ const drivePollInterval = 250 * time.Millisecond
 // after pushing to the gate before falling back to a rerun.
 const triggerWaitTimeout = 5 * time.Second
 
+const maxPRNotePushOptionBytes = 47 * 1024
+
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
 	switch types.RunStatus(status) {
@@ -127,7 +129,10 @@ func resolvePRNote(prNote, prNoteFile string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
 		}
-		return strings.TrimSpace(string(data)), nil
+		prNote = strings.TrimSpace(string(data))
+	}
+	if len(prNote) > maxPRNotePushOptionBytes {
+		return "", fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", len(prNote), maxPRNotePushOptionBytes)
 	}
 	return prNote, nil
 }

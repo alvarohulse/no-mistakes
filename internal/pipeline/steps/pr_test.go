@@ -816,6 +816,32 @@ func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T)
 	}
 }
 
+func TestAssemblePRBody_NearLimitNoteDropsUnclampableRemainder(t *testing.T) {
+	t.Parallel()
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
+	note := strings.Repeat("n", limit-scm.PRBodyLen("## Notes\n\n")-1)
+	sctx := &pipeline.StepContext{
+		UserIntent: "Keep this intent only when it fits.",
+		PRNote:     note,
+	}
+
+	got := assemblePRBody(
+		sctx,
+		"## What Changed\n\n- provider-limited body",
+		"low risk",
+		"",
+		"## Pipeline\n\n- review: pass",
+		limit,
+	)
+
+	if scm.PRBodyLen(got) > limit {
+		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
+	}
+	if !strings.Contains(got, note) {
+		t.Fatal("expected the near-limit author note to remain verbatim")
+	}
+}
+
 func prTruncationTail() string {
 	// Mirror of scm's truncation marker for assertions; kept here so the test
 	// reads naturally without exporting the constant.
@@ -1724,76 +1750,73 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	}
 }
 
-func TestPrependNotesSection(t *testing.T) {
+func TestBuildPRBody_ClampsTestingBeforeModerateNote(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	note := "Author note must stay verbatim.\n" + strings.Repeat("n", 32*1024)
+	testing := "## Testing\n\n" + strings.Repeat("test evidence\n", 3000)
+	sctx.UserIntent = "Preserve the author note before generated evidence."
+	sctx.PRNote = note
+
+	got := buildPRBody(
+		"## What Changed\n\n- keep note-first budgeting",
+		"✅ Low: PR body truncation only",
+		testing,
+		"",
+		sctx,
+	)
+
+	assertGitHubBodyLimitForTest(t, got)
+	if !strings.Contains(got, note) {
+		t.Fatal("expected the full author note to survive generated-section clamping")
+	}
+	if strings.Contains(got, testing) {
+		t.Fatal("expected Testing to be clamped before the author note")
+	}
+}
+
+func TestBuildPRBody_KeepsNoteAfterIntentWithGeneratedHeadings(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	sctx.UserIntent = "Intent lead.\n\n```markdown\n## Testing\nexample\n## Pipeline\nexample\n```\n\nIntent content before note.\n" + strings.Repeat("i", 55*1024)
+	sctx.PRNote = "Author note starts here.\n" + strings.Repeat("n", 12*1024)
+
+	got := buildPRBody(
+		"## What Changed\n\n- keep section order",
+		"✅ Low: PR body truncation only",
+		"## Testing\n\n- go test ./internal/pipeline/steps",
+		"## Pipeline\n\n- review: pass",
+		sctx,
+	)
+
+	assertGitHubBodyLimitForTest(t, got)
+	intentHeading := strings.Index(got, "## Testing\nexample")
+	noteHeading := strings.Index(got, "## Notes")
+	if intentHeading < 0 || noteHeading < 0 || intentHeading > noteHeading {
+		t.Fatalf("expected the author note to remain after the Intent content, got intent heading at %d and note at %d", intentHeading, noteHeading)
+	}
+}
+
+func TestPRNoteSectionText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		note string
-		body string
 		want string
 	}{
-		{name: "no note leaves body unchanged", note: "", body: "## What Changed\n\n- x", want: "## What Changed\n\n- x"},
-		{name: "note is prepended", note: "verbatim note", body: "## What Changed\n\n- x", want: "## Notes\n\nverbatim note\n\n## What Changed\n\n- x"},
-		{name: "note trimmed and empty body", note: "  trimmed  ", body: "", want: "## Notes\n\ntrimmed"},
-		{name: "note with its own Notes heading is not double-wrapped", note: "## Notes\n\nfrom a file", body: "## What Changed\n\n- x", want: "## Notes\n\nfrom a file\n\n## What Changed\n\n- x"},
-		{name: "note with lowercase notes heading is not double-wrapped", note: "## notes\n\nfrom a file", body: "## What Changed\n\n- x", want: "## notes\n\nfrom a file\n\n## What Changed\n\n- x"},
+		{name: "no note", note: "", want: ""},
+		{name: "note gets heading", note: "verbatim note", want: "## Notes\n\nverbatim note"},
+		{name: "note is trimmed", note: "  trimmed  ", want: "## Notes\n\ntrimmed"},
+		{name: "existing Notes heading is not duplicated", note: "## Notes\n\nfrom a file", want: "## Notes\n\nfrom a file"},
+		{name: "lowercase Notes heading is not duplicated", note: "## notes\n\nfrom a file", want: "## notes\n\nfrom a file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := prependNotesSection(tt.body, &pipeline.StepContext{PRNote: tt.note})
+			got := prNoteSectionText(&pipeline.StepContext{PRNote: tt.note})
 			if got != tt.want {
-				t.Fatalf("prependNotesSection() = %q, want %q", got, tt.want)
+				t.Fatalf("prNoteSectionText() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestSplitProtectedPRNoteBlock_PreservesInternalHeadings(t *testing.T) {
-	t.Parallel()
-	// A note that uses generated-section names (## Testing, ## Pipeline) as its
-	// own sub-headings must stay atomic. Content-matching, not heading-name
-	// scanning, finds the note boundary, so the note is never split at a
-	// heading that also names a generated section later in the body.
-	note := "## Notes\n\nintro line\n\n## Testing\n\nhow I tested this\n\n## Pipeline\n\nnotes about the pipeline"
-	body := "## Intent\n\nwanted feature\n\n" + note + "\n\n## What Changed\n\n- change\n\n## Testing\n\n- go test ./..."
-
-	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body, note)
-	if !hasNote {
-		t.Fatal("expected note block to be found")
-	}
-	if noteBlock != note {
-		t.Fatalf("noteBlock should equal the note verbatim, got:\n%s", noteBlock)
-	}
-	if !strings.HasPrefix(prefix, "## Intent") {
-		t.Fatalf("prefix = %q", prefix)
-	}
-	if !strings.Contains(suffix, "## What Changed") {
-		t.Fatalf("suffix = %q", suffix)
-	}
-	if prefix+noteBlock+suffix != body {
-		t.Fatalf("reassembly mismatch")
-	}
-
-	// An absent note or empty section reports hasNote=false.
-	if _, _, _, has := splitProtectedPRNoteBlock("## What Changed\n\n- x", note); has {
-		t.Fatal("expected hasNote=false when the note is absent from the body")
-	}
-	if _, _, _, has := splitProtectedPRNoteBlock(body, ""); has {
-		t.Fatal("expected hasNote=false for an empty noteSection")
-	}
-}
-
-func TestLargestPRBodySectionIndex_SkipsProtectedNotes(t *testing.T) {
-	t.Parallel()
-	sections := []string{
-		"## Intent\n\nshort",
-		"## Notes\n\n" + strings.Repeat("n", 200), // largest, but protected
-		"## What Changed\n\n" + strings.Repeat("w", 50),
-	}
-	// Notes is the largest section but must be skipped, so the largest
-	// truncatable section is "## What Changed" at index 2.
-	if idx := largestPRBodySectionIndex(sections); idx != 2 {
-		t.Fatalf("largestPRBodySectionIndex skipped-notes = %d, want 2", idx)
 	}
 }
 

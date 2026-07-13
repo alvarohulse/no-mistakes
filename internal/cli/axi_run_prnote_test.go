@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,34 @@ func TestResolvePRNote(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("resolvePRNote(%q, %q) = %q, want %q", tt.prNote, tt.prNoteFile, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvePRNoteRejectsOversizedPushOption(t *testing.T) {
+	oversizedNote := strings.Repeat("x", 48*1024)
+	noteFile := filepath.Join(t.TempDir(), "oversized-note.md")
+	if err := os.WriteFile(noteFile, []byte(oversizedNote), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		prNote     string
+		prNoteFile string
+	}{
+		{name: "inline", prNote: oversizedNote},
+		{name: "file", prNoteFile: noteFile},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolvePRNote(tt.prNote, tt.prNoteFile)
+			if err == nil {
+				t.Fatal("expected an oversized PR note error")
+			}
+			if !strings.Contains(err.Error(), "too large for the push-option transport") || !strings.Contains(err.Error(), "shorten") {
+				t.Fatalf("expected an actionable transport-size error, got %q", err)
 			}
 		})
 	}
