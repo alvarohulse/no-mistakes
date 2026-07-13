@@ -296,53 +296,9 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
-		return clampAssembledPRBody(core, bodyLimit)
+		return scm.ClampPRBody(core, bodyLimit)
 	}
-	return clampAssembledPRBody(full, bodyLimit)
-}
-
-func clampAssembledPRBody(body string, bodyLimit int) string {
-	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
-		return body
-	}
-	return clampAssembledPRBodySections(body, bodyLimit)
-}
-
-func clampAssembledPRBodySections(body string, bodyLimit int) string {
-	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
-		return body
-	}
-
-	sections := splitPRBodySections(body)
-	if len(sections) <= 1 {
-		return scm.ClampPRBody(body, bodyLimit)
-	}
-
-	for {
-		joined := joinPRBodySections(sections)
-		if scm.PRBodyLen(joined) <= bodyLimit {
-			return joined
-		}
-
-		i := largestPRBodySectionIndex(sections)
-		if i < 0 {
-			return scm.ClampPRBody(joined, bodyLimit)
-		}
-
-		joinedLen := scm.PRBodyLen(joined)
-		sectionLen := scm.PRBodyLen(sections[i])
-		excess := joinedLen - bodyLimit
-		sectionBudget := sectionLen - excess
-		if sectionBudget < 0 {
-			sectionBudget = 0
-		}
-
-		truncated := scm.ClampPRBody(sections[i], sectionBudget)
-		if scm.PRBodyLen(truncated) >= sectionLen {
-			return scm.ClampPRBody(joined, bodyLimit)
-		}
-		sections[i] = truncated
-	}
+	return scm.ClampPRBody(full, bodyLimit)
 }
 
 func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {
@@ -506,7 +462,7 @@ func essentialPRBodyWithinBudget(body, generatedSections string, maxBytes int) s
 		return full
 	}
 	if generatedSections == "" {
-		return truncatePRBodySections(body, maxBytes, essentialPRBodyTruncationMarker())
+		return truncateTextAtLineBoundary(body, maxBytes, essentialPRBodyTruncationMarker())
 	}
 
 	bodyBudget := maxBytes - len(generatedSections)

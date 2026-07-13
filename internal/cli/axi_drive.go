@@ -125,16 +125,34 @@ func resolvePRNote(prNote, prNoteFile string) (string, error) {
 		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")
 	}
 	if prNoteFile != "" {
-		data, err := os.ReadFile(prNoteFile)
+		file, err := os.Open(prNoteFile)
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		defer file.Close()
+
+		info, err := file.Stat()
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		if info.Size() > int64(maxPRNotePushOptionBytes) {
+			return "", prNoteTransportSizeError(info.Size())
+		}
+
+		data, err := io.ReadAll(io.LimitReader(file, int64(maxPRNotePushOptionBytes)+1))
 		if err != nil {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
 		}
 		prNote = strings.TrimSpace(string(data))
 	}
 	if len(prNote) > maxPRNotePushOptionBytes {
-		return "", fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", len(prNote), maxPRNotePushOptionBytes)
+		return "", prNoteTransportSizeError(int64(len(prNote)))
 	}
 	return prNote, nil
+}
+
+func prNoteTransportSizeError(size int64) error {
+	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote string) error {

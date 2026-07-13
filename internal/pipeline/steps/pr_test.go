@@ -780,6 +780,23 @@ func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	}
 }
 
+func TestAssemblePRBody_NoNoteUsesLegacyClampWithFencedHeading(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{UserIntent: "Keep this example intact.\n\n```markdown\n## Testing\n" + strings.Repeat("example line\n", 500) + "```"}
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
+	whatChanged := "## What Changed\n\n- add Bar()"
+	riskLine := "low risk"
+	pipelineMD := "## Pipeline\n\n- ok"
+
+	full := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", pipelineMD), sctx)
+	want := scm.ClampPRBody(full, limit)
+	got := assemblePRBody(sctx, whatChanged, riskLine, "", pipelineMD, limit)
+
+	if got != want {
+		t.Fatalf("assemblePRBody() changed legacy no-note clamping around a fenced heading:\n%s", got)
+	}
+}
+
 func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	t.Parallel()
 	note := "Author note: preserve this verbatim under the provider cap.\n\n## Detail A\n\nsubsection A content\n\n## Detail B\n\nsubsection B content"
@@ -1138,6 +1155,20 @@ func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t 
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected oversized PR body to contain %q, got:\n%s", want, got)
 		}
+	}
+}
+
+func TestBuildPRBody_NoNoteUsesLegacyClampWithFencedHeading(t *testing.T) {
+	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	sctx.UserIntent = "Keep this example intact.\n\n```markdown\n## Testing\n" + strings.Repeat("example line\n", 6000) + "```"
+	body := "## What Changed\n\n- add Bar()"
+
+	full := prependIntentSection(body, sctx)
+	want := truncateTextAtLineBoundary(full, maxPullRequestBodyBytes, essentialPRBodyTruncationMarker())
+	got := buildPRBody(body, "", "", "", sctx)
+
+	if got != want {
+		t.Fatalf("buildPRBody() changed legacy no-note clamping around a fenced heading:\n%s", got)
 	}
 }
 
