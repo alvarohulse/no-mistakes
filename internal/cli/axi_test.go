@@ -359,19 +359,23 @@ func TestPreflightGuardReportsWorkingTreeCheckError(t *testing.T) {
 	}
 }
 
-func TestStatusEmptyHelpIncludesRequiredIntent(t *testing.T) {
+func TestStatusEmptyHelpIncludesRunFlags(t *testing.T) {
 	out := axiDoc(
 		toon.Field{Key: "runs", Value: "0 runs yet in this repository"},
 		toon.Field{Key: "help", Value: []string{startRunHelp()}},
 	)
-	if !strings.Contains(out, "--intent") {
-		t.Fatalf("empty status help must include required --intent, got:\n%s", out)
+	for _, flag := range []string{"--intent", "--pr-note-file"} {
+		if !strings.Contains(out, flag) {
+			t.Fatalf("empty status help must include %s, got:\n%s", flag, out)
+		}
 	}
 }
 
-func TestLogsNoRunHelpIncludesRequiredIntent(t *testing.T) {
-	if !strings.Contains(noRunLogsHelp(), "--intent") {
-		t.Fatalf("no-run logs help must include required --intent, got %q", noRunLogsHelp())
+func TestLogsNoRunHelpIncludesRunFlags(t *testing.T) {
+	for _, flag := range []string{"--intent", "--pr-note-file"} {
+		if !strings.Contains(noRunLogsHelp(), flag) {
+			t.Fatalf("no-run logs help must include %s, got %q", flag, noRunLogsHelp())
+		}
 	}
 }
 

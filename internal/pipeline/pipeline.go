@@ -33,9 +33,9 @@ type StepContext struct {
 	UserIntent string
 	// PRNote is optional, possibly-empty author-supplied content set per run
 	// via `axi run --pr-note`/`--pr-note-file`. Unlike UserIntent (inferred and
-	// therefore untrusted), it is operator-typed and trusted: the PR step
-	// renders it verbatim in a "## Notes" section and feeds it to the PR
-	// summary prompt as author guidance.
+	// therefore untrusted), it is operator-typed and trusted: after trimming
+	// surrounding whitespace, the PR step renders it verbatim in a "## Notes"
+	// section and feeds it to the PR summary prompt as author guidance.
 	PRNote string
 }
 

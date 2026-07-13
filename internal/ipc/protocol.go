@@ -63,8 +63,9 @@ func (e *RPCError) Error() string { return e.Message }
 // intent from local transcripts.
 //
 // PRNote, when set, is operator-supplied content (via `axi run --pr-note`/
-// `--pr-note-file`). It is stamped onto the run so the PR step renders it
-// verbatim in a "## Notes" section and feeds it to the PR summary prompt.
+// `--pr-note-file`). It is stamped onto the run so, after trimming surrounding
+// whitespace, the PR step renders it verbatim in a "## Notes" section and feeds
+// it to the PR summary prompt.
 type PushReceivedParams struct {
 	Gate      string           `json:"gate"`
 	Ref       string           `json:"ref"`

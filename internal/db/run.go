@@ -30,9 +30,9 @@ type Run struct {
 	IntentScore        *float64
 	// PRNote is optional author-supplied content, set per run via
 	// `axi run --pr-note`/`--pr-note-file`. Unlike Intent (inferred from
-	// transcripts), it is operator-typed and trusted: the PR step renders it
-	// verbatim in a "## Notes" section and feeds it to the summary prompt as
-	// author guidance.
+	// transcripts), it is operator-typed and trusted: after trimming surrounding
+	// whitespace, the PR step renders it verbatim in a "## Notes" section and
+	// feeds it to the summary prompt as author guidance.
 	PRNote    *string
 	CreatedAt int64
 	UpdatedAt int64
@@ -204,8 +204,8 @@ type RunIntent struct {
 }
 
 // UpdateRunPRNote persists the author-supplied PR note for a run. The note is
-// operator-typed (via `axi run --pr-note`/`--pr-note-file`) and reused verbatim
-// by the PR step, so it is stored as-is.
+// operator-typed (via `axi run --pr-note`/`--pr-note-file`) and stored as-is;
+// the PR step trims surrounding whitespace before rendering it verbatim.
 func (d *DB) UpdateRunPRNote(id, note string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET pr_note = ?, updated_at = ? WHERE id = ?`, note, now(), id)
 	if err != nil {

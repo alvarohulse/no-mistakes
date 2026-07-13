@@ -319,9 +319,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}
 
-	// Stamp an operator-supplied PR note onto the run so the PR step renders it
-	// verbatim in a "## Notes" section and feeds it to the PR summary prompt. A
-	// persist failure is non-fatal: the PR step simply omits the note.
+	// Stamp a trimmed operator-supplied PR note onto the run so the PR step
+	// renders it verbatim in a "## Notes" section and feeds it to the PR summary
+	// prompt. A persist failure is non-fatal: the PR step simply omits the note.
 	if trimmed := strings.TrimSpace(prNote); trimmed != "" {
 		if err := m.db.UpdateRunPRNote(run.ID, trimmed); err != nil {
 			slog.Warn("failed to persist agent-supplied pr note", "run_id", run.ID, "error", err)

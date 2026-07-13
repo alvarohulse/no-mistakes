@@ -89,8 +89,8 @@ no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 | `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
-| `--pr-note` | `string` | (none) | Author-supplied text added verbatim to a `## Notes` section of the PR body and fed to the PR summary as author guidance |
-| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`) |
+| `--pr-note` | `string` | (none) | Author-supplied text trimmed and added to a `## Notes` section of the PR body, then fed to the PR summary as author guidance (maximum 47 KiB) |
+| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`; maximum 47 KiB) |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -98,11 +98,13 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 
-`--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive and `--pr-note-file` is read and trimmed) injects author-supplied content into the pull request the `pr` step opens.
-It has two effects: the text is reproduced verbatim in a guaranteed `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and the same text is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
-Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it is not wrapped in the untrusted "data, not instructions" framing.
+`--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive) injects author-supplied content into the pull request the `pr` step opens.
+Both inputs are limited to 47 KiB (48,128 bytes); a file's size is checked before its surrounding whitespace is trimmed.
+After surrounding whitespace is trimmed, the text is reproduced verbatim in a `## Notes` section placed after `## Intent` and before `## What Changed`, and is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
+If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added; any other level-two headings inside the note remain part of the note.
+Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it receives no untrusted-data framing, adversarial stripping, or secret redaction, so do not include secrets.
 Both flags are run-scoped like `--intent`: the note persists on the run and `axi run` reuses it when reattaching to or re-triggering the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
-When the PR body must be truncated to fit a host's character limit, the generated and pipeline sections are clamped before the author note, so the note is preserved.
+When the PR body must be truncated to fit a host's character limit, the generated and pipeline sections are clamped before the atomic author note; the note itself is clamped only when it alone exceeds the host limit.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.

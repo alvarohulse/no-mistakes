@@ -274,7 +274,8 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // within bodyLimit (0 = unlimited). Without an author note, an oversized body
 // first drops Testing so Azure DevOps sheds log dumps while keeping the core
 // narrative. With a note, sections are budgeted explicitly around the protected
-// note and reduced in pipeline-to-intent order.
+// note and reduced in pipeline-to-intent order. The note is clamped only when it
+// alone exceeds the provider limit.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
 	noteSection := prNoteSectionText(sctx)
 	if noteSection != "" {

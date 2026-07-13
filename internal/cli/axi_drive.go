@@ -76,14 +76,17 @@ func newAxiRunCmd() *cobra.Command {
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
 			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
-			"your own text into the pull request the pr step opens: it is reproduced\n" +
+			"your own text into the pull request the pr step opens. Each input is limited\n" +
+			"to 47 KiB. After surrounding whitespace is trimmed, the note is reproduced\n" +
 			"verbatim in a \"## Notes\" section after \"## Intent\" and before \"## What\n" +
 			"Changed\", and fed to the PR summary as trusted author guidance (unlike\n" +
-			"inferred intent, it is not wrapped in untrusted framing). Both are\n" +
-			"run-scoped: the note persists on the run and axi run reuses it when\n" +
+			"inferred intent, it receives no untrusted framing or secret redaction). If\n" +
+			"the note already starts with \"## Notes\", no second heading is added. Both\n" +
+			"flags are run-scoped: the note persists on the run and axi run reuses it when\n" +
 			"reattaching to or re-triggering the same head, but no-mistakes rerun and\n" +
 			"the TUI rerun start a fresh run without the note. When the PR body must\n" +
-			"be truncated, generated and pipeline sections are clamped before the note.",
+			"be truncated, generated and pipeline sections are clamped before the atomic\n" +
+			"note; the note itself is clamped only when it alone exceeds the host limit.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -111,15 +114,15 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
-	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added verbatim to a \"## Notes\" section of the PR body and fed to the PR summary as author guidance (run-scoped; persists on the run; axi run reuses it on reattach, but no-mistakes rerun and the TUI rerun do not)")
-	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 47 KiB; an existing Notes heading is not duplicated; run-scoped)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 47 KiB before trimming)")
 	return cmd
 }
 
 // resolvePRNote resolves the author-supplied PR note from the mutually
-// exclusive --pr-note / --pr-note-file flags. --pr-note-file is intended for
-// longer content: its file is read and trimmed. Returns "" when neither flag
-// is set.
+// exclusive --pr-note / --pr-note-file flags. Inputs are limited to 47 KiB;
+// --pr-note-file is intended for longer content and is size-checked before its
+// file is read and trimmed. Returns "" when neither flag is set.
 func resolvePRNote(prNote, prNoteFile string) (string, error) {
 	if prNote != "" && prNoteFile != "" {
 		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")
