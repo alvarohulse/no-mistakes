@@ -1690,7 +1690,9 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	// touched: the verbatim note survives while pipeline rounds are omitted.
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep the note visible under the GitHub cap."
-	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized.\n\n## Detail A\n\nsubsection A content\n\n## Detail B\n\nsubsection B content"
+	// The note deliberately uses generated-section names (## Testing, ## Pipeline)
+	// as its own sub-headings to prove the note is protected atomically.
+	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized.\n\n## Testing\n\nsubsection testing content\n\n## Pipeline\n\nsubsection pipeline content"
 
 	rounds := make([]string, 0, 200)
 	for i := 1; i <= 200; i++ {
@@ -1709,8 +1711,8 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	if !strings.Contains(got, "Author note: preserve this verbatim even when the body is oversized.") {
 		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
 	}
-	if !strings.Contains(got, "## Detail A") || !strings.Contains(got, "## Detail B") {
-		t.Fatalf("expected note sub-headings to survive clamping, got:\n%s", got)
+	if !strings.Contains(got, "subsection testing content") || !strings.Contains(got, "subsection pipeline content") {
+		t.Fatalf("expected note sub-heading content to survive clamping, got:\n%s", got)
 	}
 	if !strings.Contains(got, "earlier update rounds omitted") {
 		t.Fatalf("expected the pipeline section to be clamped first, got:\n%s", got)
@@ -1733,6 +1735,8 @@ func TestPrependNotesSection(t *testing.T) {
 		{name: "no note leaves body unchanged", note: "", body: "## What Changed\n\n- x", want: "## What Changed\n\n- x"},
 		{name: "note is prepended", note: "verbatim note", body: "## What Changed\n\n- x", want: "## Notes\n\nverbatim note\n\n## What Changed\n\n- x"},
 		{name: "note trimmed and empty body", note: "  trimmed  ", body: "", want: "## Notes\n\ntrimmed"},
+		{name: "note with its own Notes heading is not double-wrapped", note: "## Notes\n\nfrom a file", body: "## What Changed\n\n- x", want: "## Notes\n\nfrom a file\n\n## What Changed\n\n- x"},
+		{name: "note with lowercase notes heading is not double-wrapped", note: "## notes\n\nfrom a file", body: "## What Changed\n\n- x", want: "## notes\n\nfrom a file\n\n## What Changed\n\n- x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1746,27 +1750,36 @@ func TestPrependNotesSection(t *testing.T) {
 
 func TestSplitProtectedPRNoteBlock_PreservesInternalHeadings(t *testing.T) {
 	t.Parallel()
-	note := "## Notes\n\nintro line\n\n## Detail A\n\nsubsection A\n\n## Detail B\n\nsubsection B"
-	body := "## Intent\n\nwanted feature\n\n" + note + "\n\n## What Changed\n\n- change"
+	// A note that uses generated-section names (## Testing, ## Pipeline) as its
+	// own sub-headings must stay atomic. Content-matching, not heading-name
+	// scanning, finds the note boundary, so the note is never split at a
+	// heading that also names a generated section later in the body.
+	note := "## Notes\n\nintro line\n\n## Testing\n\nhow I tested this\n\n## Pipeline\n\nnotes about the pipeline"
+	body := "## Intent\n\nwanted feature\n\n" + note + "\n\n## What Changed\n\n- change\n\n## Testing\n\n- go test ./..."
 
-	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body, note)
 	if !hasNote {
 		t.Fatal("expected note block to be found")
 	}
-	if !strings.Contains(noteBlock, "## Detail A") || !strings.Contains(noteBlock, "## Detail B") {
-		t.Fatalf("expected internal sub-headings in note block, got:\n%s", noteBlock)
+	if noteBlock != note {
+		t.Fatalf("noteBlock should equal the note verbatim, got:\n%s", noteBlock)
 	}
-	if !strings.HasPrefix(noteBlock, "## Notes\n\nintro line") {
-		t.Fatalf("noteBlock = %q", noteBlock)
-	}
-	if prefix != "## Intent\n\nwanted feature\n\n" {
+	if !strings.HasPrefix(prefix, "## Intent") {
 		t.Fatalf("prefix = %q", prefix)
 	}
-	if suffix != "## What Changed\n\n- change" {
+	if !strings.Contains(suffix, "## What Changed") {
 		t.Fatalf("suffix = %q", suffix)
 	}
 	if prefix+noteBlock+suffix != body {
 		t.Fatalf("reassembly mismatch")
+	}
+
+	// An absent note or empty section reports hasNote=false.
+	if _, _, _, has := splitProtectedPRNoteBlock("## What Changed\n\n- x", note); has {
+		t.Fatal("expected hasNote=false when the note is absent from the body")
+	}
+	if _, _, _, has := splitProtectedPRNoteBlock(body, ""); has {
+		t.Fatal("expected hasNote=false for an empty noteSection")
 	}
 }
 

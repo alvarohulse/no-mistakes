@@ -270,6 +270,7 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // core overruns: it shrinks generated sections before the author note, and
 // only clamps the note itself when it alone exceeds the cap.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
+	noteSection := prNoteSectionText(sctx)
 	full := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx), sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
@@ -279,17 +280,17 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
-		return clampAssembledPRBody(core, bodyLimit)
+		return clampAssembledPRBody(core, noteSection, bodyLimit)
 	}
-	return clampAssembledPRBody(full, bodyLimit)
+	return clampAssembledPRBody(full, noteSection, bodyLimit)
 }
 
-func clampAssembledPRBody(body string, bodyLimit int) string {
+func clampAssembledPRBody(body, noteSection string, bodyLimit int) string {
 	if bodyLimit <= 0 || scm.PRBodyLen(body) <= bodyLimit {
 		return body
 	}
 
-	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body, noteSection)
 	if hasNote {
 		if scm.PRBodyLen(noteBlock) > bodyLimit {
 			return scm.ClampPRBody(noteBlock, bodyLimit)
@@ -345,21 +346,21 @@ func clampAssembledPRBodySections(body string, bodyLimit int) string {
 
 func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {
 	body = stripGeneratedSections(body)
-	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
+	return appendGeneratedSectionsToCleanBody(body, "", riskLine, testingMD, pipelineMD)
 }
 
 func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext) string {
 	body = stripGeneratedSections(body)
 	body = prependNotesSection(body, sctx)
 	body = prependIntentSection(body, sctx)
-	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
+	return appendGeneratedSectionsToCleanBody(body, prNoteSectionText(sctx), riskLine, testingMD, pipelineMD)
 }
 
-func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
+func appendGeneratedSectionsToCleanBody(body, noteSection, riskLine, testingMD, pipelineMD string) string {
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
-		return essentialPRBodyWithinLimit(body, generatedSections)
+		return essentialPRBodyWithinLimit(body, noteSection, generatedSections)
 	}
 
 	separator := ""
@@ -370,7 +371,7 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 		return prefix + separator + pipelineMD
 	}
 
-	prefix = essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD)
+	prefix = essentialPRBodyWithinPipelineBudget(body, noteSection, generatedSections, pipelineMD)
 	return appendPipelineSectionWithinLimit(prefix, pipelineMD)
 }
 
@@ -387,16 +388,16 @@ func generatedEssentialSections(riskLine, testingMD string) string {
 	return b.String()
 }
 
-func essentialPRBodyWithinLimit(body, generatedSections string) string {
-	return essentialPRBodyWithinBudget(body, generatedSections, maxPullRequestBodyBytes)
+func essentialPRBodyWithinLimit(body, noteSection, generatedSections string) string {
+	return essentialPRBodyWithinBudget(body, noteSection, generatedSections, maxPullRequestBodyBytes)
 }
 
-func essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD string) string {
+func essentialPRBodyWithinPipelineBudget(body, noteSection, generatedSections, pipelineMD string) string {
 	minPipeline := minimumPipelineRetainingLatestUpdate(pipelineMD)
 	if minPipeline == "" {
 		minPipeline = minimumPipelineOmissionSection(pipelineMD)
 		if minPipeline == "" {
-			return essentialPRBodyWithinLimit(body, generatedSections)
+			return essentialPRBodyWithinLimit(body, noteSection, generatedSections)
 		}
 	}
 
@@ -405,25 +406,25 @@ func essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD str
 		prefixBudget -= len("\n\n")
 	}
 	if prefixBudget <= 0 || len(generatedSections) > prefixBudget {
-		return essentialPRBodyWithinLimit(body, generatedSections)
+		return essentialPRBodyWithinLimit(body, noteSection, generatedSections)
 	}
-	return essentialPRBodyWithinBudget(body, generatedSections, prefixBudget)
+	return essentialPRBodyWithinBudget(body, noteSection, generatedSections, prefixBudget)
 }
 
-func essentialPRBodyWithinBudget(body, generatedSections string, maxBytes int) string {
+func essentialPRBodyWithinBudget(body, noteSection, generatedSections string, maxBytes int) string {
 	full := body + generatedSections
 	if len(full) <= maxBytes {
 		return full
 	}
 	if generatedSections == "" {
-		return truncateTextAtLineBoundary(body, maxBytes, essentialPRBodyTruncationMarker())
+		return truncatePRBodySections(body, noteSection, maxBytes, essentialPRBodyTruncationMarker())
 	}
 
 	bodyBudget := maxBytes - len(generatedSections)
 	if bodyBudget <= 0 {
 		return truncateTextAtLineBoundary(generatedSections, maxBytes, essentialPRBodyTruncationMarker())
 	}
-	return truncatePRBodySections(body, bodyBudget, essentialPRBodyTruncationMarker()) + generatedSections
+	return truncatePRBodySections(body, noteSection, bodyBudget, essentialPRBodyTruncationMarker()) + generatedSections
 }
 
 func appendPipelineSectionWithinLimit(prefix, pipelineMD string) string {
@@ -765,7 +766,7 @@ func essentialPRBodyTruncationMarker() string {
 	return fmt.Sprintf("_... (body truncated to keep the PR body within GitHub's %d-char limit.)_", githubPullRequestBodyHardLimitChars)
 }
 
-func truncatePRBodySections(body string, maxBytes int, marker string) string {
+func truncatePRBodySections(body, noteSection string, maxBytes int, marker string) string {
 	if maxBytes <= 0 {
 		return ""
 	}
@@ -773,7 +774,7 @@ func truncatePRBodySections(body string, maxBytes int, marker string) string {
 		return body
 	}
 
-	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body)
+	prefix, noteBlock, suffix, hasNote := splitProtectedPRNoteBlock(body, noteSection)
 	if hasNote {
 		if len(noteBlock) > maxBytes {
 			return truncateTextAtLineBoundary(noteBlock, maxBytes, marker)
@@ -854,61 +855,35 @@ func isPRNoteBoundaryHeading(line string) bool {
 	}
 }
 
-// splitProtectedPRNoteBlock extracts the author "## Notes" block as one atomic
-// unit, including any internal "## " sub-headings. Returns hasNote=false when
-// the body has no Notes section.
-func splitProtectedPRNoteBlock(body string) (prefix, noteBlock, suffix string, hasNote bool) {
-	if body == "" {
-		return "", "", "", false
-	}
-
-	notesStart := -1
-	for start := 0; start < len(body); {
-		end := strings.IndexByte(body[start:], '\n')
-		lineEnd := len(body)
-		next := len(body)
-		if end >= 0 {
-			lineEnd = start + end
-			next = lineEnd + 1
-		}
-		if strings.EqualFold(strings.TrimSpace(body[start:lineEnd]), "## Notes") {
-			notesStart = start
-			break
-		}
-		start = next
-	}
-	if notesStart < 0 {
+// splitProtectedPRNoteBlock locates the author note within body by its exact
+// content (noteSection, from prNoteSectionText) and returns the surrounding
+// prefix and suffix. Matching by content rather than by heading names makes the
+// note atomic even when it contains its own "## " sub-headings - including the
+// generated-section names (## What Changed, ## Testing, ...) that a
+// heading-scan would otherwise treat as the note's end. Returns hasNote=false
+// when there is no note or it is not present in body.
+func splitProtectedPRNoteBlock(body, noteSection string) (prefix, noteBlock, suffix string, hasNote bool) {
+	if body == "" || noteSection == "" {
 		return body, "", "", false
 	}
-
-	prefix = body[:notesStart]
-	scanStart := notesStart
-	if nl := strings.IndexByte(body[scanStart:], '\n'); nl >= 0 {
-		scanStart += nl + 1
-	} else {
-		return prefix, body[notesStart:], "", true
+	idx := strings.Index(body, noteSection)
+	if idx < 0 {
+		return body, "", "", false
 	}
-
-	boundaryStart := len(body)
-	for start := scanStart; start < len(body); {
-		end := strings.IndexByte(body[start:], '\n')
-		lineEnd := len(body)
-		next := len(body)
-		if end >= 0 {
-			lineEnd = start + end
-			next = lineEnd + 1
-		}
-		if isPRNoteBoundaryHeading(body[start:lineEnd]) {
-			boundaryStart = start
-			break
-		}
-		start = next
-	}
-
-	return prefix, body[notesStart:boundaryStart], body[boundaryStart:], true
+	return body[:idx], noteSection, body[idx+len(noteSection):], true
 }
 
+// reinsertPRNoteBlock re-inserts the note into an already-truncated, note-free
+// body, placing it before the first note-boundary heading (the agent's
+// "## What Changed" and the generated sections that follow). Because body no
+// longer contains the note, the heading scan is unambiguous. Sections are
+// re-joined with blank-line separators so the note is never glued to adjacent
+// content.
 func reinsertPRNoteBlock(body, noteBlock string) string {
+	noteBlock = strings.Trim(noteBlock, "\n")
+	if noteBlock == "" {
+		return body
+	}
 	for start := 0; start < len(body); {
 		end := strings.IndexByte(body[start:], '\n')
 		lineEnd := len(body)
@@ -918,14 +893,23 @@ func reinsertPRNoteBlock(body, noteBlock string) string {
 			next = lineEnd + 1
 		}
 		if isPRNoteBoundaryHeading(body[start:lineEnd]) {
-			return body[:start] + noteBlock + body[start:]
+			return joinPRNoteParts(body[:start], noteBlock, body[start:])
 		}
 		start = next
 	}
-	if body == "" {
-		return noteBlock
+	return joinPRNoteParts(body, noteBlock)
+}
+
+// joinPRNoteParts joins non-empty parts (each trimmed of surrounding blank
+// lines) with a single blank-line separator.
+func joinPRNoteParts(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.Trim(p, "\n"); trimmed != "" {
+			kept = append(kept, trimmed)
+		}
 	}
-	return body + noteBlock
+	return strings.Join(kept, "\n\n")
 }
 
 // isProtectedPRBodySection reports whether section must not be shrunk by the
@@ -1149,15 +1133,41 @@ func cleanedPRNote(sctx *pipeline.StepContext) string {
 	return strings.TrimSpace(sctx.PRNote)
 }
 
-// prependNotesSection prepends a "## Notes" section carrying the author-supplied
-// PR note verbatim. Callers place it after the Intent section and before the
-// agent's "## What Changed" body. Returns body unchanged when no note is set.
-func prependNotesSection(body string, sctx *pipeline.StepContext) string {
+// prNoteSectionText returns the exact "## Notes" section string for the run, or
+// "" when no note is set. It is the single source of truth for the note section:
+// prependNotesSection inserts this string, and the truncation path locates and
+// protects it by exact content. When the author-supplied note already begins
+// with its own "## Notes" heading (common with --pr-note-file), the note is used
+// verbatim as the section rather than double-wrapped in a second heading.
+func prNoteSectionText(sctx *pipeline.StepContext) string {
 	note := cleanedPRNote(sctx)
 	if note == "" {
+		return ""
+	}
+	if noteHasOwnNotesHeading(note) {
+		return note
+	}
+	return "## Notes\n\n" + note
+}
+
+// noteHasOwnNotesHeading reports whether the note's first non-empty line is a
+// "## Notes" heading, so prNoteSectionText does not prepend a duplicate one.
+func noteHasOwnNotesHeading(note string) bool {
+	line := note
+	if i := strings.IndexByte(note, '\n'); i >= 0 {
+		line = note[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(line), "## Notes")
+}
+
+// prependNotesSection prepends the author "## Notes" section (see
+// prNoteSectionText) after the Intent section and before the agent's
+// "## What Changed" body. Returns body unchanged when no note is set.
+func prependNotesSection(body string, sctx *pipeline.StepContext) string {
+	section := prNoteSectionText(sctx)
+	if section == "" {
 		return body
 	}
-	section := "## Notes\n\n" + note
 	if strings.TrimSpace(body) == "" {
 		return section
 	}
