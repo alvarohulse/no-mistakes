@@ -31,7 +31,15 @@ const drivePollInterval = 250 * time.Millisecond
 // after pushing to the gate before falling back to a rerun.
 const triggerWaitTimeout = 5 * time.Second
 
-const maxPRNotePushOptionBytes = 47 * 1024
+// maxPRNotePushOptionBytes caps the author note's source size. The note rides a
+// single base64-encoded git push option, so it is subject to two transport
+// limits: git's ~64 KiB pkt-line and, on Windows, the ~32767-char CreateProcess
+// command-line limit (PushWithOptions passes the option via argv). base64
+// inflates the note by ~4/3, and the option prefix plus the rest of the git
+// command consume more of that budget, so this uses a single globally
+// conservative source ceiling that stays safe on every supported platform,
+// including Windows, rather than a platform-specific limit.
+const maxPRNotePushOptionBytes = 20 * 1024
 
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
@@ -114,15 +122,16 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
-	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 47 KiB; an existing Notes heading is not duplicated; run-scoped)")
-	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 47 KiB before trimming)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 20 KiB; an existing Notes heading is not duplicated; run-scoped)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 20 KiB before trimming)")
 	return cmd
 }
 
 // resolvePRNote resolves the author-supplied PR note from the mutually
-// exclusive --pr-note / --pr-note-file flags. Inputs are limited to 47 KiB;
-// --pr-note-file is intended for longer content and is size-checked before its
-// file is read and trimmed. Returns "" when neither flag is set.
+// exclusive --pr-note / --pr-note-file flags. Inputs are limited to
+// maxPRNotePushOptionBytes; --pr-note-file is intended for longer content and is
+// size-checked (via os.Stat, before reading) so an accidentally huge file
+// cannot be slurped into memory. Returns "" when neither flag is set.
 func resolvePRNote(prNote, prNoteFile string) (string, error) {
 	if prNote != "" && prNoteFile != "" {
 		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")

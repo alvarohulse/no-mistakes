@@ -47,7 +47,9 @@ func TestResolvePRNote(t *testing.T) {
 }
 
 func TestResolvePRNoteRejectsOversizedPushOption(t *testing.T) {
-	oversizedNote := strings.Repeat("x", 48*1024)
+	// One byte over the conservative transport ceiling must be rejected, whether
+	// supplied inline or via a file, with an actionable error.
+	oversizedNote := strings.Repeat("x", maxPRNotePushOptionBytes+1)
 	noteFile := filepath.Join(t.TempDir(), "oversized-note.md")
 	if err := os.WriteFile(noteFile, []byte(oversizedNote), 0o644); err != nil {
 		t.Fatal(err)
@@ -71,5 +73,18 @@ func TestResolvePRNoteRejectsOversizedPushOption(t *testing.T) {
 				t.Fatalf("expected an actionable transport-size error, got %q", err)
 			}
 		})
+	}
+}
+
+func TestResolvePRNoteAcceptsNoteAtLimit(t *testing.T) {
+	// A note exactly at the ceiling is accepted (the limit is a conservative
+	// Windows-safe source size, well under the base64-inflated transport caps).
+	note := strings.Repeat("x", maxPRNotePushOptionBytes)
+	got, err := resolvePRNote(note, "")
+	if err != nil {
+		t.Fatalf("resolvePRNote at limit error = %v", err)
+	}
+	if got != note {
+		t.Fatalf("resolvePRNote at limit did not pass the note through unchanged")
 	}
 }

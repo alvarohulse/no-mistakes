@@ -833,32 +833,6 @@ func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T)
 	}
 }
 
-func TestAssemblePRBody_NearLimitNoteDropsUnclampableRemainder(t *testing.T) {
-	t.Parallel()
-	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
-	note := strings.Repeat("n", limit-scm.PRBodyLen("## Notes\n\n")-1)
-	sctx := &pipeline.StepContext{
-		UserIntent: "Keep this intent only when it fits.",
-		PRNote:     note,
-	}
-
-	got := assemblePRBody(
-		sctx,
-		"## What Changed\n\n- provider-limited body",
-		"low risk",
-		"",
-		"## Pipeline\n\n- review: pass",
-		limit,
-	)
-
-	if scm.PRBodyLen(got) > limit {
-		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
-	}
-	if !strings.Contains(got, note) {
-		t.Fatal("expected the near-limit author note to remain verbatim")
-	}
-}
-
 func prTruncationTail() string {
 	// Mirror of scm's truncation marker for assertions; kept here so the test
 	// reads naturally without exporting the constant.
@@ -1743,13 +1717,13 @@ func TestPRStep_PromptIncludesAuthorNotesAsTrustedGuidance(t *testing.T) {
 
 func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	t.Parallel()
-	// An oversized Pipeline section must be clamped before the author note is
-	// touched: the verbatim note survives while pipeline rounds are omitted.
+	// The note is a normal PR-body section near the top. When only the Pipeline
+	// section is oversized, the generic truncation omits pipeline rounds and
+	// leaves the small note (and the rest of the narrative) intact - no
+	// note-specific truncation machinery required.
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep the note visible under the GitHub cap."
-	// The note deliberately uses generated-section names (## Testing, ## Pipeline)
-	// as its own sub-headings to prove the note is protected atomically.
-	sctx.PRNote = "Author note: preserve this verbatim even when the body is oversized.\n\n## Testing\n\nsubsection testing content\n\n## Pipeline\n\nsubsection pipeline content"
+	sctx.PRNote = "Author note: reviewers should preserve this wording verbatim."
 
 	rounds := make([]string, 0, 200)
 	for i := 1; i <= 200; i++ {
@@ -1765,11 +1739,8 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	)
 
 	assertGitHubBodyLimitForTest(t, got)
-	if !strings.Contains(got, "Author note: preserve this verbatim even when the body is oversized.") {
+	if !strings.Contains(got, "Author note: reviewers should preserve this wording verbatim.") {
 		t.Fatalf("expected the author note to survive clamping, got:\n%s", got)
-	}
-	if !strings.Contains(got, "subsection testing content") || !strings.Contains(got, "subsection pipeline content") {
-		t.Fatalf("expected note sub-heading content to survive clamping, got:\n%s", got)
 	}
 	if !strings.Contains(got, "earlier update rounds omitted") {
 		t.Fatalf("expected the pipeline section to be clamped first, got:\n%s", got)
@@ -1781,50 +1752,33 @@ func TestBuildPRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T) {
 	}
 }
 
-func TestBuildPRBody_ClampsTestingBeforeModerateNote(t *testing.T) {
+func TestStripGeneratedSections_KeepsNotesHeading(t *testing.T) {
 	t.Parallel()
-	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
-	note := "Author note must stay verbatim.\n" + strings.Repeat("n", 32*1024)
-	testing := "## Testing\n\n" + strings.Repeat("test evidence\n", 3000)
-	sctx.UserIntent = "Preserve the author note before generated evidence."
-	sctx.PRNote = note
-
-	got := buildPRBody(
-		"## What Changed\n\n- keep note-first budgeting",
-		"✅ Low: PR body truncation only",
-		testing,
-		"",
-		sctx,
-	)
-
-	assertGitHubBodyLimitForTest(t, got)
-	if !strings.Contains(got, note) {
-		t.Fatal("expected the full author note to survive generated-section clamping")
-	}
-	if strings.Contains(got, testing) {
-		t.Fatal("expected Testing to be clamped before the author note")
+	// A "## Notes" heading the agent writes (for example inside a fenced example
+	// documenting the feature) must NOT be stripped when there is no author
+	// note; only Intent/Risk/Testing/Pipeline are generated sections.
+	body := "## What Changed\n\n- document the notes feature\n\n## Notes\n\nexample note the agent wrote"
+	got := stripGeneratedSections(body)
+	if !strings.Contains(got, "## Notes") || !strings.Contains(got, "example note the agent wrote") {
+		t.Fatalf("expected a ## Notes heading to survive stripping when there is no author note, got:\n%s", got)
 	}
 }
 
-func TestBuildPRBody_KeepsNoteAfterIntentWithGeneratedHeadings(t *testing.T) {
+func TestPrependNotesSection_DropsDuplicateAgentNotes(t *testing.T) {
 	t.Parallel()
-	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
-	sctx.UserIntent = "Intent lead.\n\n```markdown\n## Testing\nexample\n## Pipeline\nexample\n```\n\nIntent content before note.\n" + strings.Repeat("i", 55*1024)
-	sctx.PRNote = "Author note starts here.\n" + strings.Repeat("n", 12*1024)
-
-	got := buildPRBody(
-		"## What Changed\n\n- keep section order",
-		"✅ Low: PR body truncation only",
-		"## Testing\n\n- go test ./internal/pipeline/steps",
-		"## Pipeline\n\n- review: pass",
-		sctx,
-	)
-
-	assertGitHubBodyLimitForTest(t, got)
-	intentHeading := strings.Index(got, "## Testing\nexample")
-	noteHeading := strings.Index(got, "## Notes")
-	if intentHeading < 0 || noteHeading < 0 || intentHeading > noteHeading {
-		t.Fatalf("expected the author note to remain after the Intent content, got intent heading at %d and note at %d", intentHeading, noteHeading)
+	// When an author note is set, any ## Notes section the agent emitted in the
+	// body is dropped so the operator's note is never duplicated.
+	sctx := &pipeline.StepContext{PRNote: "operator note"}
+	body := "## Notes\n\nagent-authored duplicate\n\n## What Changed\n\n- change"
+	got := prependNotesSection(body, sctx)
+	if strings.Count(got, "## Notes") != 1 {
+		t.Fatalf("expected exactly one ## Notes section, got:\n%s", got)
+	}
+	if strings.Contains(got, "agent-authored duplicate") {
+		t.Fatalf("expected the agent-authored Notes to be dropped, got:\n%s", got)
+	}
+	if !strings.Contains(got, "operator note") || !strings.Contains(got, "## What Changed") {
+		t.Fatalf("expected the operator note and What Changed to remain, got:\n%s", got)
 	}
 }
 

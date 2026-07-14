@@ -321,13 +321,17 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 
 	// Stamp a trimmed operator-supplied PR note onto the run so the PR step
 	// renders it verbatim in a "## Notes" section and feeds it to the PR summary
-	// prompt. A persist failure is non-fatal: the PR step simply omits the note.
+	// prompt. Unlike intent (which falls back to transcript inference), the note
+	// has no fallback: silently dropping it on a persist failure would violate
+	// the guaranteed "## Notes" contract, so fail the run rather than open a PR
+	// without the requested note.
 	if trimmed := strings.TrimSpace(prNote); trimmed != "" {
 		if err := m.db.UpdateRunPRNote(run.ID, trimmed); err != nil {
-			slog.Warn("failed to persist agent-supplied pr note", "run_id", run.ID, "error", err)
-		} else {
-			run.PRNote = &trimmed
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("persist pr note: %s", err))
+			trackStartFailure("persist_pr_note")
+			return "", fmt.Errorf("persist pr note: %w", err)
 		}
+		run.PRNote = &trimmed
 	}
 
 	// Create worktree from the gate bare repo.

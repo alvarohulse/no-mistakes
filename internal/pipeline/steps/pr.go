@@ -48,15 +48,6 @@ type pipelineUpdateGroup struct {
 	footer string
 }
 
-type protectedPRBody struct {
-	intent      string
-	note        string
-	whatChanged string
-	risk        string
-	testing     string
-	pipeline    string
-}
-
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
 func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -277,23 +268,12 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // note and reduced in pipeline-to-intent order. The note is clamped only when it
 // alone exceeds the provider limit.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
-	noteSection := prNoteSectionText(sctx)
-	if noteSection != "" {
-		return protectedPRBodyWithinProviderLimit(protectedPRBody{
-			intent:      prependIntentSection("", sctx),
-			note:        noteSection,
-			whatChanged: stripGeneratedSections(whatChanged),
-			risk:        riskAssessmentSection(riskLine),
-			testing:     testingMD,
-			pipeline:    pipelineMD,
-		}, bodyLimit)
-	}
-	full := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx)
+	full := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx), sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
 	}
 	if testingMD != "" {
-		core := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", pipelineMD), sctx)
+		core := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, "", pipelineMD), sctx), sctx)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
@@ -309,97 +289,31 @@ func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) strin
 
 func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext) string {
 	body = stripGeneratedSections(body)
-	noteSection := prNoteSectionText(sctx)
-	if noteSection != "" {
-		return protectedPRBodyWithinByteLimit(protectedPRBody{
-			intent:      prependIntentSection("", sctx),
-			note:        noteSection,
-			whatChanged: body,
-			risk:        riskAssessmentSection(riskLine),
-			testing:     testingMD,
-			pipeline:    pipelineMD,
-		}, maxPullRequestBodyBytes)
-	}
+	body = prependNotesSection(body, sctx)
 	body = prependIntentSection(body, sctx)
 	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
 }
 
-func protectedPRBodyWithinByteLimit(body protectedPRBody, maxBytes int) string {
-	return protectedPRBodyWithinLimit(
-		body,
-		maxBytes,
-		func(text string) int { return len(text) },
-		func(section string, sectionBudget int, pipeline bool) string {
-			if pipeline {
-				return truncatePipelineSection(section, sectionBudget)
-			}
-			return truncateTextAtLineBoundary(section, sectionBudget, essentialPRBodyTruncationMarker())
-		},
-	)
-}
-
-func protectedPRBodyWithinProviderLimit(body protectedPRBody, bodyLimit int) string {
-	return protectedPRBodyWithinLimit(
-		body,
-		bodyLimit,
-		scm.PRBodyLen,
-		func(section string, sectionBudget int, _ bool) string {
-			if sectionBudget <= 0 {
-				return ""
-			}
-			return scm.ClampPRBody(section, sectionBudget)
-		},
-	)
-}
-
-func protectedPRBodyWithinLimit(body protectedPRBody, limit int, bodyLen func(string) int, truncate func(string, int, bool) string) string {
-	full := body.render()
-	if limit <= 0 || bodyLen(full) <= limit {
-		return full
+// prependNotesSection prepends the author "## Notes" section (see
+// prNoteSectionText) after the Intent section and before the agent's
+// "## What Changed" body. Any "## Notes" heading the agent happened to emit is
+// dropped first so the operator section is never duplicated. Returns body
+// unchanged when no note is set.
+//
+// The note is a normal PR-body section. On the rare oversized body, the generic
+// truncation clamps the large Pipeline/Testing sections first (Pipeline via its
+// dedicated omission logic), so a small operator note near the top is preserved
+// in practice without any note-specific truncation machinery.
+func prependNotesSection(body string, sctx *pipeline.StepContext) string {
+	section := prNoteSectionText(sctx)
+	if section == "" {
+		return body
 	}
-	if bodyLen(body.note) > limit {
-		truncatedNote := truncate(body.note, limit, false)
-		if bodyLen(truncatedNote) <= limit {
-			return truncatedNote
-		}
-		return ""
+	body = stripNotesSection(body)
+	if strings.TrimSpace(body) == "" {
+		return section
 	}
-
-	sections := []*string{&body.pipeline, &body.testing, &body.risk, &body.whatChanged, &body.intent}
-	for i, section := range sections {
-		full = body.render()
-		if bodyLen(full) <= limit {
-			return full
-		}
-		if *section == "" {
-			continue
-		}
-
-		sectionLength := bodyLen(*section)
-		sectionBudget := sectionLength - (bodyLen(full) - limit)
-		truncated := truncate(*section, sectionBudget, i == 0)
-		if truncated == "" || bodyLen(truncated) >= sectionLength || bodyLen(truncated) > sectionBudget {
-			*section = ""
-			continue
-		}
-		*section = truncated
-	}
-
-	if full = body.render(); bodyLen(full) <= limit {
-		return full
-	}
-	return body.note
-}
-
-func (body protectedPRBody) render() string {
-	return joinPRBodyParts(body.intent, body.note, body.whatChanged, body.risk, body.testing, body.pipeline)
-}
-
-func riskAssessmentSection(riskLine string) string {
-	if riskLine == "" {
-		return ""
-	}
-	return "## Risk Assessment\n\n" + riskLine
+	return section + "\n\n" + body
 }
 
 func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
@@ -857,16 +771,6 @@ func largestPRBodySectionIndex(sections []string) int {
 	return index
 }
 
-func joinPRBodyParts(parts ...string) string {
-	kept := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if trimmed := strings.Trim(p, "\n"); trimmed != "" {
-			kept = append(kept, trimmed)
-		}
-	}
-	return strings.Join(kept, "\n\n")
-}
-
 func splitPRBodySections(body string) []string {
 	if body == "" {
 		return nil
@@ -1041,11 +945,51 @@ func isGeneratedSectionHeading(line string) bool {
 	heading = strings.ToLower(heading)
 
 	switch heading {
-	case "intent", "notes", "risk assessment", "testing", "tests", "pipeline":
+	case "intent", "risk assessment", "testing", "tests", "pipeline":
 		return true
 	default:
 		return false
 	}
+}
+
+// stripNotesSection removes a "## Notes" section (its heading through the line
+// before the next "## " heading) from body. It is applied only on the note
+// path, so an author note is never duplicated - while a no-note body keeps any
+// "## Notes" the agent wrote (for example inside a fenced example), which is why
+// "notes" is deliberately not part of isGeneratedSectionHeading.
+func stripNotesSection(body string) string {
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	skipping := false
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if skipping {
+			if strings.HasPrefix(line, "## ") {
+				skipping = false
+			} else {
+				continue
+			}
+		}
+		if isNotesHeading(line) {
+			skipping = true
+			continue
+		}
+		out = append(out, raw)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isNotesHeading(line string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "##") {
+		return false
+	}
+	heading := strings.TrimSpace(strings.TrimPrefix(line, "##"))
+	heading = strings.ToLower(strings.TrimRight(heading, ":.!? "))
+	return heading == "notes"
 }
 
 // prependIntentSection prepends a "## Intent" section sourced from the
