@@ -20,12 +20,12 @@ import (
 // intentExtractTimeout caps total wall-clock time spent on intent extraction.
 const intentExtractTimeout = 300 * time.Second
 
-// IntentStep is a best-effort pipeline step that infers the user's intent
-// from local agent transcripts and attaches it to the run so downstream
-// steps can surface it in their prompts. Failures are intentionally
+// IntentStep is a best-effort pipeline step that preserves intent already
+// supplied on the run or infers it from local agent transcripts, then makes it
+// available to downstream prompts. Inference failures are intentionally
 // swallowed and surface as a "skipped" outcome rather than a run failure:
-// missing transcripts, slow summarizers, or DB hiccups must not block
-// the pipeline. Disambiguator cleanup failures are fatal because they may leave
+// missing transcripts, slow summarizers, or DB hiccups must not block the
+// pipeline. Disambiguator cleanup failures are fatal because they may leave
 // worktree side effects that could affect later steps.
 type IntentStep struct {
 	// runIntent computes the intent for a step context. It is overridden

@@ -89,21 +89,21 @@ no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 | `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
-| `--pr-note` | `string` | (none) | Author-supplied text trimmed and added to a `## Notes` section of the PR body, then fed to the PR summary as author guidance (maximum 16 KiB, and bounded further when combined with `--intent`) |
-| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`; maximum 16 KiB) |
+| `--pr-note` | `string` | (none) | Author-supplied text trimmed and added to a `## Notes` section of the PR body, then fed to the PR summary as author guidance (maximum 16 KiB before trimming; aggregate push-option bound applies) |
+| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`; maximum 16 KiB before trimming) |
 
 `--intent` is not a description of the diff.
-It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
+It is the user's goal or request, and no-mistakes uses it directly instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 
 `--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive) injects author-supplied content into the pull request the `pr` step opens.
-Each input is limited to 16 KiB (16,384 bytes), and the combined size of `--pr-note` and `--intent` is bounded so the base64-encoded push options fit the git transport on every platform, including Windows' command-line length limit; a file's size is checked before it is read, so an accidentally huge file is rejected rather than loaded into memory.
+Each raw input is limited to 16 KiB (16,384 bytes) before trimming, and an aggregate bound covers the note, `--intent`, and any `--skip` options so the push-option command fits on every platform, including Windows. Regular files are size-checked before reading, while streams such as FIFOs are bounded while reading.
 After surrounding whitespace is trimmed, the text is reproduced verbatim in a `## Notes` section placed after `## Intent` and before `## What Changed`, and is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
 If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added; any other level-two headings inside the note remain part of the note.
-Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it receives no untrusted-data framing, adversarial stripping, or secret redaction, so do not include secrets.
-The flags apply only when starting a new run and are rejected (not silently ignored) when `axi run` reattaches to an active run: the note persists on the run and is reused when `axi run` re-triggers the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
+Intent is sanitized and framed as untrusted in downstream prompts regardless of whether it was supplied or inferred. The locally operator-typed note is trusted, so it receives no untrusted-data framing, adversarial stripping, or secret redaction; do not include secrets.
+The flags apply only when starting a new run. This rule keys off flag presence, so even an empty note flag is rejected (not silently ignored) when `axi run` would reattach. With either flag present, `axi run` fails if it cannot verify the active-run state and rejects reattachment before opening a note file. The note persists on the new run and is carried into `axi run`'s fallback rerun when the gate already has the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without it.
 The note is a normal PR-body section placed after `## Intent`, with no special protection under truncation. The Pipeline section is clamped first (via its dedicated round-omission logic), but if a host's character limit still forces truncation, the note is clamped along with the rest of the body - it is not byte-protected. In practice PR bodies rarely approach these limits and the note is small, so it is preserved; keep it concise if you need it to always survive.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.

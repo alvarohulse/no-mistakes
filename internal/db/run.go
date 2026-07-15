@@ -29,10 +29,10 @@ type Run struct {
 	IntentSessionID    *string
 	IntentScore        *float64
 	// PRNote is optional author-supplied content, set per run via
-	// `axi run --pr-note`/`--pr-note-file`. Unlike Intent (inferred from
-	// transcripts), it is operator-typed and trusted: after trimming surrounding
-	// whitespace, the PR step renders it verbatim in a "## Notes" section and
-	// feeds it to the summary prompt as author guidance.
+	// `axi run --pr-note`/`--pr-note-file`. Unlike Intent, it is operator-typed
+	// and trusted: after trimming surrounding whitespace, the PR step renders it
+	// verbatim in a "## Notes" section and feeds it to the summary prompt as
+	// author guidance without intent's sanitization or untrusted-data framing.
 	PRNote    *string
 	CreatedAt int64
 	UpdatedAt int64
@@ -218,7 +218,8 @@ type RunIntent struct {
 	Score     float64
 }
 
-// UpdateRunIntent persists the inferred user intent for a run.
+// UpdateRunIntent persists user intent for a run, whether agent-supplied or
+// inferred from transcripts.
 func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	_, err := d.sql.Exec(
 		`UPDATE runs SET intent = ?, intent_source = ?, intent_session_id = ?, intent_score = ?, updated_at = ? WHERE id = ?`,

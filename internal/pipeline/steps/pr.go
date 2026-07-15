@@ -951,11 +951,11 @@ func isGeneratedSectionHeading(line string) bool {
 	}
 }
 
-// prependIntentSection prepends a "## Intent" section sourced from the
-// already-extracted user intent. The intent text is reused verbatim (after
-// the same secret/adversarial scrubbing the agent prompt path applies)
-// rather than being paraphrased by the agent. Returns body unchanged when
-// no intent is available.
+// prependIntentSection prepends a "## Intent" section sourced from the resolved
+// user intent, whether agent-supplied or transcript-inferred. The intent text is
+// reused verbatim after the same secret/adversarial scrubbing the agent prompt
+// path applies, rather than being paraphrased by the agent. Returns body
+// unchanged when no intent is available.
 func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	cleaned := cleanedUserIntent(sctx)
 	if cleaned == "" {
@@ -968,10 +968,10 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	return section + "\n\n" + body
 }
 
-// cleanedPRNote returns the trimmed author-supplied PR note. Unlike the
-// inferred user intent, the note is operator-typed locally and therefore
-// trusted: it is used verbatim (only whitespace-trimmed), with no
-// secret-redaction or adversarial-stripping. Returns "" when no note is set.
+// cleanedPRNote returns the trimmed author-supplied PR note. Unlike user intent,
+// the note is operator-typed locally and trusted: it is used verbatim (only
+// whitespace-trimmed), with no secret-redaction or adversarial-stripping.
+// Returns "" when no note is set.
 func cleanedPRNote(sctx *pipeline.StepContext) string {
 	if sctx == nil {
 		return ""
@@ -1038,7 +1038,7 @@ func noteHasOwnNotesHeading(note string) bool {
 //
 // Unlike userIntentPromptSection, the note is operator-typed locally for this
 // run, so it is trusted: it is framed as author guidance rather than wrapped in
-// the untrusted "data, not instructions" guard used for the inferred intent.
+// the untrusted "data, not instructions" guard used for intent.
 func prNotePromptSection(sctx *pipeline.StepContext) string {
 	note := cleanedPRNote(sctx)
 	if note == "" {

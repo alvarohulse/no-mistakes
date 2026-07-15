@@ -137,7 +137,7 @@ When set, telemetry uses this website ID at runtime. If it is unset in a dev bui
 
 When telemetry is enabled, `no-mistakes` sends command, run, approval, fix, and wizard events, completed step events with `awaiting_approval`, `fix_review`, or `failed` status, and pageviews for the human surfaces `/wizard` and `/tui` and the agent surfaces `/axi`, `/axi/run`, `/axi/respond`, `/axi/status`, `/axi/logs`, and `/axi/abort` to Umami.
 AXI pageviews are sent alongside command events, so command status and duration remain available.
-They include only flag-derived context: `/axi/run` records whether `--yes`, `--intent`, `--skip`, or `--pr-note`/`--pr-note-file` was present; `/axi/respond` records the sanitized action and whether `--yes` was present; `/axi/status` records whether `--run` was present; and `/axi/logs` records the sanitized step, whether `--full` was present, and whether `--run` was present.
+They include only flag-derived context: `/axi/run` records the effective `--yes` value and whether nonblank `--intent`, `--skip`, or either PR-note input was supplied; `/axi/respond` records the sanitized action and effective `--yes` value; `/axi/status` records whether a nonblank `--run` value was supplied; and `/axi/logs` records the sanitized step, effective `--full` value, and whether a nonblank `--run` value was supplied.
 
 ## `NO_MISTAKES_TELEMETRY`
 
