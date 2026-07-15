@@ -76,6 +76,23 @@ func TestResolvePRNoteRejectsOversizedPushOption(t *testing.T) {
 	}
 }
 
+func TestPushOptionsWithinTransport(t *testing.T) {
+	// A normal note plus a normal intent fits the aggregate transport budget.
+	small := []string{formatIntentPushOption("a small intent"), formatPRNotePushOption("a small note")}
+	if !pushOptionsWithinTransport(small) {
+		t.Fatal("expected a small intent + note to fit the aggregate transport")
+	}
+	// A max-size note combined with a large intent overflows the aggregate
+	// budget even though each fits on its own - they share one command line.
+	big := []string{
+		formatIntentPushOption(strings.Repeat("i", maxPRNotePushOptionBytes)),
+		formatPRNotePushOption(strings.Repeat("n", maxPRNotePushOptionBytes)),
+	}
+	if pushOptionsWithinTransport(big) {
+		t.Fatal("expected a max note + large intent to exceed the aggregate transport budget")
+	}
+}
+
 func TestResolvePRNoteAcceptsNoteAtLimit(t *testing.T) {
 	// A note exactly at the ceiling is accepted (the limit is a conservative
 	// Windows-safe source size, well under the base64-inflated transport caps).

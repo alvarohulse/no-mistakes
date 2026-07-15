@@ -1764,6 +1764,47 @@ func TestStripGeneratedSections_KeepsNotesHeading(t *testing.T) {
 	}
 }
 
+func TestStripNotesSection_IgnoresFencedHeadings(t *testing.T) {
+	t.Parallel()
+	// A "## Notes" heading inside a fenced code example must be preserved,
+	// including the closing fence and the content that follows it.
+	body := "## What Changed\n\n- document notes\n\n```markdown\n## Notes\n\nfenced example content\n```\n\n- more content"
+	got := stripNotesSection(body)
+	if !strings.Contains(got, "## Notes") || !strings.Contains(got, "fenced example content") {
+		t.Fatalf("expected fenced ## Notes to be preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "```") || !strings.Contains(got, "- more content") {
+		t.Fatalf("expected the closing fence and following content to be preserved, got:\n%s", got)
+	}
+
+	// A real top-level "## Notes" section is still removed.
+	got2 := stripNotesSection("## Notes\n\nreal notes to drop\n\n## What Changed\n\n- keep")
+	if strings.Contains(got2, "real notes to drop") {
+		t.Fatalf("expected a real ## Notes section to be removed, got:\n%s", got2)
+	}
+	if !strings.Contains(got2, "## What Changed") {
+		t.Fatalf("expected What Changed to remain, got:\n%s", got2)
+	}
+}
+
+func TestEssentialPRBodyWithinBudget_KeepsBodyOverOversizedGenerated(t *testing.T) {
+	t.Parallel()
+	// When the generated Testing/Risk sections alone exceed the budget, the body
+	// (which holds the operator note and What Changed) must survive - the
+	// generated evidence is clamped instead of the body being discarded.
+	body := "## Notes\n\noperator note stays\n\n## What Changed\n\n- essential summary"
+	maxBytes := 4096
+	generated := "\n\n## Testing\n\n" + strings.Repeat("t", maxBytes*2)
+
+	got := essentialPRBodyWithinBudget(body, generated, maxBytes)
+	if len(got) > maxBytes {
+		t.Fatalf("result = %d bytes, want <= %d", len(got), maxBytes)
+	}
+	if !strings.Contains(got, "operator note stays") || !strings.Contains(got, "essential summary") {
+		t.Fatalf("expected the body to survive oversized generated content, got:\n%s", got)
+	}
+}
+
 func TestPrependNotesSection_DropsDuplicateAgentNotes(t *testing.T) {
 	t.Parallel()
 	// When an author note is set, any ## Notes section the agent emitted in the

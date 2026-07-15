@@ -31,15 +31,33 @@ const drivePollInterval = 250 * time.Millisecond
 // after pushing to the gate before falling back to a rerun.
 const triggerWaitTimeout = 5 * time.Second
 
-// maxPRNotePushOptionBytes caps the author note's source size. The note rides a
-// single base64-encoded git push option, so it is subject to two transport
-// limits: git's ~64 KiB pkt-line and, on Windows, the ~32767-char CreateProcess
-// command-line limit (PushWithOptions passes the option via argv). base64
-// inflates the note by ~4/3, and the option prefix plus the rest of the git
-// command consume more of that budget, so this uses a single globally
-// conservative source ceiling that stays safe on every supported platform,
-// including Windows, rather than a platform-specific limit.
-const maxPRNotePushOptionBytes = 20 * 1024
+// maxPRNotePushOptionBytes caps a single author note's source size. The note
+// rides a base64-encoded git push option (see formatPRNotePushOption), so it is
+// bounded well below git's pkt-line limit. base64 inflates by ~4/3, so 16 KiB
+// of source is ~21.8 KiB encoded - comfortably within transport for the note
+// alone. The combined transport (note plus --intent plus --skip, which all
+// share one command line) is bounded separately by maxAggregatePushOptionBytes.
+const maxPRNotePushOptionBytes = 16 * 1024
+
+// maxAggregatePushOptionBytes bounds the combined size of every push option on a
+// single gate push. On Windows, PushWithOptions passes options via argv, which
+// CreateProcess caps at 32767 characters for the whole command line; the note
+// and the (also base64-encoded) intent share that budget, so a note that fits
+// maxPRNotePushOptionBytes on its own can still overflow once a non-trivial
+// intent is added. This conservative ceiling leaves headroom for the rest of
+// the git command and keeps the push safe on every supported platform.
+const maxAggregatePushOptionBytes = 28 * 1024
+
+// pushOptionsWithinTransport reports whether the assembled push options fit the
+// aggregate transport budget, accounting for the " --push-option " argv
+// overhead each one carries.
+func pushOptionsWithinTransport(options []string) bool {
+	total := 0
+	for _, opt := range options {
+		total += len(opt) + len(" --push-option ")
+	}
+	return total <= maxAggregatePushOptionBytes
+}
 
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
@@ -85,16 +103,18 @@ func newAxiRunCmd() *cobra.Command {
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
 			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
 			"your own text into the pull request the pr step opens. Each input is limited\n" +
-			"to 47 KiB. After surrounding whitespace is trimmed, the note is reproduced\n" +
-			"verbatim in a \"## Notes\" section after \"## Intent\" and before \"## What\n" +
-			"Changed\", and fed to the PR summary as trusted author guidance (unlike\n" +
-			"inferred intent, it receives no untrusted framing or secret redaction). If\n" +
-			"the note already starts with \"## Notes\", no second heading is added. Both\n" +
-			"flags are run-scoped: the note persists on the run and axi run reuses it when\n" +
-			"reattaching to or re-triggering the same head, but no-mistakes rerun and\n" +
-			"the TUI rerun start a fresh run without the note. When the PR body must\n" +
-			"be truncated, generated and pipeline sections are clamped before the atomic\n" +
-			"note; the note itself is clamped only when it alone exceeds the host limit.",
+			"to 16 KiB, and the combined size of --pr-note and --intent is bounded so it\n" +
+			"fits the git push-option transport on every platform. After surrounding\n" +
+			"whitespace is trimmed, the note is reproduced verbatim in a \"## Notes\"\n" +
+			"section after \"## Intent\" and before \"## What Changed\", and fed to the PR\n" +
+			"summary as trusted author guidance (unlike inferred intent, it receives no\n" +
+			"untrusted framing or secret redaction). If the note already starts with\n" +
+			"\"## Notes\", no second heading is added. The flags apply only when starting a\n" +
+			"new run (not on reattach); the note persists on the run and is reused when\n" +
+			"axi run re-triggers the same head, but no-mistakes rerun and the TUI rerun\n" +
+			"start a fresh run without it. The note is a normal PR-body section placed\n" +
+			"after Intent; on an oversized body the large generated and pipeline sections\n" +
+			"are clamped first, so a normal-sized note is preserved in practice.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -122,8 +142,8 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
-	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 20 KiB; an existing Notes heading is not duplicated; run-scoped)")
-	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 20 KiB before trimming)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 16 KiB, and bounded further when combined with --intent; an existing Notes heading is not duplicated; applies only when starting a new run)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 16 KiB before trimming)")
 	return cmd
 }
 
@@ -190,6 +210,14 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	}
 
 	runID := activeRunID(env, branch, headSHA)
+	if runID != "" && strings.TrimSpace(prNote) != "" {
+		// A run is already active for this HEAD, so reattaching only drives it -
+		// the PR note is applied when a run is started (see triggerRun), not on
+		// reattach. Reject rather than silently ignore, so the operator does not
+		// believe a note was attached to a run that never received it.
+		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
+			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
+	}
 	if runID == "" {
 		// Intent is mandatory when starting a run: the agent driving this knows
 		// the change's intent, so we take it directly instead of inferring it
@@ -284,6 +312,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	}
 	if opt := formatPRNotePushOption(prNote); opt != "" {
 		pushOptions = append(pushOptions, opt)
+	}
+	if !pushOptionsWithinTransport(pushOptions) {
+		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
 

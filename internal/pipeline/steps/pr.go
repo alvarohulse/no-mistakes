@@ -382,7 +382,17 @@ func essentialPRBodyWithinBudget(body, generatedSections string, maxBytes int) s
 
 	bodyBudget := maxBytes - len(generatedSections)
 	if bodyBudget <= 0 {
-		return truncateTextAtLineBoundary(generatedSections, maxBytes, essentialPRBodyTruncationMarker())
+		// The generated Testing/Risk sections alone exceed the budget. The body
+		// (Intent, author Notes, What Changed) is more essential than a generated
+		// evidence dump, so keep the body and clamp the generated sections into
+		// whatever budget remains - never discard the body to preserve oversized
+		// generated content.
+		keptBody := truncatePRBodySections(body, maxBytes, essentialPRBodyTruncationMarker())
+		genBudget := maxBytes - len(keptBody)
+		if genBudget <= 0 {
+			return keptBody
+		}
+		return keptBody + truncateTextAtLineBoundary(generatedSections, genBudget, essentialPRBodyTruncationMarker())
 	}
 	return truncatePRBodySections(body, bodyBudget, essentialPRBodyTruncationMarker()) + generatedSections
 }
@@ -964,22 +974,39 @@ func stripNotesSection(body string) string {
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
 	skipping := false
+	inFence := false
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
+		// Track fenced code blocks so a "## Notes" heading inside a fenced
+		// example is treated as literal content, never as a real section that
+		// toggles removal (and its closing fence is never dropped).
+		if isCodeFence(line) {
+			inFence = !inFence
+			if skipping {
+				continue
+			}
+			out = append(out, raw)
+			continue
+		}
 		if skipping {
-			if strings.HasPrefix(line, "## ") {
+			if !inFence && strings.HasPrefix(line, "## ") {
 				skipping = false
 			} else {
 				continue
 			}
 		}
-		if isNotesHeading(line) {
+		if !inFence && isNotesHeading(line) {
 			skipping = true
 			continue
 		}
 		out = append(out, raw)
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isCodeFence(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
 }
 
 func isNotesHeading(line string) bool {
