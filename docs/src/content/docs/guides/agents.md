@@ -5,7 +5,7 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is pipeline-agent-agnostic by design: the gate should mean the same thing regardless of which supported agent backend you prefer.
 It is not runner-free.
-Every validation run requires either a supported native agent binary or a configured ACP runner.
+Every validation run requires a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`.
 The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
 The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
