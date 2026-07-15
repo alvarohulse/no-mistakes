@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // EmptyTreeSHA is the well-known SHA of an empty tree in git.
@@ -26,8 +26,7 @@ func IsZeroSHA(sha string) bool {
 }
 
 // Run executes a git command in the given directory and returns trimmed stdout.
-// Returns an error that includes the command and stderr on failure. On Windows,
-// shellenv.HideWindow suppresses a console window; stdout/stderr are captured.
+// Returns an error that includes the command and stderr on failure.
 //
 // When dir is itself a bare repository (a gate repo), the repo is named
 // explicitly via --git-dir instead of relying on cwd-based discovery, which
@@ -41,7 +40,7 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
@@ -74,7 +73,7 @@ func isBareGitDir(dir string) bool {
 // InitBare creates a new bare git repository at the given path.
 func InitBare(ctx context.Context, path string) error {
 	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
@@ -125,7 +124,7 @@ func FindGitRoot(path string) (string, error) {
 	}
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	cmd.Dir = abs
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -139,47 +138,85 @@ func FindGitRoot(path string) (string, error) {
 }
 
 // FindMainRepoRoot returns the root of the main working tree for a git
-// repository. For a regular repo this is the same as FindGitRoot. For a
-// linked worktree it resolves back to the main repository root by inspecting
-// git's common dir. For a git submodule checkout it returns that submodule's
-// working tree root (same as FindGitRoot), not a path under the
-// superproject's .git/modules/ tree.
+// repository. Three layouts are supported:
 //
-// Git submodules are NOT treated as linked worktrees: their common-dir lives
-// under the superproject's .git/modules/ tree, so taking its parent would
-// give the wrong path. Submodules are detected via
-// --show-superproject-working-tree and resolved using --show-toplevel instead.
+//  1. A regular repository or a linked worktree: the git common dir is
+//     <root>/.git, so the main working tree is filepath.Dir(commonDir).
+//  2. An absorbed submodule (including nested .../modules/a/modules/b):
+//     the git common dir lives under the superproject's .git/modules/...
+//     and is detached from its working tree. Git writes core.worktree
+//     when it absorbs a submodule, pointing at the working tree whose
+//     remote.origin.url is the submodule's own origin (which is what
+//     callers like init and eject need).
+//  3. Exotic GIT_DIR layouts without a core.worktree: fall back to
+//     `git rev-parse --show-toplevel` from the original path, the same
+//     answer FindGitRoot returns.
+//
+// In every branch the returned path is run through filepath.EvalSymlinks
+// when possible so callers can compare it against other symlink-resolved
+// paths (notably on macOS, where /tmp and /private/tmp refer to the same
+// directory). Symlink resolution failures fall back to the unresolved
+// path, matching the historical behavior.
 func FindMainRepoRoot(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
 
-	// Detect git submodules: if --show-superproject-working-tree is non-empty
-	// we are inside a submodule and should treat it as its own repo root.
-	superCmd := exec.Command("git", "rev-parse", "--show-superproject-working-tree")
-	superCmd.Dir = abs
-	if superOut, err := superCmd.Output(); err == nil && strings.TrimSpace(string(superOut)) != "" {
-		return FindGitRoot(abs)
-	}
-
-	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	cmd.Dir = abs
-	shellenv.HideWindow(cmd)
-	out, err := cmd.Output()
+	// Resolve the git common dir.
+	commonDirCmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	commonDirCmd.Dir = abs
+	winproc.Harden(commonDirCmd)
+	commonDirOut, err := commonDirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
 	}
-	commonDir := strings.TrimSpace(string(out))
-	// Make absolute if relative (e.g. ".git" in the main repo itself).
+	commonDir := strings.TrimSpace(string(commonDirOut))
 	if !filepath.IsAbs(commonDir) {
 		commonDir = filepath.Join(abs, commonDir)
 	}
-	// commonDir is the .git directory (e.g. /path/to/repo/.git); parent is the repo root.
-	root := filepath.Dir(filepath.Clean(commonDir))
-	resolved, err := filepath.EvalSymlinks(root)
+
+	// Branch 1: regular repo or linked worktree. Linked worktrees share
+	// the main repo's <root>/.git, so the common dir's basename is still
+	// ".git" and its parent is the main working tree.
+	if filepath.Base(commonDir) == ".git" {
+		return resolveMainRoot(filepath.Dir(commonDir))
+	}
+
+	// Branch 2: detached git dir (absorbed submodule). Ask the git dir
+	// itself for its core.worktree, which git writes when it absorbs a
+	// submodule's git dir. The value is typically relative (e.g.
+	// "../../../sub"); resolve it against the common dir.
+	worktreeCmd := exec.Command("git", "--git-dir", commonDir, "config", "--get", "core.worktree")
+	winproc.Harden(worktreeCmd)
+	if worktreeOut, err := worktreeCmd.Output(); err == nil {
+		worktree := strings.TrimSpace(string(worktreeOut))
+		if worktree != "" {
+			if !filepath.IsAbs(worktree) {
+				worktree = filepath.Join(commonDir, worktree)
+			}
+			return resolveMainRoot(worktree)
+		}
+	}
+
+	// Branch 3: exotic GIT_DIR without a usable core.worktree. Defer to
+	// `git rev-parse --show-toplevel` from the original path.
+	topCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	topCmd.Dir = abs
+	winproc.Harden(topCmd)
+	topOut, err := topCmd.Output()
 	if err != nil {
-		return root, nil
+		return "", fmt.Errorf("not a git repository: %s", abs)
+	}
+	return resolveMainRoot(strings.TrimSpace(string(topOut)))
+}
+
+// resolveMainRoot applies filepath.EvalSymlinks to path, falling back to
+// the unresolved path when symlink resolution fails.
+func resolveMainRoot(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path, nil
 	}
 	return resolved, nil
 }
@@ -203,6 +240,33 @@ func DiffNameOnly(ctx context.Context, dir, base, head string) ([]string, error)
 		}
 	}
 	return files, nil
+}
+
+// DiffStat returns the bounded size of the diff between base and head: the
+// number of changed files and the net changed lines (insertions + deletions)
+// from `git diff --numstat`. Binary files (numstat "-") contribute a changed
+// file but no line count. It carries no paths or content - just two counts.
+func DiffStat(ctx context.Context, dir, base, head string) (files, lines int, err error) {
+	out, err := Run(ctx, dir, "diff", "--numstat", base+".."+head)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		files++
+		added, aerr := strconv.Atoi(fields[0])
+		deleted, derr := strconv.Atoi(fields[1])
+		if aerr == nil {
+			lines += added
+		}
+		if derr == nil {
+			lines += deleted
+		}
+	}
+	return files, lines, nil
 }
 
 // CommitTime returns the committer timestamp for a SHA in UTC.
@@ -246,12 +310,11 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 
 // IsDetachedHEAD reports whether the working tree is in a detached-HEAD state
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
-// which fails cleanly when HEAD is not a symbolic ref. On Windows,
-// shellenv.HideWindow suppresses a console window.
+// which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = dir
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
@@ -456,12 +519,11 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 
 // RefExists reports whether the given ref resolves to a commit. It uses
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
-// result rather than a loud error. On Windows, shellenv.HideWindow suppresses
-// a console window.
+// result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	cmd.Env = NonInteractiveEnv(dir)
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {

@@ -172,11 +172,9 @@ func filterStructuredToSchema(structured map[string]any, schemaPath string) (map
 	return filtered, nil
 }
 
-// extractCodexPrompt returns the prompt no-mistakes sent to codex. The real
-// invocation is `codex exec [user-flags...] - --json [...]` with the prompt
-// piped on stdin (the "-" positional; see internal/agent/codex.go), so we read
-// stdin here. A positional prompt other than "-" is still honored as a
-// backward-compatible fallback for any caller that passes the prompt in argv.
+// extractCodexPrompt returns the prompt from stdin when no-mistakes emits the
+// managed "-" positional. Legacy argv prompts remain supported for fixtures:
+// fresh uses the first positional, resume uses the positional after session ID.
 func extractCodexPrompt(args []string) string {
 	flagsWithValues := map[string]bool{
 		"-m": true, "--model": true,
@@ -193,6 +191,7 @@ func extractCodexPrompt(args []string) string {
 			break
 		}
 	}
+	var positionals []string
 	for i := start; i < len(args); i++ {
 		a := args[i]
 		if flagsWithValues[a] {
@@ -206,7 +205,16 @@ func extractCodexPrompt(args []string) string {
 		if len(a) > 0 && a[0] == '-' {
 			continue
 		}
-		return a
+		positionals = append(positionals, a)
 	}
-	return readStdinPrompt()
+	if len(positionals) == 0 {
+		return readStdinPrompt()
+	}
+	if positionals[0] == "resume" {
+		if len(positionals) >= 3 {
+			return positionals[2] // resume <session-id> <prompt>
+		}
+		return "" // resume without id+prompt is not a shape no-mistakes emits
+	}
+	return positionals[0]
 }

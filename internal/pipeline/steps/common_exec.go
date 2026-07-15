@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -144,7 +145,6 @@ func missingFromCustomPath(env []string, name string) string {
 // stepCmd creates an exec.Cmd that inherits the StepContext's extra Env, if any.
 // When sctx.Env overrides PATH, the binary is resolved from the overridden PATH
 // so that tests can inject fake binaries without modifying the process environment.
-// On Windows, shellenv.HideWindow keeps helper-tool spawns from flashing a console.
 func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd {
 	resolved := name
 	missingFromPath := false
@@ -158,13 +158,13 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 	}
 	cmd := exec.CommandContext(sctx.Ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
+	winproc.Harden(cmd)
 	if len(sctx.Env) > 0 {
 		cmd.Env = mergeEnv(sctx.Env)
 	}
 	if missingFromPath {
 		cmd.Err = &exec.Error{Name: name, Err: exec.ErrNotFound}
 	}
-	shellenv.HideWindow(cmd)
 	return cmd
 }
 

@@ -24,6 +24,8 @@ type acpxAgent struct {
 
 func (a *acpxAgent) Name() string { return "acp:" + a.target }
 
+func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, a.Name(), opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -64,6 +66,8 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return nil, fmt.Errorf("acpx start: %w", err)
 	}
 	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, a.Name(), pid)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
@@ -78,17 +82,23 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		return nil, fmt.Errorf("acpx parse events: %w", err)
+		retErr := fmt.Errorf("acpx parse events: %w", err)
+		emitAgentExited(opts, a.Name(), pid, retErr)
+		return nil, retErr
 	}
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if waitErr != nil {
-		return nil, fmt.Errorf("acpx exited: %w: %s", waitErr, acpxProcessErrorOutput(stderrBuf, stdoutErr))
+		retErr := fmt.Errorf("acpx exited: %w: %s", waitErr, acpxProcessErrorOutput(stderrBuf, stdoutErr))
+		emitAgentExited(opts, a.Name(), pid, retErr)
+		return nil, retErr
 	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))
 	}
-	return finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	emitAgentExited(opts, a.Name(), pid, err)
+	return res, err
 }
 
 func (a *acpxAgent) Close() error { return nil }
@@ -153,6 +163,7 @@ type acpxSessionUpdate struct {
 	Content       json.RawMessage `json:"content"`
 	Text          string          `json:"text"`
 	Used          int             `json:"used"`
+	usedReported  bool
 	acpxUsageFields
 	Meta struct {
 		Usage acpxUsageFields `json:"usage"`
@@ -178,6 +189,8 @@ type acpxUsageFields struct {
 	CacheCreationTokensCamel      int `json:"cacheCreationTokens"`
 	CacheWriteTokensCamel         int `json:"cacheWriteTokens"`
 	CachedWriteTokensCamel        int `json:"cachedWriteTokens"`
+	reported                      bool
+	cacheCreationReported         bool
 }
 
 func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage) (string, string, error) {
@@ -202,6 +215,7 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 		if err := json.Unmarshal(line, &msg); err != nil {
 			continue
 		}
+		markAcpxUsagePresence(line, &msg)
 		if msg.Error != nil && msg.Error.Message != "" && stdoutErr == "" {
 			stdoutErr = msg.Error.Message
 		}
@@ -238,11 +252,22 @@ func acpxUpdateUsage(update acpxSessionUpdate) TokenUsage {
 	if update.Used > usage.InputTokens {
 		usage.InputTokens = update.Used
 	}
+	usage.Reported = usage.Reported || update.usedReported || update.Used != 0
 	return usage
 }
 
 func acpxUsageFieldsToTokenUsage(fields acpxUsageFields) TokenUsage {
 	return TokenUsage{
+		Reported: fields.reported || acpxUsageFieldsHaveValues(fields),
+		CacheCreationReported: fields.cacheCreationReported || acpxFirstPositive(
+			fields.CacheCreationInputTokens,
+			fields.CacheWriteInputTokens,
+			fields.CacheWriteTokens,
+			fields.CacheCreationInputTokensCamel,
+			fields.CacheCreationTokensCamel,
+			fields.CacheWriteTokensCamel,
+			fields.CachedWriteTokensCamel,
+		) > 0,
 		InputTokens: acpxFirstPositive(
 			fields.InputTokens,
 			fields.InputTokensCamel,
@@ -272,12 +297,77 @@ func acpxUsageFieldsToTokenUsage(fields acpxUsageFields) TokenUsage {
 	}
 }
 
+func markAcpxUsagePresence(line []byte, msg *acpxJSONMessage) {
+	var raw struct {
+		Result struct {
+			Usage json.RawMessage `json:"usage"`
+		} `json:"result"`
+		Params struct {
+			Update json.RawMessage `json:"update"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(line, &raw) != nil {
+		return
+	}
+	markAcpxUsageFields(raw.Result.Usage, &msg.Result.Usage)
+	if len(raw.Params.Update) == 0 {
+		return
+	}
+	var update map[string]json.RawMessage
+	if json.Unmarshal(raw.Params.Update, &update) != nil {
+		return
+	}
+	markAcpxUsageFields(raw.Params.Update, &msg.Params.Update.acpxUsageFields)
+	if _, ok := update["used"]; ok {
+		msg.Params.Update.usedReported = true
+	}
+	if meta, ok := update["_meta"]; ok {
+		var metaFields struct {
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(meta, &metaFields) == nil {
+			markAcpxUsageFields(metaFields.Usage, &msg.Params.Update.Meta.Usage)
+		}
+	}
+}
+
+func markAcpxUsageFields(raw json.RawMessage, fields *acpxUsageFields) {
+	if len(raw) == 0 || fields == nil {
+		return
+	}
+	var values map[string]json.RawMessage
+	if json.Unmarshal(raw, &values) != nil {
+		return
+	}
+	usageKeys := []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_read_tokens", "cached_input_tokens", "inputTokens", "outputTokens", "cacheReadInputTokens", "cachedInputTokens", "cacheReadTokens", "cachedReadTokens"}
+	cacheKeys := []string{"cache_creation_input_tokens", "cache_write_input_tokens", "cache_write_tokens", "cacheCreationInputTokens", "cacheCreationTokens", "cacheWriteTokens", "cachedWriteTokens"}
+	for _, key := range usageKeys {
+		if _, ok := values[key]; ok {
+			fields.reported = true
+		}
+	}
+	for _, key := range cacheKeys {
+		if _, ok := values[key]; ok {
+			fields.reported = true
+			fields.cacheCreationReported = true
+		}
+	}
+}
+
+func acpxUsageFieldsHaveValues(fields acpxUsageFields) bool {
+	fields.reported = false
+	fields.cacheCreationReported = false
+	return fields != (acpxUsageFields{})
+}
+
 func acpxMaxUsage(a, b TokenUsage) TokenUsage {
 	return TokenUsage{
-		InputTokens:         max(a.InputTokens, b.InputTokens),
-		OutputTokens:        max(a.OutputTokens, b.OutputTokens),
-		CacheReadTokens:     max(a.CacheReadTokens, b.CacheReadTokens),
-		CacheCreationTokens: max(a.CacheCreationTokens, b.CacheCreationTokens),
+		Reported:              a.Reported || b.Reported,
+		CacheCreationReported: a.CacheCreationReported || b.CacheCreationReported,
+		InputTokens:           max(a.InputTokens, b.InputTokens),
+		OutputTokens:          max(a.OutputTokens, b.OutputTokens),
+		CacheReadTokens:       max(a.CacheReadTokens, b.CacheReadTokens),
+		CacheCreationTokens:   max(a.CacheCreationTokens, b.CacheCreationTokens),
 	}
 }
 

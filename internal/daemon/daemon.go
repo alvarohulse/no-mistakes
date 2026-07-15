@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 var applyShellEnvToProcess = shellenv.ApplyToProcess
@@ -26,8 +27,8 @@ var createDaemonPIDTempFile = os.CreateTemp
 var renameDaemonPIDFile = os.Rename
 
 // Run starts the daemon process. It blocks until a shutdown signal is received
-// or the shutdown IPC method is called. This is called when NM_DAEMON=1 or via
-// the hidden `no-mistakes daemon run` entrypoint used by the managed service.
+// or the shutdown IPC method is called. This is called via the hidden
+// `no-mistakes daemon run` entrypoint used by managed and detached services.
 func Run() error {
 	p, err := paths.New()
 	if err != nil {
@@ -115,26 +116,41 @@ func RunWithResources(p *paths.Paths, d *db.DB) error {
 // RunWithOptions starts the daemon with optional overrides.
 // stepFactory overrides the default pipeline steps (for testing).
 func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
+	// Singleton guard: only one live daemon may own this NM_HOME at a time.
+	// This must be acquired before recoverOnStartup (global stale-run
+	// recovery and orphan-worktree cleanup) and before the IPC socket is
+	// bound, and held for the rest of the process lifetime - otherwise a
+	// second daemon racing to start against the same root can mark another
+	// live daemon's active runs as crashed and delete worktrees out from
+	// under it (see AGENTS.md "Daemon Singleton Lock"). Covers both the
+	// `daemon start` -> detached child path and a direct `daemon run --root`
+	// invocation, since both funnel through here.
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 		defer cancel()
 		_ = telemetry.Close(ctx)
 	}()
 
-	// Recover stale runs from a previous daemon crash.
-	recoverOnStartup(d, p)
-
 	// Point the agent package at our PID tracking dir so any managed
 	// servers we spawn from here on leave crash-recovery breadcrumbs.
 	agent.SetServerPIDsDir(p.ServerPIDsDir())
 	defer agent.SetServerPIDsDir("")
 
+	mgr := NewRunManager(d, p, stepFactory)
+
+	// Recover stale runs from a previous daemon crash.
+	recoverOnStartup(d, p, mgr)
+
 	srv := ipc.NewServer()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	mgr := NewRunManager(d, p, stepFactory)
 
 	var shutdownOnce sync.Once
 	doShutdown := func(reason string) {
@@ -248,20 +264,42 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 // best-effort migrates gate bare repos in place so older installs pick up
 // the per-worktree hookspath isolation introduced for issue #122 when Git
 // supports config --worktree.
-func recoverOnStartup(d *db.DB, p *paths.Paths) {
+func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapOrphanedServers(p)
 	migrateGateConfigs(context.Background(), p)
 
-	count, err := d.RecoverStaleRuns("daemon crashed during execution")
+	plans := mgr.recoverableParkedRuns(context.Background())
+	preserved := make(map[string]struct{}, len(plans))
+	for _, plan := range plans {
+		preserved[plan.run.ID] = struct{}{}
+	}
+	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved)
 	if err != nil {
 		slog.Error("failed to recover stale runs", "error", err)
+		for _, plan := range plans {
+			_ = plan.agent.Close()
+		}
 		return
 	}
 	if count > 0 {
 		slog.Info("recovered stale runs from previous crash", "count", count)
 	}
 
-	// Clean up orphaned worktree directories.
+	cleanupOrphanWorktrees(d, p)
+	mgr.resumeRecoveredRuns(plans)
+}
+
+// cleanupOrphanWorktrees removes worktree directories left behind by runs
+// that are no longer active. It is DB-aware: a worktree is only removed when
+// its run row is terminal, or when there is no matching run row at all.
+// This is what keeps cleanup from deleting the checkout out from under a
+// pipeline that is still actually running (see skipWorktreeCleanup).
+// Called from recoverOnStartup after
+// RecoverStaleRuns, so in the normal single-daemon path every run this loop
+// sees has already been resolved to a terminal status; it is factored out
+// separately so it can also be exercised - and its DB-aware skip behavior
+// verified - independent of stale-run recovery's side effects.
+func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 	wtRoot := p.WorktreesDir()
 	entries, err := os.ReadDir(wtRoot)
 	if err != nil {
@@ -282,7 +320,12 @@ func recoverOnStartup(d *db.DB, p *paths.Paths) {
 			if !runEntry.IsDir() {
 				continue
 			}
-			wtPath := filepath.Join(repoPath, runEntry.Name())
+			runID := runEntry.Name()
+			wtPath := filepath.Join(repoPath, runID)
+			if skip, reason := skipWorktreeCleanup(d, runID); skip {
+				slog.Info("skipping worktree cleanup", "path", wtPath, "reason", reason)
+				continue
+			}
 			if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
 				slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
 				if err := os.RemoveAll(wtPath); err != nil {
@@ -295,6 +338,27 @@ func recoverOnStartup(d *db.DB, p *paths.Paths) {
 		// Remove empty repo dir.
 		os.Remove(repoPath)
 	}
+}
+
+// skipWorktreeCleanup reports whether the worktree directory for runID must
+// be left alone during startup cleanup. It is the active-run guard that
+// makes cleanup safe even if the singleton lock were ever bypassed: a
+// worktree is never removed while its run is still pending or running -
+// only terminal-run leftovers or directories with no matching run row at
+// all (e.g. a directory left behind after its run row was independently
+// pruned) are eligible for removal. RunManager.startRun always inserts the
+// run row before creating the worktree directory, so on a single daemon a
+// "no matching run" directory is never one whose insert simply hasn't landed
+// yet - it is safe to remove immediately.
+func skipWorktreeCleanup(d *db.DB, runID string) (bool, string) {
+	run, err := d.GetRun(runID)
+	if err != nil {
+		return true, fmt.Sprintf("failed to look up run %s: %v", runID, err)
+	}
+	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
+	}
+	return false, ""
 }
 
 // migrateGateConfigs walks every bare repo under p.ReposDir() and refreshes
@@ -365,6 +429,26 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		runs, err := d.GetRunsByRepo(p.RepoID)
 		if err != nil {
 			return nil, fmt.Errorf("get runs: %w", err)
+		}
+		infos := make([]ipc.RunInfo, 0, len(runs))
+		for _, r := range runs {
+			steps, err := d.GetStepsByRun(r.ID)
+			if err != nil {
+				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
+			}
+			infos = append(infos, *runToInfo(d, r, steps))
+		}
+		return &ipc.GetRunsResult{Runs: infos}, nil
+	})
+
+	srv.Handle(ipc.MethodGetRunsForHead, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.GetRunsForHeadParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		runs, err := d.GetRunsByRepoHead(p.RepoID, p.Branch, p.HeadSHA)
+		if err != nil {
+			return nil, fmt.Errorf("get runs for head: %w", err)
 		}
 		infos := make([]ipc.RunInfo, 0, len(runs))
 		for _, r := range runs {
@@ -494,17 +578,23 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 
 func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	info := ipc.StepResultInfo{
-		ID:           s.ID,
-		RunID:        s.RunID,
-		StepName:     s.StepName,
-		StepOrder:    s.StepOrder,
-		Status:       s.Status,
-		ExitCode:     s.ExitCode,
-		DurationMS:   s.DurationMS,
-		FindingsJSON: s.FindingsJSON,
-		Error:        s.Error,
-		StartedAt:    s.StartedAt,
-		CompletedAt:  s.CompletedAt,
+		ID:             s.ID,
+		RunID:          s.RunID,
+		StepName:       s.StepName,
+		StepOrder:      s.StepOrder,
+		Status:         s.Status,
+		ExitCode:       s.ExitCode,
+		DurationMS:     s.DurationMS,
+		FindingsJSON:   s.FindingsJSON,
+		Error:          s.Error,
+		StartedAt:      s.StartedAt,
+		CompletedAt:    s.CompletedAt,
+		LastActivityAt: s.LastActivityAt,
+		LastActivity:   s.LastActivity,
+		AgentPID:       s.AgentPID,
+	}
+	if s.AutoFixLimit != nil {
+		info.AutoFixLimit = *s.AutoFixLimit
 	}
 	if stats, err := d.StepFindingStats(s); err == nil {
 		info.ReportedFindings = stats.ReportedFindings
@@ -512,6 +602,11 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	}
 	if summaries, err := d.StepFixSummaries(s.ID); err == nil {
 		info.FixSummaries = summaries
+	}
+	if rounds, err := d.StepRoundStats(s.ID); err == nil {
+		info.RoundCount = rounds.TotalRounds
+		info.FixRoundCount = rounds.FixRounds
+		info.PendingFixSource = rounds.PendingFixSource
 	}
 	return info
 }

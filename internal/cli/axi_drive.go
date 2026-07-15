@@ -101,22 +101,15 @@ func newAxiRunCmd() *cobra.Command {
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
+			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
+			"agent. The daemon requires a supported native agent binary or a configured\n" +
+			"ACP target through acpx, and fails before the first step when none can run.\n\n" +
 			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
-			"your own text into the pull request the pr step opens. Each input is limited\n" +
-			"to 16 KiB, and the combined size of --pr-note and --intent is bounded so it\n" +
-			"fits the git push-option transport on every platform. After surrounding\n" +
-			"whitespace is trimmed, the note is reproduced verbatim in a \"## Notes\"\n" +
-			"section after \"## Intent\" and before \"## What Changed\", and fed to the PR\n" +
-			"summary as trusted author guidance (unlike inferred intent, it receives no\n" +
-			"untrusted framing or secret redaction). If the note already starts with\n" +
-			"\"## Notes\", no second heading is added. The flags apply only when starting a\n" +
-			"new run and are rejected with an error (not silently ignored) on reattach;\n" +
-			"the note persists on the run and is reused when axi run re-triggers the same\n" +
-			"head, but no-mistakes rerun and the TUI rerun\n" +
-			"start a fresh run without it. The note is a normal PR-body section placed\n" +
-			"after Intent with no special truncation protection: the Pipeline section is\n" +
-			"clamped first, but if a host limit still forces truncation the note is clamped\n" +
-			"with the rest of the body. It is small, so in practice it survives.",
+			"author-supplied text into the pull request. Inputs are limited to 16 KiB and\n" +
+			"the aggregate push-option transport is bounded. The trimmed note is rendered\n" +
+			"verbatim in a ## Notes section after Intent and reused for same-head reruns;\n" +
+			"note flags are rejected when reattaching to an active run.\n\n" +
+			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -132,10 +125,6 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				// Mutual exclusion and the reattach check key off whether the
-				// flags were set (Flags().Changed), not their resolved content, so
-				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
-				// whitespace-only note is not silently treated as "no note flag".
 				// Mutual exclusion and the reattach check key off whether the
 				// flags were set (Flags().Changed), not their resolved content, so
 				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
@@ -208,7 +197,7 @@ func prNoteTransportSizeError(size int64) error {
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool) error {
 	ctx := cmd.Context()
-	env, err := openAxiEnv(true)
+	env, err := openAxiRunEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
@@ -254,6 +243,9 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
 	}
 	if runID == "" {
+		if err := configErrorForFreshAxiRun(env, runID); err != nil {
+			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+		}
 		// Intent is mandatory when starting a run: the agent driving this knows
 		// the change's intent, so we take it directly instead of inferring it
 		// from transcripts. Reattaching to an in-flight run does not need it.
@@ -290,10 +282,14 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	return renderDriveResult(cmd, run, ciReady)
 }
 
-// activeRunID returns the ID of a non-terminal run for branch and head, or ""
-// if none. It fails open: a lookup error yields "". Callers that must not
-// proceed on an unverified lookup (e.g. a run carrying a PR note that would be
-// silently dropped) use activeRunIDChecked instead.
+func configErrorForFreshAxiRun(env *axiEnv, runID string) error {
+	if runID != "" {
+		return nil
+	}
+	return env.globalConfigErr
+}
+
+// activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
 func activeRunID(env *axiEnv, branch, headSHA string) string {
 	id, _ := activeRunIDChecked(env, branch, headSHA)
 	return id
@@ -363,19 +359,23 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
+	priorRunIDs, err := runIDsForHead(env.client, env.repo.ID, branch, headSHA)
+	if err != nil {
+		// An active run can still be found below. Without a baseline, however,
+		// a matching terminal run may predate this push, so do not attach to it.
+		priorRunIDs = nil
+	}
 	if opt := formatPRNotePushOption(prNote); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
-	// The aggregate bound is enforced only when a PR note is present: it exists
-	// to catch a note plus intent overflowing one command line, and applying it
-	// to intent-only runs would newly reject large intents that pushed fine
-	// before this feature existed.
+	// Enforce the aggregate bound only when a note is present, preserving the
+	// historical behavior of intent-only runs.
 	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
 		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
 
-	if run, _ := waitForActiveRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, triggerWaitTimeout); run != nil {
+	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, priorRunIDs, triggerWaitTimeout); run != nil {
 		return run.ID, nil
 	}
 	if !shouldRerunAfterNoActiveRun(pushErr) {
@@ -391,7 +391,36 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	return rr.RunID, nil
 }
 
-func waitForActiveRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, timeout time.Duration) (*ipc.RunInfo, error) {
+// runIDsForHead snapshots the run IDs already present for a repo's exact branch
+// and head SHA before a push, so waitForTriggeredRunForHead can tell a run this
+// push created apart from a terminal run an earlier push left behind. Scoping to
+// the head keeps this lookup, and the poll that reuses the same method, bounded
+// to the handful of runs for one head rather than the repo's whole history.
+func runIDsForHead(client *ipc.Client, repoID, branch, headSHA string) (map[string]struct{}, error) {
+	runs, err := runsForHead(client, repoID, branch, headSHA)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]struct{}, len(runs))
+	for _, run := range runs {
+		ids[run.ID] = struct{}{}
+	}
+	return ids, nil
+}
+
+func runsForHead(client *ipc.Client, repoID, branch, headSHA string) ([]ipc.RunInfo, error) {
+	var result ipc.GetRunsResult
+	if err := client.Call(ipc.MethodGetRunsForHead, &ipc.GetRunsForHeadParams{RepoID: repoID, Branch: branch, HeadSHA: headSHA}, &result); err != nil {
+		return nil, err
+	}
+	return result.Runs, nil
+}
+
+// waitForTriggeredRunForHead waits for the run created by this trigger. The
+// active-run lookup handles normal execution; the head lookup catches a run
+// that fails before it can be observed as active. priorRunIDs prevents an
+// up-to-date push from attaching to a terminal run created by an earlier one.
+func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, priorRunIDs map[string]struct{}, timeout time.Duration) (*ipc.RunInfo, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 
@@ -408,6 +437,19 @@ func waitForActiveRunForHead(ctx context.Context, client *ipc.Client, repoID, br
 		}
 		if run := activeRunInfoForHead(result.Run, headSHA); run != nil {
 			return run, nil
+		}
+		if priorRunIDs != nil {
+			runs, err := runsForHead(client, repoID, branch, headSHA)
+			if err != nil {
+				return nil, err
+			}
+			for i := range runs {
+				run := &runs[i]
+				if _, existed := priorRunIDs[run.ID]; !existed {
+					return run, nil
+				}
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -670,9 +712,11 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		return nil
 	}
 
+	help := []string{preserveGateFixCommitsGuidance}
 	if rv.PRURL != "" {
-		fields = append(fields, toon.Field{Key: "help", Value: []string{fmt.Sprintf("Open the PR: %s", rv.PRURL)}})
+		help = append([]string{fmt.Sprintf("Open the PR: %s", rv.PRURL)}, help...)
 	}
+	fields = append(fields, toon.Field{Key: "help", Value: help})
 	emitDoc(cmd, fields...)
 	return &exitError{code: 1}
 }
@@ -693,6 +737,7 @@ func successReportHelp(fixes []fixRow) []string {
 	if len(fixes) > 0 {
 		help = append(help, "The pipeline fixed findings the original change missed (see `fixes`) - acknowledge the misses and list each fix so the user can review them.")
 	}
+	help = append(help, preserveGateFixCommitsGuidance)
 	return help
 }
 
@@ -704,7 +749,8 @@ func newAxiRespondCmd() *cobra.Command {
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
-			"blocks until the next gate, CI-ready decision point, or final outcome.",
+			"blocks until the next gate, CI-ready decision point, or final outcome.\n\n" +
+			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -756,7 +802,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 			"Valid actions: approve, fix, skip")
 	}
 
-	env, err := openAxiEnv(true)
+	env, err := openAxiDaemonEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
@@ -772,7 +818,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	}
 	if active.Run == nil {
 		return emitError(cmd, 1, "no active run to respond to",
-			"Run `no-mistakes axi run` to start one")
+			"Run `no-mistakes axi run --intent \"...\"` to start one")
 	}
 	runID := active.Run.ID
 
@@ -858,7 +904,8 @@ func newAxiAbortCmd() *cobra.Command {
 			"While a run is active, do NOT abort (or rerun) to go fix a finding\n" +
 			"yourself - that discards the pipeline's in-flight work and forces a full\n" +
 			"re-validation. abort and rerun are for between runs (after a failed or\n" +
-			"cancelled outcome), never to circumvent a gate.",
+			"cancelled outcome), never to circumvent a gate.\n\n" +
+			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -878,7 +925,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	}
 
 	ctx := cmd.Context()
-	env, err := openAxiEnv(true)
+	env, err := openAxiDaemonEnv()
 	if err != nil {
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}

@@ -9,16 +9,17 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived = "push_received"
-	MethodGetRun       = "get_run"
-	MethodGetRuns      = "get_runs"
-	MethodGetActiveRun = "get_active_run"
-	MethodRerun        = "rerun"
-	MethodSubscribe    = "subscribe"
-	MethodRespond      = "respond"
-	MethodCancelRun    = "cancel_run"
-	MethodHealth       = "health"
-	MethodShutdown     = "shutdown"
+	MethodPushReceived   = "push_received"
+	MethodGetRun         = "get_run"
+	MethodGetRuns        = "get_runs"
+	MethodGetRunsForHead = "get_runs_for_head"
+	MethodGetActiveRun   = "get_active_run"
+	MethodRerun          = "rerun"
+	MethodSubscribe      = "subscribe"
+	MethodRespond        = "respond"
+	MethodCancelRun      = "cancel_run"
+	MethodHealth         = "health"
+	MethodShutdown       = "shutdown"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -67,6 +68,7 @@ func (e *RPCError) Error() string { return e.Message }
 // whitespace, the PR step renders it verbatim in a "## Notes" section and feeds
 // it to the PR summary prompt.
 type PushReceivedParams struct {
+	// Gate is the absolute path to the gate bare repo.
 	Gate      string           `json:"gate"`
 	Ref       string           `json:"ref"`
 	Old       string           `json:"old"`
@@ -84,6 +86,16 @@ type GetRunParams struct {
 // GetRunsParams requests all runs for a repo.
 type GetRunsParams struct {
 	RepoID string `json:"repo_id"`
+}
+
+// GetRunsForHeadParams requests the runs for a repo on an exact branch and head
+// SHA. It backs a lightweight lookup that avoids scanning the repo's whole run
+// history, so a caller polling for the run created by a specific push does not
+// re-fetch every run (and its steps) on each poll.
+type GetRunsForHeadParams struct {
+	RepoID  string `json:"repo_id"`
+	Branch  string `json:"branch"`
+	HeadSHA string `json:"head_sha"`
 }
 
 // GetActiveRunParams requests the active run for a repo.
@@ -221,10 +233,17 @@ type StepResultInfo struct {
 	// FixSummaries holds one entry per fix round the pipeline ran for this
 	// step, in round order: the agent's one-line fix summary, or "" when the
 	// round recorded none. Agent surfaces use it to report applied fixes.
-	FixSummaries []string `json:"fix_summaries,omitempty"`
-	Error        *string  `json:"error,omitempty"`
-	StartedAt    *int64   `json:"started_at,omitempty"`
-	CompletedAt  *int64   `json:"completed_at,omitempty"`
+	FixSummaries     []string `json:"fix_summaries,omitempty"`
+	RoundCount       int      `json:"round_count,omitempty"`
+	FixRoundCount    int      `json:"fix_round_count,omitempty"`
+	AutoFixLimit     int      `json:"auto_fix_limit,omitempty"`
+	PendingFixSource string   `json:"pending_fix_source,omitempty"`
+	Error            *string  `json:"error,omitempty"`
+	StartedAt        *int64   `json:"started_at,omitempty"`
+	CompletedAt      *int64   `json:"completed_at,omitempty"`
+	LastActivityAt   *int64   `json:"last_activity_at,omitempty"`
+	LastActivity     *string  `json:"last_activity,omitempty"`
+	AgentPID         *int     `json:"agent_pid,omitempty"`
 }
 
 // --- Events (for subscribe stream) ---

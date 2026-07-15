@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"golang.org/x/sys/windows"
 )
 
@@ -44,11 +45,8 @@ var assignShellCommandJobFunc = assignShellCommandJob
 var resumeProcessThreadsFunc = resumeProcessThreads
 
 // ConfigureShellCommand prepares a Windows command for whole-tree cleanup on
-// cancellation and normal exit. It also sets CREATE_NO_WINDOW so spawned
-// console programs (agent CLIs, git, taskkill) do not flash their own terminal
-// window; their stdio is always redirected here, so no visible console is
-// needed. StartShellCommand assigns a kill-on-close job and fails if that
-// guarantee is unavailable.
+// cancellation and normal exit. StartShellCommand assigns a kill-on-close job
+// and fails if that guarantee is unavailable.
 //
 // Use RunShellCommand, OutputShellCommand, or CombinedOutputShellCommand for
 // one-shot commands, or use StartShellCommand and defer
@@ -56,18 +54,16 @@ var resumeProcessThreadsFunc = resumeProcessThreads
 // caller needs manual pipe handling. If a parser reads stdout/stderr until EOF,
 // the goroutine that owns Wait should terminate the group when the leader exits
 // so inherited pipe holders cannot wedge the parser.
-//
-// Direct os/exec spawns that bypass this helper must call HideWindow instead.
 func ConfigureShellCommand(cmd *exec.Cmd) {
+	// Suppress the visible console window Windows would otherwise allocate for
+	// this console child (agents, cmd.exe shell steps) when spawned from the
+	// console-less daemon. See issue #287. Harden allocates SysProcAttr if
+	// needed; the process-group flag below is then OR-ed in alongside it.
+	winproc.Harden(cmd)
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= createNewProcessGroup
-	// CREATE_NO_WINDOW keeps spawned console programs (the agent CLIs, git,
-	// taskkill) from flashing their own console window. Their stdio is always
-	// redirected to pipes here, so no visible console is ever needed; without
-	// this flag every subprocess pops a terminal window on Windows.
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NO_WINDOW
 	if job, err := newShellCommandJobFunc(); err == nil {
 		shellCommandJobs.Store(cmd, &shellCommandJobState{handle: job})
 		cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
@@ -91,7 +87,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		}
 		pid := strconv.Itoa(cmd.Process.Pid)
 		kill := exec.Command("taskkill", "/T", "/F", "/PID", pid)
-		HideWindow(kill)
+		winproc.Harden(kill)
 		err := kill.Run()
 		switch {
 		case err == nil:
@@ -152,7 +148,7 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	}
 	pid := strconv.Itoa(cmd.Process.Pid)
 	kill := exec.Command("taskkill", "/T", "/F", "/PID", pid)
-	HideWindow(kill)
+	winproc.Harden(kill)
 	_ = kill.Run()
 }
 

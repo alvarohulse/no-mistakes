@@ -23,6 +23,8 @@ type piAgent struct {
 
 func (a *piAgent) Name() string { return "pi" }
 
+func (a *piAgent) ReportsAgentAttempts() bool { return true }
+
 func (a *piAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "pi", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -48,6 +50,8 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 		return nil, fmt.Errorf("pi start: %w", err)
 	}
 	defer started.closePipes()
+	pid := started.pid()
+	emitAgentStarted(opts, "pi", pid)
 
 	prompt := buildPiPrompt(opts.Prompt, opts.JSONSchema)
 	go func() {
@@ -67,7 +71,9 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	if err := pp.parse(ctx, started.stdout); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
-		return nil, fmt.Errorf("pi parse events: %w", err)
+		retErr := fmt.Errorf("pi parse events: %w", err)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
 	waitErr := started.wait()
@@ -75,17 +81,25 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	if waitErr != nil {
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if stderr != "" {
-			return nil, fmt.Errorf("pi exited: %w: %s", waitErr, stderr)
+			retErr := fmt.Errorf("pi exited: %w: %s", waitErr, stderr)
+			emitAgentExited(opts, "pi", pid, retErr)
+			return nil, retErr
 		}
-		return nil, fmt.Errorf("pi exited: %w", waitErr)
+		retErr := fmt.Errorf("pi exited: %w", waitErr)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
 	if pp.assistantError != "" {
-		return nil, fmt.Errorf("pi reported error: %s", pp.assistantError)
+		retErr := fmt.Errorf("pi reported error: %s", pp.assistantError)
+		emitAgentExited(opts, "pi", pid, retErr)
+		return nil, retErr
 	}
 
 	text := pp.finalText()
-	return finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	emitAgentExited(opts, "pi", pid, err)
+	return res, err
 }
 
 // buildArgs returns the Pi argv for one invocation. User extras come first
@@ -392,20 +406,25 @@ func piIntField(m map[string]any, names ...string) int {
 }
 
 func piUsageFrom(usage map[string]any) TokenUsage {
+	_, cacheCreationReported := usage["cacheWrite"]
 	return TokenUsage{
-		InputTokens:         piIntField(usage, "input"),
-		OutputTokens:        piIntField(usage, "output"),
-		CacheReadTokens:     piIntField(usage, "cacheRead"),
-		CacheCreationTokens: piIntField(usage, "cacheWrite"),
+		Reported:              len(usage) > 0,
+		CacheCreationReported: cacheCreationReported,
+		InputTokens:           piIntField(usage, "input"),
+		OutputTokens:          piIntField(usage, "output"),
+		CacheReadTokens:       piIntField(usage, "cacheRead"),
+		CacheCreationTokens:   piIntField(usage, "cacheWrite"),
 	}
 }
 
 func piUsageAdd(a, b TokenUsage) TokenUsage {
 	return TokenUsage{
-		InputTokens:         a.InputTokens + b.InputTokens,
-		OutputTokens:        a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:     a.CacheReadTokens + b.CacheReadTokens,
-		CacheCreationTokens: a.CacheCreationTokens + b.CacheCreationTokens,
+		Reported:              a.Reported || b.Reported,
+		CacheCreationReported: a.CacheCreationReported || b.CacheCreationReported,
+		InputTokens:           a.InputTokens + b.InputTokens,
+		OutputTokens:          a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:       a.CacheReadTokens + b.CacheReadTokens,
+		CacheCreationTokens:   a.CacheCreationTokens + b.CacheCreationTokens,
 	}
 }
 

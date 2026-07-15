@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"github.com/spf13/cobra"
 )
 
@@ -44,7 +46,9 @@ func newDoctorCmd() *cobra.Command {
 					fail("git           ", "not found")
 					allOK = false
 				} else {
-					out, err := exec.Command("git", "--version").Output()
+					gitCmd := exec.Command("git", "--version")
+					winproc.Harden(gitCmd)
+					out, err := gitCmd.Output()
 					if err != nil {
 						fail("git           ", fmt.Sprintf("error (%v)", err))
 						allOK = false
@@ -123,6 +127,25 @@ func newDoctorCmd() *cobra.Command {
 					}
 				}
 
+				if p == nil {
+					fail("gate validation", "unavailable: data directory could not be resolved")
+					allOK = false
+				} else {
+					globalCfg, err := config.LoadGlobal(p.ConfigFile())
+					if err != nil {
+						fail("gate validation", fmt.Sprintf("unavailable: load config (%v)", err))
+						allOK = false
+					} else {
+						cfg := config.Merge(globalCfg, &config.RepoConfig{})
+						if err := cfg.ResolveAgent(cmd.Context(), exec.LookPath); err != nil {
+							fail("gate validation", err.Error())
+							allOK = false
+						} else {
+							ok("gate validation", fmt.Sprintf("%s is runnable", cfg.Agent))
+						}
+					}
+				}
+
 				if !allOK {
 					fmt.Fprintln(w)
 					fmt.Fprintf(w, "  %s\n", sRed.Render("some checks failed"))
@@ -143,6 +166,7 @@ func doctorAgentChecks() []doctorAgentCheck {
 		{"opencode", []string{"opencode"}},
 		{"pi", []string{"pi"}},
 		{"copilot", []string{"copilot"}},
+		{"acpx", []string{"acpx"}},
 	}
 	for _, alias := range types.ACPAliases() {
 		agents = append(agents, doctorAgentCheck{

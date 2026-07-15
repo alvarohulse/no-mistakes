@@ -8,13 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 var taskkillProcessTree = func(pid int) ([]byte, error) {
 	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
-	// HideWindow keeps the internal taskkill cleanup from flashing a console.
-	shellenv.HideWindow(cmd)
+	winproc.Harden(cmd)
 	return cmd.CombinedOutput()
 }
 
