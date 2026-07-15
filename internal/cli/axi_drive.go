@@ -110,8 +110,9 @@ func newAxiRunCmd() *cobra.Command {
 			"summary as trusted author guidance (unlike inferred intent, it receives no\n" +
 			"untrusted framing or secret redaction). If the note already starts with\n" +
 			"\"## Notes\", no second heading is added. The flags apply only when starting a\n" +
-			"new run (not on reattach); the note persists on the run and is reused when\n" +
-			"axi run re-triggers the same head, but no-mistakes rerun and the TUI rerun\n" +
+			"new run and are rejected with an error (not silently ignored) on reattach;\n" +
+			"the note persists on the run and is reused when axi run re-triggers the same\n" +
+			"head, but no-mistakes rerun and the TUI rerun\n" +
 			"start a fresh run without it. The note is a normal PR-body section placed\n" +
 			"after Intent with no special truncation protection: the Pipeline section is\n" +
 			"clamped first, but if a host limit still forces truncation the note is clamped\n" +
@@ -131,12 +132,21 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
+				// Mutual exclusion and the reattach check key off whether the
+				// flags were set (Flags().Changed), not their resolved content, so
+				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
+				// whitespace-only note is not silently treated as "no note flag".
+				noteProvided := cmd.Flags().Changed("pr-note") || cmd.Flags().Changed("pr-note-file")
+				if cmd.Flags().Changed("pr-note") && cmd.Flags().Changed("pr-note-file") {
+					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
+						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
+				}
 				note, err := resolvePRNote(prNote, prNoteFile)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(),
 						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, note)
+				return runAxiRun(cmd, autoYes, skipSteps, intent, note, noteProvided)
 			})
 		},
 	}
@@ -195,7 +205,7 @@ func prNoteTransportSizeError(size int64) error {
 	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote string) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote string, noteProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiEnv(true)
 	if err != nil {
@@ -218,11 +228,13 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	}
 
 	runID := activeRunID(env, branch, headSHA)
-	if runID != "" && strings.TrimSpace(prNote) != "" {
+	if runID != "" && noteProvided {
 		// A run is already active for this HEAD, so reattaching only drives it -
 		// the PR note is applied when a run is started (see triggerRun), not on
 		// reattach. Reject rather than silently ignore, so the operator does not
-		// believe a note was attached to a run that never received it.
+		// believe a note was attached to a run that never received it. This keys
+		// off flag presence, so even an empty or whitespace-only note is rejected
+		// rather than silently reattaching.
 		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
 	}

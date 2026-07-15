@@ -1776,6 +1776,10 @@ func TestPRNoteSectionText(t *testing.T) {
 		{name: "note is trimmed", note: "  trimmed  ", want: "## Notes\n\ntrimmed"},
 		{name: "existing Notes heading is not duplicated", note: "## Notes\n\nfrom a file", want: "## Notes\n\nfrom a file"},
 		{name: "lowercase Notes heading is not duplicated", note: "## notes\n\nfrom a file", want: "## notes\n\nfrom a file"},
+		{name: "extra spaces after marker not duplicated", note: "##   Notes\n\nfrom a file", want: "##   Notes\n\nfrom a file"},
+		{name: "whitespace-delimited closing sequence not duplicated", note: "## Notes ##\n\nfrom a file", want: "## Notes ##\n\nfrom a file"},
+		{name: "hashes without preceding space are literal text and get wrapped", note: "## Notes###\n\ntext", want: "## Notes\n\n## Notes###\n\ntext"},
+		{name: "deeper heading gets wrapped", note: "### Notes\n\ntext", want: "## Notes\n\n### Notes\n\ntext"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

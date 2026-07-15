@@ -1017,8 +1017,16 @@ func noteHasOwnNotesHeading(note string) bool {
 	if rest != "" && !strings.HasPrefix(rest, " ") && !strings.HasPrefix(rest, "\t") {
 		return false
 	}
-	heading := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(rest), "#"))
-	return strings.EqualFold(heading, "notes")
+	content := strings.TrimSpace(rest)
+	// Strip an optional ATX closing sequence: a trailing run of '#' is a closing
+	// sequence only when whitespace-delimited, so "## Notes ###" is a Notes
+	// heading but "## Notes###" is not (it renders as the literal "Notes###").
+	if trimmed := strings.TrimRight(content, "#"); trimmed != content {
+		if trimmed == "" || strings.HasSuffix(trimmed, " ") || strings.HasSuffix(trimmed, "\t") {
+			content = strings.TrimSpace(trimmed)
+		}
+	}
+	return strings.EqualFold(content, "notes")
 }
 
 // prNotePromptSection returns a prompt fragment carrying the author-supplied PR

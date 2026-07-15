@@ -218,17 +218,6 @@ type RunIntent struct {
 	Score     float64
 }
 
-// UpdateRunPRNote persists the author-supplied PR note for a run. The note is
-// operator-typed (via `axi run --pr-note`/`--pr-note-file`) and stored as-is;
-// the PR step trims surrounding whitespace before rendering it verbatim.
-func (d *DB) UpdateRunPRNote(id, note string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET pr_note = ?, updated_at = ? WHERE id = ?`, note, now(), id)
-	if err != nil {
-		return fmt.Errorf("update run pr note: %w", err)
-	}
-	return nil
-}
-
 // UpdateRunIntent persists the inferred user intent for a run.
 func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	_, err := d.sql.Exec(
