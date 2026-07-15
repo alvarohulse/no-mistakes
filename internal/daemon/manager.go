@@ -297,7 +297,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	m.cancelActiveRuns(repo.ID, branch)
 
 	// Create run record.
-	run, err := m.db.InsertRun(repo.ID, branch, headSHA, baseSHA)
+	// Persist the operator PR note atomically with the run. Unlike inferred
+	// intent (which falls back to transcript inference), the note has no
+	// fallback, so writing it in the same insert avoids ever creating a run that
+	// is missing its guaranteed "## Notes" content.
+	run, err := m.db.InsertRunWithPRNote(repo.ID, branch, headSHA, baseSHA, strings.TrimSpace(prNote))
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -317,21 +321,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			score := 1.0
 			run.IntentScore = &score
 		}
-	}
-
-	// Stamp a trimmed operator-supplied PR note onto the run so the PR step
-	// renders it verbatim in a "## Notes" section and feeds it to the PR summary
-	// prompt. Unlike intent (which falls back to transcript inference), the note
-	// has no fallback: silently dropping it on a persist failure would violate
-	// the guaranteed "## Notes" contract, so fail the run rather than open a PR
-	// without the requested note.
-	if trimmed := strings.TrimSpace(prNote); trimmed != "" {
-		if err := m.db.UpdateRunPRNote(run.ID, trimmed); err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("persist pr note: %s", err))
-			trackStartFailure("persist_pr_note")
-			return "", fmt.Errorf("persist pr note: %w", err)
-		}
-		run.PRNote = &trimmed
 	}
 
 	// Create worktree from the gate bare repo.

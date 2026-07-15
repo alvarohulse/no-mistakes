@@ -54,6 +54,15 @@ func scanRun(row interface {
 
 // InsertRun creates a new run record.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, "")
+}
+
+// InsertRunWithPRNote inserts a run and, when prNote is non-empty, its
+// operator-supplied PR note in a single write. Persisting the note atomically
+// with the run means a failed follow-up update can never leave a run that lacks
+// its guaranteed "## Notes" content: either the run and note are both created or
+// neither is. prNote is stored verbatim (callers trim it beforehand).
+func (d *DB) InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, prNote string) (*Run, error) {
 	ts := now()
 	r := &Run{
 		ID:        newID(),
@@ -65,9 +74,15 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
+	var notePtr *string
+	if prNote != "" {
+		note := prNote
+		r.PRNote = &note
+		notePtr = &note
+	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

@@ -65,6 +65,37 @@ func TestUpdateRunPRNote_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestInsertRunWithPRNote_PersistsAtomically(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/pr-note", "git@github.com:user/pr-note.git", "main")
+
+	// A non-empty note is written in the same insert and reads back verbatim.
+	note := "## Notes\n\nRelease operators: preserve this wording."
+	run, err := d.InsertRunWithPRNote(repo.ID, "feature", "abc", "def", note)
+	if err != nil {
+		t.Fatalf("insert run with pr note: %v", err)
+	}
+	if run.PRNote == nil || *run.PRNote != note {
+		t.Fatalf("returned run pr_note = %v, want %q", run.PRNote, note)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.PRNote == nil || *got.PRNote != note {
+		t.Fatalf("persisted pr_note = %v, want %q", got.PRNote, note)
+	}
+
+	// An empty note leaves pr_note NULL (delegated path, e.g. plain InsertRun).
+	plain, err := d.InsertRunWithPRNote(repo.ID, "feature2", "aaa", "bbb", "")
+	if err != nil {
+		t.Fatalf("insert run without pr note: %v", err)
+	}
+	if plain.PRNote != nil {
+		t.Fatalf("expected nil pr_note when none supplied, got %q", *plain.PRNote)
+	}
+}
+
 func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

@@ -994,14 +994,31 @@ func prNoteSectionText(sctx *pipeline.StepContext) string {
 	return "## Notes\n\n" + note
 }
 
-// noteHasOwnNotesHeading reports whether the note's first non-empty line is a
-// "## Notes" heading, so prNoteSectionText does not prepend a duplicate one.
+// noteHasOwnNotesHeading reports whether the note's first line is a level-2 ATX
+// "Notes" heading, so prNoteSectionText does not prepend a duplicate one. It
+// normalizes ATX variants (extra spaces after the marker and an optional closing
+// "#" sequence, e.g. "##   Notes" or "## Notes ##") rather than matching the
+// exact string "## Notes".
 func noteHasOwnNotesHeading(note string) bool {
 	line := note
 	if i := strings.IndexByte(note, '\n'); i >= 0 {
 		line = note[:i]
 	}
-	return strings.EqualFold(strings.TrimSpace(line), "## Notes")
+	line = strings.TrimSpace(line)
+	hashes := 0
+	for hashes < len(line) && line[hashes] == '#' {
+		hashes++
+	}
+	if hashes != 2 {
+		return false
+	}
+	rest := line[hashes:]
+	// A valid ATX heading marker is followed by a space/tab (or end of line).
+	if rest != "" && !strings.HasPrefix(rest, " ") && !strings.HasPrefix(rest, "\t") {
+		return false
+	}
+	heading := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(rest), "#"))
+	return strings.EqualFold(heading, "notes")
 }
 
 // prNotePromptSection returns a prompt fragment carrying the author-supplied PR

@@ -321,7 +321,11 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	if opt := formatPRNotePushOption(prNote); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
-	if !pushOptionsWithinTransport(pushOptions) {
+	// The aggregate bound is enforced only when a PR note is present: it exists
+	// to catch a note plus intent overflowing one command line, and applying it
+	// to intent-only runs would newly reject large intents that pushed fine
+	// before this feature existed.
+	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
 		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
