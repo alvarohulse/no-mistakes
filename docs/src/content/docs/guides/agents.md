@@ -5,8 +5,8 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is pipeline-agent-agnostic by design: the gate should mean the same thing regardless of which supported agent backend you prefer.
 It is not runner-free.
-Every validation run requires either a supported native agent binary or `acpx` configured for an ACP target.
-The default `agent: auto` setting picks the first supported native agent available on your system.
+Every validation run requires either a supported native agent binary or a configured ACP runner.
+The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
 The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
@@ -45,6 +45,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
+| Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Runner requirements
@@ -113,7 +114,7 @@ agent: [codex, claude]
 ### Optional ACP target
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
-`agent: auto` only probes native agents and never auto-selects ACP targets.
+`agent: auto` probes native agents and first-class ACP aliases (such as `cursor`), and never auto-selects arbitrary `acp:<target>` entries.
 
 The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns the exact resolution order, fallback-list filtering and retry semantics, and the failure behavior when no entry is runnable.
 
@@ -279,18 +280,22 @@ Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 
+## ACP aliases
+
+ACP aliases are first-class agent names that resolve to ACP targets.
+`agent: cursor` is the first alias: it is shorthand for the `cursor` ACP target with the default raw command `cursor-agent acp`, not a separate native backend.
+`agent: acp:cursor` uses that same default command, so either spelling works without an `acp_registry_overrides.cursor` entry.
+
+Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
+Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their required binaries are present.
+The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP availability, bridge-path, command-override, and equivalent-spelling deduplication rules.
+
 ## ACP via acpx
 
 ACP support is optional and requires a separately installed `acpx` binary.
 Use `agent: acp:<target>` to run a target known to acpx, for example `agent: acp:gemini`.
-
-For custom ACP target commands, define a global override:
-
-```yaml
-agent: acp:local-gemini
-acp_registry_overrides:
-  local-gemini: node /opt/mock-acp-agent.mjs
-```
+When the target matches a first-class alias such as `acp:cursor`, no-mistakes supplies that alias' default raw command.
+Configure custom target commands in the [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides).
 
 no-mistakes invokes acpx with JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
 Structured output is handled by appending the requested JSON schema to the prompt and validating the final assistant text.
@@ -313,12 +318,12 @@ $ no-mistakes doctor
   – pi (not found)
   – copilot (not found)
   – acpx (not found)
+  – cursor (not found (cursor-agent, acpx))
   ✓ gate validation claude is runnable
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+The standalone `acpx` and `cursor` rows inspect the default binary names.
 The `gate validation` line is the decisive result: when the configured global runner is unavailable, doctor fails because a complete gate cannot validate without it.
-
-For `agent: acp:<target>`, doctor verifies that `acpx` is installed on `PATH` or resolves through `acpx_path` in global config.
-It does not invoke the target or test its credentials.
+See the [Global Config Reference](/no-mistakes/reference/global-config/) for ACP availability and probing behavior.
 Every new validation run resolves its effective agent again after applying any trusted repository-level override.

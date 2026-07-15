@@ -789,11 +789,8 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
-	if target, ok := acpTarget(name); ok {
-		rawCommand := ""
-		if opts.ACPRegistryOverrides != nil {
-			rawCommand = opts.ACPRegistryOverrides[target]
-		}
+	if target, ok := types.ACPTargetFor(name); ok {
+		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
 	switch name {
@@ -810,20 +807,8 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentCopilot:
 		return &copilotAgent{bin: bin, extraArgs: extraArgs}, nil
 	default:
-		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
-}
-
-func acpTarget(name types.AgentName) (string, bool) {
-	value := string(name)
-	if !strings.HasPrefix(value, "acp:") {
-		return "", false
-	}
-	target := strings.TrimPrefix(value, "acp:")
-	if target == "" || strings.ContainsAny(target, " \t\r\n") {
-		return "", false
-	}
-	return target, true
 }
 
 // NewNoop returns an agent that does nothing. Used for demo mode where
