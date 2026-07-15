@@ -149,7 +149,7 @@ After surrounding whitespace is trimmed, the note is reproduced verbatim in a `#
 If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added.
 Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it receives no untrusted-data framing, adversarial stripping, or secret redaction, so do not include secrets.
 The flags apply only when starting a new run (they are rejected, not silently ignored, when `axi run` reattaches to an active run): the note persists on the run and is reused when `axi run` re-triggers the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
-The note is a normal PR-body section placed after `## Intent`. On the rare oversized body, the large Pipeline and generated sections are clamped first, so a normal-sized note near the top is preserved in practice.
+The note is a normal PR-body section placed after `## Intent`, with no special protection under truncation: the Pipeline section is clamped first, but if a host's character limit still forces truncation the note is clamped along with the rest of the body. PR bodies rarely approach these limits and the note is small, so it is preserved in practice; keep it concise if you need it to always survive.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
 While a non-terminal run is parked at an `awaiting_approval` or `fix_review` gate, the run object also includes `awaiting_agent: parked <duration>`.
 Use that field in `axi status` output to tell in one read that the run is waiting for the driving agent to send `axi respond`, not actively running, fixing, or watching CI.

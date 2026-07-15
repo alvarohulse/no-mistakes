@@ -113,8 +113,9 @@ func newAxiRunCmd() *cobra.Command {
 			"new run (not on reattach); the note persists on the run and is reused when\n" +
 			"axi run re-triggers the same head, but no-mistakes rerun and the TUI rerun\n" +
 			"start a fresh run without it. The note is a normal PR-body section placed\n" +
-			"after Intent; on an oversized body the large generated and pipeline sections\n" +
-			"are clamped first, so a normal-sized note is preserved in practice.",
+			"after Intent with no special truncation protection: the Pipeline section is\n" +
+			"clamped first, but if a host limit still forces truncation the note is clamped\n" +
+			"with the rest of the body. It is small, so in practice it survives.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,

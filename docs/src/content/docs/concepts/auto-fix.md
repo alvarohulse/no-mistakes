@@ -115,7 +115,7 @@ The PR body's deterministic risk assessment, testing, and pipeline sections are 
 In PR pipeline details, auto-fix rounds are rendered as an issue -> fix -> verification narrative instead of a round-numbered log: each fix summary is followed by either a successful re-check or the findings still open after that fix.
 On very long runs, the PR body uses a 63,488-byte safety cap, which leaves a 2 KB buffer below GitHub's 65,536-character body limit.
 It first keeps the newest pipeline update rounds and replaces older rounds with an omission marker at whole-update boundaries.
-If the newest update or essential body content is still too large, the PR step truncates at line or section boundaries and adds an explicit marker. An operator-supplied `## Notes` section from `axi run --pr-note` or `--pr-note-file` sits near the top (after `## Intent`), so it is preserved in practice because the large Pipeline and generated sections are clamped first.
+If the newest update or essential body content is still too large, the PR step truncates at line or section boundaries and adds an explicit marker. An operator-supplied `## Notes` section from `axi run --pr-note` or `--pr-note-file` sits near the top (after `## Intent`) and is a normal section with no special truncation protection; the Pipeline section is clamped first, but if the body still exceeds the limit the note may be clamped along with the rest.
 The full round history remains available in the run log.
 
 Round trigger types:

@@ -297,20 +297,18 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 
 // prependNotesSection prepends the author "## Notes" section (see
 // prNoteSectionText) after the Intent section and before the agent's
-// "## What Changed" body. Any "## Notes" heading the agent happened to emit is
-// dropped first so the operator section is never duplicated. Returns body
-// unchanged when no note is set.
+// "## What Changed" body. Returns body unchanged when no note is set.
 //
-// The note is a normal PR-body section. On the rare oversized body, the generic
-// truncation clamps the large Pipeline/Testing sections first (Pipeline via its
-// dedicated omission logic), so a small operator note near the top is preserved
-// in practice without any note-specific truncation machinery.
+// The note is a normal PR-body section with no special truncation handling: on
+// an oversized PR body it is clamped along with the rest of the body. The PR
+// prompt tells the agent not to repeat the note and prNoteSectionText avoids a
+// duplicate "## Notes" heading, so the agent body is not rewritten here (which
+// also avoids fragile, fence-unaware section stripping).
 func prependNotesSection(body string, sctx *pipeline.StepContext) string {
 	section := prNoteSectionText(sctx)
 	if section == "" {
 		return body
 	}
-	body = stripNotesSection(body)
 	if strings.TrimSpace(body) == "" {
 		return section
 	}
@@ -383,17 +381,7 @@ func essentialPRBodyWithinBudget(body, generatedSections string, maxBytes int) s
 
 	bodyBudget := maxBytes - len(generatedSections)
 	if bodyBudget <= 0 {
-		// The generated Testing/Risk sections alone exceed the budget. The body
-		// (Intent, author Notes, What Changed) is more essential than a generated
-		// evidence dump, so keep the body and clamp the generated sections into
-		// whatever budget remains - never discard the body to preserve oversized
-		// generated content.
-		keptBody := truncatePRBodySections(body, maxBytes, essentialPRBodyTruncationMarker())
-		genBudget := maxBytes - len(keptBody)
-		if genBudget <= 0 {
-			return keptBody
-		}
-		return keptBody + truncateTextAtLineBoundary(generatedSections, genBudget, essentialPRBodyTruncationMarker())
+		return truncateTextAtLineBoundary(generatedSections, maxBytes, essentialPRBodyTruncationMarker())
 	}
 	return truncatePRBodySections(body, bodyBudget, essentialPRBodyTruncationMarker()) + generatedSections
 }
@@ -961,99 +949,6 @@ func isGeneratedSectionHeading(line string) bool {
 	default:
 		return false
 	}
-}
-
-// stripNotesSection removes a "## Notes" section (its heading through the line
-// before the next "## " heading) from body. It is applied only on the note
-// path, so an author note is never duplicated - while a no-note body keeps any
-// "## Notes" the agent wrote (for example inside a fenced example), which is why
-// "notes" is deliberately not part of isGeneratedSectionHeading.
-func stripNotesSection(body string) string {
-	if body == "" {
-		return ""
-	}
-	lines := strings.Split(body, "\n")
-	out := make([]string, 0, len(lines))
-	skipping := false
-	openFence := "" // the marker that opened the current fenced block, "" when outside one
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if openFence != "" {
-			// Inside a fenced block, every line is literal content (a "## Notes"
-			// here never toggles removal); it closes only on a compatible fence.
-			if fenceCloses(line, openFence) {
-				openFence = ""
-			}
-			if !skipping {
-				out = append(out, raw)
-			}
-			continue
-		}
-		if f := fenceOpens(line); f != "" {
-			openFence = f
-			if !skipping {
-				out = append(out, raw)
-			}
-			continue
-		}
-		if skipping {
-			if strings.HasPrefix(line, "## ") {
-				skipping = false
-			} else {
-				continue
-			}
-		}
-		if isNotesHeading(line) {
-			skipping = true
-			continue
-		}
-		out = append(out, raw)
-	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
-}
-
-// fenceOpens returns the marker (a run of >=3 backticks or tildes) that opens a
-// fenced code block on line, or "" when line is not a code fence. An info
-// string may follow the marker.
-func fenceOpens(line string) string {
-	line = strings.TrimSpace(line)
-	for _, ch := range []byte{'`', '~'} {
-		n := 0
-		for n < len(line) && line[n] == ch {
-			n++
-		}
-		if n >= 3 {
-			return line[:n]
-		}
-	}
-	return ""
-}
-
-// fenceCloses reports whether line closes a block opened by openFence: it must
-// be the same character, at least as long, and contain nothing but that fence
-// character (a longer inner fence of the same character therefore does not
-// close a shorter outer one, and vice versa).
-func fenceCloses(line, openFence string) bool {
-	line = strings.TrimSpace(line)
-	if openFence == "" {
-		return false
-	}
-	ch := openFence[0]
-	n := 0
-	for n < len(line) && line[n] == ch {
-		n++
-	}
-	return n == len(line) && n >= len(openFence)
-}
-
-func isNotesHeading(line string) bool {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "##") {
-		return false
-	}
-	heading := strings.TrimSpace(strings.TrimPrefix(line, "##"))
-	heading = strings.ToLower(strings.TrimRight(heading, ":.!? "))
-	return heading == "notes"
 }
 
 // prependIntentSection prepends a "## Intent" section sourced from the
