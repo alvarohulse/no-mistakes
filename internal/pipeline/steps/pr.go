@@ -262,11 +262,12 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 }
 
 // assemblePRBody composes the final PR body from its sections and keeps it
-// within bodyLimit (0 = unlimited). Without an author note, an oversized body
-// first drops Testing so Azure DevOps sheds log dumps while keeping the core
-// narrative. With a note, sections are budgeted explicitly around the protected
-// note and reduced in pipeline-to-intent order. The note is clamped only when it
-// alone exceeds the provider limit.
+// within bodyLimit (0 = unlimited). The author "## Notes" section (when set) is
+// a normal section placed after Intent - there is no note-specific budgeting.
+// An oversized body first drops the Testing section so a capped host (e.g. Azure
+// DevOps) sheds log dumps while keeping the core narrative, then falls back to a
+// whole-body clamp that keeps content from the top, so the Intent and the note
+// near the top are preserved in practice.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
 	full := prependIntentSection(prependNotesSection(appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD), sctx), sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
@@ -974,28 +975,35 @@ func stripNotesSection(body string) string {
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
 	skipping := false
-	inFence := false
+	openFence := "" // the marker that opened the current fenced block, "" when outside one
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		// Track fenced code blocks so a "## Notes" heading inside a fenced
-		// example is treated as literal content, never as a real section that
-		// toggles removal (and its closing fence is never dropped).
-		if isCodeFence(line) {
-			inFence = !inFence
-			if skipping {
-				continue
+		if openFence != "" {
+			// Inside a fenced block, every line is literal content (a "## Notes"
+			// here never toggles removal); it closes only on a compatible fence.
+			if fenceCloses(line, openFence) {
+				openFence = ""
 			}
-			out = append(out, raw)
+			if !skipping {
+				out = append(out, raw)
+			}
+			continue
+		}
+		if f := fenceOpens(line); f != "" {
+			openFence = f
+			if !skipping {
+				out = append(out, raw)
+			}
 			continue
 		}
 		if skipping {
-			if !inFence && strings.HasPrefix(line, "## ") {
+			if strings.HasPrefix(line, "## ") {
 				skipping = false
 			} else {
 				continue
 			}
 		}
-		if !inFence && isNotesHeading(line) {
+		if isNotesHeading(line) {
 			skipping = true
 			continue
 		}
@@ -1004,9 +1012,38 @@ func stripNotesSection(body string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func isCodeFence(line string) bool {
+// fenceOpens returns the marker (a run of >=3 backticks or tildes) that opens a
+// fenced code block on line, or "" when line is not a code fence. An info
+// string may follow the marker.
+func fenceOpens(line string) string {
 	line = strings.TrimSpace(line)
-	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+	for _, ch := range []byte{'`', '~'} {
+		n := 0
+		for n < len(line) && line[n] == ch {
+			n++
+		}
+		if n >= 3 {
+			return line[:n]
+		}
+	}
+	return ""
+}
+
+// fenceCloses reports whether line closes a block opened by openFence: it must
+// be the same character, at least as long, and contain nothing but that fence
+// character (a longer inner fence of the same character therefore does not
+// close a shorter outer one, and vice versa).
+func fenceCloses(line, openFence string) bool {
+	line = strings.TrimSpace(line)
+	if openFence == "" {
+		return false
+	}
+	ch := openFence[0]
+	n := 0
+	for n < len(line) && line[n] == ch {
+		n++
+	}
+	return n == len(line) && n >= len(openFence)
 }
 
 func isNotesHeading(line string) bool {

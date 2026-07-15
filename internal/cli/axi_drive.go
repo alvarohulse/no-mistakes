@@ -175,6 +175,13 @@ func resolvePRNote(prNote, prNoteFile string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
 		}
+		// Check the raw byte count before trimming. A stream (e.g. a FIFO) has no
+		// stat size, so LimitReader is the only size guard; trimming trailing
+		// whitespace first could otherwise mask that content past the limit was
+		// silently dropped.
+		if len(data) > maxPRNotePushOptionBytes {
+			return "", prNoteTransportSizeError(int64(len(data)))
+		}
 		prNote = strings.TrimSpace(string(data))
 	}
 	if len(prNote) > maxPRNotePushOptionBytes {

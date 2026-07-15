@@ -144,11 +144,11 @@ When an agent starts a new run, `--intent` is required and should describe what 
 Agents should prefer a few complete sentences over a terse summary, capturing user decisions, tradeoffs, constraints, ruled-out approaches, and explicit requests that would not be obvious from the diff alone.
 If the repo is on the default branch or has uncommitted changes, direct `axi run` returns a structured error with the command the agent should run instead of silently creating a branch or commit.
 
-To inject your own content into the pull request the `pr` step opens, pass `--pr-note "<text>"` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive and each input is limited to 20 KiB, a conservative ceiling that keeps the note within the git push-option transport on every platform, including Windows).
+To inject your own content into the pull request the `pr` step opens, pass `--pr-note "<text>"` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive and each input is limited to 16 KiB; the combined size of `--pr-note` and `--intent` is bounded further so it fits the git push-option transport on every platform, including Windows).
 After surrounding whitespace is trimmed, the note is reproduced verbatim in a `## Notes` section of the PR body, placed after `## Intent` and before `## What Changed`, and is also fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
-If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added; other level-two headings inside it remain part of the atomic note.
+If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added.
 Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it receives no untrusted-data framing, adversarial stripping, or secret redaction, so do not include secrets.
-It is run-scoped like `--intent`: the note persists on the run and `axi run` reuses it when reattaching to or re-triggering the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
+The flags apply only when starting a new run (they are rejected, not silently ignored, when `axi run` reattaches to an active run): the note persists on the run and is reused when `axi run` re-triggers the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
 The note is a normal PR-body section placed after `## Intent`. On the rare oversized body, the large Pipeline and generated sections are clamped first, so a normal-sized note near the top is preserved in practice.
 Approval gates are exposed as `gate:` objects with finding IDs, severities, files, actions, descriptions, and help commands for `no-mistakes axi respond`.
 While a non-terminal run is parked at an `awaiting_approval` or `fix_review` gate, the run object also includes `awaiting_agent: parked <duration>`.

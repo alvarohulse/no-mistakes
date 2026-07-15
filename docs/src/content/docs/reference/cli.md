@@ -89,8 +89,8 @@ no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 | `--intent` | `string` | (none) | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool` | `false` | Auto-resolve every gate until a decision point or outcome |
 | `--skip` | `string` | (none) | Comma-separated pipeline steps to skip |
-| `--pr-note` | `string` | (none) | Author-supplied text trimmed and added to a `## Notes` section of the PR body, then fed to the PR summary as author guidance (maximum 20 KiB) |
-| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`; maximum 20 KiB) |
+| `--pr-note` | `string` | (none) | Author-supplied text trimmed and added to a `## Notes` section of the PR body, then fed to the PR summary as author guidance (maximum 16 KiB, and bounded further when combined with `--intent`) |
+| `--pr-note-file` | `string` | (none) | Read the PR note from this file instead of `--pr-note`, for longer content (mutually exclusive with `--pr-note`; maximum 16 KiB) |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
@@ -99,11 +99,11 @@ When starting a new run, `axi run` refuses the default branch and uncommitted wo
 Reattaching to an in-flight run does not require `--intent`.
 
 `--pr-note` (or `--pr-note-file <path>` for longer content; the two are mutually exclusive) injects author-supplied content into the pull request the `pr` step opens.
-Both inputs are limited to 20 KiB (20,480 bytes) - a conservative ceiling that keeps the base64-encoded note within the git push-option transport on every platform, including Windows' command-line length limit; a file's size is checked before it is read, so an accidentally huge file is rejected rather than loaded into memory.
+Each input is limited to 16 KiB (16,384 bytes), and the combined size of `--pr-note` and `--intent` is bounded so the base64-encoded push options fit the git transport on every platform, including Windows' command-line length limit; a file's size is checked before it is read, so an accidentally huge file is rejected rather than loaded into memory.
 After surrounding whitespace is trimmed, the text is reproduced verbatim in a `## Notes` section placed after `## Intent` and before `## What Changed`, and is fed to the PR summary prompt as trusted author guidance so the generated summary stays consistent with it.
 If the note already starts with a `## Notes` heading (case-insensitive), no second heading is added; any other level-two headings inside the note remain part of the note.
 Unlike the inferred `--intent`, the note is operator-typed locally and therefore trusted: it receives no untrusted-data framing, adversarial stripping, or secret redaction, so do not include secrets.
-Both flags are run-scoped like `--intent`: the note persists on the run and `axi run` reuses it when reattaching to or re-triggering the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
+The flags apply only when starting a new run and are rejected (not silently ignored) when `axi run` reattaches to an active run: the note persists on the run and is reused when `axi run` re-triggers the same head, but `no-mistakes rerun` and the TUI rerun start a fresh run without the note.
 The note is a normal PR-body section placed after `## Intent`. When the PR body must be truncated to fit a host's character limit, the large Pipeline and generated sections are clamped first (Pipeline via its dedicated round-omission logic), so a normal-sized note near the top is preserved in practice; it is not given byte-level protection beyond that.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.

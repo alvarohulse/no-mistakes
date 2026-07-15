@@ -1785,6 +1785,14 @@ func TestStripNotesSection_IgnoresFencedHeadings(t *testing.T) {
 	if !strings.Contains(got2, "## What Changed") {
 		t.Fatalf("expected What Changed to remain, got:\n%s", got2)
 	}
+
+	// A longer outer fence containing a shorter inner fence must not be closed by
+	// the inner fence, so a "## Notes" between them stays literal.
+	nested := "## What Changed\n\n- doc\n\n````markdown\n```\n## Notes\nstill fenced\n```\n````\n\n- after"
+	got3 := stripNotesSection(nested)
+	if !strings.Contains(got3, "## Notes") || !strings.Contains(got3, "still fenced") || !strings.Contains(got3, "- after") {
+		t.Fatalf("expected nested-fence ## Notes and following content to be preserved, got:\n%s", got3)
+	}
 }
 
 func TestEssentialPRBodyWithinBudget_KeepsBodyOverOversizedGenerated(t *testing.T) {
