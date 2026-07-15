@@ -136,17 +136,18 @@ func newAxiRunCmd() *cobra.Command {
 				// flags were set (Flags().Changed), not their resolved content, so
 				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
 				// whitespace-only note is not silently treated as "no note flag".
+				// Mutual exclusion and the reattach check key off whether the
+				// flags were set (Flags().Changed), not their resolved content, so
+				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
+				// whitespace-only note is not silently treated as "no note flag".
+				// Note resolution itself is deferred into runAxiRun so a
+				// --pr-note-file is only read once a fresh run is confirmed.
 				noteProvided := cmd.Flags().Changed("pr-note") || cmd.Flags().Changed("pr-note-file")
 				if cmd.Flags().Changed("pr-note") && cmd.Flags().Changed("pr-note-file") {
 					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
 						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 				}
-				note, err := resolvePRNote(prNote, prNoteFile)
-				if err != nil {
-					return emitError(cmd, 2, err.Error(),
-						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
-				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, note, noteProvided)
+				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided)
 			})
 		},
 	}
@@ -205,7 +206,7 @@ func prNoteTransportSizeError(size int64) error {
 	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote string, noteProvided bool) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiEnv(true)
 	if err != nil {
@@ -227,14 +228,28 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 1, fmt.Sprintf("get current HEAD: %v", err))
 	}
 
-	runID := activeRunID(env, branch, headSHA)
+	// With a PR note, the active-run lookup must fail closed: a swallowed lookup
+	// error could otherwise let triggerRun adopt an existing note-less run and
+	// silently drop the guaranteed note. Plain runs keep the fail-open lookup so
+	// a transient daemon hiccup does not block them.
+	var runID string
+	if noteProvided {
+		id, lookupErr := activeRunIDChecked(env, branch, headSHA)
+		if lookupErr != nil {
+			return emitError(cmd, 1, fmt.Sprintf("check for an active run: %v", lookupErr),
+				"Retry once the daemon is reachable; --pr-note must not attach to an unverified run")
+		}
+		runID = id
+	} else {
+		runID = activeRunID(env, branch, headSHA)
+	}
 	if runID != "" && noteProvided {
 		// A run is already active for this HEAD, so reattaching only drives it -
-		// the PR note is applied when a run is started (see triggerRun), not on
-		// reattach. Reject rather than silently ignore, so the operator does not
-		// believe a note was attached to a run that never received it. This keys
-		// off flag presence, so even an empty or whitespace-only note is rejected
-		// rather than silently reattaching.
+		// the PR note applies only when a run is started (see triggerRun). Reject
+		// (rather than silently ignore) before resolving the note, so the operator
+		// is not misled and a --pr-note-file (which may be a FIFO) is never read on
+		// the reattach path. Keyed off flag presence, so even an empty or
+		// whitespace-only note is rejected rather than silently reattaching.
 		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
 	}
@@ -254,8 +269,15 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
+		// Resolve the note only now that a fresh run will actually start, so a
+		// --pr-note-file is read on this path alone (never on reattach).
+		note, resolveErr := resolvePRNote(prNote, prNoteFile)
+		if resolveErr != nil {
+			return emitError(cmd, 2, resolveErr.Error(),
+				`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
+		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, prNote)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note)
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}
@@ -268,13 +290,24 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	return renderDriveResult(cmd, run, ciReady)
 }
 
-// activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
+// activeRunID returns the ID of a non-terminal run for branch and head, or ""
+// if none. It fails open: a lookup error yields "". Callers that must not
+// proceed on an unverified lookup (e.g. a run carrying a PR note that would be
+// silently dropped) use activeRunIDChecked instead.
 func activeRunID(env *axiEnv, branch, headSHA string) string {
+	id, _ := activeRunIDChecked(env, branch, headSHA)
+	return id
+}
+
+// activeRunIDChecked is activeRunID that surfaces the lookup error instead of
+// swallowing it, so a caller can fail closed rather than risk adopting or
+// starting the wrong run.
+func activeRunIDChecked(env *axiEnv, branch, headSHA string) (string, error) {
 	var active ipc.GetActiveRunResult
 	if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
-		return ""
+		return "", err
 	}
-	return activeRunIDForHead(&active, headSHA)
+	return activeRunIDForHead(&active, headSHA), nil
 }
 
 func activeRunIDForHead(active *ipc.GetActiveRunResult, headSHA string) string {

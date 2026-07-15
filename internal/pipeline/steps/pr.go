@@ -1001,7 +1001,9 @@ func prNoteSectionText(sctx *pipeline.StepContext) string {
 // exact string "## Notes".
 func noteHasOwnNotesHeading(note string) bool {
 	line := note
-	if i := strings.IndexByte(note, '\n'); i >= 0 {
+	// A line ends at the first CR or LF; CommonMark accepts a bare CR, so a
+	// "## Notes\r..." heading must be recognized too.
+	if i := strings.IndexAny(note, "\r\n"); i >= 0 {
 		line = note[:i]
 	}
 	line = strings.TrimSpace(line)
