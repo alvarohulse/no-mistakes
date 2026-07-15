@@ -7,23 +7,21 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
-// userIntentPromptSection returns a prompt fragment describing the inferred
-// user intent for the change being processed. The fragment is empty when
-// no intent is available, so steps can append it unconditionally.
+// userIntentPromptSection returns a prompt fragment describing the user intent
+// for the change being processed. The fragment is empty when no intent is
+// available, so steps can append it unconditionally.
 //
-// The intent originates from a transcript the user did not write
-// specifically for this prompt: it's the LLM-summarized output of an
-// agent conversation, which may have echoed adversarial text from the
-// transcript even after the summarizer's own filters. Because every
-// downstream step (review, test, lint, document, pr) embeds this text
-// verbatim into its agent prompt, we treat it as untrusted data:
+// Intent may be supplied by the driving agent or inferred from a transcript the
+// user did not write specifically for this prompt. Because every downstream
+// step (review, test, lint, document, pr) embeds this text into its agent prompt,
+// it is treated as untrusted data regardless of source:
 //
 //  1. RedactSecrets replaces likely credentials before they reach a
 //     subprocess agent (and possibly its server logs).
 //  2. StripAdversarial neuters known prompt-control delimiters so the
 //     downstream agent doesn't parse them as authoritative framing.
 //  3. The text is wrapped in delimiters with an explicit "data, not
-//     instructions" guard, mirroring the summarizer's own framing.
+//     instructions" guard for consistent downstream framing.
 func userIntentPromptSection(sctx *pipeline.StepContext) string {
 	cleaned := cleanedUserIntent(sctx)
 	if cleaned == "" {

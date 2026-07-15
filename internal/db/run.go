@@ -28,11 +28,17 @@ type Run struct {
 	IntentSource       *string
 	IntentSessionID    *string
 	IntentScore        *float64
-	CreatedAt          int64
-	UpdatedAt          int64
+	// PRNote is optional author-supplied content, set per run via
+	// `axi run --pr-note`/`--pr-note-file`. Unlike Intent, it is operator-typed
+	// and trusted: after trimming surrounding whitespace, the PR step renders it
+	// verbatim in a "## Notes" section and feeds it to the summary prompt as
+	// author guidance without intent's sanitization or untrusted-data framing.
+	PRNote    *string
+	CreatedAt int64
+	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -41,12 +47,22 @@ func scanRun(row interface {
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
+		&r.PRNote,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
 
 // InsertRun creates a new run record.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
+	return d.InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, "")
+}
+
+// InsertRunWithPRNote inserts a run and, when prNote is non-empty, its
+// operator-supplied PR note in a single write. Persisting the note atomically
+// with the run means a failed follow-up update can never leave a run that lacks
+// its guaranteed "## Notes" content: either the run and note are both created or
+// neither is. prNote is stored verbatim (callers trim it beforehand).
+func (d *DB) InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, prNote string) (*Run, error) {
 	ts := now()
 	r := &Run{
 		ID:        newID(),
@@ -58,9 +74,15 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 		CreatedAt: ts,
 		UpdatedAt: ts,
 	}
+	var notePtr *string
+	if prNote != "" {
+		note := prNote
+		r.PRNote = &note
+		notePtr = &note
+	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -196,7 +218,8 @@ type RunIntent struct {
 	Score     float64
 }
 
-// UpdateRunIntent persists the inferred user intent for a run.
+// UpdateRunIntent persists user intent for a run, whether agent-supplied or
+// inferred from transcripts.
 func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	_, err := d.sql.Exec(
 		`UPDATE runs SET intent = ?, intent_source = ?, intent_session_id = ?, intent_score = ?, updated_at = ? WHERE id = ?`,

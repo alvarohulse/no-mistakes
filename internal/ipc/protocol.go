@@ -61,6 +61,11 @@ func (e *RPCError) Error() string { return e.Message }
 // Intent, when set, is an agent-supplied description of the change. It is
 // stamped onto the run so the intent step uses it verbatim instead of inferring
 // intent from local transcripts.
+//
+// PRNote, when set, is operator-supplied content (via `axi run --pr-note`/
+// `--pr-note-file`). It is stamped onto the run so, after trimming surrounding
+// whitespace, the PR step renders it verbatim in a "## Notes" section and feeds
+// it to the PR summary prompt.
 type PushReceivedParams struct {
 	Gate      string           `json:"gate"`
 	Ref       string           `json:"ref"`
@@ -68,6 +73,7 @@ type PushReceivedParams struct {
 	New       string           `json:"new"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
+	PRNote    string           `json:"pr_note,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -89,11 +95,13 @@ type GetActiveRunParams struct {
 
 // RerunParams requests a new run for the latest gate head on a branch.
 // Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
+// PRNote is stamped onto the new run like PushReceivedParams.PRNote.
 type RerunParams struct {
 	RepoID    string           `json:"repo_id"`
 	Branch    string           `json:"branch"`
 	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
 	Intent    string           `json:"intent,omitempty"`
+	PRNote    string           `json:"pr_note,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.

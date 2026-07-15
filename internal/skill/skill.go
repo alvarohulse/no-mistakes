@@ -107,7 +107,7 @@ When you start a run you must pass ` + "`--intent`" + `: **what the user set out
 accomplish** - the goal or request behind this work, in their terms. This is not
 a description of the diff or the files you changed; it is the objective the
 change is meant to achieve. You know it from the conversation, so pass it
-directly - no-mistakes uses it verbatim instead of inferring it from local agent
+directly - no-mistakes uses it instead of inferring it from local agent
 transcripts (slower and flakier).
 
 Err on the side of completeness, not brevity. The review step uses ` + "`--intent`" + `
@@ -118,6 +118,8 @@ constraints or approaches they ruled in or out, and anything they explicitly
 asked for that might otherwise look surprising in the diff. A few sentences to a
 short paragraph is normal - write down what you learned from the conversation
 that a reviewer reading only the diff would not know.
+
+Optional ` + "`--pr-note`" + ` (or ` + "`--pr-note-file <path>`" + ` for longer content; mutually exclusive) injects your own text into the pull request the ` + "`pr`" + ` step opens. Each raw input is limited to 16 KiB before trimming; the note, ` + "`--intent`" + `, and any ` + "`--skip`" + ` options are bounded together so the git push-option command fits on every platform. After surrounding whitespace is trimmed, the note is reproduced verbatim in a ` + "`## Notes`" + ` section of the PR body, placed after ` + "`## Intent`" + ` and before ` + "`## What Changed`" + `, and is also fed to the PR summary prompt as trusted author guidance. If the note already starts with a ` + "`## Notes`" + ` heading (case-insensitive), no second heading is added. Intent is sanitized and framed as untrusted in downstream prompts whether supplied or inferred. The locally operator-typed note is trusted, so it receives no untrusted-data framing, adversarial stripping, or secret redaction; do not include secrets. The flags apply only when starting a new run. The check keys off flag presence, including an empty value; ` + "`axi run`" + ` fails if it cannot verify active-run state and rejects reattachment before opening a note file. The note persists on the new run and is carried into ` + "`axi run`" + `'s fallback rerun when the gate already has the same head, but ` + "`no-mistakes rerun`" + ` and the TUI rerun start a fresh run without it. The note is a normal PR-body section placed after ` + "`## Intent`" + ` with no special protection under truncation: if a host's character limit forces truncation, the note may be clamped along with the rest of the body. It is small, so in practice it survives; keep it concise if it must always survive.
 
 ## Validate and decide
 

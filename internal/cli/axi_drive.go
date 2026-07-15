@@ -31,6 +31,34 @@ const drivePollInterval = 250 * time.Millisecond
 // after pushing to the gate before falling back to a rerun.
 const triggerWaitTimeout = 5 * time.Second
 
+// maxPRNotePushOptionBytes caps a single author note's source size. The note
+// rides a base64-encoded git push option (see formatPRNotePushOption), so it is
+// bounded well below git's pkt-line limit. base64 inflates by ~4/3, so 16 KiB
+// of source is ~21.8 KiB encoded - comfortably within transport for the note
+// alone. The combined transport (note plus --intent plus --skip, which all
+// share one command line) is bounded separately by maxAggregatePushOptionBytes.
+const maxPRNotePushOptionBytes = 16 * 1024
+
+// maxAggregatePushOptionBytes bounds the combined size of every push option on a
+// single gate push. On Windows, PushWithOptions passes options via argv, which
+// CreateProcess caps at 32767 characters for the whole command line; the note
+// and the (also base64-encoded) intent share that budget, so a note that fits
+// maxPRNotePushOptionBytes on its own can still overflow once a non-trivial
+// intent is added. This conservative ceiling leaves headroom for the rest of
+// the git command and keeps the push safe on every supported platform.
+const maxAggregatePushOptionBytes = 28 * 1024
+
+// pushOptionsWithinTransport reports whether the assembled push options fit the
+// aggregate transport budget, accounting for the " --push-option " argv
+// overhead each one carries.
+func pushOptionsWithinTransport(options []string) bool {
+	total := 0
+	for _, opt := range options {
+		total += len(opt) + len(" --push-option ")
+	}
+	return total <= maxAggregatePushOptionBytes
+}
+
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
 	switch types.RunStatus(status) {
@@ -59,6 +87,8 @@ func newAxiRunCmd() *cobra.Command {
 	var autoYes bool
 	var skipValue string
 	var intent string
+	var prNote string
+	var prNoteFile string
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -70,32 +100,113 @@ func newAxiRunCmd() *cobra.Command {
 			"accepting the result) until a decision point or outcome.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
-			"so no-mistakes uses it directly instead of inferring it from transcripts.",
+			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
+			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
+			"your own text into the pull request the pr step opens. Each input is limited\n" +
+			"to 16 KiB, and the combined size of --pr-note and --intent is bounded so it\n" +
+			"fits the git push-option transport on every platform. After surrounding\n" +
+			"whitespace is trimmed, the note is reproduced verbatim in a \"## Notes\"\n" +
+			"section after \"## Intent\" and before \"## What Changed\", and fed to the PR\n" +
+			"summary as trusted author guidance (unlike inferred intent, it receives no\n" +
+			"untrusted framing or secret redaction). If the note already starts with\n" +
+			"\"## Notes\", no second heading is added. The flags apply only when starting a\n" +
+			"new run and are rejected with an error (not silently ignored) on reattach;\n" +
+			"the note persists on the run and is reused when axi run re-triggers the same\n" +
+			"head, but no-mistakes rerun and the TUI rerun\n" +
+			"start a fresh run without it. The note is a normal PR-body section placed\n" +
+			"after Intent with no special truncation protection: the Pipeline section is\n" +
+			"clamped first, but if a host limit still forces truncation the note is clamped\n" +
+			"with the rest of the body. It is small, so in practice it survives.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
-				"auto_yes":   autoYes,
-				"has_intent": strings.TrimSpace(intent) != "",
-				"has_skip":   strings.TrimSpace(skipValue) != "",
+				"auto_yes":    autoYes,
+				"has_intent":  strings.TrimSpace(intent) != "",
+				"has_skip":    strings.TrimSpace(skipValue) != "",
+				"has_pr_note": strings.TrimSpace(prNote) != "" || strings.TrimSpace(prNoteFile) != "",
 			}, func() error {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent)
+				// Mutual exclusion and the reattach check key off whether the
+				// flags were set (Flags().Changed), not their resolved content, so
+				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
+				// whitespace-only note is not silently treated as "no note flag".
+				// Mutual exclusion and the reattach check key off whether the
+				// flags were set (Flags().Changed), not their resolved content, so
+				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
+				// whitespace-only note is not silently treated as "no note flag".
+				// Note resolution itself is deferred into runAxiRun so a
+				// --pr-note-file is only read once a fresh run is confirmed.
+				noteProvided := cmd.Flags().Changed("pr-note") || cmd.Flags().Changed("pr-note-file")
+				if cmd.Flags().Changed("pr-note") && cmd.Flags().Changed("pr-note-file") {
+					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
+						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
+				}
+				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided)
 			})
 		},
 	}
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 16 KiB, and bounded further when combined with --intent; an existing Notes heading is not duplicated; applies only when starting a new run)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 16 KiB before trimming)")
 	return cmd
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent string) error {
+// resolvePRNote resolves the author-supplied PR note from the mutually
+// exclusive --pr-note / --pr-note-file flags. Inputs are limited to
+// maxPRNotePushOptionBytes; --pr-note-file is intended for longer content and is
+// size-checked (via os.Stat, before reading) so an accidentally huge file
+// cannot be slurped into memory. Returns "" when neither flag is set.
+func resolvePRNote(prNote, prNoteFile string) (string, error) {
+	if prNote != "" && prNoteFile != "" {
+		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")
+	}
+	if prNoteFile != "" {
+		file, err := os.Open(prNoteFile)
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		defer file.Close()
+
+		info, err := file.Stat()
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		if info.Size() > int64(maxPRNotePushOptionBytes) {
+			return "", prNoteTransportSizeError(info.Size())
+		}
+
+		data, err := io.ReadAll(io.LimitReader(file, int64(maxPRNotePushOptionBytes)+1))
+		if err != nil {
+			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
+		}
+		// Check the raw byte count before trimming. A stream (e.g. a FIFO) has no
+		// stat size, so LimitReader is the only size guard; trimming trailing
+		// whitespace first could otherwise mask that content past the limit was
+		// silently dropped.
+		if len(data) > maxPRNotePushOptionBytes {
+			return "", prNoteTransportSizeError(int64(len(data)))
+		}
+		prNote = strings.TrimSpace(string(data))
+	}
+	if len(prNote) > maxPRNotePushOptionBytes {
+		return "", prNoteTransportSizeError(int64(len(prNote)))
+	}
+	return prNote, nil
+}
+
+func prNoteTransportSizeError(size int64) error {
+	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
+}
+
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiEnv(true)
 	if err != nil {
@@ -117,7 +228,31 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 1, fmt.Sprintf("get current HEAD: %v", err))
 	}
 
-	runID := activeRunID(env, branch, headSHA)
+	// With a PR note, the active-run lookup must fail closed: a swallowed lookup
+	// error could otherwise let triggerRun adopt an existing note-less run and
+	// silently drop the guaranteed note. Plain runs keep the fail-open lookup so
+	// a transient daemon hiccup does not block them.
+	var runID string
+	if noteProvided {
+		id, lookupErr := activeRunIDChecked(env, branch, headSHA)
+		if lookupErr != nil {
+			return emitError(cmd, 1, fmt.Sprintf("check for an active run: %v", lookupErr),
+				"Retry once the daemon is reachable; --pr-note must not attach to an unverified run")
+		}
+		runID = id
+	} else {
+		runID = activeRunID(env, branch, headSHA)
+	}
+	if runID != "" && noteProvided {
+		// A run is already active for this HEAD, so reattaching only drives it -
+		// the PR note applies only when a run is started (see triggerRun). Reject
+		// (rather than silently ignore) before resolving the note, so the operator
+		// is not misled and a --pr-note-file (which may be a FIFO) is never read on
+		// the reattach path. Keyed off flag presence, so even an empty or
+		// whitespace-only note is rejected rather than silently reattaching.
+		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
+			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
+	}
 	if runID == "" {
 		// Intent is mandatory when starting a run: the agent driving this knows
 		// the change's intent, so we take it directly instead of inferring it
@@ -134,8 +269,15 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
+		// Resolve the note only now that a fresh run will actually start, so a
+		// --pr-note-file is read on this path alone (never on reattach).
+		note, resolveErr := resolvePRNote(prNote, prNoteFile)
+		if resolveErr != nil {
+			return emitError(cmd, 2, resolveErr.Error(),
+				`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
+		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note)
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}
@@ -148,13 +290,24 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	return renderDriveResult(cmd, run, ciReady)
 }
 
-// activeRunID returns the ID of a non-terminal run for branch and head, or "" if none.
+// activeRunID returns the ID of a non-terminal run for branch and head, or ""
+// if none. It fails open: a lookup error yields "". Callers that must not
+// proceed on an unverified lookup (e.g. a run carrying a PR note that would be
+// silently dropped) use activeRunIDChecked instead.
 func activeRunID(env *axiEnv, branch, headSHA string) string {
+	id, _ := activeRunIDChecked(env, branch, headSHA)
+	return id
+}
+
+// activeRunIDChecked is activeRunID that surfaces the lookup error instead of
+// swallowing it, so a caller can fail closed rather than risk adopting or
+// starting the wrong run.
+func activeRunIDChecked(env *axiEnv, branch, headSHA string) (string, error) {
 	var active ipc.GetActiveRunResult
 	if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
-		return ""
+		return "", err
 	}
-	return activeRunIDForHead(&active, headSHA)
+	return activeRunIDForHead(&active, headSHA), nil
 }
 
 func activeRunIDForHead(active *ipc.GetActiveRunResult, headSHA string) string {
@@ -205,10 +358,20 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent string) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatPRNotePushOption(prNote); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	// The aggregate bound is enforced only when a PR note is present: it exists
+	// to catch a note plus intent overflowing one command line, and applying it
+	// to intent-only runs would newly reject large intents that pushed fine
+	// before this feature existed.
+	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
+		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
 
@@ -222,7 +385,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -264,8 +427,8 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent}
+func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string) *ipc.RerunParams {
+	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRNote: prNote}
 }
 
 // driveRun polls a run until it reaches an approval gate, a terminal state, or

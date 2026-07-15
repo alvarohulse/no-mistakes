@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,10 +72,20 @@ type ghStubInvocation struct {
 	Repo string   `json:"repo,omitempty"`
 	Head string   `json:"head,omitempty"`
 	Base string   `json:"base,omitempty"`
+	Body string   `json:"body,omitempty"`
 }
 
 func runGhForkPRStub(args []string) int {
-	recordGhStubInvocation(args)
+	body := ""
+	if hasArgValue(args, "--body-file", "-") {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent gh fork-pr: read body: %v\n", err)
+			return 1
+		}
+		body = string(data)
+	}
+	recordGhStubInvocation(args, body)
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		return 0
@@ -118,7 +129,7 @@ func runGhForkPRStub(args []string) int {
 	return 1
 }
 
-func recordGhStubInvocation(args []string) {
+func recordGhStubInvocation(args []string, body string) {
 	logPath := os.Getenv("FAKEAGENT_GH_LOG")
 	if logPath == "" {
 		return
@@ -135,6 +146,7 @@ func recordGhStubInvocation(args []string) {
 		Repo: argAfter(args, "--repo"),
 		Head: argAfter(args, "--head"),
 		Base: argAfter(args, "--base"),
+		Body: body,
 	}
 	_ = json.NewEncoder(f).Encode(inv)
 }

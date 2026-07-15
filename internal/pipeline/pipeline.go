@@ -28,9 +28,16 @@ type StepContext struct {
 	StepResultID string
 	Env          []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
-	// was trying to accomplish, inferred from local agent transcripts. It's
-	// surfaced in step prompts so agents have context beyond the diff.
+	// was trying to accomplish. It may be supplied by the driving agent or
+	// inferred from local transcripts, and is sanitized and framed as untrusted
+	// in downstream prompts.
 	UserIntent string
+	// PRNote is optional, possibly-empty author-supplied content set per run
+	// via `axi run --pr-note`/`--pr-note-file`. Unlike UserIntent, it is
+	// operator-typed and trusted: after trimming surrounding whitespace, the PR
+	// step renders it verbatim in a "## Notes" section and feeds it to the PR
+	// summary prompt as author guidance without sanitization or untrusted framing.
+	PRNote string
 }
 
 // StepOutcome is the result of executing a pipeline step.
