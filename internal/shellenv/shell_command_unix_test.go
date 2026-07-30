@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,13 +16,164 @@ import (
 	"time"
 )
 
+func TestTerminateShellCommandGroup_AllowsCooperativeDescendantCleanup(t *testing.T) {
+	dir := t.TempDir()
+	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-clean", dir)
+	ConfigureShellCommand(cmd)
+	if err := RunShellCommand(cmd); err != nil {
+		t.Fatalf("RunShellCommand() error = %v", err)
+	}
+
+	descendantPID := readPID(t, filepath.Join(dir, "descendant.pid"), 5*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(descendantPID, syscall.SIGKILL)
+	})
+	if _, err := os.Stat(filepath.Join(dir, "cleanup-complete")); err != nil {
+		t.Fatal("cooperative descendant did not finish cleanup after leader exit")
+	}
+	if !pidGoneWithin(descendantPID, 5*time.Second) {
+		t.Fatalf("cooperative descendant %d survived process-group cleanup", descendantPID)
+	}
+}
+
+func TestConfigureShellCommand_CancelAllowsCooperativeDescendantCleanup(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := shellCommandTerminationHelper(t, ctx, "leader-wait", dir)
+	ConfigureShellCommand(cmd)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunShellCommand(cmd)
+	}()
+	if !waitForHelperReady(filepath.Join(dir, "descendant-ready"), 5*time.Second) {
+		cancel()
+		t.Fatal("timed out waiting for cooperative descendant")
+	}
+	descendantPID := readPID(t, filepath.Join(dir, "descendant.pid"), 5*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(descendantPID, syscall.SIGKILL)
+	})
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunShellCommand() did not return after cancellation")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cleanup-complete")); err != nil {
+		t.Fatal("cooperative descendant did not finish cleanup after cancellation")
+	}
+	if !pidGoneWithin(descendantPID, 5*time.Second) {
+		t.Fatalf("cooperative descendant %d survived cancellation", descendantPID)
+	}
+}
+
+func TestTerminateShellCommandGroup_ForceKillsTermIgnoringDescendantAfterGrace(t *testing.T) {
+	dir := t.TempDir()
+	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-clean-ignore", dir)
+	ConfigureShellCommand(cmd)
+
+	started := time.Now()
+	if err := RunShellCommand(cmd); err != nil {
+		t.Fatalf("RunShellCommand() error = %v", err)
+	}
+	elapsed := time.Since(started)
+
+	descendantPID := readPID(t, filepath.Join(dir, "descendant.pid"), 5*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(descendantPID, syscall.SIGKILL)
+	})
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("process-group cleanup returned after %s; want a grace period before SIGKILL", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("process-group cleanup took %s; want bounded escalation", elapsed)
+	}
+	if !pidGoneWithin(descendantPID, 5*time.Second) {
+		t.Fatalf("SIGTERM-ignoring descendant %d survived bounded cleanup", descendantPID)
+	}
+}
+
+func TestShellCommandTerminationHelper(t *testing.T) {
+	mode := os.Getenv("NM_SHELLENV_TERMINATION_HELPER")
+	if mode == "" {
+		return
+	}
+	dir := os.Getenv("NM_SHELLENV_TERMINATION_DIR")
+
+	switch mode {
+	case "leader-clean", "leader-wait", "leader-clean-ignore":
+		descendantMode := "descendant-cooperative"
+		if mode == "leader-clean-ignore" {
+			descendantMode = "descendant-ignore"
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestShellCommandTerminationHelper$")
+		child.Env = append(os.Environ(),
+			"NM_SHELLENV_TERMINATION_HELPER="+descendantMode,
+			"NM_SHELLENV_TERMINATION_DIR="+dir,
+		)
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		if !waitForHelperReady(filepath.Join(dir, "descendant-ready"), 5*time.Second) {
+			os.Exit(3)
+		}
+		if mode == "leader-wait" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		os.Exit(0)
+	case "descendant-cooperative":
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		if err := os.WriteFile(filepath.Join(dir, "descendant.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+			os.Exit(4)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "descendant-ready"), []byte("ready"), 0o644); err != nil {
+			os.Exit(5)
+		}
+		<-term
+		if err := os.WriteFile(filepath.Join(dir, "cleanup-complete"), []byte("done"), 0o644); err != nil {
+			os.Exit(6)
+		}
+		os.Exit(0)
+	case "descendant-ignore":
+		signal.Ignore(syscall.SIGTERM)
+		if err := os.WriteFile(filepath.Join(dir, "descendant.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+			os.Exit(8)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "descendant-ready"), []byte("ready"), 0o644); err != nil {
+			os.Exit(9)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	default:
+		os.Exit(7)
+	}
+}
+
+func shellCommandTerminationHelper(t *testing.T, ctx context.Context, mode, dir string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestShellCommandTerminationHelper$")
+	cmd.Env = append(os.Environ(),
+		"NM_SHELLENV_TERMINATION_HELPER="+mode,
+		"NM_SHELLENV_TERMINATION_DIR="+dir,
+	)
+	return cmd
+}
+
 // TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit pins the
 // success-path guarantee that keeps the daemon alive: when a leader configured
 // with ConfigureShellCommand exits 0 but leaves a grandchild alive in its
 // process group (a test runner's worker pool), TerminateShellCommandGroup
-// SIGKILLs the whole group. cmd.Cancel only fires on cancellation, so without
-// this the grandchild leaks and orphan pools pile up across runs until the host
-// OOMs and the OS kills the daemon.
+// gracefully terminates the whole group, force-killing only after a bounded
+// grace period. cmd.Cancel only fires on cancellation, so without this the
+// grandchild leaks and orphan pools pile up across runs until the host OOMs and
+// the OS kills the daemon.
 func TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "grandchild.pid")

@@ -189,9 +189,13 @@ func waitForEvent(t *testing.T, ec *eventCollector, eventType ipc.EventType, sta
 }
 
 // waitForStepStatus polls the DB until a step reaches the expected status.
+// Every caller waits for a status the executor is guaranteed to reach, so the
+// deadline only needs to outlast the slowest environment. The generous budget
+// absorbs Windows CI jitter (a slow git subprocess spawn on the fix_review park
+// path plus -race DB writes) without changing any caller's semantics.
 func waitForStepStatus(t *testing.T, database *db.DB, runID string, stepName types.StepName, expected types.StepStatus) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		steps, err := database.GetStepsByRun(runID)
 		if err == nil {

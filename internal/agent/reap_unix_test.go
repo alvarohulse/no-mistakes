@@ -109,12 +109,12 @@ func TestNativeAgentEscapedPipeHelper(t *testing.T) {
 // When a repo has no configured test command, the test step asks the agent to
 // run the tests itself. That agent (codex here) spawns a test runner whose
 // worker pool can outlive it. ConfigureShellCommand isolates the agent in its
-// own process group and installs a cmd.Cancel that SIGKILLs the group - but
-// cmd.Cancel only fires on context cancellation. On a clean exit (exit 0)
-// nothing reaped the group, so the worker grandchildren leaked. Across runs
-// those orphans accumulate (each a multi-hundred-MB worker pool) until the host
-// is out of memory and the OS OOM-killer SIGKILLs the daemon, which the next
-// daemon start reports as "daemon crashed during execution".
+// own process group and installs whole-group cancellation - but cmd.Cancel only
+// fires on context cancellation. On a clean exit (exit 0) nothing reaped the
+// group, so the worker grandchildren leaked. Across runs those orphans
+// accumulate (each a multi-hundred-MB worker pool) until the host is out of
+// memory and the OS OOM-killer SIGKILLs the daemon, which the next daemon start
+// reports as "daemon crashed during execution".
 //
 // The fake codex backgrounds a grandchild whose stdio is detached (so it does
 // not hold the agent's stdout pipe open, which would wedge the parser instead
@@ -146,7 +146,7 @@ exit 0
 
 	grandchild := waitForPidFile(t, pidFile, 5*time.Second)
 	// Once Run has returned, the deferred TerminateShellCommandGroup must have
-	// SIGKILLed the whole group. Poll briefly to absorb signal-delivery jitter.
+	// reaped the whole group. Poll briefly to absorb signal-delivery jitter.
 	if !pidGoneWithin(grandchild, 5*time.Second) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL) // do not orphan a real process
 		t.Fatalf("grandchild pid %d still alive after clean agent exit; the process group leaked "+

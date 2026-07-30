@@ -89,12 +89,15 @@ func InitWithFork(ctx context.Context, d *db.DB, p *paths.Paths, workDir, forkUR
 	}
 	upstreamURL, err := getOriginURL(ctx, absRoot, "origin")
 	if err != nil {
-		// A missing "origin" is a normal state for a fresh `git init` repo, so
-		// give an actionable message instead of leaking git plumbing. Only
-		// substitute it when origin is genuinely absent; any other git failure
+		// A missing or URL-less "origin" is a normal state for a fresh `git init`
+		// repo, so give an actionable message instead of leaking git plumbing.
+		// Test presence by the configured URL rather than `git remote` listing:
+		// an inherited `remote.origin.*` config key (e.g. remote.origin.prune)
+		// makes `git remote` list origin even when it has no URL to push to.
+		// Only substitute when origin has no usable URL; any other git failure
 		// keeps its original error.
-		hasOrigin, listErr := git.HasRemote(ctx, absRoot, "origin")
-		if listErr == nil && !hasOrigin {
+		configuredURL, urlErr := git.GetConfiguredRemoteURL(ctx, absRoot, "origin")
+		if urlErr != nil || strings.TrimSpace(configuredURL) == "" {
 			return nil, false, fmt.Errorf(
 				"no 'origin' remote in %s\n\n"+
 					"no-mistakes pushes your branch and opens a pull request, so it needs a remote to push to.\n"+
