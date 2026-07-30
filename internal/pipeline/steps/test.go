@@ -34,6 +34,10 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	previousTestFileChanges, err := testFileChangesFromPreviousRounds(sctx)
+	if err != nil {
+		return nil, fmt.Errorf("load prior agent test file changes: %w", err)
+	}
 
 	// In fix mode, ask agent to fix test failures first.
 	//
@@ -48,7 +52,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// runtime. Process-group reaping on clean exit (#357) remains the lifecycle
 	// safety net when agents do spawn test workers; it is not a reason to force
 	// a deterministic full-suite commands.test override.
-	var newTestsFromFix []string
+	var testFileChangesFromFix []testFileChange
 	var fixSummary string
 	if sctx.Fixing {
 		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
@@ -90,8 +94,9 @@ Previous test findings to address:
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
 			AfterAgentRun: func(*agent.Result) error {
-				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
-				return nil
+				var err error
+				testFileChangesFromFix, err = detectTestFileChanges(ctx, sctx.WorkDir)
+				return err
 			},
 		})
 		if err != nil {
@@ -113,6 +118,7 @@ Previous test findings to address:
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
 
 		if exitCode != 0 {
+			testFileChanges := mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix)
 			findings := Findings{
 				Items: []Finding{{
 					Severity:    "error",
@@ -121,6 +127,7 @@ Previous test findings to address:
 				Summary: projectedOutput,
 				Tested:  tested,
 			}
+			findings.Items = append(findings.Items, testFileChangeFindings(testFileChanges)...)
 			findingsJSON, _ := json.Marshal(findings)
 			return &pipeline.StepOutcome{
 				NeedsApproval: true,
@@ -232,17 +239,14 @@ Rules:
 		needsApproval := hasBlockingFindings(findings.Items)
 		autoFixable := needsApproval
 
-		// Record any new test files the agent wrote as informational (no-op)
-		// findings. Their presence alone is not an actionable problem, so they
-		// must not force the test step into approval when tests pass (issue #140).
-		newTests := detectNewTestFiles(ctx, sctx.WorkDir)
-		for _, f := range newTests {
-			findings.Items = append(findings.Items, Finding{
-				Severity:    "info",
-				Action:      types.ActionNoOp,
-				File:        f,
-				Description: fmt.Sprintf("new test file written by agent: %s", f),
-			})
+		testFileChanges, err := detectTestFileChanges(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("detect agent test file changes: %w", err)
+		}
+		testFileChanges = mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix, testFileChanges)
+		findings.Items = append(findings.Items, testFileChangeFindings(testFileChanges)...)
+		if len(testFileChanges) > 0 {
+			needsApproval = true
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
@@ -254,25 +258,16 @@ Rules:
 		}, nil
 	}
 
-	// In fix mode the agent may add new test files while making tests pass.
-	// Record them as informational (no-op) findings but do not gate on them:
-	// passing tests with only informational findings proceed automatically (issue #140).
-	if sctx.Fixing && len(newTestsFromFix) > 0 {
+	testFileChanges := mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix)
+	if sctx.Fixing && len(testFileChanges) > 0 {
 		findings := Findings{
-			Summary: "tests passed, but agent wrote new test files",
+			Summary: "tests passed, but agent changed test files",
 			Tested:  tested,
 		}
-		for _, f := range newTestsFromFix {
-			findings.Items = append(findings.Items, Finding{
-				Severity:    "info",
-				Action:      types.ActionNoOp,
-				File:        f,
-				Description: fmt.Sprintf("new test file written by agent: %s", f),
-			})
-		}
+		findings.Items = testFileChangeFindings(testFileChanges)
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
-			NeedsApproval: false,
+			NeedsApproval: true,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
 		}, nil
@@ -281,4 +276,61 @@ Rules:
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+}
+
+func testFileChangeFindings(changes []testFileChange) []Finding {
+	findings := make([]Finding, 0, len(changes))
+	for _, change := range changes {
+		description := fmt.Sprintf("new test file written by agent: %s", change.Path)
+		if change.Kind == testFileModified {
+			description = fmt.Sprintf("existing test file modified by agent: %s", change.Path)
+		}
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionAskUser,
+			File:        change.Path,
+			Description: description,
+		})
+	}
+	return findings
+}
+
+func testFileChangesFromPreviousRounds(sctx *pipeline.StepContext) ([]testFileChange, error) {
+	if sctx.DB == nil || sctx.StepResultID == "" {
+		return nil, nil
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
+	if err != nil {
+		return nil, err
+	}
+
+	var changes []testFileChange
+	for _, round := range rounds {
+		if round.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil {
+			return nil, fmt.Errorf("parse round %d findings: %w", round.Round, err)
+		}
+		for _, finding := range findings.Items {
+			if change, ok := testFileChangeFromFinding(finding); ok {
+				changes = append(changes, change)
+			}
+		}
+	}
+	return mergeTestFileChanges(changes), nil
+}
+
+func testFileChangeFromFinding(finding Finding) (testFileChange, bool) {
+	if finding.Severity != "warning" || finding.Action != types.ActionAskUser || finding.File == "" {
+		return testFileChange{}, false
+	}
+	if finding.Description == fmt.Sprintf("new test file written by agent: %s", finding.File) {
+		return testFileChange{Path: finding.File, Kind: testFileCreated}, true
+	}
+	if finding.Description == fmt.Sprintf("existing test file modified by agent: %s", finding.File) {
+		return testFileChange{Path: finding.File, Kind: testFileModified}, true
+	}
+	return testFileChange{}, false
 }

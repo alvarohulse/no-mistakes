@@ -315,6 +315,7 @@ func runHappyPath(t *testing.T, agentName string) {
 		assertReviewWarningRun(t, h)
 		assertTestAgentNewTestFileRun(t, h)
 		assertTestAgentStagedNewTestFileRun(t, h)
+		assertTestAgentModifiedTestFileRun(t, h)
 	}
 	assertRunsDefaultLimit(t, h)
 	assertGateRefDeletionDoesNotCreateRun(t, h, "configured-commands")
@@ -472,6 +473,18 @@ func cleanReviewScenario(t *testing.T) string {
         new: "package main\n"
     stage:
       - "agent_staged_test.go"
+    structured:
+      findings: []
+      summary: "all tests passed"
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      artifacts: []
+  - match: "You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.\n\nContext:\n- branch: test-agent-modified-test-file"
+    text: "tests passed after changing an existing test"
+    edits:
+      - path: "existing_test.py"
+        new: "def test_existing():\n    assert True\n"
     structured:
       findings: []
       summary: "all tests passed"
@@ -1782,19 +1795,10 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-new-test-file", "test-agent-new-test-file.txt", "test agent new test file\n", "add test agent new test file")
 	h.PushToGate("test-agent-new-test-file")
-	// Issue #140: a passing test run whose only finding is an informational
-	// "new test file written by agent" note must not gate on approval; the run
-	// proceeds automatically to completion.
-	run := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("test-agent-new-test-file run status = %s, want completed; error=%v", run.Status, deref(run.Error))
-	}
+	run := waitForStepStatus(t, h, "test-agent-new-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-new-test-file run")
-	}
-	if testStep.Status != types.StepStatusCompleted {
-		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
 	if testStep.FindingsJSON == nil {
 		t.Fatal("expected test step to record findings JSON for new test file")
@@ -1807,11 +1811,11 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one new test file finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Severity != "info" {
-		t.Fatalf("new test file finding severity = %q, want info", item.Severity)
+	if item.Severity != "warning" {
+		t.Fatalf("new test file finding severity = %q, want warning", item.Severity)
 	}
-	if item.Action != types.ActionNoOp {
-		t.Fatalf("new test file finding action = %q, want no-op", item.Action)
+	if item.Action != types.ActionAskUser {
+		t.Fatalf("new test file finding action = %q, want ask-user", item.Action)
 	}
 	if item.File != "agent_test.py" {
 		t.Fatalf("new test file finding file = %q, want agent_test.py", item.File)
@@ -1819,24 +1823,21 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	if !strings.Contains(item.Description, "new test file written by agent: agent_test.py") {
 		t.Fatalf("new test file finding description = %q", item.Description)
 	}
+	h.Respond(run.ID, types.StepTest, types.ActionAbort)
+	completed := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("test-agent-new-test-file run status after abort = %s, want failed", completed.Status)
+	}
 }
 
 func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-staged-new-test-file", "test-agent-staged-new-test-file.txt", "test agent staged new test file\n", "add test agent staged new test file")
 	h.PushToGate("test-agent-staged-new-test-file")
-	// Issue #140: same as the untracked case, but the agent stages the new test
-	// file. It is still purely informational, so the run proceeds automatically.
-	run := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("test-agent-staged-new-test-file run status = %s, want completed; error=%v", run.Status, deref(run.Error))
-	}
+	run := waitForStepStatus(t, h, "test-agent-staged-new-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-staged-new-test-file run")
-	}
-	if testStep.Status != types.StepStatusCompleted {
-		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
 	if testStep.FindingsJSON == nil {
 		t.Fatal("expected test step to record findings JSON for staged new test file")
@@ -1849,17 +1850,58 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one staged new test file finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Severity != "info" {
-		t.Fatalf("staged new test file finding severity = %q, want info", item.Severity)
+	if item.Severity != "warning" {
+		t.Fatalf("staged new test file finding severity = %q, want warning", item.Severity)
 	}
-	if item.Action != types.ActionNoOp {
-		t.Fatalf("staged new test file finding action = %q, want no-op", item.Action)
+	if item.Action != types.ActionAskUser {
+		t.Fatalf("staged new test file finding action = %q, want ask-user", item.Action)
 	}
 	if item.File != "agent_staged_test.go" {
 		t.Fatalf("staged new test file finding file = %q, want agent_staged_test.go", item.File)
 	}
 	if !strings.Contains(item.Description, "new test file written by agent: agent_staged_test.go") {
 		t.Fatalf("staged new test file finding description = %q", item.Description)
+	}
+	h.Respond(run.ID, types.StepTest, types.ActionAbort)
+	completed := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("test-agent-staged-new-test-file run status after abort = %s, want failed", completed.Status)
+	}
+}
+
+func assertTestAgentModifiedTestFileRun(t *testing.T, h *Harness) {
+	t.Helper()
+	h.CommitChange("test-agent-modified-test-file", "existing_test.py", "def test_existing():\n    assert False\n", "add existing test")
+	h.PushToGate("test-agent-modified-test-file")
+	run := waitForStepStatus(t, h, "test-agent-modified-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	testStep, ok := findStep(run.Steps, types.StepTest)
+	if !ok {
+		t.Fatal("expected test step in test-agent-modified-test-file run")
+	}
+	if testStep.FindingsJSON == nil {
+		t.Fatal("expected test step to record findings JSON for modified test file")
+	}
+	findings, err := types.ParseFindingsJSON(*testStep.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse modified test file findings: %v", err)
+	}
+	if len(findings.Items) != 1 {
+		t.Fatalf("expected one modified test file finding, got %+v", findings.Items)
+	}
+	item := findings.Items[0]
+	if item.Severity != "warning" || item.Action != types.ActionAskUser {
+		t.Fatalf("modified test file finding = severity %q action %q, want warning/ask-user", item.Severity, item.Action)
+	}
+	if item.File != "existing_test.py" {
+		t.Fatalf("modified test file finding path = %q, want existing_test.py", item.File)
+	}
+	if !strings.Contains(item.Description, "existing test file modified by agent: existing_test.py") {
+		t.Fatalf("modified test file finding description = %q", item.Description)
+	}
+	h.Respond(run.ID, types.StepTest, types.ActionAbort)
+	completed := h.WaitForRun("test-agent-modified-test-file", 60*time.Second)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("test-agent-modified-test-file run status after abort = %s, want failed", completed.Status)
 	}
 }
 

@@ -2,11 +2,25 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
+
+type testFileChangeKind string
+
+const (
+	testFileCreated  testFileChangeKind = "created"
+	testFileModified testFileChangeKind = "modified"
+)
+
+type testFileChange struct {
+	Path string
+	Kind testFileChangeKind
+}
 
 // isTestFile returns true if the file path matches common test file naming patterns.
 func isTestFile(path string) bool {
@@ -47,29 +61,88 @@ func isTestFile(path string) bool {
 	return false
 }
 
-// detectNewTestFiles returns paths of new (untracked or staged-new) files that
-// match common test file naming patterns. Uses git status --porcelain.
-func detectNewTestFiles(ctx context.Context, dir string) []string {
-	out, err := git.Run(ctx, dir, "status", "--porcelain")
-	if err != nil || out == "" {
-		return nil
+// detectTestFileChanges returns test files created or modified in the working
+// tree. NUL-delimited output preserves paths containing whitespace.
+func detectTestFileChanges(ctx context.Context, dir string) ([]testFileChange, error) {
+	changes := make(map[string]testFileChangeKind)
+
+	untracked, err := git.Run(ctx, dir, "ls-files", "--others", "--exclude-standard", "-z", "-t")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked test files: %w", err)
 	}
-	var testFiles []string
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 4 {
+	for _, record := range splitNullRecords(untracked) {
+		if len(record) < 2 || !isTestFile(record[2:]) {
 			continue
 		}
-		// Porcelain format: XY <path> where XY is a 2-char status code + space
-		status := line[:2]
-		path := strings.TrimSpace(line[3:])
-		// New files: untracked (??) or staged add (A ) or staged add with modifications (AM)
-		if status == "??" || status[0] == 'A' {
-			if isTestFile(path) {
-				testFiles = append(testFiles, path)
+		changes[record[2:]] = testFileCreated
+	}
+
+	for _, args := range [][]string{
+		{"diff", "--cached", "--name-status", "-z", "--diff-filter=AM"},
+		{"diff", "--name-status", "-z", "--diff-filter=AM"},
+	} {
+		out, err := git.Run(ctx, dir, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list changed test files: %w", err)
+		}
+		records := splitNullRecords(out)
+		for i := 0; i+1 < len(records); i += 2 {
+			status, path := records[i], records[i+1]
+			if !isTestFile(path) {
+				continue
+			}
+			if status == "A" {
+				changes[path] = testFileCreated
+				continue
+			}
+			if _, created := changes[path]; !created && status == "M" {
+				changes[path] = testFileModified
 			}
 		}
 	}
-	return testFiles
+
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	result := make([]testFileChange, 0, len(paths))
+	for _, path := range paths {
+		result = append(result, testFileChange{Path: path, Kind: changes[path]})
+	}
+	return result, nil
+}
+
+func splitNullRecords(out string) []string {
+	if out == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+}
+
+func mergeTestFileChanges(groups ...[]testFileChange) []testFileChange {
+	changes := make(map[string]testFileChangeKind)
+	for _, group := range groups {
+		for _, change := range group {
+			if changes[change.Path] == testFileCreated {
+				continue
+			}
+			changes[change.Path] = change.Kind
+		}
+	}
+
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	result := make([]testFileChange, 0, len(paths))
+	for _, path := range paths {
+		result = append(result, testFileChange{Path: path, Kind: changes[path]})
+	}
+	return result
 }
 
 // matchIgnorePattern checks if a file path matches an ignore pattern.
