@@ -21,6 +21,7 @@ var (
 	daemonRun         = daemon.Run
 	daemonStartFn     = daemon.Start
 	daemonStopFn      = daemon.Stop
+	daemonRestartStop = daemon.StopForRestart
 	daemonIsRunningFn = daemon.IsRunning
 )
 
@@ -352,7 +353,7 @@ func newDaemonRestartCmd() *cobra.Command {
 				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force); err != nil {
 					return err
 				}
-				if err := daemonStopFn(p); err != nil {
+				if err := daemonRestartStop(p); err != nil {
 					return fmt.Errorf("stop daemon: %w", err)
 				}
 				if err := daemonStartFn(p); err != nil {

@@ -939,58 +939,53 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}
 }
 
-// TestWaitForDaemonStopWaitsForProcessExitBeforeReturning pins the restart lock
-// race fix: after the IPC socket closes, the stopping daemon still holds the
-// singleton lock through its deferred cleanup, so waitForDaemonStop must not
-// return until the process has actually exited. Returning on health-down alone
-// lets a restart launch a new daemon that loses the lock race and exits before
-// readiness.
-func TestWaitForDaemonStopWaitsForProcessExitBeforeReturning(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "dtest")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
+func TestStopForRestartWaitsForSingletonLockRelease(t *testing.T) {
+	tmpDir := t.TempDir()
 	p := paths.WithRoot(tmpDir)
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
-	const pid = 424243
-	startedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
-	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: pid, StartedAt: startedAt})
+
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		t.Fatalf("acquire singleton lock: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		lock.Release()
+		close(released)
+	}()
+	t.Cleanup(func() { <-released })
+
+	started := time.Now()
+	if err := StopForRestart(p); err != nil {
+		t.Fatalf("StopForRestart = %v, want nil", err)
+	}
+	if elapsed := time.Since(started); elapsed < 50*time.Millisecond {
+		t.Fatalf("StopForRestart returned before singleton lock release after %v", elapsed)
+	}
+}
+
+func TestWaitForDaemonStopReturnsWhenHealthStopsBeforeProcessExit(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
-		// Socket already closed: the daemon is unwinding its deferred cleanup.
-		return false, nil
-	}
-	defer func() { daemonHealthCheck = originalHealthCheck }()
-
-	originalProcessStartTime := daemonProcessStartTime
-	daemonProcessStartTime = func(int) (time.Time, error) { return startedAt, nil }
-	defer func() { daemonProcessStartTime = originalProcessStartTime }()
+	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	t.Cleanup(func() { daemonHealthCheck = originalHealthCheck })
 
 	originalProcessRunning := daemonProcessRunning
-	runningChecks := 0
-	daemonProcessRunning = func(checkPID int) (bool, error) {
-		if checkPID != pid {
-			t.Fatalf("processRunning pid = %d, want %d", checkPID, pid)
-		}
-		runningChecks++
-		// The process still holds the lock for the first few polls, then exits.
-		return runningChecks < 3, nil
+	daemonProcessRunning = func(int) (bool, error) {
+		t.Fatal("ordinary stop inspected process exit after health endpoint closed")
+		return true, nil
 	}
-	defer func() { daemonProcessRunning = originalProcessRunning }()
+	t.Cleanup(func() { daemonProcessRunning = originalProcessRunning })
 
 	if err := waitForDaemonStop(p); err != nil {
 		t.Fatalf("waitForDaemonStop = %v, want nil", err)
-	}
-	if runningChecks < 3 {
-		t.Fatalf("waitForDaemonStop returned after %d process checks, want it to wait for exit", runningChecks)
-	}
-	if _, statErr := os.Stat(p.PIDFile()); !os.IsNotExist(statErr) {
-		t.Fatalf("expected pid file removed after stop, got err=%v", statErr)
 	}
 }
 
