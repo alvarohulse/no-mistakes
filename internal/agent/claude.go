@@ -24,9 +24,7 @@ var errNoStructuredOutput = errors.New("claude returned no structured output")
 
 const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 
-// claudeAgent spawns the claude CLI for each invocation. The prompt is piped on
-// stdin via bare -p/--print (see buildArgs and runOnce); it is never passed as
-// an argv element.
+// claudeAgent spawns the claude CLI for each invocation.
 type claudeAgent struct {
 	bin       string
 	extraArgs []string
@@ -74,13 +72,10 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	args := a.buildArgs(opts.JSONSchema, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	// The prompt travels on stdin, never as an argv element. A failing test
-	// step embeds its full captured output in the fix prompt, which routinely
-	// runs to hundreds of KB; passed as `-p <prompt>` it overflows the OS
-	// ARG_MAX and the exec fails with "argument list too long" (E2BIG), taking
-	// the pipeline step - and, historically, the daemon - down. `claude -p`
-	// (print mode) reads the prompt from stdin when no positional prompt is
-	// given, so stdin has no such length ceiling.
+	// Claude Code print mode documents text stdin as its non-interactive
+	// prompt transport. Giving os/exec an in-memory reader keeps user prompt
+	// bytes out of argv and lets Cmd own the bounded concurrent copy, including
+	// EOF, early-child-exit, cancellation, and WaitDelay cleanup paths.
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
@@ -174,10 +169,9 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // supplied their own permission mode, the default --dangerously-skip-permissions
 // is not added. A non-empty resumeID continues that session via --resume
 // (never --fork-session: the session identity must stay stable so later
-// turns keep resuming the same conversation). The prompt is deliberately absent
-// from argv: runOnce sends it on stdin so large fix prompts cannot exceed ARG_MAX.
+// turns keep resuming the same conversation).
 func (a *claudeAgent) buildArgs(schema json.RawMessage, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+12)
+	args := make([]string, 0, len(a.extraArgs)+11)
 	args = append(args, a.extraArgs...)
 	args = append(args,
 		"-p",

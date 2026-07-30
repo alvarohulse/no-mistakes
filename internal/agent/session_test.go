@@ -42,8 +42,11 @@ func TestClaudeAgent_BuildArgs_Resume(t *testing.T) {
 	if !strings.Contains(joined, "--resume sess-1234") {
 		t.Fatalf("resume args missing --resume <id>: %v", args)
 	}
-	if !strings.Contains(joined, "-p") || strings.Contains(joined, "re-review the branch") {
-		t.Fatalf("resume args must keep bare print mode and omit stdin prompt: %v", args)
+	if !strings.Contains(joined, "-p") {
+		t.Fatalf("resume args must keep print mode: %v", args)
+	}
+	if strings.Contains(joined, "re-review the branch") {
+		t.Fatalf("resume prompt must not appear in argv: %v", args)
 	}
 	if strings.Contains(joined, "--fork-session") {
 		t.Fatalf("resume must continue the same session, not fork: %v", args)
@@ -103,6 +106,9 @@ func TestCodexAgent_BuildArgs_Resume(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.HasPrefix(joined, "exec resume thread-99 ") {
 		t.Fatalf("resume args must start with exec resume <id>: %v", args)
+	}
+	if !strings.Contains(joined, "thread-99 -") {
+		t.Fatalf("resume prompt must use stdin marker: %v", args)
 	}
 	if !strings.Contains(joined, "--json") {
 		t.Fatalf("resume args must keep --json: %v", args)

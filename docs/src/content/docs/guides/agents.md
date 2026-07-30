@@ -5,11 +5,13 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is pipeline-agent-agnostic by design: the gate should mean the same thing regardless of which supported agent backend you prefer.
 It is not runner-free.
-Every validation run requires either a supported native agent binary or `acpx` configured for an ACP target.
-The default `agent: auto` setting picks the first supported native agent available on your system.
+Every validation run requires a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`.
+The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
 The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
+A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
+If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
 code review, evidence-oriented test validation, test or lint detection when you
@@ -27,7 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
-- Set explicit `commands.test` and `commands.lint` if you want deterministic baseline command execution regardless of agent choice.
+- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice; leave `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
 commands are still the strongest way to make the baseline gate predictable.
@@ -38,9 +40,9 @@ By default that directory is temporary and local to the machine; repos can opt i
 ## Supported agents
 
 | Agent | Binary | Protocol |
-|---|---|---|
-| Claude | `claude` | Subprocess per invocation, prompt on stdin, JSONL streaming |
-| Codex | `codex` | Subprocess per invocation, prompt on stdin, JSONL events |
+| --- | --- | --- |
+| Claude | `claude` | Subprocess per invocation, JSONL streaming |
+| Codex | `codex` | Subprocess per invocation, JSONL events |
 | Rovo Dev | `acli` | Persistent HTTP server, SSE streaming |
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
@@ -55,7 +57,7 @@ The daemon resolves the effective agent before creating pipeline step records, a
 This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
-|---|---:|---|
+| --- | ---: | --- |
 | Install, `init`, daemon lifecycle, `status`, `runs`, and `doctor` | Yes | Local setup and diagnostics remain available. `doctor` reports that gate validation is unavailable. |
 | Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
 | Review | No | Requires agent judgment and structured findings. |
@@ -72,7 +74,8 @@ Running the gate from Antigravity or another Gemini-based coding environment doe
 Choose one of these supported setups:
 
 1. Install any supported native agent CLI and leave `agent: auto`, or select it explicitly in `~/.no-mistakes/config.yaml`.
-2. Install `acpx`, confirm that the Gemini ACP target works locally, and configure `agent: acp:gemini`.
+2. Install both `cursor-agent` and `acpx`, then leave `agent: auto` or select `agent: cursor`.
+3. Install `acpx`, confirm that the Gemini ACP target works locally, and configure `agent: acp:gemini`.
 
 ```yaml
 # ~/.no-mistakes/config.yaml
@@ -114,7 +117,7 @@ agent: [codex, claude]
 ### Optional ACP target
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
-`agent: auto` only probes native agents and never auto-selects ACP targets.
+`agent: auto` probes native agents and first-class ACP aliases (such as `cursor`), and never auto-selects arbitrary `acp:<target>` entries.
 
 The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns the exact resolution order, fallback-list filtering and retry semantics, and the failure behavior when no entry is runnable.
 
@@ -162,15 +165,21 @@ Agents can also call `no-mistakes axi` directly:
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi status
+no-mistakes axi sync --check
+no-mistakes axi sync
+no-mistakes axi sync --recover
 no-mistakes axi respond --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
 ```
 
-When an agent makes an additional fix after a gate round has already produced fix commits - a newly surfaced finding, a reviewer or pre-merge request, or any other post-completion change - it should commit the fix on top of the existing branch and run `no-mistakes axi run --intent "..."` with the original user intent.
-Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits, including the pipeline's own `no-mistakes(review|document|lint): ...` commits.
-A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
+Before any post-pipeline local commit or fresh run, read `branch_sync`.
+Only when its structured `next_action.code` is `sync`, run `no-mistakes axi sync` first.
+When `next_action.code` is `recover_custody` - a terminal run left unpublished pipeline commits preserved in the local gate - run `no-mistakes axi sync --recover` to return custody, or `no-mistakes rerun` to resume validating the preserved head.
+When `next_action.code` is `continue_active_run`, run the reported command and keep driving the active run.
+If synchronization is blocked, process that state instead of improvising reset, stash, merge, rebase, force, or branch replacement.
+Then commit follow-up work on top so every pipeline fix commit remains in the branch.
 
 The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
@@ -181,10 +190,12 @@ The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command an
 When the daemon is running through a managed service, its `PATH` comes from your login shell environment on macOS and Linux plus common user, Homebrew, and system binary directories; on Windows it reuses the current process environment.
 If native agent discovery does not resolve the binary you expect, check `~/.no-mistakes/logs/daemon.log` and set an explicit override; [Environment the daemon sees](/no-mistakes/reference/environment/#environment-the-daemon-sees) owns the full resolution story.
 
-Three global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
+Five global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
 
-- [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default binary-name table ([`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) is the ACP equivalent).
+- [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
 - [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) - extra CLI flags per native agent for model selection, service tier, reasoning depth, or permission mode, including the reserved-flag rules and smart defaults. Keep it global-only; it reflects your local agent setup rather than repo policy.
+- [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
+- [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
 - [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
 
 ## Review session reuse
@@ -224,6 +235,7 @@ Transient API and network failures are retried up to three times with exponentia
 
 When an agent starts a run through `no-mistakes axi run --intent`, no-mistakes uses that supplied intent verbatim as authoritative acceptance criteria and skips transcript-based inference, even if `intent.enabled` is false.
 Review checks the diff against those criteria, and a change that removes required behavior or adds forbidden behavior becomes an `ask-user` finding instead of being resolved automatically.
+Optional `--pr-note` or `--pr-note-file <path>` adds trusted author text to a `## Notes` section of the generated pull request and gives the same guidance to the PR-summary agent. The flags are mutually exclusive, limited to 16 KiB, and apply only when starting a new run; do not include secrets.
 Otherwise, when `intent.enabled` is true, no-mistakes reads recent local transcripts from Claude Code, Codex, OpenCode, Rovo Dev, Pi, and the GitHub Copilot CLI during the `intent` pipeline step.
 It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
 
@@ -242,14 +254,14 @@ Use `intent.disabled_readers` to disable specific transcript sources, or set `in
 
 ## Claude
 
-Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
+Spawns a `claude` subprocess for each invocation with `--output-format stream-json`. The print-mode user prompt is sent as text on stdin rather than placed in the process arguments. By default it also adds `--dangerously-skip-permissions`, unless you already set your own Claude permission flag through `agent_args_override`. Reads JSONL events from stdout. Supports native structured output via `--json-schema`.
 For review-loop reuse, Claude starts a stream-json session and resumes it with `claude -p --resume <id>`.
 
 ## Codex
 
-Spawns a `codex` subprocess for each invocation with `exec --json`. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text, with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, then validates the result against the normalized schema.
+Spawns a `codex` subprocess for each invocation with `exec - --json`, streaming the prompt on stdin so large repair output cannot exceed the OS argument limit. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text, with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, then validates the result against the normalized schema.
 Codex model and config overrides, such as `-m gpt-5.4`, `-c service_tier="priority"`, or `-c model_reasoning_effort="low"`, belong in global `agent_args_override.codex`.
-For review-loop reuse, Codex resumes the reported thread with `codex exec resume <id> <prompt>`.
+For review-loop reuse, Codex resumes the reported thread with `codex exec resume <id> -`, again reading the prompt from stdin.
 That resume command has a narrower flag surface than `codex exec`, so a resume that rejects an override falls back to a fresh same-role session rather than skipping the review turn.
 
 ## Rovo Dev
@@ -263,7 +275,7 @@ Starts a persistent HTTP server (`opencode serve`) on first use and reuses it ac
 ## Pi
 
 Spawns a `pi` subprocess for each invocation with `--mode json --no-session`.
-Any `agent_args_override.pi` flags are inserted before no-mistakes' managed flags.
+See [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) for Pi override precedence.
 Reads JSONL events from stdout and streams incremental text deltas to the TUI.
 When structured output is requested, no-mistakes injects the JSON schema into the prompt and validates the final text response.
 
@@ -282,31 +294,15 @@ ACP aliases are first-class agent names that resolve to ACP targets.
 `agent: acp:cursor` uses that same default command, so either spelling works without an `acp_registry_overrides.cursor` entry.
 
 Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
-Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their required binaries are present.
-For `cursor`, `auto` requires both `cursor-agent` and `acpx`; if either is missing, `auto` skips the alias and `no-mistakes doctor` reports it as not found.
-
-Override an alias command with the matching target key in `acp_registry_overrides`.
-For example, this keeps the `agent: cursor` shortcut while pointing it at a custom command:
-
-```yaml
-agent: cursor
-acp_registry_overrides:
-  cursor: /opt/cursor/cursor-agent acp --profile work
-```
+Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their availability checks pass.
+The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP availability, bridge-path, command-override, and equivalent-spelling deduplication rules.
 
 ## ACP via acpx
 
 ACP support is optional and requires a separately installed `acpx` binary.
 Use `agent: acp:<target>` to run a target known to acpx, for example `agent: acp:gemini`.
 When the target matches a first-class alias such as `acp:cursor`, no-mistakes supplies that alias' default raw command.
-
-For custom ACP target commands, define a global override:
-
-```yaml
-agent: acp:local-gemini
-acp_registry_overrides:
-  local-gemini: node /opt/mock-acp-agent.mjs
-```
+Configure custom target commands in the [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides).
 
 Spawns an `acpx` subprocess for each invocation with `exec -f <prompt-file>`. The prompt (including any appended JSON schema for structured output) is written to a temporary file first so large prompts do not exceed OS command-line length limits, notably the 8191-character cap on Windows. The temp file is removed when the invocation exits. no-mistakes also passes JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
 Structured output is handled by appending the requested JSON schema to the prompt file and validating the final assistant text.
@@ -329,12 +325,12 @@ $ no-mistakes doctor
   – pi (not found)
   – copilot (not found)
   – acpx (not found)
+  – cursor (not found (cursor-agent, acpx))
   ✓ gate validation claude is runnable
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
+The standalone `acpx` and `cursor` rows inspect the default binary names.
 The `gate validation` line is the decisive result: when the configured global runner is unavailable, doctor fails because a complete gate cannot validate without it.
-
-For `agent: acp:<target>`, doctor verifies that `acpx` is installed on `PATH` or resolves through `acpx_path` in global config.
-It does not invoke the target or test its credentials.
+See the [Global Config Reference](/no-mistakes/reference/global-config/) for ACP availability and probing behavior.
 Every new validation run resolves its effective agent again after applying any trusted repository-level override.

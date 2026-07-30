@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -25,6 +26,40 @@ func TestOpenAndClose(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyRequiresExistingDBAndDoesNotMigrate(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.sqlite")
+	if _, err := OpenReadOnly(missing); !os.IsNotExist(err) {
+		t.Fatalf("OpenReadOnly missing error = %v, want not-exist", err)
+	}
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close writable db: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readonly, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer readonly.Close()
+	if _, err := readonly.GetRepos(); err != nil {
+		t.Fatalf("read repos: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("read-only open changed DB size from %d to %d", before.Size(), after.Size())
+	}
+}
+
 func TestOpenCreatesSchema(t *testing.T) {
 	d := openTestDB(t)
 	// verify tables exist by querying them
@@ -41,10 +76,57 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
+	for _, column := range []string{"submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+		if !hasColumn(t, d, "runs", column) {
+			t.Fatalf("runs.%s column missing from fresh schema", column)
+		}
+	}
+	if !hasColumn(t, d, "step_rounds", "reviewed_head_sha") {
+		t.Fatal("step_rounds.reviewed_head_sha column missing from fresh schema")
+	}
 	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
+	}
+}
+
+func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+		CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL, head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', pr_url TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+		INSERT INTO repos VALUES ('repo-1', '/work/repo', 'https://example.com/repo.git', 'main', 1);
+		INSERT INTO runs VALUES ('run-1', 'repo-1', 'feature', 'mutable-head', 'base', 'completed', NULL, NULL, 1, 1);
+	`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	run, err := d.GetRun("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.HeadSHA != "mutable-head" {
+		t.Fatalf("migrated run = %#v", run)
+	}
+	if run.SubmittedHeadSHA != nil || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushTargetFingerprint != nil {
+		t.Fatalf("legacy provenance or review authority was inferred from mutable head: %#v", run)
+	}
+	if run.CustodyReturnedAt != nil {
+		t.Fatalf("legacy run gained a custody-return stamp: %#v", run)
 	}
 }
 
@@ -110,7 +192,7 @@ func TestOpenMigratesExistingStepRoundsColumns(t *testing.T) {
 		t.Fatalf("iterate table_info: %v", err)
 	}
 
-	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary"} {
+	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha"} {
 		if !columns[name] {
 			t.Fatalf("expected migrated column %q to exist", name)
 		}

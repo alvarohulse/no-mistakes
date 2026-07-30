@@ -109,6 +109,7 @@ Previous review findings to address:
 		}
 		fixSummary = summary
 	}
+	reviewTargetSHA := sctx.Run.HeadSHA
 
 	// Check whether there are any reviewable changed files after applying ignore patterns.
 	var args []string
@@ -148,10 +149,10 @@ Previous review findings to address:
 			RiskRationale: "no reviewable changes",
 		}
 		findingsJSON, _ := json.Marshal(noChangeFindings)
-		return &pipeline.StepOutcome{
+		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 			Findings:   string(findingsJSON),
 			FixSummary: fixSummary,
-		}, nil
+		})
 	}
 
 	// Ask agent to review
@@ -164,11 +165,17 @@ Previous review findings to address:
 	// prompt unchanged. This is what makes a fixer round that removed a
 	// required behavior park instead of silently completing.
 	//
+	// Review is always pre-push (StepReview.Order < StepPush/PR/CI). The phase
+	// clause and the post-parse strip below keep pipeline-owned delivery
+	// outcomes (remote branch, PR, CI for this run) out of source-review
+	// findings; later steps own those. External / pre-existing lifecycle
+	// requirements stay in scope.
+	//
 	// TODO(intent-conformance-C, HELD): add the deterministic, zero-LLM
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx)
+	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause()
 
 	prompt := fmt.Sprintf(
 		`Review the code changes and return structured findings with a risk assessment.
@@ -184,6 +191,11 @@ Context:
 Task:
 - Read the relevant history and diff yourself.
 - Focus findings on risks introduced by changed code, but inspect surrounding code, call sites, shared helpers, tests, and invariants when needed to understand root cause.
+- Determine from the stated intent and relevant evidence whether a bug-fix change claims a durable fix or explicitly authorized short-term containment.
+- For a claimed durable fix, reconstruct the concrete failing sequence and required invariant, inspect relevant sibling paths and shared state transitions, and ask whether the same authorized failure remains reachable.
+- When source evidence proves the failure remains reachable, report the concrete path and recommend the earliest supported shared boundary that would make the invariant hold, rather than duplicating another symptom patch.
+- Do not infer a systemic flaw from code shape, duplication, or architectural preference alone. Do not demand a shared abstraction or broad redesign without a concrete reachable path, violated invariant, or immediately competing semantic owner.
+- Do not block explicitly authorized honest containment merely because a later durable fix is possible. Do not expand user scope or turn optional broader improvements into blockers.
 - Do NOT run tests during review. The pipeline has a dedicated test step after review.
 - Analyze for bugs, risks, and code simplification opportunities.
 - "Simplification" means reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). It does NOT mean removing features, changing product behavior, or stripping intentional user-facing output.
@@ -201,12 +213,18 @@ Rules:
   - "ask-user": the finding is about functional requirements or product behavior, or otherwise challenges the author's deliberate intent. Even if it seems obviously wrong, we should ask the user for review. Examples: "this feature seems unnecessary", "this hardcoded value should be configurable", "this deletion looks wrong". When in doubt, default to "ask-user".
   - "auto-fix": the finding is a non-functional, non user-visible issue (correctness, error handling, security, performance, mechanical code quality) that can be safely fixed without any discussion about the author's intent.
   - "no-op": the finding is informational and does not require any action (e.g. noting a pattern, acknowledging a tradeoff).
+- For each finding, set review_scope to exactly one of:
+  - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
+  - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
+  - "external-delivery": a pre-existing or external PR, third-party artifact, or other lifecycle requirement not owned by this run.
 
 Risk assessment (after listing all findings):
+- Assess source code, source-verifiable criteria, and enforceable external lifecycle requirements normally, while excluding findings scoped "pipeline-owned-delivery" from risk.
 - Set risk_level to "low" if the change is well-bounded, mostly cosmetic, or straightforward with little ambiguity.
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
-- Provide a one-sentence risk_rationale explaining why you chose that risk level.%s`,
+- Provide a one-sentence risk_rationale explaining why you chose that risk level.
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s`,
 		branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -242,15 +260,33 @@ Risk assessment (after listing all findings):
 		}
 	}
 
+	// Phase ownership boundary: drop findings that only claim later pipeline-
+	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
+	// guidance alone is not enough - models still emit these under
+	// authoritative intent criteria like "Open PR A unmerged".
+	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(findings); n > 0 {
+		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
+		findings = stripped
+	}
+
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
 
-	return &pipeline.StepOutcome{
+	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
 		NeedsApproval: needsApproval,
 		AutoFixable:   len(findings.Items) > 0,
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
-	}, nil
+	})
+}
+
+// approvedReviewOutcome captures the immutable commit examined by this full
+// review round. The executor persists it only if this outcome ultimately
+// completes the review step, so parked, failed, skipped, and superseded rounds
+// cannot gain or advance approval authority.
+func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+	outcome.ReviewApprovedHeadSHA = reviewTargetSHA
+	return outcome, nil
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {
@@ -265,10 +301,12 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].Description = sanitizePromptMultilineText(findings.Items[i].Description)
 		findings.Items[i].Source = sanitizePromptText(findings.Items[i].Source)
 		findings.Items[i].UserInstructions = sanitizePromptMultilineText(findings.Items[i].UserInstructions)
+		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 	}
 	findings.Summary = sanitizePromptMultilineText(findings.Summary)
 	findings.RiskLevel = sanitizePromptText(findings.RiskLevel)
 	findings.RiskRationale = sanitizePromptMultilineText(findings.RiskRationale)
+	findings.RiskScope = sanitizePromptText(findings.RiskScope)
 	encoded, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return sanitizePromptMultilineText(raw)

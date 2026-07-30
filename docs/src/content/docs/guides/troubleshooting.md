@@ -85,7 +85,14 @@ Symptom: `update` refuses because active pipeline runs are in progress, prompts 
 
 `update`, `daemon stop`, and `daemon restart` all refuse by default while pipeline runs are active and list the affected runs; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the guard's exact rules, including why `-y`/`--yes` does not bypass it.
 
-Fix, once you have confirmed it is fine for the listed active runs to fail:
+First inspect each listed run with `no-mistakes axi status --run <id>`.
+A parked CI gate can clear itself after its PR becomes terminal, including after a daemon restart.
+The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns the exact fail-closed reconciliation rules, and [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns restart behavior.
+
+After upgrading from an older release, starting the daemon automatically completes stale active rows that already have a persisted merged or closed PR state.
+Do not edit `state.sqlite` directly.
+
+Only when you have confirmed it is acceptable for every remaining listed active run to fail, force the lifecycle operation:
 
 ```sh
 no-mistakes daemon stop --force
@@ -110,10 +117,13 @@ agent_path_override:
   claude: /Users/you/.local/bin/claude
 ```
 
-For `agent: acp:<target>` and ACP aliases such as `agent: cursor`, set `acpx_path` instead:
+For `agent: acp:<target>` and ACP aliases such as `agent: cursor`, set `acpx_path` for the bridge.
+If the raw target command is also outside `PATH`, set its target key in `acp_registry_overrides`; `agent_path_override` applies only to native agents:
 
 ```yaml
 acpx_path: /Users/you/.local/bin/acpx
+acp_registry_overrides:
+  cursor: /Users/you/.local/bin/cursor-agent acp
 ```
 
 For Antigravity or Gemini-based driving agents, install a supported native agent CLI separately or configure a working ACP target such as `agent: acp:gemini` with `acpx` installed.
@@ -181,19 +191,19 @@ If it's missing, run `no-mistakes init` again.
 Re-running init refreshes an existing gate and repairs the `no-mistakes` remote when it is missing.
 It also reattaches an existing gate after you rename or move the repo directory, as long as the old path no longer exists.
 
-### Check the hook
+### Check the receive hooks
 
-The gate's bare repo has a `post-receive` hook that notifies the daemon. Look at the gate path:
+The gate's bare repo has a `pre-receive` hook that authorizes ref updates before mutation and a `post-receive` hook that notifies the daemon after an admitted push. Look at the gate path:
 
 ```sh
 no-mistakes status
 # gate path is shown in the output
 
-ls -la <gate-path>/hooks/post-receive
+ls -la <gate-path>/hooks/pre-receive <gate-path>/hooks/post-receive
 ```
 
-The hook should be executable. If it's missing or non-executable, `no-mistakes init` will reinstall it for an existing no-mistakes-managed gate.
-For existing gate repos, `no-mistakes daemon restart` also installs missing no-mistakes-managed hooks and refreshes legacy managed hooks without overwriting custom hooks.
+Both hooks should be executable. If either is missing or non-executable, `no-mistakes init` will reinstall it for an existing no-mistakes-managed gate.
+For validated registered gates and strictly named legacy gates, `no-mistakes daemon restart` also installs missing no-mistakes-managed hooks and refreshes legacy managed hooks. An existing custom pre-receive hook is preserved behind the managed admission wrapper.
 Current managed hooks resolve the gate as an absolute bare-repo path before notifying the daemon, so a shell with a bad `PWD` value cannot accidentally report the gate as `.`.
 If `notify-push.log` mentions `invalid gate path: .`, refresh the managed hook with `no-mistakes init` or `no-mistakes daemon restart`, then push again.
 
@@ -201,10 +211,10 @@ Also check `<gate-path>/notify-push.log`. The hook now appends daemon notificati
 
 ### Check the daemon socket
 
-The hook talks to the daemon over `~/.no-mistakes/socket`. If the daemon isn't running, the push still succeeds (the hook never blocks), but no pipeline starts. Start the daemon and push again.
+Both receive hooks talk to the daemon over `~/.no-mistakes/socket`. If the daemon is not running, pre-receive admission fails closed and the push is rejected before any gate ref changes. Start the daemon and push again.
 
-If the gate is older, re-running `no-mistakes init` or restarting the daemon also reapplies hook-path isolation for existing bare repos when Git supports `config --worktree`.
-That protects the gate hook if a tool such as Husky wrote `core.hookspath` into shared git config from inside a linked worktree.
+If the gate is older, re-running `no-mistakes init` or restarting the daemon also reapplies hook-path isolation when Git supports `config --worktree`.
+That protects the gate hook if a tool such as Husky wrote `core.hookspath` into shared git config from inside a linked worktree. [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns the gate validation and migration rules used during restart.
 
 ## PR step is skipped
 

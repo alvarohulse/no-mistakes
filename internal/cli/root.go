@@ -58,8 +58,9 @@ func newRootCmd() *cobra.Command {
 		Use:     "no-mistakes",
 		Short:   "Local Git proxy that validates code before pushing to the configured target",
 		Version: buildinfo.String(),
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			setColorProfileForOutput(cmd.OutOrStdout())
+			return guardGateControl(cmd)
 		},
 		// Silence cobra's default error/usage printing — we handle it ourselves.
 		SilenceErrors: true,
@@ -89,6 +90,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newAttachCmd())
 	cmd.AddCommand(newRerunCmd())
 	cmd.AddCommand(newStatusCmd())
+	cmd.AddCommand(newSyncCmd())
 	cmd.AddCommand(newRunsCmd())
 	cmd.AddCommand(newStatsCmd())
 	cmd.AddCommand(newDoctorCmd())

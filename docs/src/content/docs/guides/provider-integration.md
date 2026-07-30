@@ -170,8 +170,9 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
 
 - PR creation and update (`az repos pr create` / `update`); Azure DevOps caps
   PR descriptions at 4000 characters, so the pipeline builds the body within
-  that budget - shedding the Testing section first when needed, then applying
-  a final truncation backstop with a visible marker
+  that budget and applies a final truncation backstop with a visible marker.
+  See the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) for
+  section ownership and truncation behavior.
 - CI status polling - Azure branch policy evaluations (build validation and
   status checks) are read via `az repos pr policy list` until the PR is
   completed, abandoned, or the configured `ci_timeout` idle window elapses
@@ -204,6 +205,12 @@ When the hostname is not obviously GitLab, `no-mistakes` consults glab's configu
 Running `glab auth login --hostname your-gitlab.example.com` is enough to make detection succeed; if glab is not configured for the host, detection fails closed and the upstream is treated as unsupported.
 
 The GitLab backend is pinned against `glab v1.5x`. Self-hosted detection and the merge-request and CI steps rely on its current flag and API surface, so keep `glab` reasonably up to date.
+
+## SSH host aliases
+
+SSH remotes that use a host alias from your SSH configuration (for example `git@github-personal:owner/repo` or `git@gitlab-work:group/repo`, where `github-personal`/`gitlab-work` map to a real `HostName` via `~/.ssh/config`) are supported. `no-mistakes` resolves the alias through `ssh -G` to its real host name and uses that host only for provider detection and for scoping the provider CLI (`gh`/`glab`) to the right instance. The original Git remote URL is left untouched, so authentication and pushes continue to use the alias exactly as your SSH configuration expects.
+
+If `ssh -G` is unavailable or the alias does not resolve, detection falls back to the literal host in the remote URL rather than failing the run.
 
 ## Unsupported hosts
 

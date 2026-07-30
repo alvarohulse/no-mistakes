@@ -2,12 +2,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
@@ -39,8 +42,8 @@ type StepContext struct {
 	// acceptance criteria); an agent name ("claude", "codex", ...) means it
 	// was inferred from a transcript (a hint). Empty when no intent exists.
 	IntentSource string
-	// PRNote is optional trusted author content rendered verbatim in the PR body
-	// and supplied to the PR summary without intent sanitization.
+	// PRNote is optional author-supplied content that the PR step renders
+	// verbatim and supplies to the summary prompt as trusted guidance.
 	PRNote string
 	// Sessions manages the run's durable review-loop agent sessions
 	// (reviewer and fixer roles). nil runs every invocation cold.
@@ -75,6 +78,10 @@ type StepOutcome struct {
 	// mode so the executor can persist it on the round record and later
 	// rounds can reference what was previously attempted.
 	FixSummary string
+	// ReviewApprovedHeadSHA is set only by a successfully executed full review
+	// round. The executor durably records it only when the review step actually
+	// completes, never while that outcome is parked or after a failed round.
+	ReviewApprovedHeadSHA string
 
 	// DurationOverrideMS, when positive, replaces the wall-clock duration
 	// reported for this step. Used by demo mode to show realistic durations
@@ -91,4 +98,13 @@ type Step interface {
 	// A step that returns NeedsApproval=true will pause the pipeline
 	// until the user responds with an approval action.
 	Execute(sctx *StepContext) (*StepOutcome, error)
+}
+
+// ApprovalGateReconciler is implemented by a step whose parked approval gate
+// can become obsolete when an external source of truth changes. The executor
+// invokes it with a bounded context while also waiting for an approval. A true
+// result completes the step through the normal success path; false or an error
+// leaves the gate parked. Implementations must be read-only and fail closed.
+type ApprovalGateReconciler interface {
+	ReconcileApprovalGate(sctx *StepContext) (resolved bool, err error)
 }

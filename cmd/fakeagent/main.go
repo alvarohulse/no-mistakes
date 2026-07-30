@@ -37,7 +37,7 @@ func run(argv []string) int {
 
 	switch name {
 	case "claude":
-		return runClaude(args, scenario)
+		return runClaude(args, os.Stdin, scenario)
 	case "codex":
 		return runCodex(args, scenario)
 	case "opencode":
@@ -76,16 +76,7 @@ type ghStubInvocation struct {
 }
 
 func runGhForkPRStub(args []string) int {
-	body := ""
-	if hasArgValue(args, "--body-file", "-") {
-		data, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "fakeagent gh fork-pr: read body: %v\n", err)
-			return 1
-		}
-		body = string(data)
-	}
-	recordGhStubInvocation(args, body)
+	recordGhStubInvocation(args)
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		return 0
@@ -129,7 +120,7 @@ func runGhForkPRStub(args []string) int {
 	return 1
 }
 
-func recordGhStubInvocation(args []string, body string) {
+func recordGhStubInvocation(args []string) {
 	logPath := os.Getenv("FAKEAGENT_GH_LOG")
 	if logPath == "" {
 		return
@@ -146,7 +137,10 @@ func recordGhStubInvocation(args []string, body string) {
 		Repo: argAfter(args, "--repo"),
 		Head: argAfter(args, "--head"),
 		Base: argAfter(args, "--base"),
-		Body: body,
+	}
+	if hasArgValue(args, "--body-file", "-") {
+		body, _ := io.ReadAll(os.Stdin)
+		inv.Body = string(body)
 	}
 	_ = json.NewEncoder(f).Encode(inv)
 }

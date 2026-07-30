@@ -17,9 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-// codexAgent spawns the codex CLI for each invocation. The prompt is piped on
-// stdin via the "-" positional (see buildArgs and runOnce); it is never passed
-// as an argv element.
+// codexAgent spawns the codex CLI for each invocation.
 type codexAgent struct {
 	bin       string
 	extraArgs []string
@@ -32,7 +30,7 @@ func (a *codexAgent) Name() string { return "codex" }
 
 // SupportsSessionResume reports codex's native durable-session capability:
 // `codex exec --json` emits thread.started with a thread_id, and
-// `codex exec resume <id> <prompt>` continues that thread.
+// `codex exec resume <id> -` continues that thread with a prompt on stdin.
 func (a *codexAgent) SupportsSessionResume() bool { return true }
 
 func (a *codexAgent) ReportsAgentAttempts() bool { return true }
@@ -94,12 +92,6 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	args := a.buildArgs(schemaPath, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	// The prompt travels on stdin, never as an argv element. A failing test
-	// step embeds its full captured output in the fix prompt, which routinely
-	// runs to hundreds of KB; passed as an `exec <prompt>` positional it
-	// overflows the OS ARG_MAX and the exec fails with "argument list too long"
-	// (E2BIG), taking the pipeline step down. `codex exec -` reads the prompt
-	// from stdin, so stdin has no such length ceiling.
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
@@ -167,10 +159,9 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 func (a *codexAgent) Close() error { return nil }
 
 // buildArgs constructs the codex CLI arguments. User-supplied extraArgs are
-// inserted after "exec" (or "exec resume") so user flags take effect. The
-// prompt is delivered on stdin and represented by the managed "-" positional,
-// avoiding ARG_MAX/E2BIG for large fix prompts. If the user declared their own
-// execution-mode flag, the default bypass is not added.
+// inserted after "exec" so user flags (e.g. -m, --sandbox)
+// take effect. If the user declared their own execution-mode flag, the
+// default --dangerously-bypass-approvals-and-sandbox is not added.
 // A non-empty resumeID routes through `codex exec resume <id> -`,
 // which exposes a narrower flag surface than `codex exec` (no --color, no
 // -s/--sandbox as of codex 0.144): unsupported user extraArgs make the
@@ -202,7 +193,7 @@ func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	// (AGENTS.md) plus project execpolicy `.rules`; codex config itself is
 	// user-level ($CODEX_HOME), not project. Both knobs are global overrides
 	// accepted by `codex exec` AND `codex exec resume`, appended last so they
-	// never disturb codex's `[resume] <id> <prompt>` positionals:
+	// never disturb codex's `[resume] <id> -` positionals:
 	//   - `-c project_doc_max_bytes=0` makes codex read zero bytes of AGENTS.md
 	//     (the identity-bearing surface). Skipped only when the operator pinned
 	//     their own project_doc_max_bytes (their choice wins; NeutralizesGate-
