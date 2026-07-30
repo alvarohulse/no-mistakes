@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -65,7 +66,13 @@ type GlobalConfig struct {
 	AutoFix      AutoFixRaw
 	Commit       CommitRaw
 	Intent       IntentRaw
+	Rebase       StepAgentRaw
+	Review       StepAgentRaw
 	Test         TestRaw
+	Document     DocumentRaw
+	Lint         StepAgentRaw
+	PR           StepAgentRaw
+	CI           StepAgentRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -84,7 +91,13 @@ type globalConfigRaw struct {
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
 	Commit               CommitRaw           `yaml:"commit"`
 	Intent               IntentRaw           `yaml:"intent"`
+	Rebase               StepAgentRaw        `yaml:"rebase"`
+	Review               StepAgentRaw        `yaml:"review"`
 	Test                 TestRaw             `yaml:"test"`
+	Document             DocumentRaw         `yaml:"document"`
+	Lint                 StepAgentRaw        `yaml:"lint"`
+	PR                   StepAgentRaw        `yaml:"pr"`
+	CI                   StepAgentRaw        `yaml:"ci"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -94,22 +107,27 @@ type RepoConfig struct {
 	Commands       Commands          `yaml:"commands"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format} and agent) from a contributor's
+	// fields (commands.{test,lint,format}, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Commit            CommitRaw  `yaml:"commit"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Test              TestRaw    `yaml:"test"`
+	AllowRepoCommands bool         `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
+	Commit            CommitRaw    `yaml:"commit"`
+	Intent            IntentRaw    `yaml:"intent"`
+	Rebase            StepAgentRaw `yaml:"rebase"`
+	Review            StepAgentRaw `yaml:"review"`
+	Test              TestRaw      `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
 	// steers the document step's gate prompt, so it is honored ONLY from the
 	// trusted default-branch copy of .no-mistakes.yaml (see
 	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
 	// weaken documentation rules for its own review.
-	Document DocumentRaw `yaml:"document"`
+	Document DocumentRaw  `yaml:"document"`
+	Lint     StepAgentRaw `yaml:"lint"`
+	PR       StepAgentRaw `yaml:"pr"`
+	CI       StepAgentRaw `yaml:"ci"`
 	// DisableProjectSettings opts the repository out of loading project-level
 	// agent settings/instructions (AGENTS.md/CLAUDE.md and the equivalent
 	// per-harness project settings) into gate agents. It exists for
@@ -123,26 +141,66 @@ type RepoConfig struct {
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
 }
 
+// StepAgentRaw is the YAML representation of one step's optional agent route.
+// Agent is the primary entry and Agents preserves the ordered fallback list.
+type StepAgentRaw struct {
+	Agent  types.AgentName   `yaml:"-"`
+	Agents []types.AgentName `yaml:"-"`
+}
+
+func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent agentList `yaml:"agent"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	return nil
+}
+
 // DocumentRaw is the YAML representation of document-step settings.
 type DocumentRaw struct {
+	Agent  types.AgentName   `yaml:"-"`
+	Agents []types.AgentName `yaml:"-"`
 	// Instructions augment (never replace) the built-in documentation
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
 	Instructions string `yaml:"instructions"`
 }
 
+func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent        agentList `yaml:"agent"`
+		Instructions string    `yaml:"instructions"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Instructions = raw.Instructions
+	return nil
+}
+
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList   `yaml:"agent"`
-		Commands               Commands    `yaml:"commands"`
-		IgnorePatterns         []string    `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
-		Commit                 CommitRaw   `yaml:"commit"`
-		Intent                 IntentRaw   `yaml:"intent"`
-		Test                   TestRaw     `yaml:"test"`
-		Document               DocumentRaw `yaml:"document"`
-		DisableProjectSettings bool        `yaml:"disable_project_settings"`
+		Agent                  agentList    `yaml:"agent"`
+		Commands               Commands     `yaml:"commands"`
+		IgnorePatterns         []string     `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
+		Commit                 CommitRaw    `yaml:"commit"`
+		Intent                 IntentRaw    `yaml:"intent"`
+		Rebase                 StepAgentRaw `yaml:"rebase"`
+		Review                 StepAgentRaw `yaml:"review"`
+		Test                   TestRaw      `yaml:"test"`
+		Document               DocumentRaw  `yaml:"document"`
+		Lint                   StepAgentRaw `yaml:"lint"`
+		PR                     StepAgentRaw `yaml:"pr"`
+		CI                     StepAgentRaw `yaml:"ci"`
+		DisableProjectSettings bool         `yaml:"disable_project_settings"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -156,8 +214,13 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Commit = raw.Commit
 	c.Intent = raw.Intent
+	c.Rebase = raw.Rebase
+	c.Review = raw.Review
 	c.Test = raw.Test
 	c.Document = raw.Document
+	c.Lint = raw.Lint
+	c.PR = raw.PR
+	c.CI = raw.CI
 	c.DisableProjectSettings = raw.DisableProjectSettings
 	return nil
 }
@@ -196,6 +259,7 @@ type AutoFix struct {
 type Config struct {
 	Agent                types.AgentName
 	Agents               []types.AgentName
+	StepAgents           map[types.StepName][]types.AgentName
 	ACPXPath             string
 	ACPRegistryOverrides map[string]string
 	AgentPathOverride    map[string]string
@@ -227,7 +291,23 @@ type Document struct {
 
 // TestRaw is the YAML representation of test-step settings.
 type TestRaw struct {
-	Evidence EvidenceRaw `yaml:"evidence"`
+	Agent    types.AgentName   `yaml:"-"`
+	Agents   []types.AgentName `yaml:"-"`
+	Evidence EvidenceRaw       `yaml:"evidence"`
+}
+
+func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent    agentList   `yaml:"agent"`
+		Evidence EvidenceRaw `yaml:"evidence"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Evidence = raw.Evidence
+	return nil
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -254,10 +334,32 @@ type Evidence struct {
 // IntentRaw is the YAML representation of user-intent extraction settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
 type IntentRaw struct {
-	Enabled         *bool    `yaml:"enabled"`
-	Threshold       *float64 `yaml:"threshold"`
-	SlackDays       *int     `yaml:"slack_days"`
-	DisabledReaders []string `yaml:"disabled_readers"`
+	Agent           types.AgentName   `yaml:"-"`
+	Agents          []types.AgentName `yaml:"-"`
+	Enabled         *bool             `yaml:"enabled"`
+	Threshold       *float64          `yaml:"threshold"`
+	SlackDays       *int              `yaml:"slack_days"`
+	DisabledReaders []string          `yaml:"disabled_readers"`
+}
+
+func (c *IntentRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent           agentList `yaml:"agent"`
+		Enabled         *bool     `yaml:"enabled"`
+		Threshold       *float64  `yaml:"threshold"`
+		SlackDays       *int      `yaml:"slack_days"`
+		DisabledReaders []string  `yaml:"disabled_readers"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Enabled = raw.Enabled
+	c.Threshold = raw.Threshold
+	c.SlackDays = raw.SlackDays
+	c.DisabledReaders = raw.DisabledReaders
+	return nil
 }
 
 // Intent is the resolved user-intent extraction config.
@@ -269,6 +371,89 @@ type Intent struct {
 }
 
 type agentList []types.AgentName
+
+// decodeKnownFields preserves yaml.Decoder.KnownFields semantics inside
+// custom UnmarshalYAML methods. yaml.Node.Decode does not inherit the parent
+// decoder's strictness, so validate the node recursively against the concrete
+// decode target before decoding it.
+func decodeKnownFields(value *yaml.Node, out any) error {
+	if err := validateKnownFields(value, reflect.TypeOf(out)); err != nil {
+		return err
+	}
+	return value.Decode(out)
+}
+
+func validateKnownFields(value *yaml.Node, target reflect.Type) error {
+	return validateKnownFieldsStack(value, target, make(map[*yaml.Node]bool))
+}
+
+func validateKnownFieldsStack(value *yaml.Node, target reflect.Type, stack map[*yaml.Node]bool) error {
+	if value == nil || target == nil {
+		return nil
+	}
+	if stack[value] {
+		return fmt.Errorf("YAML alias cycle while validating %s", target)
+	}
+	stack[value] = true
+	defer delete(stack, value)
+	if value.Kind == yaml.AliasNode {
+		return validateKnownFieldsStack(value.Alias, target, stack)
+	}
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	if target.Kind() == reflect.Slice && value.Kind == yaml.SequenceNode {
+		for _, item := range value.Content {
+			if err := validateKnownFieldsStack(item, target.Elem(), stack); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if target.Kind() != reflect.Struct || value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	fields := make(map[string]reflect.Type, target.NumField())
+	for i := 0; i < target.NumField(); i++ {
+		field := target.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fields[name] = field.Type
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		if key == "<<" {
+			merged := value.Content[i+1]
+			if merged.Kind == yaml.SequenceNode {
+				for _, item := range merged.Content {
+					if err := validateKnownFieldsStack(item, target, stack); err != nil {
+						return err
+					}
+				}
+			} else if err := validateKnownFieldsStack(merged, target, stack); err != nil {
+				return err
+			}
+			continue
+		}
+		fieldType, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("field %s not found in type %s", key, target)
+		}
+		if err := validateKnownFieldsStack(value.Content[i+1], fieldType, stack); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (a *agentList) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
@@ -315,6 +500,59 @@ func copyAgents(names []types.AgentName) []types.AgentName {
 	return out
 }
 
+func stepAgentNames(agentName types.AgentName, agents []types.AgentName) []types.AgentName {
+	if len(agents) > 0 {
+		return copyAgents(agents)
+	}
+	if agentName != "" {
+		return []types.AgentName{agentName}
+	}
+	return nil
+}
+
+func addStepAgentRoute(routes map[types.StepName][]types.AgentName, step types.StepName, agentName types.AgentName, agents []types.AgentName) {
+	if names := stepAgentNames(agentName, agents); len(names) > 0 {
+		routes[step] = names
+	}
+}
+
+// ConfiguredStepAgents returns the repo's explicitly configured per-step
+// routes. Unconfigured steps are omitted and inherit the run-wide route.
+func (c *RepoConfig) ConfiguredStepAgents() map[types.StepName][]types.AgentName {
+	routes := make(map[types.StepName][]types.AgentName)
+	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
+	addStepAgentRoute(routes, types.StepRebase, c.Rebase.Agent, c.Rebase.Agents)
+	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
+	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
+	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
+	addStepAgentRoute(routes, types.StepLint, c.Lint.Agent, c.Lint.Agents)
+	addStepAgentRoute(routes, types.StepPR, c.PR.Agent, c.PR.Agents)
+	addStepAgentRoute(routes, types.StepCI, c.CI.Agent, c.CI.Agents)
+	return routes
+}
+
+func (c *GlobalConfig) configuredStepAgents() map[types.StepName][]types.AgentName {
+	routes := make(map[types.StepName][]types.AgentName)
+	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
+	addStepAgentRoute(routes, types.StepRebase, c.Rebase.Agent, c.Rebase.Agents)
+	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
+	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
+	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
+	addStepAgentRoute(routes, types.StepLint, c.Lint.Agent, c.Lint.Agents)
+	addStepAgentRoute(routes, types.StepPR, c.PR.Agent, c.PR.Agents)
+	addStepAgentRoute(routes, types.StepCI, c.CI.Agent, c.CI.Agents)
+	return routes
+}
+
+// ConfiguredAgentsForStep returns a step's explicit route or the run-wide
+// route when the step is unconfigured.
+func (c *Config) ConfiguredAgentsForStep(step types.StepName) []types.AgentName {
+	if names := c.StepAgents[step]; len(names) > 0 {
+		return copyAgents(names)
+	}
+	return c.configuredAgents()
+}
+
 // defaultConfigYAML is the template written when no global config file exists.
 const defaultConfigYAML = `# no-mistakes global configuration
 
@@ -326,6 +564,12 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
+
+# Optional per-step routes. Each agent accepts the same scalar or ordered
+# fallback-list form as the run-wide agent. Unconfigured steps inherit it.
+# Supported sections: intent, rebase, review, test, document, lint, pr, ci.
+# review:
+#   agent: [codex, claude]
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
@@ -368,7 +612,8 @@ log_level: info
 #   claude: /usr/local/bin/claude
 #   codex: /opt/codex
 
-# Extra native agent CLI flags (optional, global only)
+# Extra native agent CLI flags (optional, global only). ACP targets and aliases
+# do not support these flags; route a step to a native agent when it needs them.
 # Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
 # agent_args_override:
 #   codex:
@@ -477,38 +722,60 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 // identity, and kept as fallbacks. The lookPath function should behave like
 // exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
-	candidates := c.configuredAgents()
-	if len(candidates) <= 1 {
-		c.Agent = firstAgent(candidates)
-		c.Agents = copyAgents(candidates)
-		if c.Agent == types.AgentAuto {
-			name, err := c.resolveAutoAgent(ctx, lookPath)
-			if err != nil {
-				return err
-			}
-			c.Agent = name
-			c.Agents = []types.AgentName{name}
-			return nil
-		}
-		name, ok, probe, err := c.resolveConfiguredAgent(ctx, c.Agent, lookPath)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return noRunnableAgentError([]types.AgentName{c.Agent}, []string{probe})
-		}
-		c.Agent = name
-		c.Agents = []types.AgentName{name}
-		return nil
-	}
-
-	resolved, err := c.resolveAgentList(ctx, candidates, lookPath)
+	resolved, err := c.resolveAgents(ctx, c.configuredAgents(), lookPath)
 	if err != nil {
 		return err
 	}
 	c.Agent = resolved[0]
 	c.Agents = resolved
+	for _, step := range []types.StepName{
+		types.StepIntent,
+		types.StepRebase,
+		types.StepReview,
+		types.StepTest,
+		types.StepDocument,
+		types.StepLint,
+		types.StepPR,
+		types.StepCI,
+	} {
+		candidates := c.StepAgents[step]
+		if len(candidates) == 0 {
+			continue
+		}
+		resolved, err := c.resolveAgents(ctx, candidates, lookPath)
+		if err != nil {
+			return fmt.Errorf("resolve %s agent route: %w", step, err)
+		}
+		c.StepAgents[step] = resolved
+	}
 	return nil
+}
+
+func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+	if len(candidates) <= 1 {
+		name := firstAgent(candidates)
+		if name == types.AgentAuto {
+			name, err := c.resolveAutoAgent(ctx, lookPath)
+			if err != nil {
+				return nil, err
+			}
+			return []types.AgentName{name}, nil
+		}
+		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, name, lookPath)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, noRunnableAgentError([]types.AgentName{name}, []string{probe})
+		}
+		return []types.AgentName{resolved}, nil
+	}
+
+	resolved, err := c.resolveAgentList(ctx, candidates, lookPath)
+	if err != nil {
+		return nil, err
+	}
+	return resolved, nil
 }
 
 func (c *Config) configuredAgents() []types.AgentName {
@@ -840,6 +1107,9 @@ var reservedAgentArgs = map[string]map[string]bool{
 func validateAgentArgsOverride(override map[string][]string) error {
 	for name, args := range override {
 		if !agentArgsOverrideAgents[name] {
+			if _, ok := types.ACPTargetFor(types.AgentName(name)); ok {
+				return fmt.Errorf("invalid agent_args_override.%s: ACP agent model/reasoning overrides are not supported; route the step to a native agent instead", name)
+			}
 			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot)", name)
 		}
 		reserved := reservedAgentArgs[name]
@@ -911,6 +1181,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	if err := validateCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if strings.TrimSpace(raw.Document.Instructions) != "" {
+		return nil, fmt.Errorf("parse global config: document.instructions is repo-only")
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -970,7 +1243,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
+	cfg.Rebase = raw.Rebase
+	cfg.Review = raw.Review
 	cfg.Test = raw.Test
+	cfg.Document = raw.Document
+	cfg.Lint = raw.Lint
+	cfg.PR = raw.PR
+	cfg.CI = raw.CI
 
 	return cfg, nil
 }
@@ -1049,8 +1328,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // given a pushed-branch copy and the trusted default-branch copy.
 //
 // The code-executing selection fields - Commands (run verbatim via sh -c on
-// the daemon host) and Agent/Agents (select which processes launch with the
-// maintainer's credentials, including fallback lists and acp: targets) - are
+// the daemon host), Agent/Agents, and every per-step agent route (select which
+// processes launch with the maintainer's credentials, including fallback lists
+// and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Document (the
 // documentation placement policy injected into the document gate prompt) is
@@ -1060,23 +1340,25 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // project-instruction boundary. When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands and
-// agent selection.
-// When there is no trusted copy and the maintainer has not opted in, both
-// fields are forced empty (Agent "" and nil Agents inherit the global agent;
-// Commands{} yields built-in defaults) rather than falling back to the pushed
-// branch - this blocks the supply-chain vector for repos that ship
-// .no-mistakes.yaml only on feature branches.
+// agent selection, including step routes.
+// When there is no trusted copy and the maintainer has not opted in, all
+// code-executing selectors are forced empty (Agent "" and nil Agents inherit
+// the global agent; empty step routes inherit that run route; Commands{} yields
+// built-in defaults) rather than falling back to the pushed branch - this blocks
+// the supply-chain vector for repos that ship .no-mistakes.yaml only on feature
+// branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
-// always taken from the pushed copy, matching prior behavior, since they cannot
-// run arbitrary shell or select a process.
+// Non-executing fields (ignore patterns, auto-fix, commit, intent settings
+// other than its agent route, and test evidence) are always taken from the
+// pushed copy, matching prior behavior, since they cannot run arbitrary shell
+// or select a process.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
 	if trusted != nil {
-		effective.Document = trusted.Document
+		effective.Document.Instructions = trusted.Document.Instructions
 		// disable_project_settings is a security boundary: honor it ONLY from the
 		// trusted default-branch copy so a pushed branch cannot turn the opt-out
 		// off (and re-enable its own AGENTS.md) or on. A nil trusted copy here
@@ -1084,7 +1366,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// separately when it could not be READ at all), so falsy is correct.
 		effective.DisableProjectSettings = trusted.DisableProjectSettings
 	} else {
-		effective.Document = DocumentRaw{}
+		effective.Document.Instructions = ""
 		effective.DisableProjectSettings = false
 	}
 	if allowRepoCommands {
@@ -1094,12 +1376,38 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Commands = trusted.Commands
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
+		effective.Intent.Agent = trusted.Intent.Agent
+		effective.Intent.Agents = copyAgents(trusted.Intent.Agents)
+		effective.Rebase = copyStepAgentRaw(trusted.Rebase)
+		effective.Review = copyStepAgentRaw(trusted.Review)
+		effective.Test.Agent = trusted.Test.Agent
+		effective.Test.Agents = copyAgents(trusted.Test.Agents)
+		effective.Document.Agent = trusted.Document.Agent
+		effective.Document.Agents = copyAgents(trusted.Document.Agents)
+		effective.Lint = copyStepAgentRaw(trusted.Lint)
+		effective.PR = copyStepAgentRaw(trusted.PR)
+		effective.CI = copyStepAgentRaw(trusted.CI)
 	} else {
 		effective.Commands = Commands{}
 		effective.Agent = ""
 		effective.Agents = nil
+		effective.Intent.Agent = ""
+		effective.Intent.Agents = nil
+		effective.Rebase = StepAgentRaw{}
+		effective.Review = StepAgentRaw{}
+		effective.Test.Agent = ""
+		effective.Test.Agents = nil
+		effective.Document.Agent = ""
+		effective.Document.Agents = nil
+		effective.Lint = StepAgentRaw{}
+		effective.PR = StepAgentRaw{}
+		effective.CI = StepAgentRaw{}
 	}
 	return &effective
+}
+
+func copyStepAgentRaw(src StepAgentRaw) StepAgentRaw {
+	return StepAgentRaw{Agent: src.Agent, Agents: copyAgents(src.Agents)}
 }
 
 // ParseLogLevel converts a log level string to slog.Level.
@@ -1255,6 +1563,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	cfg := &Config{
 		Agent:                global.Agent,
 		Agents:               copyAgents(global.Agents),
+		StepAgents:           global.configuredStepAgents(),
 		ACPXPath:             global.ACPXPath,
 		ACPRegistryOverrides: global.ACPRegistryOverrides,
 		AgentPathOverride:    global.AgentPathOverride,
@@ -1281,6 +1590,9 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		if len(cfg.Agents) == 0 {
 			cfg.Agents = []types.AgentName{repo.Agent}
 		}
+	}
+	for step, agents := range repo.ConfiguredStepAgents() {
+		cfg.StepAgents[step] = copyAgents(agents)
 	}
 
 	return cfg

@@ -45,7 +45,7 @@ type Executor struct {
 	db     *db.DB
 	paths  *paths.Paths
 	config *config.Config
-	agent  agent.Agent
+	agents AgentRoutes
 	steps  []Step
 	skips  map[types.StepName]bool
 
@@ -79,6 +79,12 @@ func (e *Executor) SetSkippedSteps(steps []types.StepName) {
 
 // NewExecutor creates a pipeline executor.
 func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.Agent, steps []Step, onEvent EventFunc) *Executor {
+	return NewExecutorWithAgentRoutes(database, p, cfg, AgentRoutes{Default: ag}, steps, onEvent)
+}
+
+// NewExecutorWithAgentRoutes creates a pipeline executor with immutable
+// per-step agent routing.
+func NewExecutorWithAgentRoutes(database *db.DB, p *paths.Paths, cfg *config.Config, agents AgentRoutes, steps []Step, onEvent EventFunc) *Executor {
 	if onEvent == nil {
 		onEvent = func(ipc.Event) {}
 	}
@@ -86,7 +92,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		db:                    database,
 		paths:                 p,
 		config:                cfg,
-		agent:                 ag,
+		agents:                agents,
 		steps:                 steps,
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
@@ -214,8 +220,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 }
 
 func (e *Executor) initializeRunScopes(runID string) {
-	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
-	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
+	reviewAgent := e.agents.AgentForStep(types.StepReview)
+	sessionsEnabled := e.config != nil && e.config.SessionReuse && reviewAgent != nil
+	e.sessions = NewRunSessions(e.db, runID, reviewAgent, sessionsEnabled)
 	e.shared = &RunShared{}
 }
 
@@ -297,7 +304,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		WorkDir:  workDir,
 		Config:   e.config,
 		DB:       e.db,
-		Agent:    e.agent,
+		Agent:    e.agents.AgentForStep(gate.step.Name()),
 		Sessions: e.sessions,
 		Shared:   e.shared,
 		Log: func(message string) {
@@ -361,7 +368,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		"action":     string(response.action),
 		"fix_review": gate.stepResult.Status == types.StepStatusFixReview,
 	}
-	if agentName := e.telemetryAgentName(); agentName != "" {
+	if agentName := e.telemetryAgentName(gate.step.Name()); agentName != "" {
 		approvalFields["agent"] = agentName
 	}
 	if selectedCount := selectedFindingCount(gate.findings, response.findingIDs); selectedCount > 0 {
@@ -673,7 +680,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	stepAgent := e.agent
+	stepAgent := e.agents.AgentForStep(stepName)
 	if stepAgent != nil {
 		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
@@ -893,7 +900,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			"action":     string(response.action),
 			"fix_review": sctx.Fixing,
 		}
-		if agentName := e.telemetryAgentName(); agentName != "" {
+		if agentName := e.telemetryAgentName(stepName); agentName != "" {
 			approvalFields["agent"] = agentName
 		}
 		if selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs); selectedCount > 0 {
@@ -1281,7 +1288,7 @@ func (e *Executor) emitStepEventWithFindingsDiffAndError(eventType ipc.EventType
 		"step":   string(stepName),
 		"status": status,
 	}
-	if agentName := e.telemetryAgentName(); agentName != "" {
+	if agentName := e.telemetryAgentName(stepName); agentName != "" {
 		fields["agent"] = agentName
 	}
 	if durationMS != nil {
@@ -1333,11 +1340,19 @@ func (e *Executor) emitLogChunk(run *db.Run, repo *db.Repo, stepName types.StepN
 	})
 }
 
-func (e *Executor) telemetryAgentName() string {
-	if e.config == nil || e.config.Agent == "" {
+func (e *Executor) telemetryAgentName(step types.StepName) string {
+	ag := e.agents.AgentForStep(step)
+	if ag != nil {
+		return ag.Name()
+	}
+	if e.config == nil {
 		return ""
 	}
-	return string(e.config.Agent)
+	names := e.config.ConfiguredAgentsForStep(step)
+	if len(names) == 0 {
+		return ""
+	}
+	return string(names[0])
 }
 
 func (e *Executor) fixTelemetryFields(source string, stepName types.StepName, selectedCount int, attempt int) telemetry.Fields {
@@ -1346,7 +1361,7 @@ func (e *Executor) fixTelemetryFields(source string, stepName types.StepName, se
 		"step":                    string(stepName),
 		"selected_findings_count": selectedCount,
 	}
-	if agentName := e.telemetryAgentName(); agentName != "" {
+	if agentName := e.telemetryAgentName(stepName); agentName != "" {
 		fields["agent"] = agentName
 	}
 	if attempt > 0 {

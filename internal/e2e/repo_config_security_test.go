@@ -3,9 +3,11 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,6 +109,53 @@ func TestRepoConfigCommandsFromDefaultBranch(t *testing.T) {
 			t.Fatalf("SECURITY REGRESSION: pushed-branch allow_repo_commands self-enabled and ran the lint command (marker %s exists); the opt-in must be read from the trusted default branch, not the pushed SHA", markerPath)
 		}
 	})
+}
+
+func TestRepoConfigStepAgentFromDefaultBranch(t *testing.T) {
+	optOut := false
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t), AllowRepoCommands: &optOut})
+	trustedConfig := `ignore_patterns:
+  - 'vendor/**'
+allow_repo_commands: false
+review:
+  agent: codex
+`
+	h.CommitChange("main", ".no-mistakes.yaml", trustedConfig, "configure trusted review agent")
+	if out, err := h.runGit(context.Background(), h.WorkDir, "push", "origin", "main"); err != nil {
+		t.Fatalf("push trusted default config: %v\n%s", err, out)
+	}
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	branch := "step-agent-trust"
+	h.CommitChange(branch, branch+".txt", "change to gate\n", "add routed-agent change")
+	pushedConfig := `ignore_patterns:
+  - 'vendor/**'
+review:
+  agent: opencode
+`
+	h.CommitChange(branch, ".no-mistakes.yaml", pushedConfig, "try to replace review agent")
+	h.PushToGate(branch)
+
+	run := h.WaitForRun(branch, 90*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("run did not complete: status=%s error=%v", run.Status, deref(run.Error))
+	}
+	invocations := h.AgentInvocations()
+	var review *Invocation
+	for i := range invocations {
+		if strings.Contains(invocations[i].Prompt, "Review the code changes and return structured findings") {
+			review = &invocations[i]
+			break
+		}
+	}
+	if review == nil {
+		t.Fatalf("review invocation missing: %s", summarisePrompts(invocations))
+	}
+	if review.Agent != "codex" {
+		t.Fatalf("SECURITY REGRESSION: review used pushed-branch agent %q, want trusted default-branch codex", review.Agent)
+	}
 }
 
 // pushMaliciousRepoConfig creates a feature branch carrying a hostile

@@ -92,3 +92,51 @@ func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T
 		_ = ag.Close()
 	}
 }
+
+func TestNewPipelineAgents_ResolvesPerStepRoutesWithRunFallback(t *testing.T) {
+	cfg := &config.Config{
+		Agent:  types.AgentClaude,
+		Agents: []types.AgentName{types.AgentClaude},
+		StepAgents: map[types.StepName][]types.AgentName{
+			types.StepReview: {types.AgentCodex, types.AgentClaude},
+			types.StepTest:   {types.AgentPi},
+		},
+	}
+	routes, err := newPipelineAgents(context.Background(), cfg, fakeLookPath)
+	if err != nil {
+		t.Fatalf("newPipelineAgents() error = %v", err)
+	}
+	t.Cleanup(func() { _ = routes.Close() })
+
+	if got := routes.AgentForStep(types.StepReview).Name(); got != "codex" {
+		t.Fatalf("review agent = %q, want codex", got)
+	}
+	if !agent.SupportsSessionProvider(routes.AgentForStep(types.StepReview), "claude") {
+		t.Fatal("review route did not preserve its ordered claude fallback")
+	}
+	if got := routes.AgentForStep(types.StepTest).Name(); got != "pi" {
+		t.Fatalf("test agent = %q, want pi", got)
+	}
+	if got := routes.AgentForStep(types.StepLint).Name(); got != "claude" {
+		t.Fatalf("unconfigured lint agent = %q, want run-wide claude", got)
+	}
+}
+
+func TestNewPipelineAgents_IsolatesExplicitRoutesForParallelSafety(t *testing.T) {
+	cfg := &config.Config{
+		Agent:  types.AgentCodex,
+		Agents: []types.AgentName{types.AgentCodex},
+		StepAgents: map[types.StepName][]types.AgentName{
+			types.StepReview: {types.AgentCodex},
+		},
+	}
+	routes, err := newPipelineAgents(context.Background(), cfg, fakeLookPath)
+	if err != nil {
+		t.Fatalf("newPipelineAgents() error = %v", err)
+	}
+	t.Cleanup(func() { _ = routes.Close() })
+
+	if routes.routes.Default == routes.AgentForStep(types.StepReview) {
+		t.Fatal("explicit review route shares a mutable adapter with the run-wide route")
+	}
+}

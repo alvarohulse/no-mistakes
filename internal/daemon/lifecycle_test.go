@@ -939,6 +939,56 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}
 }
 
+func TestStopForRestartWaitsForSingletonLockRelease(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := paths.WithRoot(tmpDir)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		t.Fatalf("acquire singleton lock: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(75 * time.Millisecond)
+		lock.Release()
+		close(released)
+	}()
+	t.Cleanup(func() { <-released })
+
+	started := time.Now()
+	if err := StopForRestart(p); err != nil {
+		t.Fatalf("StopForRestart = %v, want nil", err)
+	}
+	if elapsed := time.Since(started); elapsed < 50*time.Millisecond {
+		t.Fatalf("StopForRestart returned before singleton lock release after %v", elapsed)
+	}
+}
+
+func TestWaitForDaemonStopReturnsWhenHealthStopsBeforeProcessExit(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	originalHealthCheck := daemonHealthCheck
+	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	t.Cleanup(func() { daemonHealthCheck = originalHealthCheck })
+
+	originalProcessRunning := daemonProcessRunning
+	daemonProcessRunning = func(int) (bool, error) {
+		t.Fatal("ordinary stop inspected process exit after health endpoint closed")
+		return true, nil
+	}
+	t.Cleanup(func() { daemonProcessRunning = originalProcessRunning })
+
+	if err := waitForDaemonStop(p); err != nil {
+		t.Fatalf("waitForDaemonStop = %v, want nil", err)
+	}
+}
+
 func TestWaitForDaemonStopRejectsStalePIDBeforeKill(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {

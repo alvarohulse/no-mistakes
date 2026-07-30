@@ -10,6 +10,9 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 
 agent: auto
 
+review:
+  agent: [codex, claude]
+
 acpx_path: acpx
 
 acp_registry_overrides:
@@ -98,6 +101,22 @@ If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
 
+### Per-step agent routes
+
+Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `pr`, and `ci`.
+
+```yaml
+agent: claude
+review:
+  agent: [codex, claude]
+test:
+  agent: pi
+```
+
+An unconfigured step inherits the run-wide `agent`. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. Review session reuse stays scoped to the selected Review route.
+
+ACP targets and aliases are valid routes when they need no native CLI overrides. `agent_args_override` is native-only: an ACP key such as `cursor` or `acp:gemini` is rejected, and ACP construction fails rather than silently ignoring extra model or reasoning flags. Route that step to a native agent when it depends on those flags.
+
 ### acpx_path
 
 Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP aliases such as `agent: cursor`.
@@ -154,6 +173,7 @@ Default native binary names when no override is set:
 
 Extra CLI flags to pass to each native agent.
 Use this to set model selection, service tier, reasoning effort, permission mode, or any other flag the underlying agent supports.
+ACP targets and aliases do not accept these overrides; configuring an ACP key fails with an actionable error instead of silently discarding the flags.
 
 |         |                                                           |
 | ------- | --------------------------------------------------------- |

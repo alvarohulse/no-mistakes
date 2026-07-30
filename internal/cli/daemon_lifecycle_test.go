@@ -78,9 +78,9 @@ func TestDaemonRestartRefusesWithActiveRuns(t *testing.T) {
 
 	stopCalled := false
 	startCalled := false
-	prevStop := daemonStopFn
+	prevStop := daemonRestartStop
 	prevStart := daemonStartFn
-	daemonStopFn = func(*paths.Paths) error {
+	daemonRestartStop = func(*paths.Paths) error {
 		stopCalled = true
 		return nil
 	}
@@ -89,7 +89,7 @@ func TestDaemonRestartRefusesWithActiveRuns(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() {
-		daemonStopFn = prevStop
+		daemonRestartStop = prevStop
 		daemonStartFn = prevStart
 	})
 
@@ -110,11 +110,14 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	t.Setenv("NM_HOME", nmHome)
 
 	prevStop := daemonStopFn
+	prevRestartStop := daemonRestartStop
 	prevStart := daemonStartFn
 	daemonStopFn = func(*paths.Paths) error { return nil }
+	daemonRestartStop = func(*paths.Paths) error { return nil }
 	daemonStartFn = func(*paths.Paths) error { return nil }
 	t.Cleanup(func() {
 		daemonStopFn = prevStop
+		daemonRestartStop = prevRestartStop
 		daemonStartFn = prevStart
 	})
 

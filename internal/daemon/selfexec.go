@@ -236,19 +236,18 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 }
 
 func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
-	if managed, err := stopManagedService(p); managed && err != nil {
-		if alive, _ := daemonHealthCheck(p); !alive {
-			return nil
-		}
+	managed, err := stopManagedService(p)
+	alive, _ := daemonHealthCheck(p)
+	if alive {
 		if detachedErr := stopDetachedDaemon(p); detachedErr != nil {
-			return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v", err, detachedErr)
+			if managed && err != nil {
+				return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v", err, detachedErr)
+			}
+			return fmt.Errorf("stop existing daemon before managed restart: %w", detachedErr)
 		}
-		return nil
 	}
-	if alive, _ := daemonHealthCheck(p); alive {
-		if err := stopDetachedDaemon(p); err != nil {
-			return fmt.Errorf("stop existing daemon before managed restart: %w", err)
-		}
+	if err := waitForDaemonLockRelease(p, daemonStopTimeout()); err != nil {
+		return fmt.Errorf("wait for daemon lock release before managed restart: %w", err)
 	}
 	return nil
 }
@@ -535,7 +534,8 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 	return result.Status == "ok", nil
 }
 
-// Stop sends a shutdown request to the running daemon and waits for it to exit.
+// Stop sends a shutdown request and waits for the daemon health endpoint to go
+// away. It does not wait for deferred process cleanup after the endpoint closes.
 func Stop(p *paths.Paths) error {
 	if managed, err := stopManagedService(p); managed {
 		if err != nil {
@@ -550,6 +550,35 @@ func Stop(p *paths.Paths) error {
 		return waitForDaemonStop(p)
 	}
 	return stopDetachedDaemon(p)
+}
+
+// StopForRestart stops the daemon and waits until its singleton lock is
+// available, proving a replacement can safely start. Ordinary Stop callers do
+// not need this handoff and should not pay for deferred process cleanup.
+func StopForRestart(p *paths.Paths) error {
+	if err := Stop(p); err != nil {
+		return err
+	}
+	if err := waitForDaemonLockRelease(p, daemonStopTimeout()); err != nil {
+		return fmt.Errorf("wait for daemon lock release: %w", err)
+	}
+	return nil
+}
+
+func waitForDaemonLockRelease(p *paths.Paths, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		lock, err := acquireSingletonLock(p)
+		if err == nil {
+			lock.Release()
+			return nil
+		}
+		if !errors.Is(err, ErrSingletonLockHeld) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return fmt.Errorf("singleton lock remained held for %v", timeout)
 }
 
 func stopDetachedDaemon(p *paths.Paths) error {

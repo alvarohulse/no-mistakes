@@ -41,6 +41,18 @@ func TestNew_KnownAgents(t *testing.T) {
 	}
 }
 
+func TestNewWithOptions_ACPRejectsIgnoredExtraArgs(t *testing.T) {
+	_, err := NewWithOptions(types.AgentCursor, "acpx", []string{"--model", "claude-opus-4-8"}, Options{})
+	if err == nil {
+		t.Fatal("expected ACP extra args to be rejected")
+	}
+	for _, want := range []string{"cursor", "ACP", "agent_args_override", "not supported"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got %v", want, err)
+		}
+	}
+}
+
 func TestNew_ACPAgent(t *testing.T) {
 	a, err := New("acp:gemini", "acpx", nil)
 	if err != nil {

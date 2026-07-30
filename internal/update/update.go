@@ -32,7 +32,7 @@ var githubAPIBaseURL = "https://api.github.com"
 var currentGOOS = runtime.GOOS
 var daemonIsRunning = daemon.IsRunning
 var daemonExecutablePath = runningDaemonExecutablePath
-var daemonStop = daemon.Stop
+var daemonStop = daemon.StopForRestart
 var daemonStart = daemon.Start
 var windowsExecutablePathForPID = defaultWindowsExecutablePathForPID
 
