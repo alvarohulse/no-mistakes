@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -151,7 +152,7 @@ func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent agentList `yaml:"agent"`
 	}
-	if err := value.Decode(&raw); err != nil {
+	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
 	}
 	c.Agent = firstAgent(raw.Agent)
@@ -174,7 +175,7 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 		Agent        agentList `yaml:"agent"`
 		Instructions string    `yaml:"instructions"`
 	}
-	if err := value.Decode(&raw); err != nil {
+	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
 	}
 	c.Agent = firstAgent(raw.Agent)
@@ -300,7 +301,7 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 		Agent    agentList   `yaml:"agent"`
 		Evidence EvidenceRaw `yaml:"evidence"`
 	}
-	if err := value.Decode(&raw); err != nil {
+	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
 	}
 	c.Agent = firstAgent(raw.Agent)
@@ -349,7 +350,7 @@ func (c *IntentRaw) UnmarshalYAML(value *yaml.Node) error {
 		SlackDays       *int      `yaml:"slack_days"`
 		DisabledReaders []string  `yaml:"disabled_readers"`
 	}
-	if err := value.Decode(&raw); err != nil {
+	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
 	}
 	c.Agent = firstAgent(raw.Agent)
@@ -370,6 +371,80 @@ type Intent struct {
 }
 
 type agentList []types.AgentName
+
+// decodeKnownFields preserves yaml.Decoder.KnownFields semantics inside
+// custom UnmarshalYAML methods. yaml.Node.Decode does not inherit the parent
+// decoder's strictness, so validate the node recursively against the concrete
+// decode target before decoding it.
+func decodeKnownFields(value *yaml.Node, out any) error {
+	if err := validateKnownFields(value, reflect.TypeOf(out)); err != nil {
+		return err
+	}
+	return value.Decode(out)
+}
+
+func validateKnownFields(value *yaml.Node, target reflect.Type) error {
+	if value == nil || target == nil {
+		return nil
+	}
+	if value.Kind == yaml.AliasNode {
+		return validateKnownFields(value.Alias, target)
+	}
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	if target.Kind() == reflect.Slice && value.Kind == yaml.SequenceNode {
+		for _, item := range value.Content {
+			if err := validateKnownFields(item, target.Elem()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if target.Kind() != reflect.Struct || value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	fields := make(map[string]reflect.Type, target.NumField())
+	for i := 0; i < target.NumField(); i++ {
+		field := target.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fields[name] = field.Type
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		if key == "<<" {
+			merged := value.Content[i+1]
+			if merged.Kind == yaml.SequenceNode {
+				for _, item := range merged.Content {
+					if err := validateKnownFields(item, target); err != nil {
+						return err
+					}
+				}
+			} else if err := validateKnownFields(merged, target); err != nil {
+				return err
+			}
+			continue
+		}
+		fieldType, ok := fields[key]
+		if !ok {
+			return fmt.Errorf("field %s not found in type %s", key, target)
+		}
+		if err := validateKnownFields(value.Content[i+1], fieldType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (a *agentList) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {

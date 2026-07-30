@@ -112,6 +112,56 @@ func TestLoadGlobal_DocumentInstructionsRemainRepoOnly(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_StepSectionsRejectUnknownFields(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "simple route",
+			yaml: "review:\n  agnet: codex\n",
+			want: "agnet",
+		},
+		{
+			name: "intent settings",
+			yaml: "intent:\n  agent: codex\n  enabeld: false\n",
+			want: "enabeld",
+		},
+		{
+			name: "test settings",
+			yaml: "test:\n  agent: codex\n  evidnce: {}\n",
+			want: "evidnce",
+		},
+		{
+			name: "nested test evidence",
+			yaml: "test:\n  evidence:\n    store_in_reop: true\n",
+			want: "store_in_reop",
+		},
+		{
+			name: "document settings",
+			yaml: "document:\n  agent: codex\n  instructionz: docs own guidance\n",
+			want: "instructionz",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadGlobal(path)
+			if err == nil {
+				t.Fatalf("LoadGlobal() accepted unknown field %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "field") {
+				t.Fatalf("LoadGlobal() error = %v, want unknown field %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestMerge_StepAgentsOverrideGlobalAndFallBackToRunAgent(t *testing.T) {
 	global := DefaultGlobalConfig()
 	global.Review = StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}}
