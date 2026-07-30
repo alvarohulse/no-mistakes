@@ -384,18 +384,27 @@ func decodeKnownFields(value *yaml.Node, out any) error {
 }
 
 func validateKnownFields(value *yaml.Node, target reflect.Type) error {
+	return validateKnownFieldsStack(value, target, make(map[*yaml.Node]bool))
+}
+
+func validateKnownFieldsStack(value *yaml.Node, target reflect.Type, stack map[*yaml.Node]bool) error {
 	if value == nil || target == nil {
 		return nil
 	}
+	if stack[value] {
+		return fmt.Errorf("YAML alias cycle while validating %s", target)
+	}
+	stack[value] = true
+	defer delete(stack, value)
 	if value.Kind == yaml.AliasNode {
-		return validateKnownFields(value.Alias, target)
+		return validateKnownFieldsStack(value.Alias, target, stack)
 	}
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
 	if target.Kind() == reflect.Slice && value.Kind == yaml.SequenceNode {
 		for _, item := range value.Content {
-			if err := validateKnownFields(item, target.Elem()); err != nil {
+			if err := validateKnownFieldsStack(item, target.Elem(), stack); err != nil {
 				return err
 			}
 		}
@@ -426,11 +435,11 @@ func validateKnownFields(value *yaml.Node, target reflect.Type) error {
 			merged := value.Content[i+1]
 			if merged.Kind == yaml.SequenceNode {
 				for _, item := range merged.Content {
-					if err := validateKnownFields(item, target); err != nil {
+					if err := validateKnownFieldsStack(item, target, stack); err != nil {
 						return err
 					}
 				}
-			} else if err := validateKnownFields(merged, target); err != nil {
+			} else if err := validateKnownFieldsStack(merged, target, stack); err != nil {
 				return err
 			}
 			continue
@@ -439,7 +448,7 @@ func validateKnownFields(value *yaml.Node, target reflect.Type) error {
 		if !ok {
 			return fmt.Errorf("field %s not found in type %s", key, target)
 		}
-		if err := validateKnownFields(value.Content[i+1], fieldType); err != nil {
+		if err := validateKnownFieldsStack(value.Content[i+1], fieldType, stack); err != nil {
 			return err
 		}
 	}

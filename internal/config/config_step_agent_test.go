@@ -2,11 +2,14 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -160,6 +163,103 @@ func TestLoadGlobal_StepSectionsRejectUnknownFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadGlobal_AliasCyclesReturnPromptly(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "self reference",
+			yaml: "review: &review\n  agent: codex\n  <<: *review\n",
+		},
+		{
+			name: "mutual reference",
+			yaml: "review: &review\n  agent: codex\n  <<: &fallback\n    agent: claude\n    <<: *review\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLoadGlobal_AliasCycleHelper$")
+			cmd.Env = append(os.Environ(), "NM_TEST_ALIAS_CYCLE_YAML="+tt.yaml)
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("LoadGlobal() did not return for %s", tt.name)
+			}
+			if err != nil {
+				t.Fatalf("alias-cycle helper crashed for %s: %v\n%s", tt.name, err, output)
+			}
+			text := string(output)
+			if !strings.Contains(text, "CONFIG_ERROR:") || !strings.Contains(strings.ToLower(text), "cycle") {
+				t.Fatalf("LoadGlobal() output = %q, want actionable cycle error", text)
+			}
+		})
+	}
+}
+
+func TestLoadGlobal_AliasCycleHelper(t *testing.T) {
+	data := os.Getenv("NM_TEST_ALIAS_CYCLE_YAML")
+	if data == "" {
+		t.Skip("subprocess helper")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(path)
+	if err == nil {
+		t.Fatal("LoadGlobal() accepted a YAML alias cycle")
+	}
+	fmt.Printf("CONFIG_ERROR: %v\n", err)
+}
+
+func TestLoadGlobal_NonCyclicSharedAliasesRemainStrict(t *testing.T) {
+	t.Run("valid shared route", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		data := `review: &route
+  agent: [codex, claude]
+test:
+  <<: *route
+document:
+  <<: *route
+`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := LoadGlobal(path)
+		if err != nil {
+			t.Fatalf("LoadGlobal() error = %v", err)
+		}
+		want := []types.AgentName{types.AgentCodex, types.AgentClaude}
+		if got := cfg.Test.Agents; !reflect.DeepEqual(got, want) {
+			t.Fatalf("test route = %v, want %v", got, want)
+		}
+		if got := cfg.Document.Agents; !reflect.DeepEqual(got, want) {
+			t.Fatalf("document route = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("shared alias revalidated under another schema", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		data := `intent: &intent
+  agent: codex
+  enabled: false
+review:
+  <<: *intent
+`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadGlobal(path)
+		if err == nil || !strings.Contains(err.Error(), "enabled") {
+			t.Fatalf("LoadGlobal() error = %v, want aliased unknown field rejection", err)
+		}
+	})
 }
 
 func TestMerge_StepAgentsOverrideGlobalAndFallBackToRunAgent(t *testing.T) {
