@@ -792,6 +792,9 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
 	if target, ok := types.ACPTargetFor(name); ok {
+		if len(extraArgs) > 0 {
+			return nil, fmt.Errorf("agent_args_override is not supported for ACP agent %q; route the step to a native agent for model or reasoning overrides", name)
+		}
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
 	}
