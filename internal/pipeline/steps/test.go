@@ -48,7 +48,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// runtime. Process-group reaping on clean exit (#357) remains the lifecycle
 	// safety net when agents do spawn test workers; it is not a reason to force
 	// a deterministic full-suite commands.test override.
-	var newTestsFromFix []string
+	var testFileChangesFromFix []testFileChange
 	var fixSummary string
 	if sctx.Fixing {
 		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
@@ -90,8 +90,9 @@ Previous test findings to address:
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
 			AfterAgentRun: func(*agent.Result) error {
-				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
-				return nil
+				var err error
+				testFileChangesFromFix, err = detectTestFileChanges(ctx, sctx.WorkDir)
+				return err
 			},
 		})
 		if err != nil {
@@ -232,17 +233,13 @@ Rules:
 		needsApproval := hasBlockingFindings(findings.Items)
 		autoFixable := needsApproval
 
-		// Record any new test files the agent wrote as informational (no-op)
-		// findings. Their presence alone is not an actionable problem, so they
-		// must not force the test step into approval when tests pass (issue #140).
-		newTests := detectNewTestFiles(ctx, sctx.WorkDir)
-		for _, f := range newTests {
-			findings.Items = append(findings.Items, Finding{
-				Severity:    "info",
-				Action:      types.ActionNoOp,
-				File:        f,
-				Description: fmt.Sprintf("new test file written by agent: %s", f),
-			})
+		testFileChanges, err := detectTestFileChanges(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("detect agent test file changes: %w", err)
+		}
+		findings.Items = append(findings.Items, testFileChangeFindings(testFileChanges)...)
+		if len(testFileChanges) > 0 {
+			needsApproval = true
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
@@ -254,25 +251,15 @@ Rules:
 		}, nil
 	}
 
-	// In fix mode the agent may add new test files while making tests pass.
-	// Record them as informational (no-op) findings but do not gate on them:
-	// passing tests with only informational findings proceed automatically (issue #140).
-	if sctx.Fixing && len(newTestsFromFix) > 0 {
+	if sctx.Fixing && len(testFileChangesFromFix) > 0 {
 		findings := Findings{
-			Summary: "tests passed, but agent wrote new test files",
+			Summary: "tests passed, but agent changed test files",
 			Tested:  tested,
 		}
-		for _, f := range newTestsFromFix {
-			findings.Items = append(findings.Items, Finding{
-				Severity:    "info",
-				Action:      types.ActionNoOp,
-				File:        f,
-				Description: fmt.Sprintf("new test file written by agent: %s", f),
-			})
-		}
+		findings.Items = testFileChangeFindings(testFileChangesFromFix)
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
-			NeedsApproval: false,
+			NeedsApproval: true,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
 		}, nil
@@ -281,4 +268,21 @@ Rules:
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+}
+
+func testFileChangeFindings(changes []testFileChange) []Finding {
+	findings := make([]Finding, 0, len(changes))
+	for _, change := range changes {
+		description := fmt.Sprintf("new test file written by agent: %s", change.Path)
+		if change.Kind == testFileModified {
+			description = fmt.Sprintf("existing test file modified by agent: %s", change.Path)
+		}
+		findings = append(findings, Finding{
+			Severity:    "warning",
+			Action:      types.ActionAskUser,
+			File:        change.Path,
+			Description: description,
+		})
+	}
+	return findings
 }

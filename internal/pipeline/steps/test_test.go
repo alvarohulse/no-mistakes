@@ -134,7 +134,7 @@ func TestTestStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 	}
 }
 
-func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T) {
+func TestTestStep_FixMode_AgentWritesNewTests_NeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -144,7 +144,7 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			// Simulate agent creating a new test file during fix in another supported language
-			os.WriteFile(filepath.Join(dir, "component.spec.tsx"), []byte("export {}\n"), 0o644)
+			os.WriteFile(filepath.Join(dir, "component behavior.spec.tsx"), []byte("export {}\n"), 0o644)
 			return &agent.Result{Output: json.RawMessage(`{"summary":"add regression test"}`)}, nil
 		},
 	}
@@ -156,10 +156,8 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Issue #140: a passing test run whose only finding is an informational
-	// "new test file written by agent" note must not require approval.
-	if outcome.NeedsApproval {
-		t.Error("expected no approval for an informational new-test-file finding when tests pass")
+	if !outcome.NeedsApproval {
+		t.Error("expected approval when the agent writes a new test file")
 	}
 	if callCount != 1 {
 		t.Errorf("expected 1 agent call in fix mode, got %d", callCount)
@@ -169,15 +167,79 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 	json.Unmarshal([]byte(outcome.Findings), &f)
 	foundTestFile := false
 	for _, item := range f.Items {
-		if strings.Contains(item.Description, "component.spec.tsx") {
+		if strings.Contains(item.Description, "component behavior.spec.tsx") {
 			foundTestFile = true
-			if item.Action != types.ActionNoOp {
-				t.Errorf("expected new-test-file finding action %q, got %q", types.ActionNoOp, item.Action)
+			if item.Severity != "warning" {
+				t.Errorf("expected new-test-file finding severity warning, got %q", item.Severity)
+			}
+			if item.Action != types.ActionAskUser {
+				t.Errorf("expected new-test-file finding action %q, got %q", types.ActionAskUser, item.Action)
 			}
 		}
 	}
 	if !foundTestFile {
-		t.Errorf("expected finding mentioning component.spec.tsx, got findings: %+v", f.Items)
+		t.Errorf("expected finding mentioning component behavior.spec.tsx, got findings: %+v", f.Items)
+	}
+}
+
+func TestTestStep_EvidenceAgentModifiesExistingTest_NeedsApproval(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		name := "unstaged"
+		if staged {
+			name = "staged"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := setupGitRepo(t)
+			const testFile = "component behavior_test.go"
+			testPath := filepath.Join(dir, testFile)
+			if err := os.WriteFile(testPath, []byte("package component\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", testFile)
+			gitCmd(t, dir, "commit", "-m", "add component test")
+			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(testPath, []byte("package component\n\n// weakened assertion\n"), 0o644); err != nil {
+						return nil, err
+					}
+					if staged {
+						gitCmd(t, dir, "add", testFile)
+					}
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"tests passed","tested":["go test ./..."],"testing_summary":"tests passed"}`)}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !outcome.NeedsApproval {
+				t.Fatal("expected approval when the agent modifies an existing test file")
+			}
+
+			var findings Findings
+			if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 {
+				t.Fatalf("expected one modified-test-file finding, got %+v", findings.Items)
+			}
+			finding := findings.Items[0]
+			if finding.Severity != "warning" || finding.Action != types.ActionAskUser {
+				t.Fatalf("modified-test-file finding = severity %q action %q, want warning/%s", finding.Severity, finding.Action, types.ActionAskUser)
+			}
+			if finding.File != testFile {
+				t.Fatalf("modified-test-file finding path = %q, want %q", finding.File, testFile)
+			}
+			if !strings.Contains(finding.Description, "existing test file modified by agent") {
+				t.Fatalf("modified-test-file finding description = %q", finding.Description)
+			}
+		})
 	}
 }
 
