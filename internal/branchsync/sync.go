@@ -896,15 +896,35 @@ func revList(ctx context.Context, dir string, args ...string) ([]string, error) 
 }
 
 func mergeTreePreservesFinalHead(ctx context.Context, dir, base, local, pushed string) bool {
-	mergedTree, err := git.Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
-	if err != nil {
-		return false
-	}
 	pushedTree, err := git.Run(ctx, dir, "rev-parse", pushed+"^{tree}")
 	if err != nil {
 		return false
 	}
+	mergedTree, err := git.Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
+	if err != nil {
+		// `merge-tree --write-tree` (git 2.38+) reports conflicts by exiting
+		// non-zero, so a genuine capability failure and a conflicting merge look
+		// alike here. Only fall back to the portable three-way merge when the
+		// installed git predates that plumbing; a real conflict must stay a
+		// refusal (not equivalent).
+		if !mergeTreeWriteTreeUnsupported(err) {
+			return false
+		}
+		tree, clean, ferr := git.MergeToTree(ctx, dir, base, pushed, local)
+		if ferr != nil || !clean {
+			return false
+		}
+		return tree == pushedTree
+	}
 	return mergedTree == pushedTree
+}
+
+// mergeTreeWriteTreeUnsupported reports whether err came from a git too old to
+// support `git merge-tree --write-tree` (added in git 2.38), which prints a
+// usage error for the unknown flags rather than attempting the merge.
+func mergeTreeWriteTreeUnsupported(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "usage: git merge-tree") || strings.Contains(msg, "unknown option")
 }
 
 func (s *Service) remoteName(ctx context.Context) string {
