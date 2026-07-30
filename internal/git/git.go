@@ -52,9 +52,15 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 }
 
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
+	return runInDirEnv(ctx, dir, nil, args...)
+}
+
+// runInDirEnv is runInDir with extra environment variables appended (last wins)
+// so callers can redirect GIT_INDEX_FILE / GIT_WORK_TREE for scratch operations.
+func runInDirEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = NonInteractiveEnv(dir)
+	cmd.Env = append(NonInteractiveEnv(dir), extraEnv...)
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
@@ -65,6 +71,42 @@ func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// MergeToTree performs a real three-way content merge of ours and theirs onto
+// base and returns the resulting tree OID, reporting whether the merge applied
+// without conflicts. It never touches dir's index or working tree: the merge
+// runs against a throwaway index and scratch work tree. This is the portable
+// equivalent of `git merge-tree --write-tree` (git 2.38+); callers prefer that
+// plumbing when available and fall back here on older git.
+func MergeToTree(ctx context.Context, dir, base, ours, theirs string) (tree string, clean bool, err error) {
+	scratch, err := os.MkdirTemp("", "nm-mergetree-*")
+	if err != nil {
+		return "", false, err
+	}
+	defer os.RemoveAll(scratch)
+	extraEnv := []string{
+		"GIT_INDEX_FILE=" + filepath.Join(scratch, "index"),
+		"GIT_WORK_TREE=" + scratch,
+	}
+	// Seed the throwaway index with ours so merge-recursive has a base state.
+	if _, err := runInDirEnv(ctx, dir, extraEnv, "read-tree", ours); err != nil {
+		return "", false, err
+	}
+	// merge-recursive exits 0 on a clean merge and 1 on conflicts; treat any
+	// other exit code as a genuine failure.
+	if _, mergeErr := runInDirEnv(ctx, dir, extraEnv, "merge-recursive", base, "--", ours, theirs); mergeErr != nil {
+		var ee *exec.ExitError
+		if errors.As(mergeErr, &ee) && ee.ExitCode() == 1 {
+			return "", false, nil
+		}
+		return "", false, mergeErr
+	}
+	tree, err = runInDirEnv(ctx, dir, extraEnv, "write-tree")
+	if err != nil {
+		return "", false, err
+	}
+	return tree, true, nil
 }
 
 // ValidateBareRepository verifies both the filesystem shape and Git's own bare
