@@ -495,6 +495,39 @@ func killTimedOutDaemonPID(pid int, startedAt time.Time) error {
 	return daemonKillPID(pid)
 }
 
+// waitForDaemonProcessExit blocks until the daemon process recorded in `record`
+// has exited - releasing the singleton lock - or `timeout` elapses. It is
+// best-effort: callers use it to close the restart lock race, not to prove
+// termination, so it returns quietly on any ambiguity. A PID whose live start
+// time no longer matches the record has already exited (the number may be
+// reused), and our own PID (an in-process test daemon) can never be waited on.
+func waitForDaemonProcessExit(record daemonPIDFile, timeout time.Duration) {
+	if record.PID <= 0 || record.PID == os.Getpid() || timeout <= 0 {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !record.StartedAt.IsZero() {
+			start, err := daemonProcessStartTime(record.PID)
+			if err != nil {
+				return
+			}
+			diff := start.Sub(record.StartedAt.UTC())
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > orphanStartTimeTolerance {
+				return
+			}
+		}
+		running, err := daemonProcessRunning(record.PID)
+		if err != nil || !running {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func waitForProcessExit(pid int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -692,11 +725,24 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 }
 
 func waitForDaemonStop(p *paths.Paths) error {
+	// Capture the live daemon's identity before it tears its pid file down so
+	// we can wait for the process to fully exit, not just for the IPC socket to
+	// close. Health going down only proves the socket closed; the daemon keeps
+	// the singleton lock (lock.go) through its deferred cleanup - telemetry
+	// flush, log teardown, and the bootstrap-sink subprocess Wait - and the
+	// kernel releases the lock only on process exit. A restart that launches a
+	// new daemon inside that window loses the lock race, and the child exits
+	// before readiness ("daemon child ... exited before readiness").
+	stopping, stoppingErr := readDaemonPIDFile(p.PIDFile())
+
 	// Wait for daemon to actually stop (socket becomes unavailable).
 	deadline := time.Now().Add(daemonStopTimeout())
 	for time.Now().Before(deadline) {
 		alive, err := daemonHealthCheck(p)
 		if err == nil && !alive {
+			if stoppingErr == nil {
+				waitForDaemonProcessExit(stopping, time.Until(deadline))
+			}
 			cleanupDaemonArtifacts(p)
 			slog.Info("daemon stopped gracefully")
 			return nil
