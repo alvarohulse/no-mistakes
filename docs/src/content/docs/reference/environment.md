@@ -175,6 +175,7 @@ Run IDs, repository paths, branch names, session identities, prompts, model outp
 
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
 Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the reported model and its provider, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
+It also records how the top-level agent was invoked and any nested agent identities that the adapter's event stream exposed.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 
 The additive session-fidelity fields are nullable and read back as unknown (rendered `-`) rather than a fabricated zero when the adapter did not report them, so rows written before a field existed, and adapters that do not surface a datum, stay honest.
@@ -184,9 +185,12 @@ The legacy raw input, output, and cache-read token counters render numerically; 
 - Activity: `model_roundtrips` (a proxy for productive model turns), `tool_calls`, and a bounded tool-category histogram (`tool_wait_calls`, `tool_test_lint_calls`, `tool_edit_calls`, `tool_read_calls`, `tool_git_calls`, `tool_other_calls`); a compound command counts once per sub-command, so the histogram can sum higher than `tool_calls`.
 - Timing split: `subprocess_wait_ms` is the wall-clock spent inside tool subprocesses; model/reasoning time is the invocation duration minus it, clamped at zero.
 - Context: `workload_files`/`workload_lines` (bounded change size), `finding_count` (findings in the structured output), and `fallback_reason` (why a failed resume forced a fresh session, one of transient/parse/exit/spawn/unsupported/other).
+- Agent attribution: `invocation_mode` is `harness_cli` for the adapter process launched by the pipeline. `agent_observations_json` contains an ordered, bounded list of nested identities observed through a `subagent_tool`; SQL `NULL` means the adapter exposes no reliable nested-agent evidence, while `[]` means a supported stream observed none.
+
+Nested attribution is intentionally limited to native wire evidence. Claude exposes configured `Agent`/legacy `Task` types, and OpenCode exposes `task` subagent types. Codex exposes completed `spawn_agent` calls but its `exec --json` stream omits nicknames and roles, so no-mistakes stores a truncated hash of the child thread ID such as `thread:0123456789abcdef`, never the raw ID. ACP, Copilot, Pi, and Rovo streams currently provide no reliable nested identity to this integration and remain unknown. Harness-SDK internals are not inferred.
 
 The count and timing definitions live in one authoritative place (`internal/agent/invocationmetrics.go`).
-Inspect the evidence with `no-mistakes stats --agents` (per-purpose aggregates, including a `METRICS` coverage count so a real zero is distinguishable from missing instrumentation) or `no-mistakes stats --run <id>` (one run's invocations, the per-round-vs-cumulative token split, and parked time).
+Inspect the evidence with `no-mistakes stats --agents` (per-purpose aggregates, including a `METRICS` coverage count so a real zero is distinguishable from missing instrumentation) or `no-mistakes stats --run <id>` (one run's per-step invocations, invocation modes and nested identities, the per-round-vs-cumulative token split, and parked time).
 
 ## `NO_MISTAKES_TELEMETRY`
 
