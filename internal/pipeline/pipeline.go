@@ -12,6 +12,21 @@ import (
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
+// AgentRoutes is an immutable run-scoped routing table. Steps with no explicit
+// entry use Default, preserving the run-wide agent behavior.
+type AgentRoutes struct {
+	Default agent.Agent
+	ByStep  map[types.StepName]agent.Agent
+}
+
+// AgentForStep returns the configured step route or the run-wide fallback.
+func (r AgentRoutes) AgentForStep(step types.StepName) agent.Agent {
+	if routed := r.ByStep[step]; routed != nil {
+		return routed
+	}
+	return r.Default
+}
+
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
 	Ctx              context.Context
