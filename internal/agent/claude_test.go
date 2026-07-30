@@ -11,11 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestClaudeAgent_BuildArgs(t *testing.T) {
@@ -168,6 +171,30 @@ func TestParseClaudeEvents_ResultEvent(t *testing.T) {
 	}
 	if result.StructuredOutput == nil {
 		t.Fatal("expected structured_output")
+	}
+}
+
+func TestParseClaudeEvents_CollectsNestedAgentInvocations(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-2","name":"Task","input":{"subagent_type":"general-purpose"}},{"type":"tool_use","id":"tool-3","name":"StructuredOutput","input":{}}],"usage":{}}}`,
+		`{"type":"result","subtype":"success","is_error":false}`,
+		"",
+	}, "\n")
+
+	var usage TokenUsage
+	var result *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result); err != nil {
+		t.Fatalf("parseClaudeEvents() error = %v", err)
+	}
+	if result == nil || !result.agentObservationsReported {
+		t.Fatalf("agent observations not reported: %+v", result)
+	}
+	want := []types.AgentObservation{
+		{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
+		{Identity: "general-purpose", InvocationMode: types.AgentInvocationModeSubagentTool},
+	}
+	if !reflect.DeepEqual(result.agentObservations, want) {
+		t.Fatalf("agent observations = %+v, want %+v", result.agentObservations, want)
 	}
 }
 

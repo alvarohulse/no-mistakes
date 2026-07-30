@@ -71,6 +71,7 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		case "message.part.updated":
 			if props != nil && props.Part != nil {
 				p := props.Part
+				state.observeOpencodeTool(p.ID, p.Type, p.Tool, p.State)
 				if p.Type == "text" && p.ID != "" {
 					phase := ""
 					if p.Metadata != nil && p.Metadata.OpenAI != nil {
@@ -141,6 +142,17 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 		// will provide the final result
 	}
 	return nil
+}
+
+func (s *opencodeStreamState) observeOpencodeTool(id, partType, tool string, state *opencodeToolState) {
+	if s == nil || s.observations == nil || partType != "tool" || !strings.EqualFold(tool, "task") || state == nil {
+		return
+	}
+	identity := state.Input.SubagentType
+	if identity == "" {
+		identity = state.Input.Agent
+	}
+	s.observations.observe(id, identity)
 }
 
 func (s *opencodeStreamState) emitSeparatorIfNeeded() {

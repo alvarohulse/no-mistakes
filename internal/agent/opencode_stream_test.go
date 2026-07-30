@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestOpencodeTokensToUsage(t *testing.T) {
@@ -741,5 +744,29 @@ data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info"
 	}
 	if state.lastText != "partial" {
 		t.Errorf("expected lastText 'partial', got %q", state.lastText)
+	}
+}
+
+func TestParseOpencodeSSE_CollectsNestedAgentInvocations(t *testing.T) {
+	input := `data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"task-1","messageID":"asst-msg","type":"tool","tool":"task","state":{"status":"completed","input":{"subagent_type":"explore"}}}}}}
+
+data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}
+
+`
+	state := &opencodeStreamState{
+		sessionID:    "s1",
+		textParts:    make(map[string]*opencodeTextPart),
+		usageByMsg:   make(map[string]TokenUsage),
+		observations: newAgentObservationCollector(true),
+	}
+	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
+		t.Fatalf("parseOpencodeSSE() error = %v", err)
+	}
+	want := []types.AgentObservation{{
+		Identity:       "explore",
+		InvocationMode: types.AgentInvocationModeSubagentTool,
+	}}
+	if !reflect.DeepEqual(state.observations.observations, want) {
+		t.Fatalf("agent observations = %+v, want %+v", state.observations.observations, want)
 	}
 }
