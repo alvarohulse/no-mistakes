@@ -14,6 +14,10 @@ type Repo struct {
 	ForkURL       string
 	DefaultBranch string
 	CreatedAt     int64
+
+	// URLsVerified is run-scoped, in-memory evidence that the URL fields were
+	// just validated against the working clone. It is never persisted.
+	URLsVerified bool `json:"-"`
 }
 
 // PushURL returns the remote URL that should receive branch updates.
@@ -77,6 +81,30 @@ func (d *DB) InsertRepoWithFork(workingPath, upstreamURL, forkURL, defaultBranch
 	return r, nil
 }
 
+// GetRepos returns every authoritative repository record ordered by ID.
+func (d *DB) GetRepos() ([]*Repo, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos ORDER BY id`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get repos: %w", err)
+	}
+	defer rows.Close()
+
+	var repos []*Repo
+	for rows.Next() {
+		r := &Repo{}
+		if err := rows.Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan repo: %w", err)
+		}
+		repos = append(repos, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repos: %w", err)
+	}
+	return repos, nil
+}
+
 // GetRepo returns a repo by ID.
 func (d *DB) GetRepo(id string) (*Repo, error) {
 	r := &Repo{}
@@ -103,6 +131,41 @@ func (d *DB) GetRepoByPath(workingPath string) (*Repo, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get repo by path: %w", err)
+	}
+	return r, nil
+}
+
+// ReplaceRepoURLs atomically replaces both registered repository URLs and
+// returns the committed record. A failure leaves the exact prior registration
+// intact.
+func (d *DB) ReplaceRepoURLs(id, upstreamURL, forkURL string) (*Repo, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin repo URL replacement: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
+		`UPDATE repos SET upstream_url = ?, fork_url = ? WHERE id = ?`,
+		upstreamURL, nullableString(forkURL), id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("replace repo URLs: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("replace repo URLs rows affected: %w", err)
+	} else if affected != 1 {
+		return nil, fmt.Errorf("replace repo URLs: repository not found")
+	}
+
+	r := &Repo{}
+	if err := tx.QueryRow(
+		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, id,
+	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt); err != nil {
+		return nil, fmt.Errorf("read replaced repo URLs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit repo URL replacement: %w", err)
 	}
 	return r, nil
 }

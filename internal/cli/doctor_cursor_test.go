@@ -25,11 +25,9 @@ func TestDoctorACPAliasRequiresBothBinaries(t *testing.T) {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
 	}
 
-	if !strings.Contains(out, "cursor") {
-		t.Fatalf("doctor report missing cursor alias entry:\n%s", out)
-	}
-	if !strings.Contains(out, "acpx") {
-		t.Fatalf("doctor should name the missing acpx binary for cursor alias:\n%s", out)
+	line := doctorAgentLine(t, out, "cursor")
+	if !strings.Contains(line, "acpx") {
+		t.Fatalf("cursor alias row should name the missing acpx binary:\n%s", line)
 	}
 }
 
@@ -49,11 +47,25 @@ func TestDoctorACPAliasDetectedWithBothBinaries(t *testing.T) {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
 	}
 
+	line := doctorAgentLine(t, out, "cursor")
 	for _, want := range []string{cursorPath, acpxPath} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("doctor did not report cursor alias binary %q:\n%s", want, out)
+		if !strings.Contains(line, want) {
+			t.Fatalf("cursor alias row did not report binary %q:\n%s", want, line)
 		}
 	}
+}
+
+func doctorAgentLine(t *testing.T, out, agent string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		for i, f := range strings.Fields(line) {
+			if i >= 1 && f == agent {
+				return line
+			}
+		}
+	}
+	t.Fatalf("no %q row in doctor output:\n%s", agent, out)
+	return ""
 }
 
 func writeFakeBinary(t *testing.T, dir, name string) string {

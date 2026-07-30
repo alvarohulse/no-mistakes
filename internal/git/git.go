@@ -35,8 +35,23 @@ func IsZeroSHA(sha string) bool {
 // on discovering a bare repo from the working directory (issue #362).
 func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	if isBareGitDir(dir) {
-		args = append([]string{"--git-dir=" + dir}, args...)
+		return RunBare(ctx, dir, args...)
 	}
+	return runInDir(ctx, dir, args...)
+}
+
+// RunBare executes Git against exactly bareDir. Unlike Run, it never falls
+// back to cwd-based repository discovery when bareDir is malformed. Gate
+// recovery uses this after structural validation so an invalid directory under
+// NM_HOME cannot discover or mutate an ancestor worktree.
+func RunBare(ctx context.Context, bareDir string, args ...string) (string, error) {
+	if bareDir == "" {
+		return "", fmt.Errorf("bare git directory is empty")
+	}
+	return runInDir(ctx, bareDir, append([]string{"--git-dir=" + bareDir}, args...)...)
+}
+
+func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
@@ -52,12 +67,40 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// ValidateBareRepository verifies both the filesystem shape and Git's own bare
+// repository classification. The Git query is explicitly scoped with
+// --git-dir, so validation itself cannot discover an ancestor repository.
+func ValidateBareRepository(ctx context.Context, bareDir string) error {
+	if !isBareGitDir(bareDir) {
+		return fmt.Errorf("not a structurally valid bare repository: %s", bareDir)
+	}
+	out, err := RunBare(ctx, bareDir, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		return fmt.Errorf("validate bare repository: %w", err)
+	}
+	if strings.TrimSpace(out) != "true" {
+		return fmt.Errorf("repository is not bare: %s", bareDir)
+	}
+	return nil
+}
+
+// LooksLikeBareRepository performs the non-mutating structural half of bare
+// repository validation. Call ValidateBareRepository before mutating an
+// unstamped directory discovered from the filesystem.
+func LooksLikeBareRepository(dir string) bool {
+	return isBareGitDir(dir)
+}
+
 // isBareGitDir reports whether dir is itself a git directory (a bare repo),
 // as opposed to a working tree or linked worktree, which carry a .git entry
 // and keep using normal discovery. The check mirrors git's own git-dir
 // heuristic: a HEAD file plus an objects directory.
 func isBareGitDir(dir string) bool {
 	if dir == "" {
+		return false
+	}
+	root, err := os.Lstat(dir)
+	if err != nil || !root.IsDir() || root.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
@@ -113,6 +156,32 @@ func GetRemoteURL(ctx context.Context, dir, name string) (string, error) {
 // without applying url.*.insteadOf rewrites.
 func GetConfiguredRemoteURL(ctx context.Context, dir, name string) (string, error) {
 	return Run(ctx, dir, "config", "--get", "remote."+name+".url")
+}
+
+// GetConfiguredRemoteURLs returns every literal URL configured for a remote.
+// Callers that require an authoritative source can reject zero or multiple
+// values rather than letting git silently select one.
+func GetConfiguredRemoteURLs(ctx context.Context, dir, name string) ([]string, error) {
+	out, err := Run(ctx, dir, "config", "--null", "--get-all", "remote."+name+".url")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00"), nil
+}
+
+// HasRemote reports whether a remote named name is configured in the repo at
+// dir, returning an error if the remote list cannot be read.
+func HasRemote(ctx context.Context, dir, name string) (bool, error) {
+	out, err := Run(ctx, dir, "remote")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // FindGitRoot walks up from path to find the git repository root.
@@ -363,14 +432,32 @@ func FetchRemoteBranchToRef(ctx context.Context, dir, remote, branch, localRef s
 	return err
 }
 
-// Push pushes a ref to a remote. If forceWithLease is true, uses
-// --force-with-lease with the expectedSHA for safe force-push.
+// FetchRemoteBranchToPrivateRef fetches one branch into a caller-owned private
+// ref without touching FETCH_HEAD or ordinary remote-tracking refs.
+func FetchRemoteBranchToPrivateRef(ctx context.Context, dir, remote, branch, localRef string) error {
+	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
+	_, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", remote, refspec)
+	return err
+}
+
+// Push pushes HEAD to a remote ref. If forceWithLease is true, it uses an
+// explicit expected remote SHA for safe force-push.
 func Push(ctx context.Context, dir, remote, ref, expectedSHA string, forceWithLease bool) error {
 	return PushWithOptions(ctx, dir, remote, ref, expectedSHA, forceWithLease, nil)
 }
 
-// PushWithOptions pushes a ref to a remote with per-push options.
+// PushCommit pushes one immutable commit object to a remote ref. Unlike Push,
+// a concurrent worktree HEAD move cannot change the source selected by git.
+func PushCommit(ctx context.Context, dir, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+	return pushSourceWithOptions(ctx, dir, remote, commitSHA, ref, expectedSHA, forceWithLease, nil)
+}
+
+// PushWithOptions pushes HEAD to a remote with per-push options.
 func PushWithOptions(ctx context.Context, dir, remote, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
+	return pushSourceWithOptions(ctx, dir, remote, "HEAD", ref, expectedSHA, forceWithLease, pushOptions)
+}
+
+func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expectedSHA string, forceWithLease bool, pushOptions []string) error {
 	args := []string{"push"}
 	for _, option := range pushOptions {
 		args = append(args, "-o", option)
@@ -383,7 +470,7 @@ func PushWithOptions(ctx context.Context, dir, remote, ref, expectedSHA string, 
 			args = append(args, "--force-with-lease")
 		}
 	}
-	args = append(args, "HEAD:"+ref)
+	args = append(args, source+":"+ref)
 	_, err := Run(ctx, dir, args...)
 	return err
 }

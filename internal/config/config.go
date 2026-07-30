@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -62,6 +63,7 @@ type GlobalConfig struct {
 	// session_reuse: false to force every invocation cold.
 	SessionReuse bool `yaml:"-"`
 	AutoFix      AutoFixRaw
+	Commit       CommitRaw
 	Intent       IntentRaw
 	Test         TestRaw
 }
@@ -80,6 +82,7 @@ type globalConfigRaw struct {
 	LogLevel             string              `yaml:"log_level"`
 	SessionReuse         *bool               `yaml:"session_reuse"`
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
+	Commit               CommitRaw           `yaml:"commit"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
 }
@@ -98,6 +101,7 @@ type RepoConfig struct {
 	// the pushed branch controls nothing that executes.
 	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
 	AutoFix           AutoFixRaw `yaml:"auto_fix"`
+	Commit            CommitRaw  `yaml:"commit"`
 	Intent            IntentRaw  `yaml:"intent"`
 	Test              TestRaw    `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
@@ -134,6 +138,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		IgnorePatterns         []string    `yaml:"ignore_patterns"`
 		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
 		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
+		Commit                 CommitRaw   `yaml:"commit"`
 		Intent                 IntentRaw   `yaml:"intent"`
 		Test                   TestRaw     `yaml:"test"`
 		Document               DocumentRaw `yaml:"document"`
@@ -149,6 +154,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
+	c.Commit = raw.Commit
 	c.Intent = raw.Intent
 	c.Test = raw.Test
 	c.Document = raw.Document
@@ -201,6 +207,7 @@ type Config struct {
 	Commands             Commands
 	IgnorePatterns       []string
 	AutoFix              AutoFix
+	Commit               Commit
 	Intent               Intent
 	Test                 Test
 	Document             Document
@@ -382,6 +389,11 @@ auto_fix:
   document: 3
   ci: 3
 
+# Auto-fix commit subject template. Available variables: {{.Step}} and {{.Summary}}.
+# Repo config may override this value.
+# commit:
+#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
+
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
@@ -460,9 +472,10 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 }
 
 // ResolveAgent resolves configured agent names to available agents. A single
-// explicit agent must be runnable; auto is probed into the first available
-// native agent; an ordered list is filtered to available agents and kept as fallbacks.
-// The lookPath function should behave like exec.LookPath.
+// explicit agent must be runnable; auto probes native agents, then ACP aliases;
+// an ordered list is filtered to available agents, deduplicated by resolved
+// identity, and kept as fallbacks. The lookPath function should behave like
+// exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
 	candidates := c.configuredAgents()
 	if len(candidates) <= 1 {
@@ -552,7 +565,7 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 
 func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
-	seen := map[types.AgentName]bool{}
+	seen := map[string]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		name, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate, lookPath)
@@ -562,16 +575,27 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		if err != nil {
 			return nil, err
 		}
-		if !ok || seen[name] {
+		if !ok {
 			continue
 		}
-		seen[name] = true
+		identity := resolvedAgentIdentity(name)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
 		resolved = append(resolved, name)
 	}
 	if len(resolved) == 0 {
 		return nil, noRunnableAgentError(candidates, probed)
 	}
 	return resolved, nil
+}
+
+func resolvedAgentIdentity(name types.AgentName) string {
+	if target, ok := types.ACPTargetFor(name); ok {
+		return "acp:" + target
+	}
+	return "native:" + string(name)
 }
 
 func noRunnableAgentError(configured []types.AgentName, probed []string) error {
@@ -650,9 +674,10 @@ func (c *Config) AgentPathFor(name types.AgentName) string {
 	return string(name)
 }
 
-// acpAvailable reports whether the binaries an ACP agent name executes — the
-// resolved raw command's executable (when one is set) and the acpx shim — are
-// on PATH. It returns the binaries it considered for diagnostics.
+// acpAvailable reports whether the acpx shim and any probeable raw-command
+// executable can be resolved. Only bare command names and clean absolute paths
+// are probeable; relative, quoted, or escaped raw commands are left for acpx to
+// execute from the worktree. It returns the binaries it considered for diagnostics.
 func (c *Config) acpAvailable(name types.AgentName, lookPath func(string) (string, error)) (bool, []string, error) {
 	bins := c.acpBinaries(name)
 	for _, bin := range bins {
@@ -669,11 +694,68 @@ func (c *Config) acpAvailable(name types.AgentName, lookPath func(string) (strin
 func (c *Config) acpBinaries(name types.AgentName) []string {
 	bins := make([]string, 0, 2)
 	if target, ok := types.ACPTargetFor(name); ok {
-		if bin := types.ACPRawCommandBinary(target, c.ACPRegistryOverrides); bin != "" {
+		if bin, probeable := acpCommandBinaryForProbe(types.ACPRawCommand(target, c.ACPRegistryOverrides)); probeable {
 			bins = append(bins, bin)
 		}
 	}
 	return append(bins, c.AgentPathFor(name))
+}
+
+func acpCommandBinaryForProbe(command string) (string, bool) {
+	return acpCommandBinaryForProbeForOS(command, runtime.GOOS)
+}
+
+func acpCommandBinaryForProbeForOS(command, goos string) (string, bool) {
+	if strings.ContainsAny(command, `"'`) {
+		return "", false
+	}
+	if goos != "windows" && strings.ContainsRune(command, '\\') {
+		return "", false
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "", false
+	}
+	bin := fields[0]
+	if isAbsolutePathForProbe(bin, goos) {
+		return bin, true
+	}
+	if containsPathSeparatorForProbe(bin, goos) {
+		return "", false
+	}
+	return bin, true
+}
+
+func isAbsolutePathForProbe(path, goos string) bool {
+	if goos == runtime.GOOS {
+		return filepath.IsAbs(path)
+	}
+	if goos == "windows" {
+		return isWindowsAbsolutePath(path)
+	}
+	return strings.HasPrefix(path, "/")
+}
+
+func isWindowsAbsolutePath(path string) bool {
+	if len(path) >= 3 && isASCIILetter(path[0]) && path[1] == ':' && isWindowsPathSeparator(path[2]) {
+		return true
+	}
+	return len(path) >= 3 && isWindowsPathSeparator(path[0]) && isWindowsPathSeparator(path[1])
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isWindowsPathSeparator(value byte) bool {
+	return value == '\\' || value == '/'
+}
+
+func containsPathSeparatorForProbe(path, goos string) bool {
+	if goos == "windows" {
+		return strings.ContainsAny(path, `/\`)
+	}
+	return strings.ContainsRune(path, '/')
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in
@@ -700,10 +782,9 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentCopilot):  true,
 }
 
-// reservedAgentArgs lists flags and managed arguments (including codex's "-"
-// stdin positional) that no-mistakes manages internally and that users cannot
-// override through agent_args_override. A flag is matched by its bare form
-// (e.g. "--color") as well as the "--color=value" form.
+// reservedAgentArgs lists flags that no-mistakes manages internally and that
+// users cannot override through agent_args_override. A flag is matched by its
+// bare form (e.g. "--color") as well as the "--color=value" form.
 var reservedAgentArgs = map[string]map[string]bool{
 	string(types.AgentClaude): {
 		"-p":              true,
@@ -727,7 +808,6 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--thread":     true,
 		"--thread-id":  true,
 		"--last":       true,
-		"-":            true,
 		"--json":       true,
 		"--color":      true,
 	},
@@ -828,6 +908,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateCommitRaw(raw.Commit); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -885,6 +968,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
 	}
 	cfg.AutoFix = raw.AutoFix
+	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 
@@ -951,6 +1035,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateCommitRaw(cfg.Commit); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
@@ -980,8 +1067,8 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
+// Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
+// always taken from the pushed copy, matching prior behavior, since they cannot
 // run arbitrary shell or select a process.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
@@ -1157,6 +1244,14 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
+	commit := Commit{FixMessage: DefaultFixMessageTemplate}
+	if global.Commit.FixMessage != nil {
+		commit.FixMessage = *global.Commit.FixMessage
+	}
+	if repo.Commit.FixMessage != nil {
+		commit.FixMessage = *repo.Commit.FixMessage
+	}
+
 	cfg := &Config{
 		Agent:                global.Agent,
 		Agents:               copyAgents(global.Agents),
@@ -1171,6 +1266,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Commands:             repo.Commands,
 		IgnorePatterns:       repo.IgnorePatterns,
 		AutoFix:              af,
+		Commit:               commit,
 		Intent:               intent,
 		Test:                 test,
 		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},

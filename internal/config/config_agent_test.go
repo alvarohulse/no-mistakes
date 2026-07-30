@@ -219,6 +219,41 @@ func TestResolveAgent_ListPicksFirstAvailableAndKeepsFallbacks(t *testing.T) {
 	}
 }
 
+func TestResolveAgent_ListDeduplicatesEquivalentACPTargets(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates []types.AgentName
+		want       types.AgentName
+	}{
+		{name: "alias before target", candidates: []types.AgentName{types.AgentCursor, "acp:cursor"}, want: types.AgentCursor},
+		{name: "target before alias", candidates: []types.AgentName{"acp:cursor", types.AgentCursor}, want: "acp:cursor"},
+		{name: "auto before target", candidates: []types.AgentName{types.AgentAuto, "acp:cursor"}, want: types.AgentCursor},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Agents: tt.candidates}
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				switch bin {
+				case "cursor-agent", "acpx":
+					return "/usr/bin/" + bin, nil
+				default:
+					return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+				}
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Agent != tt.want {
+				t.Errorf("agent = %q, want %q", cfg.Agent, tt.want)
+			}
+			if len(cfg.Agents) != 1 || cfg.Agents[0] != tt.want {
+				t.Fatalf("agents = %v, want [%s]", cfg.Agents, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAgent_ListSkipsUnavailableAuto(t *testing.T) {
 	cfg := &Config{Agents: []types.AgentName{types.AgentAuto, "acp:gemini"}}
 
@@ -594,6 +629,76 @@ func TestResolveAgent_ACPAliasRegistryOverrideBinaryProbed(t *testing.T) {
 	}
 	if cfg.Agent != types.AgentCursor {
 		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentCursor)
+	}
+}
+
+func TestResolveAgent_ACPAliasCommandAvailability(t *testing.T) {
+	tests := []struct {
+		name       string
+		override   string
+		wantErr    bool
+		wantProbes string
+	}{
+		{name: "default requires command binary", wantErr: true, wantProbes: "cursor-agent"},
+		{name: "relative override skips command probe", override: "./bin/local-agent acp", wantProbes: "acpx"},
+		{name: "quoted override skips command probe", override: `"/opt/Cursor Agent/cursor-agent" acp`, wantProbes: "acpx"},
+		{name: "escaped absolute override skips command probe", override: `/opt/Cursor\ Agent/cursor-agent acp`, wantProbes: "acpx"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Agent: types.AgentCursor}
+			if tt.override != "" {
+				cfg.ACPRegistryOverrides = map[string]string{"cursor": tt.override}
+			}
+			var probes []string
+			err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+				probes = append(probes, bin)
+				if bin == "acpx" {
+					return "/usr/bin/acpx", nil
+				}
+				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+			})
+			if tt.wantErr && err == nil {
+				t.Fatal("expected unavailable agent to fail resolution")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := strings.Join(probes, ", "); got != tt.wantProbes {
+				t.Errorf("probes = %q, want %q", got, tt.wantProbes)
+			}
+		})
+	}
+}
+
+func TestACPCommandBinaryForProbeForOS(t *testing.T) {
+	tests := []struct {
+		name    string
+		goos    string
+		command string
+		wantBin string
+		wantOK  bool
+	}{
+		{name: "windows drive path", goos: "windows", command: `C:\tools\cursor-agent.exe acp`, wantBin: `C:\tools\cursor-agent.exe`, wantOK: true},
+		{name: "windows UNC path", goos: "windows", command: `\\host\share\cursor-agent.exe acp`, wantBin: `\\host\share\cursor-agent.exe`, wantOK: true},
+		{name: "unix absolute path", goos: "linux", command: "/opt/cursor-agent acp", wantBin: "/opt/cursor-agent", wantOK: true},
+		{name: "unix escaped space", goos: "linux", command: `/opt/Cursor\ Agent/cursor-agent acp`},
+		{name: "windows double-quoted path", goos: "windows", command: `"C:\Program Files\cursor-agent.exe" acp`},
+		{name: "windows single-quoted path", goos: "windows", command: `'C:\Program Files\cursor-agent.exe' acp`},
+		{name: "unix double-quoted path", goos: "linux", command: `"/opt/Cursor Agent/cursor-agent" acp`},
+		{name: "unix single-quoted path", goos: "linux", command: `'/opt/Cursor Agent/cursor-agent' acp`},
+		{name: "relative path", goos: "linux", command: "./bin/x acp"},
+		{name: "bare command", goos: "linux", command: "cursor-agent acp", wantBin: "cursor-agent", wantOK: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBin, gotOK := acpCommandBinaryForProbeForOS(tt.command, tt.goos)
+			if gotBin != tt.wantBin || gotOK != tt.wantOK {
+				t.Errorf("acpCommandBinaryForProbeForOS(%q, %q) = (%q, %t), want (%q, %t)", tt.command, tt.goos, gotBin, gotOK, tt.wantBin, tt.wantOK)
+			}
+		})
 	}
 }
 

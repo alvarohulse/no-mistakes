@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 )
 
-func runClaude(args []string, scenario *Scenario) int {
-	prompt := extractClaudePrompt(args)
+func runClaude(args []string, promptReader io.Reader, scenario *Scenario) int {
+	prompt, err := extractClaudePrompt(args, promptReader)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent: claude prompt: %v\n", err)
+		return 1
+	}
 	logInvocation("claude", prompt, args)
 
 	action := scenario.Match(prompt)
@@ -207,52 +210,24 @@ func hasClaudeSchema(args []string) bool {
 	return false
 }
 
-// extractClaudePrompt returns the prompt no-mistakes sent to claude. The real
-// invocation is `claude -p --verbose ...` with the prompt piped on stdin (never
-// an argv element - see internal/agent/claude.go), so we read stdin here. A
-// positional prompt immediately following -p/--print is still honored as a
-// backward-compatible fallback for any caller that passes the prompt in argv.
-func extractClaudePrompt(args []string) string {
-	flagsWithValues := map[string]bool{
-		"--output-format":    true,
-		"--json-schema":      true,
-		"--permission-mode":  true,
-		"--model":            true,
-		"-m":                 true,
-		"--max-turns":        true,
-		"--system":           true,
-		"--allowed-tools":    true,
-		"--disallowed-tools": true,
-		"--mcp-config":       true,
-		"--continue":         true,
-		"--resume":           true,
-		"--cwd":              true,
-		"--add-dir":          true,
-	}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-p", "--print":
-			// -p is a boolean flag; a following non-flag arg is a legacy
-			// positional prompt, otherwise the prompt is on stdin.
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				return args[i+1]
-			}
-			return readStdinPrompt()
-		}
-		if flagsWithValues[args[i]] {
-			i++ // skip the value
+// extractClaudePrompt mirrors Claude Code's documented print-mode contract:
+// -p selects non-interactive mode and the text user prompt is read to EOF from
+// stdin. Keeping the e2e fake on this shape ensures prompts cannot regress into
+// process argv unnoticed.
+func extractClaudePrompt(args []string, promptReader io.Reader) (string, error) {
+	foundPrint := false
+	for _, arg := range args {
+		if arg == "-p" || arg == "--print" {
+			foundPrint = true
+			break
 		}
 	}
-	return readStdinPrompt()
-}
-
-// readStdinPrompt reads the entire prompt piped to the fake agent on stdin.
-// Shared by the claude and codex fakes (both stream the prompt on stdin).
-func readStdinPrompt() string {
-	data, err := io.ReadAll(os.Stdin)
+	if !foundPrint {
+		return "", fmt.Errorf("missing -p")
+	}
+	prompt, err := io.ReadAll(promptReader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "fakeagent: read stdin prompt: %v\n", err)
-		return ""
+		return "", fmt.Errorf("read stdin: %w", err)
 	}
-	return string(data)
+	return string(prompt), nil
 }

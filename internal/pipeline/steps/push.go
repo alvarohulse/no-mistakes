@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -18,8 +20,15 @@ type PushStep struct{}
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	newHeadSHA := ""
+	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+		return nil, err
+	}
+	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
@@ -56,7 +65,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
-	pushURL := sctx.Repo.PushURL()
+	pushURL := resolvePushURL(sctx)
 	pushTarget := "upstream"
 	usingFork := strings.TrimSpace(sctx.Repo.ForkURL) != ""
 	if usingFork {
@@ -69,6 +78,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	headBeingPushed, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
+	}
+	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+		return nil, err
 	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
@@ -86,16 +98,32 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	switch {
 	case decision.newBranch:
 		// New branch: regular push (no force needed).
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, "", false); err != nil {
+		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
-		// Remote already at this head: nothing to push, just reconcile refs below.
+		// Remote already at this exact head. This freshly verified equality is a
+		// successful binding even though no objects needed to move.
 	default:
 		// Existing branch: force-with-lease anchored to the verified remote head.
-		if err := git.Push(ctx, sctx.WorkDir, pushURL, ref, decision.remoteSHA, true); err != nil {
+		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
+	}
+	verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
+	if err != nil || verifiedRemote != headBeingPushed {
+		if err != nil {
+			return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+		}
+		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
+	}
+	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+		HeadSHA:           headBeingPushed,
+		TargetKind:        pushTarget,
+		TargetFingerprint: branchsync.TargetFingerprint(pushURL),
+		Ref:               ref,
+	}); err != nil {
+		return nil, err
 	}
 
 	if newHeadSHA != "" {
@@ -104,19 +132,60 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
-	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve HEAD after push: %w", err)
-	}
-	if headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+	// Persist the immutable source that was verified and delivered, never a
+	// fresh read of mutable worktree HEAD after the push.
+	if headBeingPushed != sctx.Run.HeadSHA {
+		sctx.Run.HeadSHA = headBeingPushed
+		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
 			return nil, err
 		}
 	}
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("load durable review approval before push: %w", err)
+	}
+	if run == nil || run.ReviewApprovedHeadSHA == nil || strings.TrimSpace(*run.ReviewApprovedHeadSHA) == "" {
+		return fmt.Errorf("refusing to push: run has no durably recorded review-approved head")
+	}
+	approvedHead := strings.TrimSpace(*run.ReviewApprovedHeadSHA)
+	if !isFullGitObjectID(approvedHead) {
+		return fmt.Errorf("refusing to push: durable review-approved head is malformed")
+	}
+	resolved, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "--verify", approvedHead+"^{commit}")
+	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved), approvedHead) {
+		return fmt.Errorf("refusing to push: durable review-approved head is unreachable")
+	}
+	if proposedHead != approvedHead {
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", approvedHead, proposedHead); err != nil {
+			return fmt.Errorf("refusing to push: proposed head %s violates continuity with review-approved head %s (it is not an equal or descendant commit)", shortObjectID(proposedHead), shortObjectID(approvedHead))
+		}
+	}
+	return nil
+}
+
+func isFullGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func shortObjectID(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
 }
 
 func (s *PushStep) stageInRepoEvidence(sctx *pipeline.StepContext) error {

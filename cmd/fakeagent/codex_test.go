@@ -196,3 +196,10 @@ func TestExtractCodexPromptSkipsOutputSchemaValue(t *testing.T) {
 		t.Fatalf("prompt = %q, want %q", got, "review this diff")
 	}
 }
+
+func TestExtractCodexPromptRecognizesStdinMarker(t *testing.T) {
+	args := []string{"exec", "resume", "thread-123", "-", "--json"}
+	if got := extractCodexPrompt(args); got != "-" {
+		t.Fatalf("prompt = %q, want stdin marker", got)
+	}
+}

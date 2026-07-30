@@ -18,6 +18,8 @@ const (
 	MethodSubscribe      = "subscribe"
 	MethodRespond        = "respond"
 	MethodCancelRun      = "cancel_run"
+	MethodGateContext    = "gate_context"
+	MethodAdmitPush      = "admit_push"
 	MethodHealth         = "health"
 	MethodShutdown       = "shutdown"
 )
@@ -142,6 +144,19 @@ type CancelRunParams struct {
 	RunID string `json:"run_id"`
 }
 
+// GateContextParams asks the daemon to classify the authenticated caller.
+// CWD and MarkerPresent are evidence only; peer PID comes from the transport.
+type GateContextParams struct {
+	CWD           string `json:"cwd,omitempty"`
+	MarkerPresent bool   `json:"marker_present,omitempty"`
+}
+
+// AdmitPushParams asks whether a local receive hook's authenticated process
+// ancestry is allowed to mutate a managed gate ref.
+type AdmitPushParams struct {
+	Gate string `json:"gate"`
+}
+
 // HealthParams has no fields but exists for consistency.
 type HealthParams struct{}
 
@@ -185,6 +200,22 @@ type CancelRunResult struct {
 	OK bool `json:"ok"`
 }
 
+// GateContextResult is the privacy-safe execution-context classification.
+type GateContextResult struct {
+	Nested           bool           `json:"nested"`
+	ManagedGit       bool           `json:"managed_git,omitempty"`
+	AgentDescendant  bool           `json:"agent_descendant,omitempty"`
+	DaemonDescendant bool           `json:"daemon_descendant,omitempty"`
+	MarkerPresent    bool           `json:"marker_present,omitempty"`
+	RunID            string         `json:"run_id,omitempty"`
+	Phase            types.StepName `json:"phase,omitempty"`
+}
+
+// AdmitPushResult is returned before a receive hook permits ref mutation.
+type AdmitPushResult struct {
+	Context GateContextResult `json:"context"`
+}
+
 // HealthResult confirms the daemon is alive.
 type HealthResult struct {
 	Status string `json:"status"`
@@ -199,14 +230,16 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	ID      string          `json:"id"`
-	RepoID  string          `json:"repo_id"`
-	Branch  string          `json:"branch"`
-	HeadSHA string          `json:"head_sha"`
-	BaseSHA string          `json:"base_sha"`
-	Status  types.RunStatus `json:"status"`
-	PRURL   *string         `json:"pr_url,omitempty"`
-	Error   *string         `json:"error,omitempty"`
+	ID               string          `json:"id"`
+	RepoID           string          `json:"repo_id"`
+	Branch           string          `json:"branch"`
+	HeadSHA          string          `json:"head_sha"`
+	SubmittedHeadSHA *string         `json:"submitted_head_sha,omitempty"`
+	BaseSHA          string          `json:"base_sha"`
+	Status           types.RunStatus `json:"status"`
+	PRURL            *string         `json:"pr_url,omitempty"`
+	Error            *string         `json:"error,omitempty"`
+	CIReady          bool            `json:"ci_ready,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both

@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -15,6 +16,9 @@ type LintStep struct{}
 func (s *LintStep) Name() types.StepName { return types.StepLint }
 
 func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 	lintCmd := sctx.Config.Commands.Lint
@@ -85,6 +89,9 @@ Previous lint findings to address:
 		}
 		summary, err := extractCommitSummary(result)
 		if err != nil {
+			if errors.Is(err, errRejectedCommitSummary) {
+				return nil, fmt.Errorf("validate lint summary: %w", err)
+			}
 			sctx.Log(fmt.Sprintf("warning: could not parse lint summary: %v", err))
 		}
 		if err := commitAgentFixes(sctx, s.Name(), summary, "fix lint issues"); err != nil {
@@ -151,7 +158,7 @@ Previous lint findings to address:
 		return nil, fmt.Errorf("run lint command: %w", err)
 	}
 
-	sctx.Log(output)
+	projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepLint)
 
 	if exitCode != 0 {
 		findings := Findings{
@@ -159,7 +166,7 @@ Previous lint findings to address:
 				Severity:    "warning",
 				Description: fmt.Sprintf("linter found issues (exit code %d)", exitCode),
 			}},
-			Summary: output,
+			Summary: projectedOutput,
 		}
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{

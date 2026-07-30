@@ -79,20 +79,16 @@ Yolo and AXI `--yes` approve that fix review automatically after their one fix r
 
 ## Fix commits
 
-Each auto-fix cycle commits its changes with a descriptive message. The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document prefix; configured-command lint fixes use the Lint prefix:
+When the Review, Test, Document, or Lint step commits auto-fix changes, its subject comes from `commit.fix_message`.
+The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
+The pipeline validates the template, agent summary, predicted output size, and final rendered subject before `git add -A`, so a rejected value does not leave changes staged.
+The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document value for `{{.Step}}`; configured-command lint fixes use the Lint value.
 
 Before a step-specific fix commit, the pipeline verifies that the live worktree HEAD still descends from the head recorded after its previous commit.
 It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
-| Step | Commit prefix |
-|---|---|
-| Rebase | `no-mistakes(rebase): <summary>` |
-| Review | `no-mistakes(review): <summary>` |
-| Test | `no-mistakes(test): <summary>` |
-| Document | `no-mistakes(document): <summary>` |
-| Lint | `no-mistakes(lint): <summary>` |
-
-The push step commits any remaining uncommitted changes with `no-mistakes: apply agent fixes`.
+The template does not control commits created by the Rebase, CI, or Push steps.
+The CI step uses `no-mistakes: apply CI fixes`, and the Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
 
 ## Step rounds
 
@@ -101,12 +97,7 @@ A round stores its findings, duration, any selected finding IDs and whether that
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.
-The PR body's deterministic risk assessment, testing, and pipeline sections are built from these rounds, giving reviewers visibility into test results, review risk, what was fixed, and how many attempts it took.
-In PR pipeline details, auto-fix rounds are rendered as an issue -> fix -> verification narrative instead of a round-numbered log: each fix summary is followed by either a successful re-check or the findings still open after that fix.
-On very long runs, the PR body uses a 63,488-byte safety cap, which leaves a 2 KB buffer below GitHub's 65,536-character body limit.
-It first keeps the newest pipeline update rounds and replaces older rounds with an omission marker at whole-update boundaries.
-If the newest update or essential body content is still too large, the PR step truncates at line or section boundaries and adds an explicit marker. An operator-supplied `## Notes` section from `axi run --pr-note` or `--pr-note-file` sits near the top (after `## Intent`) and is a normal section with no special truncation protection; the Pipeline section is clamped first, but if the body still exceeds the limit the note may be clamped along with the rest.
-The full round history remains available in the run log.
+The full round history remains available in the run log. The generated PR keeps earlier evidence step-scoped and shows only compact step status in its Pipeline section; the [pipeline steps reference](/no-mistakes/reference/pipeline-steps/#pr) owns the PR body and size-limit contract.
 
 Round trigger types:
 - `initial` - first execution

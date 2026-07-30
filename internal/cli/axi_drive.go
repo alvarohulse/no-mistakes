@@ -11,6 +11,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -22,42 +23,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// drivePollInterval is how often the drive loop re-reads run state. Short
-// enough to feel responsive to an agent, long enough to avoid hammering the
-// daemon during long agent steps.
-const drivePollInterval = 250 * time.Millisecond
-
 // triggerWaitTimeout bounds how long we wait for the daemon to register a run
 // after pushing to the gate before falling back to a rerun.
 const triggerWaitTimeout = 5 * time.Second
 
-// maxPRNotePushOptionBytes caps a single author note's source size. The note
-// rides a base64-encoded git push option (see formatPRNotePushOption), so it is
-// bounded well below git's pkt-line limit. base64 inflates by ~4/3, so 16 KiB
-// of source is ~21.8 KiB encoded - comfortably within transport for the note
-// alone. The combined transport (note plus --intent plus --skip, which all
-// share one command line) is bounded separately by maxAggregatePushOptionBytes.
 const maxPRNotePushOptionBytes = 16 * 1024
 
-// maxAggregatePushOptionBytes bounds the combined size of every push option on a
-// single gate push. On Windows, PushWithOptions passes options via argv, which
-// CreateProcess caps at 32767 characters for the whole command line; the note
-// and the (also base64-encoded) intent share that budget, so a note that fits
-// maxPRNotePushOptionBytes on its own can still overflow once a non-trivial
-// intent is added. This conservative ceiling leaves headroom for the rest of
-// the git command and keeps the push safe on every supported platform.
 const maxAggregatePushOptionBytes = 28 * 1024
 
-// pushOptionsWithinTransport reports whether the assembled push options fit the
-// aggregate transport budget, accounting for the " --push-option " argv
-// overhead each one carries.
 func pushOptionsWithinTransport(options []string) bool {
 	total := 0
-	for _, opt := range options {
-		total += len(opt) + len(" --push-option ")
+	for _, option := range options {
+		total += len(option) + len(" --push-option ")
 	}
 	return total <= maxAggregatePushOptionBytes
 }
+
+// abortStateWaitTimeout bounds the post-cancel wait for the executor to
+// persist its terminal state before AXI renders refreshed custody guidance.
+const abortStateWaitTimeout = 10 * time.Second
 
 // terminalStatus reports whether a run has reached a final state.
 func terminalStatus(status string) bool {
@@ -102,13 +86,12 @@ func newAxiRunCmd() *cobra.Command {
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
-			"agent. The daemon requires a supported native agent binary or a configured\n" +
-			"ACP target through acpx, and fails before the first step when none can run.\n\n" +
-			"--pr-note (or --pr-note-file for longer content; mutually exclusive) injects\n" +
-			"author-supplied text into the pull request. Inputs are limited to 16 KiB and\n" +
-			"the aggregate push-option transport is bounded. The trimmed note is rendered\n" +
-			"verbatim in a ## Notes section after Intent and reused for same-head reruns;\n" +
-			"note flags are rejected when reattaching to an active run.\n\n" +
+			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
+			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
+			"first step when none can run.\n\n" +
+			"--pr-note or --pr-note-file injects trusted author text into the PR body's\n" +
+			"## Notes section. The flags are mutually exclusive, limited to 16 KiB, and\n" +
+			"apply only when starting a new run.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
@@ -125,12 +108,6 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				// Mutual exclusion and the reattach check key off whether the
-				// flags were set (Flags().Changed), not their resolved content, so
-				// `--pr-note '' --pr-note-file f` is still rejected and an empty or
-				// whitespace-only note is not silently treated as "no note flag".
-				// Note resolution itself is deferred into runAxiRun so a
-				// --pr-note-file is only read once a fresh run is confirmed.
 				noteProvided := cmd.Flags().Changed("pr-note") || cmd.Flags().Changed("pr-note-file")
 				if cmd.Flags().Changed("pr-note") && cmd.Flags().Changed("pr-note-file") {
 					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
@@ -143,16 +120,11 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
-	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text trimmed and added to a \"## Notes\" section of the PR body, then fed to the PR summary as trusted guidance (maximum 16 KiB, and bounded further when combined with --intent; an existing Notes heading is not duplicated; applies only when starting a new run)")
-	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note, for longer content (mutually exclusive with --pr-note; maximum 16 KiB before trimming)")
+	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added to the PR Notes section (maximum 16 KiB; applies only to a new run)")
+	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note (maximum 16 KiB)")
 	return cmd
 }
 
-// resolvePRNote resolves the author-supplied PR note from the mutually
-// exclusive --pr-note / --pr-note-file flags. Inputs are limited to
-// maxPRNotePushOptionBytes; --pr-note-file is intended for longer content and is
-// size-checked (via os.Stat, before reading) so an accidentally huge file
-// cannot be slurped into memory. Returns "" when neither flag is set.
 func resolvePRNote(prNote, prNoteFile string) (string, error) {
 	if prNote != "" && prNoteFile != "" {
 		return "", fmt.Errorf("--pr-note and --pr-note-file are mutually exclusive")
@@ -163,7 +135,6 @@ func resolvePRNote(prNote, prNoteFile string) (string, error) {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
 		}
 		defer file.Close()
-
 		info, err := file.Stat()
 		if err != nil {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
@@ -171,15 +142,10 @@ func resolvePRNote(prNote, prNoteFile string) (string, error) {
 		if info.Size() > int64(maxPRNotePushOptionBytes) {
 			return "", prNoteTransportSizeError(info.Size())
 		}
-
 		data, err := io.ReadAll(io.LimitReader(file, int64(maxPRNotePushOptionBytes)+1))
 		if err != nil {
 			return "", fmt.Errorf("read --pr-note-file %q: %w", prNoteFile, err)
 		}
-		// Check the raw byte count before trimming. A stream (e.g. a FIFO) has no
-		// stat size, so LimitReader is the only size guard; trimming trailing
-		// whitespace first could otherwise mask that content past the limit was
-		// silently dropped.
 		if len(data) > maxPRNotePushOptionBytes {
 			return "", prNoteTransportSizeError(int64(len(data)))
 		}
@@ -217,10 +183,6 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 1, fmt.Sprintf("get current HEAD: %v", err))
 	}
 
-	// With a PR note, the active-run lookup must fail closed: a swallowed lookup
-	// error could otherwise let triggerRun adopt an existing note-less run and
-	// silently drop the guaranteed note. Plain runs keep the fail-open lookup so
-	// a transient daemon hiccup does not block them.
 	var runID string
 	if noteProvided {
 		id, lookupErr := activeRunIDChecked(env, branch, headSHA)
@@ -233,12 +195,6 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		runID = activeRunID(env, branch, headSHA)
 	}
 	if runID != "" && noteProvided {
-		// A run is already active for this HEAD, so reattaching only drives it -
-		// the PR note applies only when a run is started (see triggerRun). Reject
-		// (rather than silently ignore) before resolving the note, so the operator
-		// is not misled and a --pr-note-file (which may be a FIFO) is never read on
-		// the reattach path. Keyed off flag presence, so even an empty or
-		// whitespace-only note is rejected rather than silently reattaching.
 		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
 	}
@@ -261,8 +217,6 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
-		// Resolve the note only now that a fresh run will actually start, so a
-		// --pr-note-file is read on this path alone (never on reattach).
 		note, resolveErr := resolvePRNote(prNote, prNoteFile)
 		if resolveErr != nil {
 			return emitError(cmd, 2, resolveErr.Error(),
@@ -271,11 +225,14 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		var err error
 		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note)
 		if err != nil {
+			if ownershipErr, ok := err.(*branchOwnershipError); ok {
+				return emitBranchOwnershipError(cmd, ownershipErr)
+			}
 			return emitError(cmd, 1, err.Error())
 		}
 	}
 
-	run, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, autoYes, ciLogReader(env.p))
+	run, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, env.p.Socket(), runID, autoYes, ciLogReader(env.p))
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
@@ -295,9 +252,6 @@ func activeRunID(env *axiEnv, branch, headSHA string) string {
 	return id
 }
 
-// activeRunIDChecked is activeRunID that surfaces the lookup error instead of
-// swallowing it, so a caller can fail closed rather than risk adopting or
-// starting the wrong run.
 func activeRunIDChecked(env *axiEnv, branch, headSHA string) (string, error) {
 	var active ipc.GetActiveRunResult
 	if err := env.client.Call(ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
@@ -315,7 +269,11 @@ func activeRunIDForHead(active *ipc.GetActiveRunResult, headSHA string) string {
 }
 
 func activeRunInfoForHead(run *ipc.RunInfo, headSHA string) *ipc.RunInfo {
-	if run == nil || terminalStatus(string(run.Status)) || run.HeadSHA != headSHA {
+	if run == nil || terminalStatus(string(run.Status)) {
+		return nil
+	}
+	matchesSubmitted := run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == headSHA
+	if run.HeadSHA != headSHA && !matchesSubmitted {
 		return nil
 	}
 	return run
@@ -350,6 +308,57 @@ func preflightGuard(ctx context.Context, env *axiEnv, branch string) func(*cobra
 	return nil
 }
 
+// branchOwnershipError carries the shared branch-sync classification that
+// blocked a fresh trigger. Keeping the state intact lets AXI render the exact
+// structured next action instead of reducing the refusal to a Git push error.
+type branchOwnershipError struct {
+	state branchsync.State
+}
+
+func (e *branchOwnershipError) Error() string {
+	if e.state.Error != "" {
+		return e.state.Error
+	}
+	return "the pipeline still owns this branch; no fresh run was started"
+}
+
+func emitBranchOwnershipError(cmd *cobra.Command, ownershipErr *branchOwnershipError) error {
+	state := ownershipErr.state
+	fields := []toon.Field{
+		{Key: "error", Value: ownershipErr.Error()},
+		branchSyncField(state),
+	}
+	if state.NextAction != nil {
+		fields = append(fields, toon.Field{Key: "help", Value: []string{
+			"Run `" + state.NextAction.Command + "`",
+			branchSyncAgentGuidance,
+		}})
+	}
+	emitDoc(cmd, fields...)
+	return &exitError{code: 1}
+}
+
+func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
+	service := &branchsync.Service{
+		DB:      env.d,
+		Repo:    env.repo,
+		WorkDir: ".",
+		GateDir: env.p.RepoDir(env.repo.ID),
+		Paths:   env.p,
+	}
+	return service.InspectCached(ctx)
+}
+
+func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
+	state := inspectAxiBranchSync(ctx, env)
+	switch state.State {
+	case branchsync.StatePipelineOwned, branchsync.StatePushInProgress:
+		return &state
+	default:
+		return nil
+	}
+}
+
 // triggerRun starts a fresh run for branch: it pushes the current HEAD through
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
@@ -359,21 +368,30 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
+	if opt := formatPRNotePushOption(prNote); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
+		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
+	}
 	priorRunIDs, err := runIDsForHead(env.client, env.repo.ID, branch, headSHA)
 	if err != nil {
 		// An active run can still be found below. Without a baseline, however,
 		// a matching terminal run may predate this push, so do not attach to it.
 		priorRunIDs = nil
 	}
-	if opt := formatPRNotePushOption(prNote); opt != "" {
-		pushOptions = append(pushOptions, opt)
-	}
-	// Enforce the aggregate bound only when a note is present, preserving the
-	// historical behavior of intent-only runs.
-	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
-		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
+	if state := freshRunBranchOwnershipState(ctx, env); state != nil {
+		return "", &branchOwnershipError{state: *state}
 	}
 	pushErr := git.PushWithOptions(ctx, ".", gate.RemoteName, "refs/heads/"+branch, "", false, pushOptions)
+	if pushErr != nil {
+		// Close the inspection-to-push race: if the pipeline advanced ownership
+		// after the pre-push check, preserve the structured branch-sync refusal
+		// instead of leaking the resulting Git non-fast-forward.
+		if state := freshRunBranchOwnershipState(ctx, env); state != nil {
+			return "", &branchOwnershipError{state: *state}
+		}
+	}
 
 	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, headSHA, priorRunIDs, triggerWaitTimeout); run != nil {
 		return run.ID, nil
@@ -473,8 +491,9 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNo
 	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRNote: prNote}
 }
 
-// driveRun polls a run until it reaches an approval gate, a terminal state, or
-// CI checks pass, streaming step transitions to progress (stderr). When
+// driveRun subscribes to a run and reconciles authoritative state on transition
+// events until it reaches an approval gate, a terminal state, or CI checks
+// pass, streaming step transitions to progress (stderr). When
 // autoApprove is set it resolves each gate and continues; otherwise it returns
 // at the first gate so the caller can surface it for a human/agent decision.
 //
@@ -491,14 +510,18 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNo
 // ready for a human to merge. The daemon keeps monitoring in the background.
 // readCILog reads the CI step's log lines for runID; it may be nil (no early
 // stop) and returns nil when no log exists yet.
-func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID string, autoApprove bool, readCILog func(string) []string) (run *ipc.RunInfo, ciReady bool, err error) {
+func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, socketPath, runID string, autoApprove bool, readCILog func(string) []string) (run *ipc.RunInfo, ciReady bool, err error) {
+	reconciler := newRunReconciler(&ipcRunStateSource{socketPath: socketPath}, runID)
+	defer reconciler.Close()
+	return driveRunWithReconciler(ctx, progress, client, reconciler, runID, autoApprove, readCILog)
+}
+
+func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc.Client, reconciler *runReconciler, runID string, autoApprove bool, readCILog func(string) []string) (run *ipc.RunInfo, ciReady bool, err error) {
 	pp := &progressPrinter{w: progress, seen: map[string]string{}}
 	fixedSteps := map[string]bool{}
+	pendingGate := ""
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
-		run, err := getRunInfo(client, runID)
+		run, err := reconciler.Next(ctx)
 		if err != nil {
 			return nil, false, err
 		}
@@ -515,6 +538,13 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 			if !autoApprove {
 				return run, false, nil
 			}
+			gateKey := gate.Name + "\x00" + gate.Status
+			if pendingGate == gateKey {
+				// Duplicate or delayed events can race persistence after a response.
+				// Keep waiting for an authoritative transition rather than answering
+				// the same gate twice.
+				continue
+			}
 			action, findingIDs := gateResolution(gate, fixedSteps[gate.Name])
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
@@ -522,19 +552,15 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 			if err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
-			if err := waitStepLeavesGate(ctx, client, runID, gate.Name, gate.Status); err != nil {
-				return nil, false, err
-			}
+			pendingGate = gateKey
 			continue
 		}
+		pendingGate = ""
 		// CI is green but the PR is unmerged: hand control back rather than
 		// waiting on a human merge. This holds even under autoApprove, since
 		// the agent cannot approve away a human's merge.
 		if readCILog != nil && ciReadyToMerge(rv, readCILog(runID)) {
 			return run, true, nil
-		}
-		if err := sleepCtx(ctx, drivePollInterval); err != nil {
-			return nil, false, err
 		}
 	}
 }
@@ -594,13 +620,12 @@ func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []s
 // waitStepLeavesGate blocks until the named step's status changes away from the
 // gate status we just answered, or the run terminates. This prevents a
 // double-approve race: respond is asynchronous, so without waiting the next
-// poll could still observe the same gate and approve it twice.
-func waitStepLeavesGate(ctx context.Context, client *ipc.Client, runID, step, gateStatus string) error {
+// event reconciliation could still observe the same gate and approve it twice.
+func waitStepLeavesGate(ctx context.Context, socketPath, runID, step, gateStatus string) error {
+	reconciler := newRunReconciler(&ipcRunStateSource{socketPath: socketPath}, runID)
+	defer reconciler.Close()
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		run, err := getRunInfo(client, runID)
+		run, err := reconciler.Next(ctx)
 		if err != nil {
 			return err
 		}
@@ -614,9 +639,6 @@ func waitStepLeavesGate(ctx context.Context, client *ipc.Client, runID, step, ga
 				}
 				break
 			}
-		}
-		if err := sleepCtx(ctx, drivePollInterval); err != nil {
-			return err
 		}
 	}
 }
@@ -649,17 +671,6 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 	return nil
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
 // renderDriveResult prints the run snapshot plus one of: the active gate (exit
 // 0, a normal decision point), a checks-passed outcome (exit 0, CI is green and
 // the PR is ready for a human to merge), or the terminal outcome (exit 0 when
@@ -669,6 +680,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error {
 	rv := runViewFromIPC(run)
 	fields := []toon.Field{runObjectField(rv)}
+	hasBranchSync := false
+	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
+		fields = append(fields, *syncField)
+		hasBranchSync = true
+	}
 
 	// CI passed but the run is intentionally still monitoring for a human
 	// merge. Report it as a distinct, successful outcome so the agent stops
@@ -682,6 +698,9 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		fixes := rv.fixRows()
 		fields = appendFixesField(fields, fixes)
 		help := append([]string{merge}, successReportHelp(fixes)...)
+		if hasBranchSync {
+			help = append(help, branchSyncAgentGuidance)
+		}
 		help = append(help, staleMonitorGuidance)
 		fields = append(fields, toon.Field{Key: "help", Value: help})
 		emitDoc(cmd, fields...)
@@ -707,12 +726,18 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 			help = append(help, fmt.Sprintf("Open the PR: %s", rv.PRURL))
 		}
 		help = append(help, successReportHelp(fixes)...)
+		if hasBranchSync {
+			help = append(help, branchSyncAgentGuidance)
+		}
 		fields = append(fields, toon.Field{Key: "help", Value: help})
 		emitDoc(cmd, fields...)
 		return nil
 	}
 
 	help := []string{preserveGateFixCommitsGuidance}
+	if hasBranchSync {
+		help = append(help, branchSyncAgentGuidance)
+	}
 	if rv.PRURL != "" {
 		help = append([]string{fmt.Sprintf("Open the PR: %s", rv.PRURL)}, help...)
 	}
@@ -869,11 +894,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	// Let the executor consume the response before we re-read state, so we
 	// don't immediately observe the same gate we just answered.
-	if err := waitStepLeavesGate(ctx, env.client, runID, string(stepName), gateStatusFor(rv, string(stepName))); err != nil {
+	if err := waitStepLeavesGate(ctx, env.p.Socket(), runID, string(stepName), gateStatusFor(rv, string(stepName))); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("wait for %s: %v", stepName, err))
 	}
 
-	final, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, runID, ra.autoYes, ciLogReader(env.p))
+	final, ciReady, err := driveRun(ctx, cmd.ErrOrStderr(), env.client, env.p.Socket(), runID, ra.autoYes, ciLogReader(env.p))
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
@@ -953,12 +978,53 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	if err := env.client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: active.Run.ID}, &result); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("abort run: %v", err))
 	}
-	emitDoc(cmd,
+	waitForTerminalRun(ctx, env.client, active.Run.ID, abortStateWaitTimeout)
+	fields := []toon.Field{
 		toon.Field{Key: "aborted", Value: true},
 		toon.Field{Key: "run", Value: active.Run.ID},
 		toon.Field{Key: "branch", Value: active.Run.Branch},
+	}
+	state := inspectAxiBranchSync(ctx, env)
+	if state.Pipeline.RunID == active.Run.ID && relevantCachedSyncState(state) {
+		fields = append(fields, branchSyncField(state))
+	}
+	help := []string{
+		"Run `no-mistakes axi sync --check` before any local follow-up commit - a cancelled run can leave unpublished pipeline commits preserved in the local gate, and the check offers the guarded custody recovery",
+	}
+	if state.Pipeline.RunID == active.Run.ID && state.NextAction != nil {
+		help = []string{
+			"Run `" + state.NextAction.Command + "`",
+			branchSyncAgentGuidance,
+		}
+	}
+	fields = append(fields,
+		toon.Field{Key: "help", Value: help},
 	)
+	emitDoc(cmd, fields...)
 	return nil
+}
+
+func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, timeout time.Duration) *ipc.RunInfo {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		run, err := getRunInfo(client, runID)
+		if err != nil {
+			return nil
+		}
+		if run != nil && terminalStatus(string(run.Status)) {
+			return run
+		}
+		select {
+		case <-ctx.Done():
+			return run
+		case <-timer.C:
+			return run
+		case <-ticker.C:
+		}
+	}
 }
 
 // runAxiAbortByRunID cancels a run by its id directly via the daemon, without

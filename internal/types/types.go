@@ -129,8 +129,8 @@ const (
 	ActionAbort   ApprovalAction = "abort"
 )
 
-// AgentName identifies a supported agent backend.
-// ACP agent names use dynamic acp:<target> values instead of constants.
+// AgentName identifies a supported agent backend. Explicit ACP targets use
+// dynamic acp:<target> values; first-class ACP aliases have constants below.
 type AgentName string
 
 const (
@@ -210,7 +210,8 @@ func ACPTargetFor(name AgentName) (string, bool) {
 }
 
 // ACPRawCommand resolves the raw command acpx runs for an ACP target: a
-// non-blank registry override wins, otherwise the alias default command.
+// registry override is trimmed and wins when non-blank, otherwise the alias
+// default command is used.
 // Empty means acpx dispatches the target through its own registry.
 func ACPRawCommand(target string, overrides map[string]string) string {
 	if override := strings.TrimSpace(overrides[target]); override != "" {
@@ -220,14 +221,4 @@ func ACPRawCommand(target string, overrides map[string]string) string {
 		return alias.DefaultCommand
 	}
 	return ""
-}
-
-// ACPRawCommandBinary returns the executable named by the resolved raw command
-// for an ACP target; empty when acpx dispatches the target through its registry.
-func ACPRawCommandBinary(target string, overrides map[string]string) string {
-	fields := strings.Fields(ACPRawCommand(target, overrides))
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
 }

@@ -12,8 +12,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -338,6 +340,100 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 	}
 }
 
+func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
+	for _, state := range []string{"merged", "closed"} {
+		t.Run(state, func(t *testing.T) {
+			root, err := os.MkdirTemp("", "dtest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(root) })
+			p := paths.WithRoot(root)
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := database.InsertRepoWithID("terminal-pr-"+state, t.TempDir(), "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunPRState(run.ID, state); err != nil {
+				t.Fatal(err)
+			}
+			// Recreate a legacy interrupted row after the current writer has run:
+			// terminal PR truth was durable, but status was still running.
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			ci, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(ci.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- RunWithOptions(p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} })
+			}()
+			defer func() {
+				client, dialErr := ipc.Dial(p.Socket())
+				if dialErr == nil {
+					_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+					_ = client.Close()
+				}
+				select {
+				case <-errCh:
+				case <-time.After(3 * time.Second):
+					t.Error("isolated daemon did not stop")
+				}
+				_ = database.Close()
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, statErr := os.Stat(p.Socket()); statErr == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("isolated daemon did not become ready")
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			got, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != state {
+				t.Fatalf("startup reconciliation = status %s pr_state %v, want completed/%s", got.Status, got.PRState, state)
+			}
+			gotCI, err := database.GetStepResult(ci.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotCI.Status != types.StepStatusCompleted {
+				t.Fatalf("startup reconciliation CI status = %s, want completed", gotCI.Status)
+			}
+			active, err := lifecycle.ActiveRuns(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("startup reconciliation retained active runs: %+v", active)
+			}
+		})
+	}
+}
+
 func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -380,7 +476,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if err := d.SetStepFindings(step.ID, findings); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+	if _, err := d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, headSHA, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
@@ -442,6 +538,9 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if completed.AwaitingAgentSince != nil {
 		t.Fatal("recovered run remained parked after approval")
 	}
+	if completed.ReviewApprovedHeadSHA == nil || *completed.ReviewApprovedHeadSHA != headSHA {
+		t.Fatalf("recovered review approval = %#v, want %s", completed.ReviewApprovedHeadSHA, headSHA)
+	}
 	// The executor marks the run terminal before its owner goroutine performs
 	// worktree cleanup. Wait for that cleanup rather than assuming it completed
 	// in the same scheduling slice, which is especially unreliable on Windows.
@@ -456,6 +555,106 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 			t.Fatalf("recovered worktree still exists after cleanup: %s", worktree)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testing.T) {
+	for _, state := range []string{"MERGED", "CLOSED"} {
+		t.Run(state, func(t *testing.T) {
+			tmpDir, err := os.MkdirTemp("", "dtest")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+			p := paths.WithRoot(tmpDir)
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			mockClaude := writeMockClaude(t, t.TempDir())
+			if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\nagent_path_override:\n  claude: "+mockClaude+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			repo, headSHA := setupTestGitRepo(t, p, d, "reconcile-parked-ci-"+strings.ToLower(state))
+			run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/42"); err != nil {
+				t.Fatal(err)
+			}
+			prURL := "https://github.com/test/repo/pull/42"
+			run.PRURL = &prURL
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+				t.Fatal(err)
+			}
+			step, err := d.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStep(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"PR was still open when CI monitoring timed out","action":"ask-user"}],"summary":"CI monitoring timed out before PR was merged or closed"}`
+			if err := d.SetStepFindings(step.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			ghDir, ghLog := writeMockGHState(t, t.TempDir(), state)
+			t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- RunWithOptions(p, d, func() []pipeline.Step { return []pipeline.Step{&steps.CIStep{}} })
+			}()
+			defer func() {
+				client, dialErr := ipc.Dial(p.Socket())
+				if dialErr == nil {
+					_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+					_ = client.Close()
+				}
+				select {
+				case <-errCh:
+				case <-time.After(3 * time.Second):
+					t.Error("daemon did not stop")
+				}
+			}()
+
+			completed := waitForRunTerminalState(t, d, run.ID)
+			if completed.Status != types.RunCompleted || completed.AwaitingAgentSince != nil {
+				t.Fatalf("historical CI gate after %s reconciliation = status %s awaiting %v", state, completed.Status, completed.AwaitingAgentSince)
+			}
+			active, err := lifecycle.ActiveRuns(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("update guard still sees %d active runs after reconciliation", len(active))
+			}
+			logData, err := os.ReadFile(ghLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(logData), "pr view 42") {
+				t.Fatalf("startup reconciliation did not read current PR state: %s", logData)
+			}
+		})
 	}
 }
 
@@ -541,7 +740,12 @@ func TestRecoverIsolatesGateRepoHooksPath(t *testing.T) {
 		t.Fatalf("seed poisoned config: %v: %s", err, out)
 	}
 
-	migrateGateConfigs(ctx, p)
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	migrateGateConfigs(ctx, database, p)
 
 	// Effective core.hookspath should now resolve to the bare's hooks dir.
 	out, err := exec.Command("git", "-C", bareDir, "config", "--get", "core.hookspath").Output()
@@ -594,7 +798,12 @@ exit 0
 		t.Fatal(err)
 	}
 
-	migrateGateConfigs(ctx, p)
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	migrateGateConfigs(ctx, database, p)
 
 	data, err := os.ReadFile(hookPath)
 	if err != nil {

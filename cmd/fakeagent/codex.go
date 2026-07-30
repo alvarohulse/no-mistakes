@@ -4,12 +4,21 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
 
 func runCodex(args []string, scenario *Scenario) int {
 	prompt := extractCodexPrompt(args)
+	if prompt == "-" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent: read codex prompt: %v\n", err)
+			return 1
+		}
+		prompt = string(data)
+	}
 	logInvocation("codex", prompt, args)
 
 	action := scenario.Match(prompt)
@@ -172,9 +181,11 @@ func filterStructuredToSchema(structured map[string]any, schemaPath string) (map
 	return filtered, nil
 }
 
-// extractCodexPrompt returns the prompt from stdin when no-mistakes emits the
-// managed "-" positional. Legacy argv prompts remain supported for fixtures:
-// fresh uses the first positional, resume uses the positional after session ID.
+// extractCodexPrompt finds the prompt positional. Real codex argv is
+// `codex exec [user-flags...] <prompt> --json [...]` for a fresh session and
+// `codex exec resume [user-flags...] <session-id> <prompt> --json [...]` for
+// a session-resume turn, so on resume the prompt is the positional after the
+// session id.
 func extractCodexPrompt(args []string) string {
 	flagsWithValues := map[string]bool{
 		"-m": true, "--model": true,
@@ -199,8 +210,8 @@ func extractCodexPrompt(args []string) string {
 			continue
 		}
 		if a == "-" {
-			// stdin sentinel: no-mistakes piped the prompt on stdin.
-			return readStdinPrompt()
+			positionals = append(positionals, a)
+			continue
 		}
 		if len(a) > 0 && a[0] == '-' {
 			continue
@@ -208,7 +219,7 @@ func extractCodexPrompt(args []string) string {
 		positionals = append(positionals, a)
 	}
 	if len(positionals) == 0 {
-		return readStdinPrompt()
+		return ""
 	}
 	if positionals[0] == "resume" {
 		if len(positionals) >= 3 {

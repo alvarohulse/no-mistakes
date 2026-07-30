@@ -66,14 +66,15 @@ func TestAxiRunPRNoteFileJourney(t *testing.T) {
 	}
 
 	var body string
-	for _, invocation := range readGHStubInvocations(t, ghLog) {
+	invocations := readGHStubInvocations(t, ghLog)
+	for _, invocation := range invocations {
 		if len(invocation.Args) >= 2 && invocation.Args[0] == "pr" && invocation.Args[1] == "create" {
 			body = invocation.Body
 			break
 		}
 	}
 	if body == "" {
-		t.Fatal("created PR body was not captured")
+		t.Fatalf("created PR body was not captured: %+v", invocations)
 	}
 	if !strings.Contains(body, note) {
 		t.Fatalf("created PR body did not preserve the author note verbatim:\n%s", body)
