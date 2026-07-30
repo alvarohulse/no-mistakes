@@ -115,6 +115,8 @@ ci:
 
 Unconfigured steps inherit the run-wide route. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review's durable reviewer/fixer sessions use only the Review route, and invocation telemetry records the concrete provider used after fallback.
 
+When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds into the document step's combined housekeeping pass, which runs on the `document` route; the `lint` route then applies only if that step falls back to its own pass. Set `commands.lint` if you want the `lint` route to own the lint duty directly.
+
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
 ACP targets and aliases remain valid step routes when no native CLI override is required. Global `agent_args_override` supports native agents only: ACP keys are rejected and ACP construction fails rather than silently discarding extra model or reasoning flags.
