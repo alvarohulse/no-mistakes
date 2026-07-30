@@ -2,30 +2,39 @@ package db
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 
 	inv := AgentInvocation{
-		RunID:               run.ID,
-		StepName:            "review",
-		Round:               2,
-		Purpose:             "review-fix",
-		Agent:               "codex",
-		Model:               "gpt-5.2-codex",
-		SessionMode:         InvocationModeResumed,
-		SessionKey:          "abcd1234abcd1234",
-		StartedAt:           1_700_000_000,
-		CompletedAt:         1_700_000_090,
-		DurationMS:          90_000,
-		ExitStatus:          "ok",
-		InputTokens:         1000,
-		OutputTokens:        200,
-		CacheReadTokens:     800,
-		CacheCreationTokens: intPtr(50),
+		RunID:          run.ID,
+		StepName:       "review",
+		Round:          2,
+		Purpose:        "review-fix",
+		Agent:          "codex",
+		Model:          "gpt-5.2-codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		AgentObservations: []types.AgentObservation{
+			{Identity: "repo-scanner", InvocationMode: types.AgentInvocationModeSubagentTool},
+			{Identity: "thread:0123456789abcdef", InvocationMode: types.AgentInvocationModeSubagentTool},
+		},
+		AgentObservationsReported: true,
+		SessionMode:               InvocationModeResumed,
+		SessionKey:                "abcd1234abcd1234",
+		StartedAt:                 1_700_000_000,
+		CompletedAt:               1_700_000_090,
+		DurationMS:                90_000,
+		ExitStatus:                "ok",
+		InputTokens:               1000,
+		OutputTokens:              200,
+		CacheReadTokens:           800,
+		CacheCreationTokens:       intPtr(50),
 	}
 	if _, err := d.InsertAgentInvocation(inv); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -45,6 +54,15 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
+	}
+	if back.InvocationMode != types.AgentInvocationModeHarnessCLI {
+		t.Fatalf("invocation mode = %q, want harness_cli", back.InvocationMode)
+	}
+	if !reflect.DeepEqual(back.AgentObservations, inv.AgentObservations) {
+		t.Fatalf("agent observations = %+v, want %+v", back.AgentObservations, inv.AgentObservations)
+	}
+	if !back.AgentObservationsReported {
+		t.Fatal("agent observations should be reported")
 	}
 }
 
@@ -439,5 +457,54 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		ModelRoundtrips: intPtr(3), ToolCalls: intPtr(2), SubprocessWaitMS: int64Ptr(500),
 	}); err != nil {
 		t.Fatalf("insert after migration: %v", err)
+	}
+}
+
+func TestOpenMigratesAgentAttributionColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	repo, err := d.InsertRepo("/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "b", "h", "b")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	for _, column := range []string{"agent_observations_json", "invocation_mode"} {
+		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + column); err != nil {
+			t.Fatalf("drop %s: %v", column, err)
+		}
+	}
+	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
+		(id, run_id, step_name, round, purpose, agent, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
+		VALUES ('legacy-attribution', ?, 'review', 1, 'review', 'codex', '', 'cold', '', 1, 2, 1, 'ok', '', 0, 0, 0)`, run.ID); err != nil {
+		t.Fatalf("insert legacy invocation: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer d.Close()
+
+	got, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get after migration: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d rows, want 1", len(got))
+	}
+	if got[0].InvocationMode != types.AgentInvocationModeHarnessCLI {
+		t.Fatalf("legacy invocation mode = %q, want harness_cli", got[0].InvocationMode)
+	}
+	if got[0].AgentObservationsReported {
+		t.Fatal("legacy row must keep nested-agent observations unknown")
 	}
 }

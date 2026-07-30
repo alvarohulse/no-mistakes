@@ -1,6 +1,11 @@
 package db
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 // Agent invocation session modes recorded for local performance telemetry.
 const (
@@ -43,7 +48,17 @@ type AgentInvocation struct {
 	// step-derived default.
 	Purpose string
 	Agent   string
-	Model   string
+	// InvocationMode is how the top-level adapter was invoked. Pipeline agent
+	// processes use harness_cli; nested event-stream observations use
+	// subagent_tool in AgentObservations.
+	InvocationMode types.AgentInvocationMode
+	// AgentObservations is the ordered list of nested agent invocations exposed
+	// by the adapter stream. AgentObservationsReported distinguishes a supported
+	// stream with no nested invocations from an adapter that exposes no such
+	// evidence.
+	AgentObservations         []types.AgentObservation
+	AgentObservationsReported bool
+	Model                     string
 	// ModelProvider is the provider that served the model (openai, anthropic,
 	// ...). Nil when the adapter cannot report it.
 	ModelProvider *string
@@ -112,7 +127,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, model, model_provider,
+const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, model, model_provider,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -123,7 +138,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, mo
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -136,11 +151,18 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?,
 // InsertAgentInvocation records one completed agent invocation. Nil pointer
 // fields are stored as SQL NULL (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
+	if inv.InvocationMode == "" {
+		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
+	}
+	observationsJSON, err := encodeAgentObservations(inv)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent observations: %w", err)
+	}
 	inv.ID = newID()
-	_, err := d.sql.Exec(
+	_, err = d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.Model, inv.ModelProvider,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.Model, inv.ModelProvider,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -184,8 +206,9 @@ type scanner interface {
 
 func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
+	var observationsJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.Model, &inv.ModelProvider,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.Model, &inv.ModelProvider,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -197,7 +220,29 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	); err != nil {
 		return AgentInvocation{}, fmt.Errorf("scan agent invocation: %w", err)
 	}
+	if observationsJSON != nil {
+		inv.AgentObservationsReported = true
+		if err := json.Unmarshal([]byte(*observationsJSON), &inv.AgentObservations); err != nil {
+			return AgentInvocation{}, fmt.Errorf("decode agent observations: %w", err)
+		}
+	}
 	return inv, nil
+}
+
+func encodeAgentObservations(inv AgentInvocation) (*string, error) {
+	if !inv.AgentObservationsReported {
+		return nil, nil
+	}
+	observations := inv.AgentObservations
+	if observations == nil {
+		observations = []types.AgentObservation{}
+	}
+	encoded, err := json.Marshal(observations)
+	if err != nil {
+		return nil, err
+	}
+	value := string(encoded)
+	return &value, nil
 }
 
 // LatestSessionCumulative returns the most recent prior invocation's cumulative
