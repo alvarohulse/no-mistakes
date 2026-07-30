@@ -19,10 +19,18 @@ import (
 // the pipes close immediately and Wait returns without waiting.
 const defaultWaitDelay = 5 * time.Second
 
+// processGroupTerminationGrace gives subprocesses a short opportunity to
+// flush state and remove temporary resources without making daemon shutdown
+// wait indefinitely on commands that ignore SIGTERM.
+const processGroupTerminationGrace = 500 * time.Millisecond
+
+const processGroupTerminationPollInterval = 10 * time.Millisecond
+
 // ConfigureShellCommand isolates cmd in its own process group (Setpgid) and
-// installs a cmd.Cancel that SIGKILLs the whole group when cmd's context is
-// cancelled. exec.CommandContext otherwise only kills the direct child PID,
-// leaving grandchildren (a test runner's worker processes, an agent-spawned
+// installs a cmd.Cancel that SIGTERMs the whole group when cmd's context is
+// cancelled, then SIGKILLs any survivors after a bounded grace period.
+// exec.CommandContext otherwise only kills the direct child PID, leaving
+// grandchildren (a test runner's worker processes, an agent-spawned
 // git/build/editor) running and holding the worktree locked.
 //
 // Cancellation is only half the lifecycle: cmd.Cancel never fires when the
@@ -44,14 +52,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		cmd.WaitDelay = defaultWaitDelay
 	}
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
+		return terminateShellCommandGroup(cmd)
 	}
 }
 
@@ -62,8 +63,9 @@ func StartShellCommand(cmd *exec.Cmd) error {
 	return cmd.Start()
 }
 
-// TerminateShellCommandGroup SIGKILLs the whole process group led by a command
-// configured with ConfigureShellCommand. It is the success/failure-path
+// TerminateShellCommandGroup SIGTERMs the whole process group led by a command
+// configured with ConfigureShellCommand, then SIGKILLs survivors after a
+// bounded grace period. It is the success/failure-path
 // counterpart to cmd.Cancel: callers defer it right after a successful Start so
 // the group is reaped however Run returns - clean exit, parse error, or
 // wait error - not only on context cancellation.
@@ -80,12 +82,53 @@ func StartShellCommand(cmd *exec.Cmd) error {
 //
 // It is safe to call unconditionally after Wait: the group persists only while
 // a member is alive, so when the leader exited cleanly with no survivors the
-// kill is a harmless no-op (ESRCH). A nil or never-started command is a no-op.
+// termination is a harmless no-op (ESRCH). A nil or never-started command is a
+// no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
+	_ = terminateShellCommandGroup(cmd)
+}
+
+// The first successful SIGTERM owns the grace window. Concurrent cancellation
+// and Wait cleanup may repeat these idempotent group signals, but neither path
+// can force-kill survivors before that first window expires.
+func terminateShellCommandGroup(cmd *exec.Cmd) error {
+	if err := signalShellCommandGroup(cmd, syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(processGroupTerminationGrace)
+	for {
+		if err := signalShellCommandGroup(cmd, 0); errors.Is(err, os.ErrProcessDone) {
+			return nil
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		pause := processGroupTerminationPollInterval
+		if remaining < pause {
+			pause = remaining
+		}
+		time.Sleep(pause)
+	}
+
+	err := signalShellCommandGroup(cmd, syscall.SIGKILL)
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
+}
+
+func signalShellCommandGroup(cmd *exec.Cmd, signal syscall.Signal) error {
 	if cmd == nil || cmd.Process == nil {
-		return
+		return os.ErrProcessDone
 	}
 	// Negative PID targets the whole group (Setpgid made the leader's PID the
-	// group ID). errors.Is(ESRCH) is the expected, benign "no survivors" case.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	// group ID). ESRCH is the expected, benign "no survivors" case.
+	err := syscall.Kill(-cmd.Process.Pid, signal)
+	if errors.Is(err, syscall.ESRCH) {
+		return os.ErrProcessDone
+	}
+	return err
 }
