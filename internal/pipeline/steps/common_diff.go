@@ -121,6 +121,30 @@ func splitNullRecords(out string) []string {
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
 }
 
+func mergeTestFileChanges(groups ...[]testFileChange) []testFileChange {
+	changes := make(map[string]testFileChangeKind)
+	for _, group := range groups {
+		for _, change := range group {
+			if changes[change.Path] == testFileCreated {
+				continue
+			}
+			changes[change.Path] = change.Kind
+		}
+	}
+
+	paths := make([]string, 0, len(changes))
+	for path := range changes {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	result := make([]testFileChange, 0, len(paths))
+	for _, path := range paths {
+		result = append(result, testFileChange{Path: path, Kind: changes[path]})
+	}
+	return result
+}
+
 // matchIgnorePattern checks if a file path matches an ignore pattern.
 // Patterns follow gitignore-like semantics:
 //   - No slash: match against filename only (e.g., "*.generated.go" matches "pkg/foo.generated.go")

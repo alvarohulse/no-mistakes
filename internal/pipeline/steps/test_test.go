@@ -8,9 +8,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -179,6 +182,192 @@ func TestTestStep_FixMode_AgentWritesNewTests_NeedsApproval(t *testing.T) {
 	}
 	if !foundTestFile {
 		t.Errorf("expected finding mentioning component behavior.spec.tsx, got findings: %+v", f.Items)
+	}
+}
+
+func TestTestStep_FixModeTestChangesSurviveEvidenceAgent(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		file     string
+		original string
+		updated  string
+	}{
+		{name: "created", file: "new behavior_test.go", updated: "package behavior\n"},
+		{name: "modified", file: "existing behavior_test.go", original: "package behavior\n", updated: "package behavior\n\n// changed assertion\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			if test.original != "" {
+				if err := os.WriteFile(filepath.Join(dir, test.file), []byte(test.original), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", test.file)
+				gitCmd(t, dir, "commit", "-m", "add existing test")
+				headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+			}
+
+			callCount := 0
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					callCount++
+					if callCount == 1 {
+						if err := os.WriteFile(filepath.Join(dir, test.file), []byte(test.updated), 0o644); err != nil {
+							return nil, err
+						}
+						return &agent.Result{Output: json.RawMessage(`{"summary":"fix failing test"}`)}, nil
+					}
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence passed","tested":["focused check"],"testing_summary":"focused evidence passed"}`)}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+			sctx.Fixing = true
+			sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"tests failed","action":"auto-fix"}],"summary":"tests failed"}`
+			sctx.UserIntent = "Keep the focused behavior working"
+
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if callCount != 2 {
+				t.Fatalf("agent calls = %d, want fixer and evidence agent", callCount)
+			}
+			if !outcome.NeedsApproval {
+				t.Fatal("expected fixer test-file change to require approval after evidence agent")
+			}
+			var findings Findings
+			if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 || findings.Items[0].File != test.file || findings.Items[0].Action != types.ActionAskUser {
+				t.Fatalf("fixer test-file findings = %+v", findings.Items)
+			}
+		})
+	}
+}
+
+func TestTestStep_TestChangesSurviveFailedFixRound(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "existing_test.go"), []byte("package product\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "existing_test.go")
+	gitCmd(t, dir, "commit", "-m", "add existing test")
+	headSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+
+	fixCalls := 0
+	var sctx *pipeline.StepContext
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			fixCalls++
+			path := "existing_test.go"
+			contents := "package product\n\n// changed assertion\n"
+			if fixCalls == 1 {
+				path = "regression_test.go"
+				contents = "package product\n"
+			} else {
+				sctx.Config.Commands.Test = "exit 0"
+			}
+			if err := os.WriteFile(filepath.Join(dir, path), []byte(contents), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix failing test"}`)}, nil
+		},
+	}
+	sctx = newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 1"})
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	exec := pipeline.NewExecutor(sctx.DB, p, sctx.Config, ag, []pipeline.Step{&TestStep{}}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(ctx, sctx.Run, sctx.Repo, dir)
+	}()
+
+	waitForRound := func(round int, status types.StepStatus) Findings {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-done:
+				t.Fatalf("pipeline completed before round %d approval: %v", round, err)
+			default:
+			}
+			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(steps) == 1 && steps[0].Status == status {
+				rounds, err := sctx.DB.GetRoundsByStep(steps[0].ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rounds) >= round && steps[0].FindingsJSON != nil {
+					var findings Findings
+					if err := json.Unmarshal([]byte(*steps[0].FindingsJSON), &findings); err != nil {
+						t.Fatal(err)
+					}
+					return findings
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for round %d status %s", round, status)
+		return Findings{}
+	}
+	findTestFailureID := func(findings Findings) string {
+		t.Helper()
+		for _, finding := range findings.Items {
+			if strings.HasPrefix(finding.Description, "tests failed with exit code") {
+				return finding.ID
+			}
+		}
+		t.Fatalf("test failure finding missing from %+v", findings.Items)
+		return ""
+	}
+
+	initial := waitForRound(1, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepTest, types.ActionFix, []string{findTestFailureID(initial)}); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := waitForRound(2, types.StepStatusFixReview)
+	if len(intermediate.Items) != 2 {
+		t.Fatalf("intermediate findings = %+v, want test failure and test-file change", intermediate.Items)
+	}
+	if err := exec.Respond(types.StepTest, types.ActionFix, []string{findTestFailureID(intermediate)}); err != nil {
+		t.Fatal(err)
+	}
+	final := waitForRound(3, types.StepStatusFixReview)
+	if len(final.Items) != 2 {
+		t.Fatalf("final findings = %+v, want both accumulated test-file approvals", final.Items)
+	}
+	for _, file := range []string{"existing_test.go", "regression_test.go"} {
+		found := false
+		for _, finding := range final.Items {
+			if finding.File == file && finding.Action == types.ActionAskUser {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("final findings = %+v, missing retained approval for %s", final.Items, file)
+		}
+	}
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pipeline did not complete after approval")
 	}
 }
 
