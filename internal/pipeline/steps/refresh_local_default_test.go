@@ -18,7 +18,7 @@ import (
 // The rebase step must detect that the branch carries commits which exist on
 // the local default branch but were never pushed to origin/<default>, and stop
 // for review instead of silently widening the PR.
-func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
+func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -64,7 +64,7 @@ func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Repo.WorkingPath = working
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testing.T) {
+func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -137,7 +137,7 @@ func TestRebaseStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testi
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Repo.WorkingPath = working
 
-	outcome, err := (&RebaseStep{}).Execute(sctx)
+	outcome, err := (&RefreshStep{}).Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,21 +16,23 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// RebaseStep syncs the pushed branch with the configured push target and the
-// latest default branch from upstream.
-type RebaseStep struct{}
+// RefreshStep syncs the pushed branch with the configured push target and its
+// freshly fetched authoritative base branch.
+type RefreshStep struct{}
 
-func (s *RebaseStep) Name() types.StepName { return types.StepRefresh }
+func (s *RefreshStep) Name() types.StepName { return types.StepRefresh }
 
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
-func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
+	baseBranch := refreshBaseBranch(sctx, defaultBranch)
+	strategy := sctx.Run.RefreshStrategy.OrDefault()
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -48,8 +50,8 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	forcePush := isForcePushAgainstRemote(ctx, sctx.WorkDir, pushRemote, branch, branchTarget, sctx.Run.BaseSHA)
 
 	sctx.Log("fetching latest upstream state...")
-	if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
-		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
+	if err := fetchRunUpstreamBranch(ctx, sctx, baseBranch); err != nil {
+		return nil, fmt.Errorf("fetch authoritative base origin/%s: %w", baseBranch, err)
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
 	// onto it (a normal push). On a force push we deliberately skip both the fetch
@@ -76,14 +78,16 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR would silently bundle another
 	// workstream's unpushed work. Surface it for a human decision instead.
-	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
-		return outcome, nil
+	if baseBranch == defaultBranch {
+		if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
+			return outcome, nil
+		}
 	}
 	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
 		findingsJSON, _ := json.Marshal(Findings{
 			Items: []Finding{{
 				Severity:    "warning",
-				File:        filepath.Join("internal", "pipeline", "steps", "rebase.go"),
+				File:        filepath.Join("internal", "pipeline", "steps", "refresh.go"),
 				Description: fmt.Sprintf("origin/%s advanced after the force push; manual review required before updating the default branch", defaultBranch),
 			}},
 			Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
@@ -94,26 +98,26 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}, nil
 	}
 
-	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	targets := refreshTargetsForBranch(branch, baseBranch, branchTarget)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
-		targets = forcePushRebaseTargets(branch, defaultBranch)
+		targets = forcePushRefreshTargets(branch, baseBranch)
 	}
 
 	if sctx.Fixing {
 		for _, target := range targets {
-			if err := rebaseWithAgent(ctx, sctx, target); err != nil {
+			if err := refreshWithAgent(ctx, sctx, strategy, target); err != nil {
 				return nil, err
 			}
 		}
 		return updateHeadSHA(ctx, sctx)
 	}
 
-	// Normal mode: try all rebases, track which targets had conflicts
+	// Normal mode: try all refresh targets, tracking every conflict.
 	var conflictTargets []string
 	var conflictFindings []Finding
 	for _, target := range targets {
-		conflictFiles, err := tryRebase(ctx, sctx, target)
+		conflictFiles, err := tryRefresh(ctx, sctx, strategy, target)
 		if err != nil {
 			return nil, err
 		}
@@ -123,15 +127,15 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 				conflictFindings = append(conflictFindings, Finding{
 					Severity:    "warning",
 					File:        file,
-					Description: fmt.Sprintf("merge conflict rebasing onto %s", target),
+					Description: refreshConflictDescription(strategy, target),
 				})
 			}
 		}
 	}
 
 	if len(conflictTargets) > 0 {
-		summary := fmt.Sprintf("conflict rebasing onto %s", strings.Join(conflictTargets, ", "))
-		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
+		summary := fmt.Sprintf("conflict during %s refresh with %s", strategy, strings.Join(conflictTargets, ", "))
+		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRefreshFindings(conflictFindings), Summary: summary})
 		return &pipeline.StepOutcome{
 			NeedsApproval: true,
 			AutoFixable:   true,
@@ -142,30 +146,37 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return updateHeadSHA(ctx, sctx)
 }
 
-// rebaseTargets returns the ordered list of refs to rebase onto.
-func rebaseTargets(branch, defaultBranch string) []string {
-	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch)
+func refreshBaseBranch(sctx *pipeline.StepContext, defaultBranch string) string {
+	if stackedOn := strings.TrimSpace(sctx.Run.StackedOn); stackedOn != "" {
+		return stackedOn
+	}
+	return defaultBranch
 }
 
-func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
+// refreshTargets returns the ordered list of refs to incorporate.
+func refreshTargets(branch, baseBranch string) []string {
+	return refreshTargetsForBranch(branch, baseBranch, "origin/"+branch)
+}
+
+func refreshTargetsForBranch(branch, baseBranch, branchTarget string) []string {
 	var targets []string
-	if branch != "" && branch != defaultBranch {
+	if branch != "" && branch != baseBranch {
 		targets = append(targets, branchTarget)
 	}
-	if branch != defaultBranch {
-		targets = append(targets, "origin/"+defaultBranch)
+	if branch != baseBranch {
+		targets = append(targets, "origin/"+baseBranch)
 	}
 	return targets
 }
 
-// forcePushRebaseTargets returns rebase targets for a force push. The pushed
+// forcePushRefreshTargets returns refresh targets for a force push. The pushed
 // branch target is skipped because it may contain autofix commits from prior
 // pipeline runs that the force push intended to discard.
-func forcePushRebaseTargets(branch, defaultBranch string) []string {
-	if branch == defaultBranch {
+func forcePushRefreshTargets(branch, baseBranch string) []string {
+	if branch == baseBranch {
 		return nil
 	}
-	return []string{"origin/" + defaultBranch}
+	return []string{"origin/" + baseBranch}
 }
 
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated
@@ -323,10 +334,39 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
+func tryRefresh(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string) ([]string, error) {
+	switch strategy.OrDefault() {
+	case types.RefreshStrategyRebase:
+		return tryRebase(ctx, sctx, targetRef)
+	case types.RefreshStrategyMerge:
+		return tryMerge(ctx, sctx, targetRef)
+	default:
+		return nil, fmt.Errorf("unsupported refresh strategy %q", strategy)
+	}
+}
+
+func refreshWithAgent(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string) error {
+	switch strategy.OrDefault() {
+	case types.RefreshStrategyRebase:
+		return rebaseWithAgent(ctx, sctx, targetRef)
+	case types.RefreshStrategyMerge:
+		return mergeWithAgent(ctx, sctx, targetRef)
+	default:
+		return fmt.Errorf("unsupported refresh strategy %q", strategy)
+	}
+}
+
+func refreshConflictDescription(strategy types.RefreshStrategy, targetRef string) string {
+	if strategy.OrDefault() == types.RefreshStrategyMerge {
+		return fmt.Sprintf("merge conflict merging %s", targetRef)
+	}
+	return fmt.Sprintf("merge conflict rebasing onto %s", targetRef)
+}
+
 // tryRebase attempts a rebase onto targetRef. Returns conflicted files when the
 // rebase stops on merge conflicts. The rebase is aborted before returning.
 func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +389,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
 func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
 	if err != nil {
 		return err
 	}
@@ -412,9 +452,89 @@ Instructions:
 	return nil
 }
 
-// shouldSkipRebase checks whether a rebase onto targetRef can be skipped.
+func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
+	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+	if err != nil {
+		return nil, err
+	}
+	if skip {
+		return nil, nil
+	}
+
+	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err != nil {
+		conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		if len(conflictFiles) == 0 {
+			return nil, fmt.Errorf("merge %s: %w", targetRef, err)
+		}
+		return conflictFiles, nil
+	}
+	return nil, nil
+}
+
+func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
+	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
+	}
+
+	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err == nil {
+		return nil
+	}
+
+	conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
+	if len(conflictFiles) == 0 {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("merge %s failed (no conflicts detected)", targetRef)
+	}
+	sctx.Log("conflicts detected, asking agent to resolve...")
+	prompt := fmt.Sprintf(
+		`Resolve git merge conflicts. Merging %s into the current branch has conflicts.
+
+Current conflicted files:
+- %s
+
+Instructions:
+- Find all conflicting files and resolve the conflict markers (<<<<<<< ======= >>>>>>>).
+- After resolving each file, stage it with: git add <file>
+- After all conflicts are resolved, run: git merge --continue
+- Do not modify any files that don't have conflicts.
+- Preserve the intent of both the current branch changes and the base branch changes.
+- Return JSON with a single "summary" field describing what you resolved.
+- Keep the summary under 10 words.`,
+		targetRef,
+		strings.Join(conflictFiles, "\n- "),
+	)
+	if sctx.PreviousFindings != "" {
+		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
+	}
+	prompt += userIntentPromptSection(sctx)
+
+	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        sctx.WorkDir,
+		JSONSchema: commitSummarySchema,
+		OnChunk:    sctx.LogChunk,
+	})
+	if err != nil {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("agent resolve conflicts: %w", err)
+	}
+	if mergeInProgress(ctx, sctx.WorkDir) {
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+		return fmt.Errorf("agent did not complete the merge")
+	}
+	return nil
+}
+
+// prepareRefreshTarget checks whether incorporating targetRef can be skipped.
 // Returns true if targetRef doesn't exist, is already merged, or can be fast-forwarded.
-func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, error) {
+func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, error) {
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", targetRef); err != nil {
 		return true, nil
 	}
@@ -462,7 +582,16 @@ func rebaseInProgress(ctx context.Context, workDir string) bool {
 	return false
 }
 
+func mergeInProgress(ctx context.Context, workDir string) bool {
+	_, err := git.Run(ctx, workDir, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+	return err == nil
+}
+
 func rebaseConflictFiles(ctx context.Context, workDir string) []string {
+	return refreshConflictFiles(ctx, workDir)
+}
+
+func refreshConflictFiles(ctx context.Context, workDir string) []string {
 	out, err := git.Run(ctx, workDir, "diff", "--name-only", "--diff-filter=U")
 	if err != nil {
 		return nil
@@ -478,7 +607,7 @@ func rebaseConflictFiles(ctx context.Context, workDir string) []string {
 	return files
 }
 
-func dedupeRebaseFindings(findings []Finding) []Finding {
+func dedupeRefreshFindings(findings []Finding) []Finding {
 	if len(findings) < 2 {
 		return findings
 	}
@@ -495,12 +624,12 @@ func dedupeRebaseFindings(findings []Finding) []Finding {
 	return filtered
 }
 
-// updateHeadSHA syncs the run's head SHA after rebase and checks for an empty diff.
-// When the branch diff against the default branch is empty, SkipRemaining is set.
+// updateHeadSHA syncs the run's head SHA after refresh and checks for an empty
+// diff against the effective base branch.
 func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve head after rebase: %w", err)
+		return nil, fmt.Errorf("resolve head after refresh: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
 		sctx.Run.HeadSHA = headSHA
@@ -510,16 +639,17 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}
 
-	// Check if the branch has any diff against the default branch.
+	// Check if the branch has any diff against its effective base branch.
 	// If the diff is empty (e.g. branch was already merged), skip remaining steps.
 	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
+	baseBranch := refreshBaseBranch(sctx, defaultBranch)
+	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
 	if err == nil && strings.TrimSpace(diff) == "" {
-		sctx.Log("empty diff after rebase, skipping remaining steps")
+		sctx.Log("empty diff after refresh, skipping remaining steps")
 		return &pipeline.StepOutcome{SkipRemaining: true}, nil
 	}
 

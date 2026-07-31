@@ -10,7 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
-func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
+func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	t.Parallel()
 	// Simulate the scenario that caused the bug: user force-pushes a commit,
 	// but origin/<branch> on the upstream remote has autofix commits from a
@@ -62,7 +62,7 @@ func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestRebaseStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
+func TestRefreshStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -124,7 +124,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/main"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_ForcePushOnDefaultBranchAllowsRewrittenRemoteHead(t *testing.T) {
+func TestRefreshStep_ForcePushOnDefaultBranchAllowsRewrittenRemoteHead(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -183,7 +183,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchAllowsRewrittenRemoteHead(t *testing
 	sctx.Run.Branch = "refs/heads/main"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -203,7 +203,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchAllowsRewrittenRemoteHead(t *testing
 	}
 }
 
-func TestRebaseStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.T) {
+func TestRefreshStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -249,7 +249,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.T
 	sctx.Run.Branch = "refs/heads/main"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestRebaseStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.T
 	}
 }
 
-func TestRebaseStep_NormalPushSyncsOriginBranch(t *testing.T) {
+func TestRefreshStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	t.Parallel()
 	// Verify that a normal (non-force) push still syncs with origin/<branch>.
 	upstream := t.TempDir()
@@ -307,7 +307,7 @@ func TestRebaseStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	_, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)

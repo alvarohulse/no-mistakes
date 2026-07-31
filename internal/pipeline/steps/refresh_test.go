@@ -14,7 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
-func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
+func TestRefreshStep_ConflictTriesAllTargets(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -59,7 +59,7 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
+func TestRefreshStep_FixModeCallsAgent(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -160,7 +160,7 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature"}]}`
 	sctx.UserIntent = "user wanted conflict resolution to preserve the extracted intent"
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
+func TestRefreshStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
 	fork := t.TempDir()
@@ -236,7 +236,7 @@ func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	sctx.Repo.UpstreamURL = parent
 	sctx.Repo.ForkURL = fork
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestRebaseStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
+func TestRefreshStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -295,7 +295,7 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Fixing = true
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	_, err := step.Execute(sctx)
 	if err == nil {
 		t.Fatal("expected error for non-conflict rebase failure")
@@ -305,7 +305,7 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	}
 }
 
-func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.T) {
+func TestRefreshStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -346,7 +346,7 @@ func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err == nil {
 		t.Fatal("expected error for non-conflict rebase failure")
@@ -362,7 +362,7 @@ func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.
 	}
 }
 
-func TestRebaseStep_LogFileNotVisibleToUser(t *testing.T) {
+func TestRefreshStep_LogFileNotVisibleToUser(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -396,7 +396,7 @@ func TestRebaseStep_LogFileNotVisibleToUser(t *testing.T) {
 	sctx.Log = func(s string) { userLogs = append(userLogs, s) }
 	sctx.LogFile = func(s string) { fileLogs = append(fileLogs, s) }
 
-	step := &RebaseStep{}
+	step := &RefreshStep{}
 	_, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
