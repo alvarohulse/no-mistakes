@@ -678,6 +678,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	if strings.TrimSpace(stackedOn) == "" {
 		stackedOn = latestForBranch.StackedOn
 	}
+	if strings.TrimSpace(string(refreshStrategy)) == "" {
+		refreshStrategy = latestForBranch.RefreshStrategy
+	}
 
 	baseSHA := latestForBranch.BaseSHA
 	if matchingHead != nil {

@@ -232,9 +232,10 @@ func parseSkipSteps(value string) ([]types.StepName, error) {
 	}
 	var steps []types.StepName
 	for _, part := range strings.Split(value, ",") {
-		step := types.StepName(strings.TrimSpace(part))
+		trimmed := strings.TrimSpace(part)
+		step := types.StepName(trimmed).Canonical()
 		if !validStep(step) {
-			return nil, fmt.Errorf("unknown step %q", step)
+			return nil, fmt.Errorf("unknown step %q", trimmed)
 		}
 		steps = append(steps, step)
 	}
@@ -310,6 +311,7 @@ func formatSkipPushOptions(steps []types.StepName) []string {
 }
 
 func validStep(step types.StepName) bool {
+	step = step.Canonical()
 	for _, known := range types.AllSteps() {
 		if step == known {
 			return true

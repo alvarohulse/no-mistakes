@@ -30,6 +30,17 @@ func TestParseSkipPushOptionsRejectsUnknownStep(t *testing.T) {
 	}
 }
 
+func TestParseSkipStepsCanonicalizesLegacyAliases(t *testing.T) {
+	got, err := parseSkipSteps("rebase,babysit")
+	if err != nil {
+		t.Fatalf("parseSkipSteps() error = %v", err)
+	}
+	want := []types.StepName{types.StepRefresh, types.StepCI}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseSkipSteps() = %v, want %v", got, want)
+	}
+}
+
 func TestNormalizeNotifyGatePathResolvesLegacyDotGate(t *testing.T) {
 	bare := filepath.Join(t.TempDir(), "repo123.git")
 	if err := os.MkdirAll(bare, 0o755); err != nil {

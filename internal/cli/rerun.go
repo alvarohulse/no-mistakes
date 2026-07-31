@@ -83,7 +83,7 @@ func newRerunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy: rebase or merge (default: trusted config, then rebase)")
+	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy: rebase or merge (inherited from the prior run when omitted)")
 	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; inherited from the prior run when omitted")
 	return cmd
 }

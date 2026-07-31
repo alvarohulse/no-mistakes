@@ -430,7 +430,7 @@ func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
 	}
 }
 
-func TestRerunPersistsExplicitRefreshSelectionAndInheritsStackBase(t *testing.T) {
+func TestRerunPersistsExplicitRefreshSelectionAndInheritsPriorSelection(t *testing.T) {
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
 	})
@@ -485,8 +485,8 @@ func TestRerunPersistsExplicitRefreshSelectionAndInheritsStackBase(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if thirdRun.RefreshStrategy != types.RefreshStrategyRebase {
-		t.Fatalf("unconfigured rerun strategy = %q, want default rebase", thirdRun.RefreshStrategy)
+	if thirdRun.RefreshStrategy != types.RefreshStrategyMerge {
+		t.Fatalf("inherited rerun strategy = %q, want merge", thirdRun.RefreshStrategy)
 	}
 	if thirdRun.StackedOn != "dependency-v2" {
 		t.Fatalf("inherited rerun stack base = %q, want dependency-v2", thirdRun.StackedOn)
