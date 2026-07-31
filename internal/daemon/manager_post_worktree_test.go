@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,14 +21,14 @@ func TestRunStartExecutesPostWorktreeHookBeforeFirstStep(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database := newRefreshRunFixture(t)
 	repo, _ := setupTestGitRepo(t, p, database, "post-worktree-success")
-	head := commitPostWorktreeHook(t, repo, "printf 'ready\\n' >> post-worktree.marker")
+	head := commitPostWorktreeHook(t, repo, postWorktreeSuccessHook())
 
 	step := &assertPostWorktreeEffectStep{check: func(workDir string) error {
 		data, err := os.ReadFile(filepath.Join(workDir, "post-worktree.marker"))
 		if err != nil {
 			return err
 		}
-		if string(data) != "ready\n" {
+		if strings.TrimSpace(string(data)) != "ready" {
 			return &unexpectedHookEffectError{got: string(data)}
 		}
 		return nil
@@ -58,7 +59,7 @@ func TestRunStartParksPostWorktreeHookFailureBeforeStepRecords(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database := newRefreshRunFixture(t)
 	repo, _ := setupTestGitRepo(t, p, database, "post-worktree-failure")
-	head := commitPostWorktreeHook(t, repo, "printf 'authenticate first\\n'; exit 23")
+	head := commitPostWorktreeHook(t, repo, postWorktreeFailingHook())
 
 	step := &mockPassStep{name: types.StepIntent}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
@@ -189,6 +190,25 @@ type unexpectedHookEffectError struct{ got string }
 
 func (e *unexpectedHookEffectError) Error() string {
 	return "unexpected post-worktree marker: " + e.got
+}
+
+// postWorktreeSuccessHook writes the "ready" marker the effect step verifies.
+// The daemon runs the hook via cmd.exe on Windows and sh elsewhere, so the
+// shell syntax must match the target interpreter.
+func postWorktreeSuccessHook() string {
+	if runtime.GOOS == "windows" {
+		return "echo ready>post-worktree.marker"
+	}
+	return "printf 'ready\\n' >> post-worktree.marker"
+}
+
+// postWorktreeFailingHook prints a recognizable message and exits 23 so the
+// park assertion can match both the exit code and the emitted output.
+func postWorktreeFailingHook() string {
+	if runtime.GOOS == "windows" {
+		return "echo authenticate first& exit 23"
+	}
+	return "printf 'authenticate first\\n'; exit 23"
 }
 
 func commitPostWorktreeHook(t *testing.T, repo *db.Repo, hook string) string {
