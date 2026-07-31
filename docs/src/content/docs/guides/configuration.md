@@ -19,12 +19,13 @@ work. Config exists for the parts that genuinely vary by machine or repo:
 - whether the review loop reuses supported native agent sessions
 - whether no-mistakes should infer intent from recent local agent transcripts
 
-Config is split across two files:
+Config normally uses two files, with an optional machine-local repo override:
 
-| File                         | Scope                         | Full field reference                                          |
-| ---------------------------- | ----------------------------- | ------------------------------------------------------------- |
-| `~/.no-mistakes/config.yaml` | Global defaults for all repos | [Global Config Reference](/no-mistakes/reference/global-config/) |
-| `<repo>/.no-mistakes.yaml`   | Per-repo overrides            | [Repo Config Reference](/no-mistakes/reference/repo-config/)     |
+| File                         | Scope                                      | Full field reference                                             |
+| ---------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| `~/.no-mistakes/config.yaml` | Global defaults for all repos              | [Global Config Reference](/no-mistakes/reference/global-config/) |
+| `<repo>/.no-mistakes.yaml`   | Committed per-repo policy                  | [Repo Config Reference](/no-mistakes/reference/repo-config/)     |
+| `$NM_REPO_CONFIG`            | Optional machine-local overrides for one repo | [Repo Config Reference](/no-mistakes/reference/repo-config/#machine-local-overrides) |
 
 Set `NM_HOME` to relocate the global config directory (the global file becomes `$NM_HOME/config.yaml`).
 Bitbucket Cloud credentials come from environment variables rather than config files.
@@ -34,6 +35,7 @@ For Azure DevOps, authenticate the `az` CLI with either `az devops login` or `AZ
 
 - **Global config** is for your machine-level defaults.
 - **Repo config** is for codebase-specific behavior that should travel with the repo.
+- **Machine-local repo config** is an explicit escape hatch for codebase-specific behavior that cannot be committed, such as canonical commands in a repository whose default branch you do not control.
 
 In practice, most teams should keep personal preferences global and repo policy
 local.
@@ -54,9 +56,12 @@ The rest of this page covers only the cross-cutting rules that involve both file
 ## Precedence
 
 - Repo config overrides global config field by field: repo `agent` replaces the global `agent` (including a full ordered fallback list), each repo `<step>.agent` replaces the matching global step route, while `auto_fix`, `commit`, `intent`, and `test.evidence` overlay individual fields and fall through to the global default for anything unset (`intent.disabled_readers` adds to the globally disabled readers instead of replacing them).
+- When `NM_REPO_CONFIG` is set, its repo-shaped file overlays the effective committed repo config field by field after the default-branch trust rules are applied. Present empty values can intentionally clear committed commands or routes. Unset preserves existing behavior.
 - `agent_path_override`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `step_quiet_warning`, `log_level`, and `session_reuse` are global-only fields.
 - `commands`, `ignore_patterns`, `document.instructions`, `allow_repo_commands`, and `disable_project_settings` are repo-only fields. By default, `commands`, `agent`, and every `<step>.agent` route are read from the trusted default branch; a trusted `allow_repo_commands: true` opt-in instead honors their pushed-branch values. The other gate-control fields always come from the trusted default branch. See the [Repo Config Reference](/no-mistakes/reference/repo-config/) security note.
 - no-mistakes reloads global config while setting up each run, so edits made before starting a run apply to it. For repeatable profiles (for example fast versus deep Codex settings), use separately initialized `NM_HOME` roots; `NM_HOME` moves all no-mistakes state, not just config.
+
+Machine-local overrides require an absolute path outside the repository and a matching `repo:` binding. Enabled runs record the contributing global, branch, trusted-default, and machine-local sources by digest. Full paths and digests remain local; the PR Pipeline section publishes only generic labels and short digest prefixes so reviewers can see that inputs changed without exposing machine paths.
 
 ## Explicit commands versus agent detection
 

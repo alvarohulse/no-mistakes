@@ -34,6 +34,23 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead.
 
+## `NM_REPO_CONFIG`
+
+Opt into a machine-local repo config that is not committed to the repository.
+
+|         |                                      |
+| ------- | ------------------------------------ |
+| Type    | `string` (absolute path to YAML file) |
+| Default | unset                                |
+
+The file uses the [repo config](/no-mistakes/reference/repo-config/) shape and overrides committed repo config field by field, including `commands`, `hooks`, the run-wide `agent`, and per-step agent routes. Explicit empty values clear the corresponding committed value.
+
+The path must be absolute, resolve outside the repository (including across symlinks), and point to a readable config that declares its own `repo:` binding. The binding must identify the registered upstream repository; equivalent SSH and HTTPS GitHub remotes match. An empty, relative, missing, unreadable, unparseable, unbound, or mismatched config fails the run before pipeline work starts. `no-mistakes doctor` checks the path, syntax, and required binding; the run also checks the binding against the selected repository.
+
+Setting the variable is the opt-in. When it is unset, config loading and recovery retain their existing behavior. launchd and systemd service definitions forward the current value, and a later daemon start or restart removes a stale entry after the variable is unset. Windows Task Scheduler inherits it from the interactive logon environment.
+
+Enabled runs record each contributing config source with its SHA-256 digest. The PR Pipeline section shows only generic source labels and 12-character digest prefixes; absolute paths and full digests stay in the local state database. Recovery refuses to continue if the machine-local or contributing global file changes, disappears, or moves, and reloads committed repo inputs from their launch-time Git refs.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.
@@ -207,6 +224,6 @@ When set to a disabling value, telemetry stays off even if a runtime or embedded
 
 ## Environment the daemon sees
 
-When the daemon runs through a managed service (launchd, systemd user service, Task Scheduler), the macOS and Linux service definitions include a default `PATH` with common user and system binary directories. They also bake in any proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`) that were set when you installed or refreshed the service, so the daemon and the agents it spawns can reach the network through your proxy even when the login-shell probe is unavailable. Once baked in, the values are preserved across later service refreshes and restarts even when the proxy variables are not exported in that shell, so a routine `daemon restart` or a binary upgrade will not strip them; export the variables again only when you need to change or remove them. Both the upper- and lower-case spellings are forwarded exactly as you set them, because tooling is inconsistent about which it reads (curl, for example, honors only the lower-case `http_proxy` for plain-HTTP requests). Because a proxy URL can embed credentials (for example `http://user:pass@host`), the generated service file is restricted to owner-only `0600` permissions whenever proxy values are forwarded into it. When no proxy variables are set, the generated definition is unchanged and keeps the conventional `0644` mode. Windows Task Scheduler inherits your logon environment and needs no forwarding. At daemon startup, the daemon resolves environment from your login shell on macOS and Linux, preserves your shell `PATH` order, and appends any missing well-known directories such as `~/.local/bin`, `~/go/bin`, `~/.cargo/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin`. If login-shell resolution fails or returns no entries, the daemon logs a warning and uses an augmented process-environment fallback that may omit version-manager directories such as nvm, fnm, or volta. On Windows it reuses the current process environment.
+When the daemon runs through a managed service (launchd, systemd user service, Task Scheduler), the macOS and Linux service definitions include a default `PATH` with common user and system binary directories. They also forward the current `NM_REPO_CONFIG` value and bake in any proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`) that were set when you installed or refreshed the service. Proxy values are preserved across later service refreshes and restarts when they are absent from the current shell; `NM_REPO_CONFIG` is not preserved, because removing the variable disables that explicit opt-in. Both upper- and lower-case proxy spellings are forwarded exactly as set. Because a proxy URL can embed credentials, the generated service file is restricted to owner-only `0600` permissions whenever proxy values are present; a machine-config path alone keeps the conventional `0644` mode. Windows Task Scheduler inherits the logon environment and needs no forwarding. At daemon startup, the daemon resolves environment from the login shell on macOS and Linux, preserves its `PATH` order, and appends missing well-known directories such as `~/.local/bin`, `~/go/bin`, `~/.cargo/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin`. If login-shell resolution fails or returns no entries, the daemon logs a warning and uses an augmented process-environment fallback that may omit version-manager directories such as nvm, fnm, or volta. On Windows it reuses the current process environment.
 
 If your env vars aren't set in your login shell's rc files (`.zprofile`, `.zshrc`, `.profile`, `.bash_profile`, `.bashrc`, PowerShell profile), the daemon won't see them. Put them somewhere a login shell will load, then restart the daemon to pick them up.

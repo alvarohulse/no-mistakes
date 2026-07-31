@@ -3,7 +3,7 @@ title: Repo Config Reference
 description: All fields for .no-mistakes.yaml.
 ---
 
-Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
+Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. An optional machine-local file can use the same shape with the additional required `repo:` binding described below.
 
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent` plus every `<step>.agent` route select which processes launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
@@ -15,7 +15,30 @@ Commit the gate-control settings you want to your default branch.
 Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than `intent.agent`, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
+
+`NM_REPO_CONFIG` is a separate, machine-owner-controlled escape hatch. When explicitly set, its bound file overlays the effective committed config after these trust rules, including code-executing fields. Do not set it globally without a correct `repo:` binding.
 :::
+
+## Machine-local overrides
+
+Set `NM_REPO_CONFIG` to an absolute path outside the repository when you need repo-specific values that cannot be committed to the default branch:
+
+```yaml
+repo: https://github.com/example/project
+
+agent: codex
+commands:
+  test: "go test ./internal/cli"
+  lint: "make lint"
+```
+
+The file must declare `repo:` and its remote identity must match the registered upstream repository. Equivalent SSH and HTTPS GitHub forms match. The path and its resolved symlink target must remain outside the repository; relative paths are rejected because managed services run from a different working directory. `no-mistakes doctor` checks that the path is absolute, readable, parseable, and bound, while run startup also checks the binding against the selected repository.
+
+The machine-local file overlays only fields present in it, after the committed pushed/default config trust resolution. This includes `commands`, `hooks`, the run-wide `agent`, and per-step routes; explicitly present empty values clear committed values. Unset `NM_REPO_CONFIG` leaves established config and recovery behavior unchanged.
+
+launchd and systemd definitions forward the current value. Setting or unsetting it causes the next managed daemon start or restart to refresh the service definition; unlike proxy settings, an old machine-config path is not inherited after the variable is removed. Windows Task Scheduler inherits the interactive logon environment.
+
+For enabled runs, no-mistakes stores full SHA-256 digests and private source paths or Git refs in the local database. The PR Pipeline section renders only source kinds and 12-character digest prefixes, never absolute paths. Recovery requires the same machine/global path and digest and reads committed configs from their launch-time Git refs, refusing drift instead of silently changing the run's config.
 
 ```yaml
 # .no-mistakes.yaml
@@ -75,6 +98,17 @@ test:
 ```
 
 ## Fields
+
+### repo
+
+Bind a machine-local config to one registered upstream repository.
+
+| | |
+| --- | --- |
+| Type | `string` (Git remote URL) |
+| Default | None |
+
+This field is required in the file selected by `NM_REPO_CONFIG` and is not needed in committed `.no-mistakes.yaml`. The binding compares normalized remote identities, so common SSH and HTTPS forms for the same GitHub repository are equivalent. A missing, invalid, or mismatched binding fails the run before pipeline work starts.
 
 ### agent
 
