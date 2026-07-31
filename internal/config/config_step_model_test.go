@@ -340,6 +340,109 @@ func TestResolveAgent_ModelNarrowsAutoAndValidatesACP(t *testing.T) {
 		}
 	})
 
+	t.Run("auto falls through to Cursor ACP for a bare family", func(t *testing.T) {
+		cfg := &Config{
+			Agent:  types.AgentCodex,
+			Agents: []types.AgentName{types.AgentCodex},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentAuto},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"},
+			},
+		}
+		var probed []string
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			probed = append(probed, bin)
+			switch bin {
+			case "codex", "acpx", "cursor-agent":
+				return "/usr/bin/" + bin, nil
+			default:
+				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+			}
+		})
+		if err != nil {
+			t.Fatalf("ResolveAgent() error = %v", err)
+		}
+		if got := cfg.StepAgents[types.StepReview]; !reflect.DeepEqual(got, []types.AgentName{types.AgentCursor}) {
+			t.Fatalf("review agents = %v, want [cursor]", got)
+		}
+		wantProbes := []string{"codex", "claude", "pi", "copilot", "cursor-agent", "acpx"}
+		if !reflect.DeepEqual(probed, wantProbes) {
+			t.Fatalf("probed = %v, want native-first %v", probed, wantProbes)
+		}
+	})
+
+	t.Run("review adversary auto shares bare-family ACP fallback", func(t *testing.T) {
+		cfg := &Config{
+			Agent:  types.AgentCodex,
+			Agents: []types.AgentName{types.AgentCodex},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentCodex},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
+			},
+			ReviewAdversaryAgents: []types.AgentName{types.AgentAuto},
+			ReviewAdversaryModel:  ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"},
+		}
+		var probed []string
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			probed = append(probed, bin)
+			switch bin {
+			case "codex", "acpx", "cursor-agent":
+				return "/usr/bin/" + bin, nil
+			default:
+				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+			}
+		})
+		if err != nil {
+			t.Fatalf("ResolveAgent() error = %v", err)
+		}
+		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentCursor}) {
+			t.Fatalf("review adversary agents = %v, want [cursor]", got)
+		}
+		wantProbes := []string{"codex", "codex", "claude", "pi", "copilot", "cursor-agent", "acpx"}
+		if !reflect.DeepEqual(probed, wantProbes) {
+			t.Fatalf("probed = %v, want native-first %v", probed, wantProbes)
+		}
+	})
+
+	t.Run("bracketed auto refuses without probing ACP aliases", func(t *testing.T) {
+		model := "claude-opus-5[effort=high]"
+		cfg := &Config{
+			Agent:  types.AgentCodex,
+			Agents: []types.AgentName{types.AgentCodex},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentAuto},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: model, Vendor: "anthropic"},
+			},
+		}
+		var probed []string
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			probed = append(probed, bin)
+			if bin == "codex" || bin == "acpx" || bin == "cursor-agent" {
+				return "/usr/bin/" + bin, nil
+			}
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		})
+		if err == nil {
+			t.Fatal("ResolveAgent() accepted bracketed auto route without a compatible native backend")
+		}
+		for _, want := range []string{model, "anthropic", "claude, pi, copilot", "ACP aliases require a bare model family"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error should contain %q, got %v", want, err)
+			}
+		}
+		for _, bin := range probed {
+			if bin == "acpx" || bin == "cursor-agent" {
+				t.Fatalf("bracketed auto route probed ACP binary %q: %v", bin, probed)
+			}
+		}
+	})
+
 	t.Run("auto fails loudly when no compatible backend is runnable", func(t *testing.T) {
 		cfg := &Config{
 			Agent:  types.AgentCodex,
@@ -357,7 +460,8 @@ func TestResolveAgent_ModelNarrowsAutoAndValidatesACP(t *testing.T) {
 			}
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		})
-		if err == nil || !strings.Contains(err.Error(), "gemini-3.5-pro") || !strings.Contains(err.Error(), "google") {
+		if err == nil || !strings.Contains(err.Error(), "gemini-3.5-pro") || !strings.Contains(err.Error(), "google") ||
+			!strings.Contains(err.Error(), "cursor-agent") || !strings.Contains(err.Error(), "acpx") || !strings.Contains(err.Error(), "ACP aliases") {
 			t.Fatalf("ResolveAgent() error = %v, want named-model failure", err)
 		}
 	})

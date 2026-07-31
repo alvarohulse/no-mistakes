@@ -135,6 +135,7 @@ The controller runs the separately routed adversary only when the primary Review
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
 `agent: auto` probes native agents and first-class ACP aliases (such as `cursor`), and never auto-selects arbitrary `acp:<target>` entries.
+With a typed model route, `auto` keeps compatible native backends first and considers ACP aliases only for bracket-free model families.
 
 The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns the exact resolution order, fallback-list filtering and retry semantics, and the failure behavior when no entry is runnable.
 

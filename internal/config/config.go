@@ -1371,8 +1371,8 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 			return "", fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
 		}
 	}
-	if model.Name != "" {
-		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto only probes native backends capable of the declared vendor", model.Name, model.Vendor, strings.Join(probed, ", "))
+	if model.Name != "" && !types.IsBareACPModelName(model.Name) {
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); ACP aliases require a bare model family", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
 	for _, alias := range types.ACPAliases() {
 		available, bins, err := c.acpAvailable(alias.Name, lookPath)
@@ -1383,6 +1383,9 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 		if available {
 			return alias.Name, nil
 		}
+	}
+	if model.Name != "" {
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto probed compatible native backends and ACP aliases", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }

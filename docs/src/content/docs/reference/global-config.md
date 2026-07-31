@@ -133,7 +133,7 @@ Claude and Codex accept their native model names. OpenCode requires `name` in `p
 
 `review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
 
-ACP targets and aliases accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; Cursor receives `cursor-agent --model claude-opus-5 acp`. Any name containing `[` or `]` is refused during launch-time config validation, including parameterized (`claude-opus-5[effort=high]`), empty, nested, repeated, and unmatched bracket forms. Native backends continue to accept their parameterized model syntax. This narrow rule prevents ACP from silently normalizing a requested variant to the family's default.
+ACP targets and aliases accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; Cursor receives `cursor-agent --model claude-opus-5 acp`. For `agent: auto`, compatible native backends keep priority, then available ACP aliases are considered for a bare family. Any name containing `[` or `]` is refused during launch-time config validation, including parameterized (`claude-opus-5[effort=high]`), empty, nested, repeated, and unmatched bracket forms. Native backends continue to accept their parameterized model syntax, while `auto` never probes ACP aliases for those names. This narrow rule prevents ACP from silently normalizing a requested variant to the family's default.
 
 ### acpx_path
 
