@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -96,6 +99,77 @@ func TestRunStartParksPostWorktreeHookFailureBeforeStepRecords(t *testing.T) {
 	}
 }
 
+func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
+	t.Run("fallback persists failed run", func(t *testing.T) {
+		p, database := newRefreshRunFixture(t)
+		repo, _ := database.InsertRepo("/tmp/post-worktree-fallback", "https://github.com/test/fallback", "main")
+		run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		installRunUpdateTrigger(t, p.DB(), `
+			CREATE TRIGGER reject_environment_park
+			BEFORE UPDATE OF awaiting_agent_since ON runs
+			BEGIN SELECT RAISE(FAIL, 'injected environment park failure'); END;
+		`)
+
+		manager := NewRunManager(database, p, nil)
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errors.New(types.RunCancelReasonAbortedByUser))
+		if err := manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed")); err == nil {
+			t.Fatal("parkPostWorktreeFailure() error = nil")
+		}
+
+		got, err := database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.RunFailed || got.Error == nil {
+			t.Fatalf("fallback run = status %s error %v, want failed with error", got.Status, got.Error)
+		}
+	})
+
+	t.Run("failed fallback emits no false terminal event", func(t *testing.T) {
+		p, database := newRefreshRunFixture(t)
+		repo, _ := database.InsertRepo("/tmp/post-worktree-double-failure", "https://github.com/test/double-failure", "main")
+		run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		installRunUpdateTrigger(t, p.DB(), `
+			CREATE TRIGGER reject_environment_park
+			BEFORE UPDATE OF awaiting_agent_since ON runs
+			BEGIN SELECT RAISE(FAIL, 'injected environment park failure'); END;
+			CREATE TRIGGER reject_failed_fallback
+			BEFORE UPDATE OF status ON runs WHEN NEW.status = 'failed'
+			BEGIN SELECT RAISE(FAIL, 'injected failed fallback failure'); END;
+		`)
+
+		manager := NewRunManager(database, p, nil)
+		events := make(chan ipc.Event, 1)
+		manager.subscribers[run.ID] = []chan<- ipc.Event{events}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errors.New(types.RunCancelReasonAbortedByUser))
+		err = manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed"))
+		if err == nil || !strings.Contains(err.Error(), "injected failed fallback failure") {
+			t.Fatalf("parkPostWorktreeFailure() error = %v, want fallback persistence failure", err)
+		}
+
+		got, err := database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.RunPending || run.Status != types.RunPending {
+			t.Fatalf("failed fallback status = database %s memory %s, want pending authority preserved", got.Status, run.Status)
+		}
+		select {
+		case event := <-events:
+			t.Fatalf("failed fallback broadcast false terminal event: %+v", event)
+		default:
+		}
+	})
+}
+
 type assertPostWorktreeEffectStep struct {
 	check      func(string) error
 	executions int
@@ -166,4 +240,16 @@ func waitForRunStatus(t *testing.T, database *db.DB, runID string, status types.
 	}
 	t.Fatalf("run %s did not reach status %s", runID, status)
 	return nil
+}
+
+func installRunUpdateTrigger(t *testing.T, databasePath, statement string) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(statement); err != nil {
+		t.Fatal(err)
+	}
 }

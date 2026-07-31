@@ -63,11 +63,11 @@ func (m *RunManager) parkPostWorktreeFailure(ctx context.Context, run *db.Run, r
 	errMsg := hookErr.Error()
 	if err := m.db.ParkRunForEnvironmentFailure(run.ID, errMsg); err != nil {
 		failureMessage := fmt.Sprintf("park post-worktree hook failure: %v", err)
+		if dbErr := m.db.UpdateRunErrorStatus(run.ID, failureMessage, types.RunFailed); dbErr != nil {
+			return errors.Join(errors.New(failureMessage), fmt.Errorf("persist failed post-worktree hook run: %w", dbErr))
+		}
 		run.Status = types.RunFailed
 		run.Error = &failureMessage
-		if dbErr := m.db.UpdateRunError(run.ID, failureMessage); dbErr != nil {
-			slog.Error("failed to record post-worktree hook park failure", "run_id", run.ID, "error", dbErr)
-		}
 		status := string(run.Status)
 		m.broadcast(ipc.Event{Type: ipc.EventRunCompleted, RunID: run.ID, RepoID: repo.ID, Status: &status, Branch: &run.Branch, Error: run.Error})
 		return errors.New(failureMessage)

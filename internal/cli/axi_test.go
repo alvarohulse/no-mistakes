@@ -80,6 +80,9 @@ func TestPostWorktreeEnvironmentParkRendering(t *testing.T) {
 	if strings.Contains(out, "axi respond") {
 		t.Errorf("environment gate must not offer a step response:\n%s", out)
 	}
+	if strings.Contains(out, preserveGateFixCommitsGuidance) || strings.Contains(out, "pipeline fix commit") {
+		t.Errorf("environment gate must not include step-gate branch-preservation guidance:\n%s", out)
+	}
 }
 
 func TestFindingsTally(t *testing.T) {

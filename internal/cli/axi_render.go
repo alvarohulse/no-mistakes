@@ -509,7 +509,6 @@ func environmentalFailureGateFields(message string) []toon.Field {
 		{Key: "help", Value: []string{
 			"Correct the environment outside no-mistakes; the post-worktree hook is deterministic controller work and has no auto-fix loop.",
 			"The run worktree is preserved while parked. Run `no-mistakes axi abort`, then start a fresh run after correcting the environment.",
-			preserveGateFixCommitsGuidance,
 		}},
 	}
 }
