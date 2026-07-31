@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -37,6 +38,11 @@ func serviceDefinitionMatchesRoot(data []byte, p *paths.Paths) bool {
 		if strings.Contains(text, suffix) {
 			return true
 		}
+	}
+	launcherPrefix := strings.ToLower(xmlEscaped(filepath.Join(root, windowsDaemonLauncherPrefix)))
+	launcherText := strings.ToLower(text)
+	if strings.Contains(launcherText, "-file ") && strings.Contains(launcherText, launcherPrefix) && strings.Contains(launcherText, windowsDaemonLauncherSuffix) {
+		return true
 	}
 	return false
 }

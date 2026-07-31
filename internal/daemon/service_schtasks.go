@@ -1,10 +1,11 @@
 package daemon
 
 import (
-	"encoding/base64"
-	"encoding/binary"
+	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -12,15 +13,32 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
+const (
+	windowsTaskCommandMaxUTF16  = 261
+	windowsDaemonLauncherPrefix = "daemon-task-launcher-"
+	windowsDaemonLauncherSuffix = ".ps1"
+)
+
+type windowsTaskInstallPlan struct {
+	command         string
+	launcherPath    string
+	launcherContent []byte
+}
+
 // installWindowsTask registers the daemon as a per-user scheduled task.
 //
 // Unlike the launchd and systemd paths, it never writes proxy settings into the
-// task definition. When NM_REPO_CONFIG is set, the task action sets only that
-// explicit opt-in before launching the daemon.
+// task definition. When NM_REPO_CONFIG is set, the task action points at a
+// generated launcher under this NM_HOME that sets only that explicit opt-in.
 func installWindowsTask(p *paths.Paths, exe string) error {
-	taskCommand, err := buildWindowsTaskCommandWithEnvironment(exe, p.Root())
+	plan, err := buildWindowsTaskInstallPlan(p, exe)
 	if err != nil {
 		return err
+	}
+	if plan.launcherPath != "" {
+		if err := writeFileAtomic(plan.launcherPath, plan.launcherContent, 0o600); err != nil {
+			return fmt.Errorf("write Windows daemon launcher: %w", err)
+		}
 	}
 	args := []string{
 		"/Create",
@@ -28,38 +46,50 @@ func installWindowsTask(p *paths.Paths, exe string) error {
 		"/SC", "ONLOGON",
 		"/RL", "LIMITED",
 		"/F",
-		"/TR", taskCommand,
+		"/TR", plan.command,
 	}
 	if _, err := serviceCommandRunner("schtasks", args...); err != nil {
 		return fmt.Errorf("schtasks create: %w", err)
 	}
 	cleanupLegacyWindowsTask(p)
+	cleanupStaleWindowsLaunchers(p, plan.launcherPath)
 	return nil
 }
 
-func buildWindowsTaskCommandWithEnvironment(exe, root string) (string, error) {
+func buildWindowsTaskInstallPlan(p *paths.Paths, exe string) (windowsTaskInstallPlan, error) {
+	directCommand := buildWindowsTaskCommand(exe, p.Root())
 	rawPath, set := os.LookupEnv(machineRepoConfigEnv)
 	if !set {
-		return buildWindowsTaskCommand(exe, root), nil
+		if err := validateWindowsTaskCommandLength(directCommand); err != nil {
+			return windowsTaskInstallPlan{}, err
+		}
+		return windowsTaskInstallPlan{command: directCommand}, nil
 	}
 	path, err := ValidateMachineRepoConfigPath(rawPath)
 	if err != nil {
-		return "", err
+		return windowsTaskInstallPlan{}, err
 	}
 	machineConfig, err := powershellSingleQuoted(path)
 	if err != nil {
-		return "", fmt.Errorf("encode %s path: %w", machineRepoConfigEnv, err)
+		return windowsTaskInstallPlan{}, fmt.Errorf("encode %s path: %w", machineRepoConfigEnv, err)
 	}
 	executable, err := powershellSingleQuoted(exe)
 	if err != nil {
-		return "", fmt.Errorf("encode daemon executable: %w", err)
+		return windowsTaskInstallPlan{}, fmt.Errorf("encode daemon executable: %w", err)
 	}
-	daemonRoot, err := powershellSingleQuoted(root)
+	daemonRoot, err := powershellSingleQuoted(p.Root())
 	if err != nil {
-		return "", fmt.Errorf("encode daemon root: %w", err)
+		return windowsTaskInstallPlan{}, fmt.Errorf("encode daemon root: %w", err)
 	}
 	script := "$env:" + machineRepoConfigEnv + "=" + machineConfig + "; & " + executable + " 'daemon' 'run' '--root' " + daemonRoot + "; exit $LASTEXITCODE"
-	return "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand " + encodePowerShellCommand(script), nil
+	content := append([]byte{0xEF, 0xBB, 0xBF}, []byte(script)...)
+	digest := sha256.Sum256(content)
+	launcherPath := filepath.Join(p.Root(), fmt.Sprintf("%s%x%s", windowsDaemonLauncherPrefix, digest[:6], windowsDaemonLauncherSuffix))
+	command := "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + quoteWindowsTaskArg(launcherPath)
+	if err := validateWindowsTaskCommandLength(command); err != nil {
+		return windowsTaskInstallPlan{}, err
+	}
+	return windowsTaskInstallPlan{command: command, launcherPath: launcherPath, launcherContent: content}, nil
 }
 
 func powershellSingleQuoted(value string) (string, error) {
@@ -69,13 +99,33 @@ func powershellSingleQuoted(value string) (string, error) {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'", nil
 }
 
-func encodePowerShellCommand(script string) string {
-	codeUnits := utf16.Encode([]rune(script))
-	data := make([]byte, len(codeUnits)*2)
-	for i, codeUnit := range codeUnits {
-		binary.LittleEndian.PutUint16(data[i*2:], codeUnit)
+func validateWindowsTaskCommandLength(command string) error {
+	length := len(utf16.Encode([]rune(command)))
+	if length > windowsTaskCommandMaxUTF16 {
+		return fmt.Errorf("Windows scheduled-task action is %d UTF-16 code units (maximum %d); move NM_HOME to a shorter path", length, windowsTaskCommandMaxUTF16)
 	}
-	return base64.StdEncoding.EncodeToString(data)
+	return nil
+}
+
+func cleanupStaleWindowsLaunchers(p *paths.Paths, keep string) {
+	entries, err := os.ReadDir(p.Root())
+	if err != nil {
+		slog.Warn("clean stale Windows daemon launchers", "root", p.Root(), "error", err)
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, windowsDaemonLauncherPrefix) || !strings.HasSuffix(name, windowsDaemonLauncherSuffix) {
+			continue
+		}
+		launcher := filepath.Join(p.Root(), name)
+		if launcher == keep {
+			continue
+		}
+		if err := os.Remove(launcher); err != nil && !os.IsNotExist(err) {
+			slog.Warn("remove stale Windows daemon launcher", "path", launcher, "error", err)
+		}
+	}
 }
 
 func cleanupLegacyWindowsTask(p *paths.Paths) {
