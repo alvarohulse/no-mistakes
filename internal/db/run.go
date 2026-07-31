@@ -2,11 +2,28 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const (
+	ConfigSourceBranch  = "branch"
+	ConfigSourceDefault = "default"
+	ConfigSourceMachine = "machine-local"
+)
+
+// ConfigSource binds one effective run-config input to the exact bytes read at
+// launch. Path is private recovery metadata for machine-local config and must
+// not be rendered into public PR text.
+type ConfigSource struct {
+	Kind   string `json:"kind"`
+	Digest string `json:"digest"`
+	Ref    string `json:"ref,omitempty"`
+	Path   string `json:"path,omitempty"`
+}
 
 // Run represents a pipeline run.
 type Run struct {
@@ -17,6 +34,7 @@ type Run struct {
 	BaseSHA          string
 	RefreshStrategy  types.RefreshStrategy
 	StackedOn        string
+	ConfigSources    []ConfigSource
 	SubmittedHeadSHA *string
 	// ReviewApprovedHeadSHA is the exact commit approved by the last
 	// successfully completed full review. It is nil for legacy runs and until
@@ -60,13 +78,14 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
-	return row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
+	var configSourcesJSON string
+	if err := row.Scan(
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
@@ -74,7 +93,13 @@ func scanRun(row interface {
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.PRNote,
 		&r.CreatedAt, &r.UpdatedAt,
-	)
+	); err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(configSourcesJSON), &r.ConfigSources); err != nil {
+		return fmt.Errorf("decode config sources: %w", err)
+	}
+	return nil
 }
 
 // InsertRun creates a new run record.
@@ -137,6 +162,22 @@ func (d *DB) UpdateRunRefreshSelection(id string, strategy types.RefreshStrategy
 	_, err := d.sql.Exec(`UPDATE runs SET refresh_strategy = ?, stacked_on = ?, updated_at = ? WHERE id = ?`, strategy, nullableString(stackedOn), now(), id)
 	if err != nil {
 		return fmt.Errorf("update run refresh selection: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunConfigSources records the ordered config inputs that contributed to
+// the effective run. It is written before any hook or pipeline step executes.
+func (d *DB) UpdateRunConfigSources(id string, sources []ConfigSource) error {
+	if sources == nil {
+		sources = []ConfigSource{}
+	}
+	encoded, err := json.Marshal(sources)
+	if err != nil {
+		return fmt.Errorf("encode config sources: %w", err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET config_sources_json = ?, updated_at = ? WHERE id = ?`, string(encoded), now(), id); err != nil {
+		return fmt.Errorf("update run config sources: %w", err)
 	}
 	return nil
 }

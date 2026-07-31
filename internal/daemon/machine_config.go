@@ -3,9 +3,12 @@ package daemon
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -19,6 +22,11 @@ type machineRepoConfig struct {
 	Config *config.RepoConfig
 	Path   string
 	Digest string
+}
+
+type repoConfigInput struct {
+	Config *config.RepoConfig
+	Source *db.ConfigSource
 }
 
 func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool)) (*machineRepoConfig, error) {
@@ -76,12 +84,109 @@ func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool))
 		return nil, fmt.Errorf("%s repo binding does not match the registered repository", machineRepoConfigEnv)
 	}
 
-	digest := sha256.Sum256(data)
 	return &machineRepoConfig{
 		Config: repoConfig,
 		Path:   resolvedPath,
-		Digest: hex.EncodeToString(digest[:]),
+		Digest: configDigest(data),
 	}, nil
+}
+
+func loadRepoConfigInput(path, kind, ref string) (*repoConfigInput, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &repoConfigInput{Config: &config.RepoConfig{}}, nil
+		}
+		return nil, err
+	}
+	repoConfig, err := config.LoadRepoFromBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	return repoConfigInputFromBytes(repoConfig, data, kind, ref), nil
+}
+
+func repoConfigInputFromBytes(repoConfig *config.RepoConfig, data []byte, kind, ref string) *repoConfigInput {
+	return &repoConfigInput{
+		Config: repoConfig,
+		Source: &db.ConfigSource{Kind: kind, Digest: configDigest(data), Ref: ref},
+	}
+}
+
+func effectiveRepoConfigAndSources(global *config.GlobalConfig, pushed, trusted *repoConfigInput, machine *machineRepoConfig) (*config.RepoConfig, []db.ConfigSource) {
+	if pushed == nil {
+		pushed = &repoConfigInput{Config: &config.RepoConfig{}}
+	}
+	trustedConfig := (*config.RepoConfig)(nil)
+	if trusted != nil {
+		trustedConfig = trusted.Config
+	}
+	allowRepoCommands := trustedConfig != nil && trustedConfig.AllowRepoCommands
+	resolve := func(pushedConfig, trustedConfig *config.RepoConfig, allow bool) *config.RepoConfig {
+		effective := config.EffectiveRepoConfig(pushedConfig, trustedConfig, allow)
+		if machine != nil {
+			effective = config.OverlayRepoConfig(effective, machine.Config)
+		}
+		return effective
+	}
+	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
+	resolved := config.Merge(global, effective)
+
+	var sources []db.ConfigSource
+	if pushed.Source != nil {
+		withoutPushed := resolve(&config.RepoConfig{}, trustedConfig, allowRepoCommands)
+		if !reflect.DeepEqual(resolved, config.Merge(global, withoutPushed)) {
+			sources = append(sources, *pushed.Source)
+		}
+	}
+	if trusted != nil && trusted.Source != nil {
+		withoutTrusted := resolve(pushed.Config, nil, false)
+		if !reflect.DeepEqual(resolved, config.Merge(global, withoutTrusted)) {
+			sources = append(sources, *trusted.Source)
+		}
+	}
+	if machine != nil {
+		sources = append(sources, db.ConfigSource{
+			Kind:   db.ConfigSourceMachine,
+			Digest: machine.Digest,
+			Path:   machine.Path,
+		})
+	}
+	return effective, sources
+}
+
+func validateRecoveredMachineRepoConfig(sources []db.ConfigSource, machine *machineRepoConfig) error {
+	var expected *db.ConfigSource
+	for i := range sources {
+		if sources[i].Kind != db.ConfigSourceMachine {
+			continue
+		}
+		if expected != nil {
+			return fmt.Errorf("run records multiple machine-local config sources")
+		}
+		expected = &sources[i]
+	}
+	if expected == nil {
+		if machine != nil {
+			return fmt.Errorf("recovered run was launched without %s; refusing to apply it mid-run", machineRepoConfigEnv)
+		}
+		return nil
+	}
+	if machine == nil {
+		return fmt.Errorf("recovered run requires the launch-time %s", machineRepoConfigEnv)
+	}
+	if machine.Path != expected.Path {
+		return fmt.Errorf("recovered run %s path differs from launch", machineRepoConfigEnv)
+	}
+	if machine.Digest != expected.Digest {
+		return fmt.Errorf("recovered run %s digest differs from launch", machineRepoConfigEnv)
+	}
+	return nil
+}
+
+func configDigest(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 func pathWithin(root, target string) bool {

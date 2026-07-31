@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -41,7 +42,7 @@ commands:
   test: machine-test
 `)
 	t.Setenv(machineRepoConfigEnv, path)
-	step := &captureRunConfigStep{captured: make(chan capturedRunConfig, 1)}
+	step := &captureRunConfigStep{captured: make(chan capturedRunConfig, 2)}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 	t.Cleanup(manager.Shutdown)
 
@@ -65,6 +66,41 @@ commands:
 		}
 	default:
 		t.Fatal("pipeline step did not capture effective config")
+	}
+	firstRun, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kinds := configSourceKinds(firstRun.ConfigSources); kinds != "branch,default,machine-local" {
+		t.Fatalf("config source kinds = %q, want branch,default,machine-local", kinds)
+	}
+	firstMachine := configSourceByKind(t, firstRun.ConfigSources, db.ConfigSourceMachine)
+	if firstMachine.Path != path {
+		t.Fatalf("stored machine path = %q, want %q", firstMachine.Path, path)
+	}
+
+	updated := `repo: git@github.com:test/repo.git
+agent: opencode
+commands:
+  test: machine-test-v2
+`
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rerunID, err := manager.HandleRerun(context.Background(), repo.ID, "main", nil, "machine config rerun", "", "", "")
+	if err != nil {
+		t.Fatalf("rerun: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, rerunID); run.Status != types.RunCompleted {
+		t.Fatalf("rerun status = %s, error = %v", run.Status, run.Error)
+	}
+	rerun, err := database.GetRun(rerunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rerunMachine := configSourceByKind(t, rerun.ConfigSources, db.ConfigSourceMachine)
+	if rerunMachine.Digest == firstMachine.Digest {
+		t.Fatalf("rerun retained stale machine digest %q", rerunMachine.Digest)
 	}
 }
 
@@ -212,6 +248,113 @@ func TestLoadMachineRepoConfigRejectsSymlinksAcrossRepositoryBoundary(t *testing
 			}
 		})
 	}
+}
+
+func TestEffectiveRepoConfigSourcesIncludeOnlyContributingCommittedInputs(t *testing.T) {
+	global := &config.GlobalConfig{Agent: types.AgentClaude}
+	pushedConfig, err := config.LoadRepoFromBytes([]byte("ignore_patterns: [vendor/**]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedConfig, err := config.LoadRepoFromBytes([]byte("commands:\n  test: trusted-test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineConfig, err := config.LoadRepoFromBytes([]byte("repo: https://github.com/test/repo\ncommands:\n  test: machine-test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := repoConfigInputFromBytes(pushedConfig, []byte("pushed"), db.ConfigSourceBranch, "head")
+	trusted := repoConfigInputFromBytes(trustedConfig, []byte("trusted"), db.ConfigSourceDefault, "main")
+	machine := &machineRepoConfig{Config: machineConfig, Path: "/private/machine.yaml", Digest: "machine"}
+
+	effective, sources := effectiveRepoConfigAndSources(global, pushed, trusted, machine)
+	if effective.Commands.Test != "machine-test" {
+		t.Fatalf("commands.test = %q, want machine-test", effective.Commands.Test)
+	}
+	if kinds := configSourceKinds(sources); kinds != "branch,machine-local" {
+		t.Fatalf("config source kinds = %q, want branch,machine-local; trusted command was fully displaced", kinds)
+	}
+}
+
+func TestRecoveredMachineRepoConfigRefusesChangedMissingOrNewSource(t *testing.T) {
+	expected := []db.ConfigSource{{Kind: db.ConfigSourceMachine, Digest: "launch-digest", Path: "/private/repo.yaml"}}
+	tests := []struct {
+		name    string
+		sources []db.ConfigSource
+		machine *machineRepoConfig
+	}{
+		{name: "changed digest", sources: expected, machine: &machineRepoConfig{Digest: "changed", Path: "/private/repo.yaml"}},
+		{name: "changed path", sources: expected, machine: &machineRepoConfig{Digest: "launch-digest", Path: "/private/other.yaml"}},
+		{name: "missing", sources: expected},
+		{name: "new mid-run", machine: &machineRepoConfig{Digest: "new", Path: "/private/repo.yaml"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateRecoveredMachineRepoConfig(tt.sources, tt.machine); err == nil {
+				t.Fatal("expected recovery to fail closed")
+			}
+		})
+	}
+	if err := validateRecoveredMachineRepoConfig(expected, &machineRepoConfig{Digest: "launch-digest", Path: "/private/repo.yaml"}); err != nil {
+		t.Fatalf("unchanged launch config rejected: %v", err)
+	}
+}
+
+func TestLoadRecoveredConfigRefusesMachineConfigDigestDrift(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "machine-config-recovery")
+	gitCmd(t, repo.WorkingPath, "remote", "add", "origin", p.RepoDir(repo.ID))
+	path := writeMachineRepoConfig(t, t.TempDir(), "repo: https://github.com/test/repo\ncommands:\n  test: launch-test\n")
+	t.Setenv(machineRepoConfigEnv, path)
+	loaded, err := loadMachineRepoConfig(repo, fixedEnv(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []db.ConfigSource{{Kind: db.ConfigSourceMachine, Digest: loaded.Digest, Path: loaded.Path}}
+	if err := database.UpdateRunConfigSources(run.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+	run.ConfigSources = sources
+	manager := NewRunManager(database, p, nil)
+	t.Cleanup(manager.Shutdown)
+
+	cfg, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath)
+	if err != nil {
+		t.Fatalf("load unchanged recovered config: %v", err)
+	}
+	if cfg.Commands.Test != "launch-test" {
+		t.Fatalf("recovered commands.test = %q, want launch-test", cfg.Commands.Test)
+	}
+	if err := os.WriteFile(path, []byte("repo: https://github.com/test/repo\ncommands:\n  test: changed-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath); err == nil || !strings.Contains(err.Error(), "digest differs") {
+		t.Fatalf("drift recovery error = %v, want digest mismatch refusal", err)
+	}
+}
+
+func configSourceByKind(t *testing.T, sources []db.ConfigSource, kind string) db.ConfigSource {
+	t.Helper()
+	for _, source := range sources {
+		if source.Kind == kind {
+			return source
+		}
+	}
+	t.Fatalf("config source %q missing from %#v", kind, sources)
+	return db.ConfigSource{}
+}
+
+func configSourceKinds(sources []db.ConfigSource) string {
+	kinds := make([]string, 0, len(sources))
+	for _, source := range sources {
+		kinds = append(kinds, source.Kind)
+	}
+	return strings.Join(kinds, ",")
 }
 
 func fixedEnv(path string) func(string) (string, bool) {

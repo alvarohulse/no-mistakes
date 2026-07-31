@@ -1,10 +1,36 @@
 package db
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestUpdateRunConfigSourcesPersistsOrderedEvidence(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/config-sources", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []ConfigSource{
+		{Kind: ConfigSourceBranch, Digest: "branch-digest", Ref: "abc123"},
+		{Kind: ConfigSourceDefault, Digest: "default-digest", Ref: "main-sha"},
+		{Kind: ConfigSourceMachine, Digest: "machine-digest", Path: "/private/config/repo.yaml"},
+	}
+	if err := d.UpdateRunConfigSources(run.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.ConfigSources, sources) {
+		t.Fatalf("config sources = %#v, want %#v", got.ConfigSources, sources)
+	}
+}
 
 func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)

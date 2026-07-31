@@ -131,6 +131,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	if run.RefreshStrategy != "rebase" || run.StackedOn != "" {
 		t.Fatalf("legacy refresh selection = (%q, %q), want default rebase", run.RefreshStrategy, run.StackedOn)
 	}
+	if len(run.ConfigSources) != 0 {
+		t.Fatalf("legacy run config sources = %#v, want empty", run.ConfigSources)
+	}
 }
 
 func TestOpenCreatesStepRoundsTable(t *testing.T) {
