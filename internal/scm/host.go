@@ -89,12 +89,15 @@ func ExtractPRNumber(prURL string) (string, error) {
 type PR struct {
 	Number string
 	URL    string
+	Base   string
 }
 
 // PRContent is the title + body for creating or updating a PR.
 type PRContent struct {
 	Title string
 	Body  string
+	// Base is optional on update. Empty preserves the current base.
+	Base string
 }
 
 // PRState is the normalized lifecycle state of a PR.

@@ -224,9 +224,10 @@ func fakeGH(t *testing.T, prViewURL string) (env []string, logFile string) {
 	logFile = filepath.Join(t.TempDir(), "gh.log")
 	linkTestBinary(t, binDir, "gh")
 	env = fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":   "gh",
-		"FAKE_CLI_LOG":    logFile,
-		"FAKE_CLI_PR_URL": prViewURL,
+		"FAKE_CLI_MODE":    "gh",
+		"FAKE_CLI_LOG":     logFile,
+		"FAKE_CLI_PR_URL":  prViewURL,
+		"FAKE_CLI_PR_BASE": "main",
 	})
 	return env, logFile
 }
@@ -264,7 +265,7 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 				fmt.Fprint(w, `{"values":[]}`)
 				return
 			}
-			fmt.Fprintf(w, `{"values":[{"id":%d,"links":{"html":{"href":%q}}}]}`,
+			fmt.Fprintf(w, `{"values":[{"id":%d,"destination":{"branch":{"name":"main"}},"links":{"html":{"href":%q}}}]}`,
 				api.existingPRID,
 				api.existingPRURL,
 			)

@@ -187,9 +187,9 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		args = append(args, "--base", base)
 	}
 	args = append(args, h.repoArgs()...)
-	jsonFields := "number,url"
+	jsonFields := "number,url,baseRefName"
 	if h.forkOwner != "" {
-		jsonFields = "number,url,headRefName,headRepositoryOwner"
+		jsonFields = "number,url,baseRefName,headRefName,headRepositoryOwner"
 	}
 	args = append(args, "--state", "open", "--json", jsonFields)
 	cmd := h.cmd(ctx, "gh", args...)
@@ -201,6 +201,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		Number              int    `json:"number"`
 		URL                 string `json:"url"`
 		HeadRefName         string `json:"headRefName"`
+		BaseRefName         string `json:"baseRefName"`
 		HeadRepositoryOwner *struct {
 			Login string `json:"login"`
 		} `json:"headRepositoryOwner"`
@@ -212,7 +213,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		if !h.matchesHead(candidate.HeadRefName, candidate.HeadRepositoryOwner, branch) {
 			continue
 		}
-		pr := &scm.PR{URL: strings.TrimSpace(candidate.URL)}
+		pr := &scm.PR{URL: strings.TrimSpace(candidate.URL), Base: strings.TrimSpace(candidate.BaseRefName)}
 		if candidate.Number > 0 {
 			pr.Number = fmt.Sprintf("%d", candidate.Number)
 		} else if num, nerr := scm.ExtractPRNumber(pr.URL); nerr == nil {
@@ -254,7 +255,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		return nil, fmt.Errorf("gh pr create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	url := strings.TrimSpace(string(out))
-	pr := &scm.PR{URL: url}
+	pr := &scm.PR{URL: url, Base: base}
 	if num, nerr := scm.ExtractPRNumber(url); nerr == nil {
 		pr.Number = num
 	}
@@ -268,10 +269,16 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	}
 	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
 	args = append(args, "--title", content.Title, "--body-file", "-")
+	if strings.TrimSpace(content.Base) != "" {
+		args = append(args, "--base", content.Base)
+	}
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if strings.TrimSpace(content.Base) != "" {
+		pr.Base = strings.TrimSpace(content.Base)
 	}
 	return pr, nil
 }

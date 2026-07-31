@@ -113,6 +113,7 @@ func fakeRecordSuccessHandler() {
 
 func fakeGHHandler(args []string) {
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
+	prBase := os.Getenv("FAKE_CLI_PR_BASE")
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
@@ -122,7 +123,7 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		number := extractTrailingNumber(prURL)
-		fmt.Printf("[{\"number\":%d,\"url\":%q}]\n", number, prURL)
+		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q}]\n", number, prURL, prBase)
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
@@ -133,6 +134,10 @@ func fakeGHHandler(args []string) {
 		os.Exit(1)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
+		if os.Getenv("FAKE_CLI_FAIL_EDIT") == "1" {
+			fmt.Fprintln(os.Stderr, "edit failed")
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {

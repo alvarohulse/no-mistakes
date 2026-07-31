@@ -75,22 +75,35 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
-	// Resolve the branch base so PR summaries cover the full branch delta.
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
-	content, err := s.buildPRContent(sctx, branch, baseSHA, scm.MaxPRBodyChars(provider))
+	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	baseBranch := refreshBaseBranch(sctx, defaultBranch)
+	// Resolve the branch base so PR summaries cover the full stacked delta.
+	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
+	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, scm.MaxPRBodyChars(provider))
 	if err != nil {
 		return nil, err
 	}
 
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
-	existing, err := host.FindPR(ctx, branch, sctx.Repo.DefaultBranch)
+	existing, err := host.FindPR(ctx, branch, "")
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
-		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
+		updateContent := scm.PRContent{Title: content.Title, Body: content.Body}
+		retargeting := strings.TrimSpace(existing.Base) != baseBranch
+		if retargeting {
+			updateContent.Base = baseBranch
+		}
+		updated, err := host.UpdatePR(ctx, existing, updateContent)
 		if err != nil {
+			if retargeting {
+				return nil, fmt.Errorf("retarget pull request to %s: %w", baseBranch, err)
+			}
 			sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
 			updated = existing
 		}
@@ -104,7 +117,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, sctx.Repo.DefaultBranch, scm.PRContent(content))
+	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent{Title: content.Title, Body: content.Body})
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +144,7 @@ func describePR(pr *scm.PR) string {
 	return ""
 }
 
-func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseSHA string, bodyLimit int) (prContent, error) {
+func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
 	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
 	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
@@ -146,7 +159,7 @@ Context:
 - branch: %s
 - base commit: %s
 - target commit: %s
-- default branch: %s
+- base branch: %s
 
 Rules:
 - Cover the full branch delta, not just the latest commit.
@@ -162,7 +175,7 @@ Diff stat:
 %s
 
 Final diff paths and statuses:
-%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, sctx.Repo.DefaultBranch, conventional.ReleaseTypeRule, diffStat, finalDiff, userIntentPromptSection(sctx), prNotePromptSection(sctx), executionContextPromptSection())
+%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, conventional.ReleaseTypeRule, diffStat, finalDiff, userIntentPromptSection(sctx), prNotePromptSection(sctx), executionContextPromptSection())
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 

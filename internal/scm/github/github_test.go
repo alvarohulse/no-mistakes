@@ -158,7 +158,7 @@ func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
 
 	const body = "## What Changed\n\n- update existing pull request bodies without long argv"
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr edit 42 --repo test/repo --title fix: cap body --body-file -": {
+		"gh pr edit 42 --repo test/repo --title fix: cap body --body-file - --base release/1.0": {
 			wantStdin: body,
 		},
 	}), nil, "", "test/repo")
@@ -167,12 +167,16 @@ func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
 	updated, err := host.UpdatePR(context.Background(), pr, scm.PRContent{
 		Title: "fix: cap body",
 		Body:  body,
+		Base:  "release/1.0",
 	})
 	if err != nil {
 		t.Fatalf("UpdatePR() error = %v", err)
 	}
 	if updated != pr {
 		t.Fatalf("UpdatePR() = %+v, want original PR", updated)
+	}
+	if updated.Base != "release/1.0" {
+		t.Fatalf("UpdatePR() base = %q, want release/1.0", updated.Base)
 	}
 }
 
@@ -429,8 +433,8 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url": {
-			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42"}]` + "\n",
+		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url,baseRefName": {
+			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"release/1.0"}]` + "\n",
 		},
 	}), nil, "", "")
 
@@ -447,6 +451,9 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	if pr.URL != "https://github.example.com/org/repo/pull/42" {
 		t.Fatalf("FindPR() URL = %q, want matching base PR", pr.URL)
 	}
+	if pr.Base != "release/1.0" {
+		t.Fatalf("FindPR() base = %q, want release/1.0", pr.Base)
+	}
 }
 
 func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
@@ -454,11 +461,11 @@ func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
 
 	branch := "feature/refactor"
 	host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,headRefName,headRepositoryOwner": {
+		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
 			stderr: `invalid argument: "--head" does not support "<owner>:<branch>"` + "\n",
 			code:   1,
 		},
-		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,headRefName,headRepositoryOwner": {
+		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
 			stdout: `[` +
 				`{"number":40,"url":"https://github.com/parent/repo/pull/40","headRefName":"feature/refactor","headRepositoryOwner":{"login":"other-owner"}},` +
 				`{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":{"login":"fork-owner"}}` +
@@ -485,7 +492,7 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base main --state open --json number,url": {
+		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName": {
 			stderr: "api unavailable\n",
 			code:   1,
 		},
