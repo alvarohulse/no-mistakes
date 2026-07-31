@@ -50,9 +50,11 @@ const body = `
 # no-mistakes
 
 ` + "`no-mistakes`" + ` is a local gate that validates your code changes through a pipeline
-(intent, rebase, review, test, document, lint, push, PR, CI) before they reach
+(intent, refresh, review, test, document, lint, push, PR, CI) before they reach
 the configured push target. You drive it through the ` + "`no-mistakes axi`" + ` command family, which prints
 machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
+The refresh step keeps the machine identity ` + "`refresh`" + ` and displays as ` + "`Rebase`" + ` or
+` + "`Merge`" + ` for the run's selected strategy.
 
 ` + gateguidance.SkillBoundary + `
 
@@ -60,6 +62,8 @@ When the user invokes ` + "`/no-mistakes`" + `, report the outcome at the end. I
 asks for something specific, translate that request into the matching ` + "`axi run`" + `
 flags yourself - for example, "skip the lint step" becomes ` + "`--skip=lint`" + `. Run
 ` + "`no-mistakes axi run --help`" + ` to see the available flags.
+Use ` + "`--refresh-strategy merge`" + ` when the user requests merge-based refresh, and
+` + "`--stacked-on <branch>`" + ` when the branch and pull request should target another branch.
 
 ## Two ways to invoke
 
@@ -251,7 +255,7 @@ either, since the platform merges it. The one exception is when that monitor is
 no longer running - the PR was closed, the run was aborted or superseded, it
 idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
 with ` + "`no-mistakes rerun`" + `, which cancels the stale monitor and re-runs the full
-pipeline including a deterministic rebase step. Do **not** reach for
+pipeline including its deterministic refresh step. Do **not** reach for
 ` + "`no-mistakes axi run`" + ` to refresh a still-active PR: after ` + "`checks-passed`" + ` it
 reattaches to the running monitor (HEAD unchanged) and returns its output
 without rebasing.

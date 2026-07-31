@@ -28,18 +28,29 @@ you are working.
 flowchart LR
   subgraph before[" Before "]
     direction TB
-    A["Local branch"] -->|"git push origin"| B["Remote branch"]
-    B --> C["CI + review churn"]
-    C --> D["More pushes"]
+    A["Local branch"]
+    B["Remote branch"]
+    C["CI + review churn"]
+    D["More pushes"]
+
+    A -->|"git push origin"| B
+    B --> C
+    C --> D
     D --> A
   end
 
   subgraph after[" With no-mistakes "]
     direction TB
-    E["Local branch"] -->|"git push no-mistakes"| F["Local gate"]
-    F --> G["Rebase, review, test, docs, lint"]
-    G --> H["Push branch + open PR"]
-    H --> I["Watch CI + auto-fix"]
+    E["Local branch"]
+    F["Local gate"]
+    G["Refresh, review, test, docs, lint"]
+    H["Push branch + open PR"]
+    I["Watch CI + auto-fix"]
+
+    E -->|"git push no-mistakes"| F
+    F --> G
+    G --> H
+    H --> I
   end
 
   before ~~~ after

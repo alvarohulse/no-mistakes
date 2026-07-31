@@ -19,7 +19,7 @@ no-mistakes --skip test,lint
 
 Unlike `no-mistakes attach`, bare `no-mistakes` only auto-attaches to an active run on the current branch.
 `--skip` only applies when bare `no-mistakes` starts a new pipeline run through the wizard; it does not skip a step on an already-active run.
-Valid step names are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, and `ci`.
+Valid step names are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `push`, `pr`, and `ci`.
 
 ## no-mistakes init
 
@@ -43,7 +43,7 @@ If the repo still contains a vendored skill copy written by an older no-mistakes
 The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
-The push, rebase branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
+The push, refresh branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
 Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
 
 Re-running `init` on an already-initialized repo succeeds and reports `Gate already initialized (refreshed)`.
@@ -89,6 +89,7 @@ no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
+no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacked-on feature/dependency
 ```
 
 | Flag          | Type     | Default | Description                                                      |
@@ -98,12 +99,15 @@ no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 | `--pr-note`   | `string` | (none)  | Trusted author text for the generated PR's Notes section         |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
+| `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
+| `--stacked-on` | `string` | default branch | Use this branch as the refresh and pull-request base             |
 
 `--intent` is not a description of the diff.
 It is the user's goal or request, and no-mistakes uses it verbatim instead of transcript inference.
 Err on the side of completeness: include the goal, important decisions and tradeoffs, constraints or approaches ruled in or out, and explicit requests that might otherwise look surprising in the diff.
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
+Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
 `--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim after `## Intent`, supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
@@ -234,6 +238,7 @@ no-mistakes axi logs --step review --run <id>
 Without `--full`, long logs show the last 40 lines and a help hint for the full log.
 Step logs include native subprocess agent lifecycle lines such as `codex started pid=4242`, `codex exited pid=4242 status=success`, and transient retry messages when the selected agent supports lifecycle events.
 They also include fix-loop markers such as `auto-fix round 1/3 starting after round 1` and `user-fix round starting after round 2`.
+Use the canonical step name `refresh`; for historical runs, `axi logs --step refresh` falls back to the older `rebase.log` filename when no `refresh.log` exists.
 
 ## no-mistakes axi abort
 
@@ -292,10 +297,18 @@ Rerun the pipeline for the current branch.
 
 ```sh
 no-mistakes rerun
+no-mistakes rerun --refresh-strategy merge
+no-mistakes rerun --stacked-on feature/dependency
 ```
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
+| `--stacked-on` | `string` | prior run's stack base | Use this branch as the refresh and pull-request base |
 
 Starts a new pipeline run using the last-known head SHA on the current branch.
 If another run is active on that branch, rerun cancels it before starting over.
+When `--stacked-on` changes, the PR step retargets an existing pull request to the new base. Once the base matches, later reruns update the PR content without repeating the retarget operation.
 Treat rerun as a between-runs action after a failed or cancelled outcome, or after you have committed a separate fix outside an active run; do not use it to bypass a gate.
 
 ## no-mistakes sync

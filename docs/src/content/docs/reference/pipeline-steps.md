@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → refresh → review → test → document → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -21,7 +21,7 @@ Commits created by the shared Review, Test, Document, and Lint fix path use the 
 ## Intent
 
 Uses agent-supplied intent when a run provides it, otherwise infers the author's intent from recent local Claude Code, Codex, OpenCode, Rovo Dev, Pi, or GitHub Copilot CLI transcripts.
-This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
+This is best-effort context, and when available it is included in refresh fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
 
 **Behavior:**
 - Uses run-supplied intent verbatim and skips transcript-based inference, even when `intent.enabled` is false
@@ -35,25 +35,28 @@ This is best-effort context, and when available it is included in rebase fixes, 
 This step does not block the pipeline for missing transcripts, summarization that exceeds the five-minute extraction cap, or other extraction failures, which are reported as skipped outcomes.
 It can fail the run only if cleanup fails after the disambiguation agent leaves worktree side effects.
 
-## Rebase
+## Refresh
 
-Fetches the latest authoritative remote state, fetches the configured pushed-branch target, and rebases your branch onto those refs.
+Fetches the latest authoritative remote state and configured pushed-branch target, then incorporates them with the run's selected strategy. The canonical step ID is always `refresh`; displays label the step `Rebase` or `Merge`.
 
 **Behavior:**
-- Fetches `origin/<default_branch>` from the remote into the worktree, and also fetches the pushed branch for non-default branches unless the push rewrote branch history
+- Uses `refresh.strategy: rebase|merge`, overridden by `--refresh-strategy`, and defaults to `rebase`
+- Uses the default branch as the base unless `--stacked-on <branch>` selects another base; that stack base is fetched freshly and persisted on the run
+- Fetches `origin/<base_branch>` from the remote into the worktree, and also fetches the pushed branch for non-base branches unless the push rewrote branch history
 - Without fork routing, the pushed-branch target is `origin/<branch>`
 - With GitHub fork routing, the pushed-branch target is the fork branch fetched into `refs/remotes/no-mistakes-push/<branch>`
-- If the branch is not the default branch, tries rebasing onto the pushed-branch target first, then `origin/<default_branch>`
-- If the push rewrote branch history, skips the pushed-branch rebase target so prior remote autofix commits do not get reintroduced
+- If the branch is not the base branch, incorporates the pushed-branch target first, then `origin/<base_branch>`
+- Rebase strategy rebases onto each target; merge strategy merges each target with `--no-edit`
+- If the push rewrote branch history, skips the pushed-branch refresh target so prior remote autofix commits do not get reintroduced
 - If the push rewrote the default branch and `origin/<default_branch>` advanced after that rewrite, pauses for manual approval before updating the branch
 - If the branch carries commits from the contributor's local default branch that are not on `origin/<default_branch>`, pauses with an `ask-user` finding instead of silently bundling that local work into the PR
 - The local-default check is best-effort and only fires when the local default tip is ahead of `origin/<default_branch>` and is an ancestor of the branch `HEAD`
 - Skips targets that don't exist or are already ancestors
-- If a fast-forward is possible, does a hard-reset instead of a rebase
-- If the diff against the default branch is empty after rebase, completes rebase and skips all remaining pipeline steps
-- On conflict: records conflicting files, aborts the rebase, and reports findings
+- If a fast-forward is possible, does a hard-reset instead of rewriting or merging history
+- If the diff against the selected base branch is empty after refresh, completes refresh and skips all remaining pipeline steps
+- On conflict: records conflicting files, aborts the in-progress rebase or merge, and reports findings
 
-**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Rebase step does not synthesize a fix commit subject; `git rebase --continue` preserves the rebased commits' subjects.
+**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` or `git merge --continue` for the selected strategy. Rebase continuation uses a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Refresh step does not synthesize a fix commit subject; Git preserves the rebased subjects or creates the normal merge commit.
 
 **Default auto-fix limit:** `3`.
 
@@ -191,12 +194,14 @@ Creates or updates a pull request.
 **Behavior:**
 - Checks for an existing PR on the branch
 - If one exists, updates it. If not, creates a new one.
+- Targets the run's `--stacked-on` branch when set; otherwise targets the repository default branch
+- If an existing PR targets a different base, retargets it once during the update; matching bases are not sent again
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
 - For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
 - PR title: agent-generated from the final branch delta with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. If drafting fails, the fallback uses the neutral title `chore: update pull request` rather than inferring scope from earlier commits.
 - The PR stage exclusively owns the complete branch-scope description. It drafts `## What Changed` from the actual final diff after local mutating stages finish, and its fallback lists the final changed paths and statuses.
 - Earlier Review and Test output remains evidence for the commit each step inspected. The PR body does not promote their risk rationale, tested details, testing summary, or evidence artifacts into final-scope claims.
-- PR body includes a `## Intent` section when user intent is available, an operator-supplied `## Notes` section when `axi run --pr-note` or `--pr-note-file` was used, the final-diff `## What Changed`, and a compact `## Pipeline` section. Pipeline entries expose step status and outcome counts; Review is rendered as completed without its earlier risk rationale. A compact attribution table lists each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents. Unreported nested attribution renders as `-`, while a supported stream that observed no nested agents renders as `none`.
+- PR body includes a `## Intent` section when user intent is available, an operator-supplied `## Notes` section when `axi run --pr-note` or `--pr-note-file` was used, the final-diff `## What Changed`, and a compact `## Pipeline` section. Pipeline entries expose step status and outcome counts, label `refresh` as `Rebase` or `Merge`, and render Review as completed without its earlier risk rationale. A compact attribution table lists each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents. Unreported nested attribution renders as `-`, while a supported stream that observed no nested agents renders as `none`.
 - Generated PR bodies are capped at 63,488 bytes, leaving a 2 KB safety buffer below GitHub's 65,536-character body limit.
 - Under body caps, the attribution table is removed as a complete unit before the existing Pipeline status-update omission and truncation rules run.
 - When the final-scope body and pipeline status leave insufficient space, the Intent section uses the remaining budget and is truncated with an explicit marker.

@@ -6,13 +6,24 @@ description: The nine steps that run on every gated push.
 The pipeline runs a fixed, opinionated sequence of steps. Order is not configurable. What each step runs *is*.
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → refresh → review → test → document → lint → push → pr → ci
 ```
 
 ```mermaid
 flowchart LR
-  intent["Intent"] --> rebase["Rebase"] --> review["Review"] --> test["Test"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"] --> ci["CI"]
-  review -. findings .-> action["Approve / fix / skip / abort"]
+  intent["Intent"]
+  refresh["Refresh (Rebase or Merge)"]
+  review["Review"]
+  test["Test"]
+  document["Document"]
+  lint["Lint"]
+  push["Push"]
+  pr["PR"]
+  ci["CI"]
+  action["Approve / fix / skip / abort"]
+
+  intent --> refresh --> review --> test --> document --> lint --> push --> pr --> ci
+  review -. findings .-> action
   test -. findings .-> action
   document -. findings .-> action
   lint -. findings .-> action
@@ -36,7 +47,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
-| 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
+| 2 | **Refresh** (`Rebase` or `Merge`) | Fetch fresh remote upstream and the configured branch target, then incorporate them with the selected strategy | `3` |
 | 3 | **Review** | AI code review of your diff | `0` (requires approval) |
 | 4 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
 | 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
@@ -48,9 +59,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 ## Why these steps, in this order
 
 - **Intent first** so downstream agent prompts and generated PR descriptions can include author intent supplied by the agent or inferred from transcripts.
-- **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
+- **Refresh next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
-  If there's no diff left after the rebase, the pipeline skips the rest.
+  If there's no diff left after refresh, the pipeline skips the rest.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
@@ -79,6 +90,7 @@ You can't reorder steps. You *can*:
 - Set explicit `commands.lint`, `commands.format`, and an optional **targeted** `commands.test` (local intent validation only; not a full CI suite).
 - Store test evidence locally by default or opt into committed in-repo evidence with `test.evidence.store_in_repo`.
 - Control auto-fix limits per step.
+- Select `refresh.strategy: rebase|merge` in trusted repo config, override it for one run with `--refresh-strategy`, and declare a stack base with `--stacked-on <branch>`.
 - Ignore paths during review and documentation checks.
 - Disable or tune transcript-based intent extraction when intent is not supplied directly.
 - Skip steps for one run with `no-mistakes --skip <steps>`, `git push -o no-mistakes.skip=<steps>`, `no-mistakes axi run --skip <steps>`, or from the TUI.

@@ -54,7 +54,8 @@ By default that directory is temporary and local to the machine; repos can opt i
 
 A complete gate never degrades silently when its configured pipeline agent is unavailable.
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
-This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while refresh, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+The canonical step name is `refresh`; its human-facing label is `Rebase` or `Merge` according to the run's selected strategy.
 
 The optional trusted `hooks.post_worktree` post-worktree hook is different: it is deterministic controller preparation in the disposable run worktree, not a pipeline step or agent invocation. It runs once before `intent`, in its own process group, so package installation, environment symlinks, and cache warming can affect every later phase without creating a verification record. If it fails, the run parks at `gate.kind: environment` with no step auto-fix loop. Correct the environment outside no-mistakes, run `no-mistakes axi abort`, then start a fresh run; `--yes` never resolves this controller gate.
 
@@ -156,7 +157,7 @@ When the pipeline applied fixes, successful outcomes include a `fixes` table lis
 If that PR later falls behind the default branch or hits a merge conflict - commonly because another PR merged first - the agent runs no command and must never hand-rebase.
 The CI monitor stays live in the background after checks pass, and when it sees an actual conflict it rebases onto the base, resolves it, and re-pushes the branch itself, so no agent or user action is needed.
 A PR that is merely behind but still clean needs nothing either, since the platform merges it.
-The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case the agent recovers with `no-mistakes rerun`, which cancels the stale monitor and re-runs the full pipeline including a deterministic rebase step.
+The one exception is when that monitor is no longer running - the PR was closed, the run was aborted or superseded, it idle-timed-out, or its auto-fix attempts were exhausted - in which case the agent recovers with `no-mistakes rerun`, which cancels the stale monitor and re-runs the full pipeline including its deterministic refresh step.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
@@ -175,6 +176,8 @@ no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
 ```
+
+Pass `--refresh-strategy merge` to select merge-based refresh for a new run, and `--stacked-on <branch>` to use another branch as both the refresh base and pull-request base. Re-running with a different `--stacked-on` retargets an existing pull request; later runs do not repeat the base update when it already matches.
 
 Before any post-pipeline local commit or fresh run, read `branch_sync`.
 Only when its structured `next_action.code` is `sync`, run `no-mistakes axi sync` first.
@@ -241,7 +244,7 @@ When an agent starts a run through `no-mistakes axi run --intent`, no-mistakes u
 Review checks the diff against those criteria, and a change that removes required behavior or adds forbidden behavior becomes an `ask-user` finding instead of being resolved automatically.
 Optional `--pr-note` or `--pr-note-file <path>` adds trusted author text to a `## Notes` section of the generated pull request and gives the same guidance to the PR-summary agent. The flags are mutually exclusive, limited to 16 KiB, and apply only when starting a new run; do not include secrets.
 Otherwise, when `intent.enabled` is true, no-mistakes reads recent local transcripts from Claude Code, Codex, OpenCode, Rovo Dev, Pi, and the GitHub Copilot CLI during the `intent` pipeline step.
-It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
+It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in refresh fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
 
 Transcript readers collect user and assistant text messages but exclude tool call output.
 They read Claude Code transcripts from `~/.claude/projects`, Codex metadata from `~/.codex/state_*.sqlite` plus referenced rollout files, OpenCode messages from `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`, Rovo Dev sessions from `~/.rovodev/sessions`, Pi transcripts from `~/.pi/agent/sessions`, and GitHub Copilot CLI sessions from `~/.copilot/session-state`.

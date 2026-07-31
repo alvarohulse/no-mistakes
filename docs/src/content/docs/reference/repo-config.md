@@ -8,11 +8,11 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent` plus every `<step>.agent` route select which processes launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, and `<step>.agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions` and `disable_project_settings` only from that trusted copy.
+The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than `intent.agent`, and `test.evidence`) are still read from the pushed branch.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than `intent.agent`, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -24,6 +24,9 @@ agent: codex
 
 review:
   agent: [codex, claude]
+
+refresh:
+  strategy: merge
 
 commands:
   lint: "golangci-lint run ./..."
@@ -48,7 +51,7 @@ document:
 disable_project_settings: true
 
 auto_fix:
-  rebase: 3
+  refresh: 3
   review: 3
   test: 3
   document: 3
@@ -106,7 +109,7 @@ This per-repo `agent` value, including every fallback entry, is still read from 
 
 ### Per-step agent routes
 
-Set `<step>.agent` to route `intent`, `rebase`, `review`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
+Set `<step>.agent` to route `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
 
 ```yaml
 agent: claude
@@ -123,6 +126,22 @@ When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
 ACP targets and aliases remain valid step routes when no native CLI override is required. Global `agent_args_override` supports native agents only: ACP keys are rejected and ACP construction fails rather than silently discarding extra model or reasoning flags.
+
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts only agent routing and cannot select a strategy.
+
+### refresh.strategy
+
+Choose how the refresh step incorporates its freshly fetched base branch.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Values | `rebase`, `merge` |
+| Default | `rebase` |
+
+The canonical step identity stays `refresh`; user-facing pipeline displays label it `Rebase` or `Merge` for the selected strategy. CLI `--refresh-strategy` overrides this setting for one run. The precedence is explicit CLI selection, then this trusted default-branch value, then `rebase`.
+
+This field is always read from the pinned trusted default-branch config, even when `allow_repo_commands` is enabled, because it controls how the gate rewrites or extends branch history.
 
 ### allow_repo_commands
 
@@ -261,7 +280,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `auto_fix.rebase` | `int` | Inherits from global (default `3`) |
+| `auto_fix.refresh` | `int` | Inherits from global (default `3`) |
 | `auto_fix.review` | `int` | Inherits from global (default `0`) |
 | `auto_fix.test` | `int` | Inherits from global (default `3`) |
 | `auto_fix.document` | `int` | Inherits from global (default `3`) |
@@ -274,7 +293,7 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
-Legacy alias: `auto_fix.babysit`.
+Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
 
 ### commit.fix_message
 
@@ -287,7 +306,7 @@ Override the auto-fix commit subject template for this repository.
 
 The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
 That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
-The setting applies to the Review, Test, Document, and Lint fix path, not commits created by the Rebase, CI, or Push steps.
+The setting applies to the Review, Test, Document, and Lint fix path, not commits created by the Refresh, CI, or Push steps.
 
 This non-executing field is read from the pushed branch, so a branch can adopt its own commit convention without enabling `allow_repo_commands`.
 
