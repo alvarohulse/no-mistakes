@@ -817,10 +817,8 @@ func (u *TokenUsage) Add(other TokenUsage) {
 }
 
 // New creates an agent by name with the given binary path.
-// For native agents, extraArgs are user CLI flags from agent_args_override that
-// are injected into the underlying tool's argv ahead of no-mistakes' managed flags.
-// ACP agents and aliases ignore extraArgs; use NewWithOptions to provide
-// registry overrides.
+// extraArgs are user CLI flags from agent_args_override that are injected into
+// the underlying tool's argv according to the selected backend's conventions.
 func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 	return NewWithOptions(name, bin, extraArgs, Options{})
 }
@@ -829,12 +827,13 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
 	if target, ok := types.ACPTargetFor(name); ok {
 		if opts.Model != "" {
-			return nil, fmt.Errorf("model %q is not supported for ACP agent %q because configured model selection is not passed into ACP target startup", opts.Model, name)
-		}
-		if len(extraArgs) > 0 {
-			return nil, fmt.Errorf("agent_args_override is not supported for ACP agent %q; route the step to a native agent for model or reasoning overrides", name)
+			return nil, fmt.Errorf("model %q is not supported for ACP agent %q because ACP model compatibility validation remains fail-closed", opts.Model, name)
 		}
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
+		rawCommand, err := composeACPTargetCommand(target, rawCommand, extraArgs, "")
+		if err != nil {
+			return nil, fmt.Errorf("configure ACP agent %q: %w", name, err)
+		}
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	}
 	if name == types.AgentRovoDev && opts.Model != "" {

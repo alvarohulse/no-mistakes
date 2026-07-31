@@ -1120,8 +1120,9 @@ log_level: info
 #   claude: /usr/local/bin/claude
 #   codex: /opt/codex
 
-# Extra native agent CLI flags (optional, global only). ACP targets and aliases
-# do not support these flags; route a step to a native agent when it needs them.
+# Extra agent CLI flags (optional, global only). ACP targets and aliases pass
+# these flags into a composable raw target command; arbitrary registry targets
+# need an acp_registry_overrides entry so no arguments are silently discarded.
 # Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
 # agent_args_override:
 #   codex:
@@ -1437,7 +1438,7 @@ func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) err
 		return nil
 	}
 	if isACPAgent(name) {
-		return fmt.Errorf("model %q is not supported for ACP agent %q because configured model selection is not passed into ACP target startup", model.Name, name)
+		return fmt.Errorf("model %q is not supported for ACP agent %q because ACP model compatibility validation remains fail-closed", model.Name, name)
 	}
 	if name == types.AgentOpenCode && !validOpenCodeModelName(model.Name) {
 		return fmt.Errorf("agent %q requires model %q to use provider/model form", name, model.Name)
@@ -1653,11 +1654,24 @@ func (c *Config) AgentArgsFor(name types.AgentName) []string {
 	if c.AgentArgsOverride == nil {
 		return nil
 	}
-	return c.AgentArgsOverride[string(name)]
+	if args, ok := c.AgentArgsOverride[string(name)]; ok {
+		return args
+	}
+	target, ok := types.ACPTargetFor(name)
+	if !ok {
+		return nil
+	}
+	if alias, ok := types.ACPAliasForTarget(target); ok {
+		if args, exists := c.AgentArgsOverride[string(alias.Name)]; exists {
+			return args
+		}
+	}
+	return c.AgentArgsOverride["acp:"+target]
 }
 
 // agentArgsOverrideAgents lists native agent names accepted as keys in
-// agent_args_override.
+// agent_args_override. ACP aliases and explicit acp:<target> names are
+// accepted dynamically by validateAgentArgsOverride.
 var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentClaude):   true,
 	string(types.AgentCodex):    true,
@@ -1726,10 +1740,9 @@ var reservedAgentArgs = map[string]map[string]bool{
 func validateAgentArgsOverride(override map[string][]string) error {
 	for name, args := range override {
 		if !agentArgsOverrideAgents[name] {
-			if _, ok := types.ACPTargetFor(types.AgentName(name)); ok {
-				return fmt.Errorf("invalid agent_args_override.%s: ACP agent model/reasoning overrides are not supported; route the step to a native agent instead", name)
+			if _, ok := types.ACPTargetFor(types.AgentName(name)); !ok {
+				return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>)", name)
 			}
-			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot)", name)
 		}
 		reserved := reservedAgentArgs[name]
 		for i, arg := range args {

@@ -93,3 +93,46 @@ func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) 
 		})
 	}
 }
+
+func TestAcpxAgent_Run_CursorPassesConfiguredArgsToTargetSpawn(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "argv.txt")
+	promptFile := filepath.Join(dir, "prompt.txt")
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", argsFile)
+	t.Setenv("NM_TEST_ACPX_PROMPT_FILE", promptFile)
+	stub := writeStubAcpx(t, dir)
+
+	a, err := New(types.AgentCursor, stub, []string{"--model", "claude-opus-5", "--profile", "work profile"})
+	if err != nil {
+		t.Fatalf("New(%q): %v", types.AgentCursor, err)
+	}
+	res, err := a.Run(context.Background(), RunOpts{Prompt: "review this change", CWD: dir})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Text != "cursor stub reply" {
+		t.Errorf("result text = %q, want stub acpx output", res.Text)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("stub acpx never recorded argv: %v", err)
+	}
+	argv := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(argv) < 2 || argv[0] != "--agent" {
+		t.Fatalf("spawned argv = %q, want leading --agent <command>", argv)
+	}
+	if got, want := argv[1], `cursor-agent --model claude-opus-5 --profile "work profile" acp`; got != want {
+		t.Errorf("target command = %q, want %q", got, want)
+	}
+	if promptData, err := os.ReadFile(promptFile); err != nil {
+		t.Fatalf("stub acpx never copied prompt file: %v", err)
+	} else if string(promptData) != "review this change" {
+		t.Errorf("prompt file = %q, want original prompt", promptData)
+	}
+	for _, arg := range argv {
+		if arg == "review this change" {
+			t.Fatalf("spawned argv = %q, prompt must not be passed in argv", argv)
+		}
+	}
+}

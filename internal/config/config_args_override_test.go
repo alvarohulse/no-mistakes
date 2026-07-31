@@ -183,6 +183,28 @@ func TestAgentArgs_ReturnsExtrasForConfiguredAgent(t *testing.T) {
 	}
 }
 
+func TestAgentArgsFor_UsesEquivalentCursorACPKey(t *testing.T) {
+	tests := []struct {
+		name  string
+		route types.AgentName
+		key   string
+	}{
+		{name: "explicit target uses alias key", route: "acp:cursor", key: "cursor"},
+		{name: "alias uses explicit target key", route: types.AgentCursor, key: "acp:cursor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{AgentArgsOverride: map[string][]string{
+				tt.key: {"--model", "claude-opus-5"},
+			}}
+			want := []string{"--model", "claude-opus-5"}
+			if got := cfg.AgentArgsFor(tt.route); !reflect.DeepEqual(got, want) {
+				t.Errorf("AgentArgsFor(%q) = %v, want %v", tt.route, got, want)
+			}
+		})
+	}
+}
+
 func TestMerge_PreservesAgentArgsOverride(t *testing.T) {
 	global := &GlobalConfig{
 		Agent: types.AgentClaude,

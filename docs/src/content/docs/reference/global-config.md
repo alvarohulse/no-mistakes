@@ -133,7 +133,7 @@ Claude and Codex accept their native model names. OpenCode requires `name` in `p
 
 `review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
 
-ACP targets and aliases remain valid agent-only routes when they need no native CLI overrides. `agent_args_override` is native-only, and every first-class model+ACP route is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. This prevents an ACP key such as `cursor` or `acp:gemini` from silently ignoring model or reasoning selection.
+ACP targets and aliases accept global `agent_args_override` entries when no-mistakes can compose a raw target command. First-class model+ACP routes are still rejected before work begins; the model compatibility rule remains fail-closed rather than silently claiming a model the ACP backend may normalize.
 
 ### acpx_path
 
@@ -189,15 +189,15 @@ Default native binary names when no override is set:
 
 ### agent_args_override
 
-Extra CLI flags to pass to each native agent.
+Extra CLI flags to pass to each agent.
 Use this to set service tier, reasoning effort, permission mode, model selection where the underlying command supports it, or any other supported flag.
-ACP targets and aliases do not accept these overrides; configuring an ACP key fails with an actionable error instead of silently discarding the flags.
+ACP aliases and explicit `acp:<target>` keys pass their flags into the ACP target's raw spawn command. Cursor flags are inserted before its `acp` subcommand, so one `cursor` target can select model families dynamically. Other ACP raw commands receive configured flags at the end. A registry target with no known raw command fails construction and names the required `acp_registry_overrides.<target>` key instead of silently discarding its flags. The equivalent `cursor` and `acp:cursor` spellings share an override when only one is configured; an exact key wins when both are present.
 
-|         |                                                           |
-| ------- | --------------------------------------------------------- |
-| Type    | `map[string][]string`                                     |
-| Keys    | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot` |
-| Default | Empty (no extra flags)                                    |
+|         |                                                                                     |
+| ------- | ----------------------------------------------------------------------------------- |
+| Type    | `map[string][]string`                                                               |
+| Keys    | `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
+| Default | Empty (no extra flags)                                                              |
 
 User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
 

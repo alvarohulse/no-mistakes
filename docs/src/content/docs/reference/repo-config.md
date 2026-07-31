@@ -190,7 +190,7 @@ When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
-ACP targets and aliases remain valid agent-only step routes when no native CLI override is required. Global `agent_args_override` supports native agents only, and first-class step models currently do too: ACP construction fails rather than silently discarding model or reasoning selection.
+ACP targets and aliases accept global `agent_args_override` entries when their target spawn command is composable. First-class step models remain native-only: ACP construction fails rather than silently claiming a model the backend may normalize.
 
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
 
