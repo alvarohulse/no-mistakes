@@ -1312,7 +1312,7 @@ func severityEmoji(severity string) string {
 
 func stepDisplayName(name types.StepName) string {
 	switch name {
-	case types.StepRebase:
+	case types.StepRefresh:
 		return "Rebase"
 	case types.StepReview:
 		return "Review"

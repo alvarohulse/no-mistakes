@@ -20,7 +20,7 @@ import (
 // latest default branch from upstream.
 type RebaseStep struct{}
 
-func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
+func (s *RebaseStep) Name() types.StepName { return types.StepRefresh }
 
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 

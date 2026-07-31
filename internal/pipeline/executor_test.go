@@ -102,7 +102,7 @@ func TestExecutor_SkippedStepsDoNotEmitTelemetry(t *testing.T) {
 	defer restore()
 
 	skipStep := &mockStep{
-		name:    types.StepRebase,
+		name:    types.StepRefresh,
 		outcome: &StepOutcome{ExitCode: 0, SkipRemaining: true},
 	}
 	exec := NewExecutor(database, p, nil, nil, []Step{

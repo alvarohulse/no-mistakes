@@ -312,7 +312,7 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 	routes.routes.Default = defaultAgent
 	for _, step := range []types.StepName{
 		types.StepIntent,
-		types.StepRebase,
+		types.StepRefresh,
 		types.StepReview,
 		types.StepTest,
 		types.StepDocument,

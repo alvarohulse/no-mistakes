@@ -71,7 +71,7 @@ type GlobalConfig struct {
 	AutoFix      AutoFixRaw
 	Commit       CommitRaw
 	Intent       IntentRaw
-	Rebase       StepAgentRaw
+	Refresh      StepAgentRaw
 	Review       StepAgentRaw
 	Test         TestRaw
 	Document     DocumentRaw
@@ -97,7 +97,8 @@ type globalConfigRaw struct {
 	AutoFix                 AutoFixRaw          `yaml:"auto_fix"`
 	Commit                  CommitRaw           `yaml:"commit"`
 	Intent                  IntentRaw           `yaml:"intent"`
-	Rebase                  StepAgentRaw        `yaml:"rebase"`
+	Refresh                 *StepAgentRaw       `yaml:"refresh"`
+	LegacyRebase            *StepAgentRaw       `yaml:"rebase"`
 	Review                  StepAgentRaw        `yaml:"review"`
 	Test                    TestRaw             `yaml:"test"`
 	Document                DocumentRaw         `yaml:"document"`
@@ -123,7 +124,7 @@ type RepoConfig struct {
 	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
 	Commit            CommitRaw    `yaml:"commit"`
 	Intent            IntentRaw    `yaml:"intent"`
-	Rebase            StepAgentRaw `yaml:"rebase"`
+	Refresh           StepAgentRaw `yaml:"refresh"`
 	Review            StepAgentRaw `yaml:"review"`
 	Test              TestRaw      `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
@@ -167,6 +168,19 @@ func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func resolveLegacyStepConfig(refresh, legacyRebase *StepAgentRaw) (StepAgentRaw, error) {
+	if refresh != nil && legacyRebase != nil {
+		return StepAgentRaw{}, fmt.Errorf("refresh and legacy rebase sections cannot both be set")
+	}
+	if refresh != nil {
+		return *refresh, nil
+	}
+	if legacyRebase != nil {
+		return *legacyRebase, nil
+	}
+	return StepAgentRaw{}, nil
+}
+
 // DocumentRaw is the YAML representation of document-step settings.
 type DocumentRaw struct {
 	Agent  types.AgentName   `yaml:"-"`
@@ -193,22 +207,23 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList    `yaml:"agent"`
-		Commands               Commands     `yaml:"commands"`
-		Hooks                  Hooks        `yaml:"hooks"`
-		IgnorePatterns         []string     `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
-		Commit                 CommitRaw    `yaml:"commit"`
-		Intent                 IntentRaw    `yaml:"intent"`
-		Rebase                 StepAgentRaw `yaml:"rebase"`
-		Review                 StepAgentRaw `yaml:"review"`
-		Test                   TestRaw      `yaml:"test"`
-		Document               DocumentRaw  `yaml:"document"`
-		Lint                   StepAgentRaw `yaml:"lint"`
-		PR                     StepAgentRaw `yaml:"pr"`
-		CI                     StepAgentRaw `yaml:"ci"`
-		DisableProjectSettings bool         `yaml:"disable_project_settings"`
+		Agent                  agentList     `yaml:"agent"`
+		Commands               Commands      `yaml:"commands"`
+		Hooks                  Hooks         `yaml:"hooks"`
+		IgnorePatterns         []string      `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool          `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw    `yaml:"auto_fix"`
+		Commit                 CommitRaw     `yaml:"commit"`
+		Intent                 IntentRaw     `yaml:"intent"`
+		Refresh                *StepAgentRaw `yaml:"refresh"`
+		LegacyRebase           *StepAgentRaw `yaml:"rebase"`
+		Review                 StepAgentRaw  `yaml:"review"`
+		Test                   TestRaw       `yaml:"test"`
+		Document               DocumentRaw   `yaml:"document"`
+		Lint                   StepAgentRaw  `yaml:"lint"`
+		PR                     StepAgentRaw  `yaml:"pr"`
+		CI                     StepAgentRaw  `yaml:"ci"`
+		DisableProjectSettings bool          `yaml:"disable_project_settings"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -223,7 +238,11 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Commit = raw.Commit
 	c.Intent = raw.Intent
-	c.Rebase = raw.Rebase
+	refresh, err := resolveLegacyStepConfig(raw.Refresh, raw.LegacyRebase)
+	if err != nil {
+		return err
+	}
+	c.Refresh = refresh
 	c.Review = raw.Review
 	c.Test = raw.Test
 	c.Document = raw.Document
@@ -257,7 +276,37 @@ type AutoFixRaw struct {
 	Document *int `yaml:"document"`
 	CI       *int `yaml:"ci"`
 	Babysit  *int `yaml:"babysit"`
-	Rebase   *int `yaml:"rebase"`
+	Refresh  *int `yaml:"refresh"`
+}
+
+func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Lint         *int `yaml:"lint"`
+		Test         *int `yaml:"test"`
+		Review       *int `yaml:"review"`
+		Document     *int `yaml:"document"`
+		CI           *int `yaml:"ci"`
+		Babysit      *int `yaml:"babysit"`
+		Refresh      *int `yaml:"refresh"`
+		LegacyRebase *int `yaml:"rebase"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	if raw.Refresh != nil && raw.LegacyRebase != nil {
+		return fmt.Errorf("auto_fix.refresh and legacy auto_fix.rebase cannot both be set")
+	}
+	c.Lint = raw.Lint
+	c.Test = raw.Test
+	c.Review = raw.Review
+	c.Document = raw.Document
+	c.CI = raw.CI
+	c.Babysit = raw.Babysit
+	c.Refresh = raw.Refresh
+	if c.Refresh == nil {
+		c.Refresh = raw.LegacyRebase
+	}
+	return nil
 }
 
 // AutoFix holds resolved per-step auto-fix attempt limits.
@@ -268,7 +317,7 @@ type AutoFix struct {
 	Review   int
 	Document int
 	CI       int
-	Rebase   int
+	Refresh  int
 }
 
 // Config is the merged result of global + per-repo configuration.
@@ -539,7 +588,7 @@ func addStepAgentRoute(routes map[types.StepName][]types.AgentName, step types.S
 func (c *RepoConfig) ConfiguredStepAgents() map[types.StepName][]types.AgentName {
 	routes := make(map[types.StepName][]types.AgentName)
 	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
-	addStepAgentRoute(routes, types.StepRebase, c.Rebase.Agent, c.Rebase.Agents)
+	addStepAgentRoute(routes, types.StepRefresh, c.Refresh.Agent, c.Refresh.Agents)
 	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
 	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
 	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
@@ -552,7 +601,7 @@ func (c *RepoConfig) ConfiguredStepAgents() map[types.StepName][]types.AgentName
 func (c *GlobalConfig) configuredStepAgents() map[types.StepName][]types.AgentName {
 	routes := make(map[types.StepName][]types.AgentName)
 	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
-	addStepAgentRoute(routes, types.StepRebase, c.Rebase.Agent, c.Rebase.Agents)
+	addStepAgentRoute(routes, types.StepRefresh, c.Refresh.Agent, c.Refresh.Agents)
 	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
 	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
 	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
@@ -585,7 +634,7 @@ agent: auto
 
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. Unconfigured steps inherit it.
-# Supported sections: intent, rebase, review, test, document, lint, pr, ci.
+# Supported sections: intent, refresh, review, test, document, lint, pr, ci.
 # review:
 #   agent: [codex, claude]
 
@@ -649,7 +698,7 @@ log_level: info
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.
 auto_fix:
-  rebase: 3
+  refresh: 3
   lint: 3
   test: 3
   review: 0
@@ -752,7 +801,7 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 	c.Agents = resolved
 	for _, step := range []types.StepName{
 		types.StepIntent,
-		types.StepRebase,
+		types.StepRefresh,
 		types.StepReview,
 		types.StepTest,
 		types.StepDocument,
@@ -1273,7 +1322,11 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.AutoFix = raw.AutoFix
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
-	cfg.Rebase = raw.Rebase
+	refresh, err := resolveLegacyStepConfig(raw.Refresh, raw.LegacyRebase)
+	if err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	cfg.Refresh = refresh
 	cfg.Review = raw.Review
 	cfg.Test = raw.Test
 	cfg.Document = raw.Document
@@ -1409,7 +1462,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Agents = copyAgents(trusted.Agents)
 		effective.Intent.Agent = trusted.Intent.Agent
 		effective.Intent.Agents = copyAgents(trusted.Intent.Agents)
-		effective.Rebase = copyStepAgentRaw(trusted.Rebase)
+		effective.Refresh = copyStepAgentRaw(trusted.Refresh)
 		effective.Review = copyStepAgentRaw(trusted.Review)
 		effective.Test.Agent = trusted.Test.Agent
 		effective.Test.Agents = copyAgents(trusted.Test.Agents)
@@ -1425,7 +1478,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Agents = nil
 		effective.Intent.Agent = ""
 		effective.Intent.Agents = nil
-		effective.Rebase = StepAgentRaw{}
+		effective.Refresh = StepAgentRaw{}
 		effective.Review = StepAgentRaw{}
 		effective.Test.Agent = ""
 		effective.Test.Agents = nil
@@ -1521,7 +1574,7 @@ func autoFixDefaults() AutoFix {
 		Review:   0,
 		Document: 3,
 		CI:       3,
-		Rebase:   3,
+		Refresh:  3,
 	}
 }
 
@@ -1542,8 +1595,8 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	if src.CI != nil {
 		dst.CI = *src.CI
 	}
-	if src.Rebase != nil {
-		dst.Rebase = *src.Rebase
+	if src.Refresh != nil {
+		dst.Refresh = *src.Refresh
 	}
 }
 
@@ -1561,8 +1614,8 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 		return c.AutoFix.Document
 	case types.StepCI:
 		return c.AutoFix.CI
-	case types.StepRebase:
-		return c.AutoFix.Rebase
+	case types.StepRefresh:
+		return c.AutoFix.Refresh
 	default:
 		return 0
 	}

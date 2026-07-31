@@ -20,7 +20,7 @@ func TestLoadRepo_StepAgentsAcceptScalarAndFallbackList(t *testing.T) {
 intent:
   agent: claude
   enabled: false
-rebase:
+refresh:
   agent: codex
 review:
   agent: [codex, claude]
@@ -49,7 +49,7 @@ ci:
 
 	want := map[types.StepName][]types.AgentName{
 		types.StepIntent:   {types.AgentClaude},
-		types.StepRebase:   {types.AgentCodex},
+		types.StepRefresh:  {types.AgentCodex},
 		types.StepReview:   {types.AgentCodex, types.AgentClaude},
 		types.StepTest:     {types.AgentPi},
 		types.StepDocument: {types.AgentOpenCode},
@@ -76,6 +76,8 @@ func TestLoadGlobal_StepAgentsAcceptScalarAndFallbackList(t *testing.T) {
 	data := `agent: claude
 intent:
   agent: pi
+refresh:
+  agent: claude
 review:
   agent: [codex, claude]
 document:
@@ -91,11 +93,42 @@ document:
 	}
 	want := map[types.StepName][]types.AgentName{
 		types.StepIntent:   {types.AgentPi},
+		types.StepRefresh:  {types.AgentClaude},
 		types.StepReview:   {types.AgentCodex, types.AgentClaude},
 		types.StepDocument: {types.AgentPi},
 	}
 	if got := cfg.configuredStepAgents(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("configuredStepAgents() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadRepo_LegacyRebaseStepRoute(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte("rebase:\n  agent: codex\n"))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	want := []types.AgentName{types.AgentCodex}
+	if got := cfg.ConfiguredStepAgents()[types.StepRefresh]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("refresh route = %v, want %v", got, want)
+	}
+}
+
+func TestLoadRepo_RejectsRefreshAndLegacyRebaseSections(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("refresh:\n  agent: codex\nrebase:\n  agent: claude\n"))
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want ambiguous-section refusal", err)
+	}
+}
+
+func TestLoadGlobal_RejectsRefreshAndLegacyRebaseSections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "refresh:\n  agent: codex\nrebase:\n  agent: claude\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(path)
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("LoadGlobal() error = %v, want ambiguous-section refusal", err)
 	}
 }
 

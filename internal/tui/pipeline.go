@@ -83,7 +83,7 @@ func stepLabel(name types.StepName) string {
 	switch name {
 	case types.StepIntent:
 		return "Intent"
-	case types.StepRebase:
+	case types.StepRefresh:
 		return "Rebase"
 	case types.StepReview:
 		return "Review"

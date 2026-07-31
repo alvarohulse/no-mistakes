@@ -28,7 +28,7 @@ type StepName string
 
 const (
 	StepIntent   StepName = "intent"
-	StepRebase   StepName = "rebase"
+	StepRefresh  StepName = "refresh"
 	StepReview   StepName = "review"
 	StepTest     StepName = "test"
 	StepDocument StepName = "document"
@@ -39,10 +39,14 @@ const (
 )
 
 func normalizeStepName(s StepName) StepName {
-	if s == "babysit" {
+	switch s {
+	case "babysit":
 		return StepCI
+	case "rebase":
+		return StepRefresh
+	default:
+		return s
 	}
-	return s
 }
 
 func (s *StepName) UnmarshalJSON(data []byte) error {
@@ -79,7 +83,7 @@ func (s StepName) Order() int {
 	switch s {
 	case StepIntent:
 		return 1
-	case StepRebase:
+	case StepRefresh:
 		return 2
 	case StepReview:
 		return 3
@@ -102,7 +106,7 @@ func (s StepName) Order() int {
 
 // AllSteps returns all pipeline steps in execution order.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRefresh, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

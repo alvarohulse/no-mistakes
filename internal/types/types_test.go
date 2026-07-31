@@ -11,7 +11,7 @@ func TestAllStepsOrder(t *testing.T) {
 		t.Fatalf("expected 9 steps, got %d", len(steps))
 	}
 
-	expected := []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	expected := []StepName{StepIntent, StepRefresh, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 	for i, s := range steps {
 		if s != expected[i] {
 			t.Errorf("step[%d] = %q, want %q", i, s, expected[i])
@@ -25,7 +25,7 @@ func TestStepNameOrder(t *testing.T) {
 		want int
 	}{
 		{StepIntent, 1},
-		{StepRebase, 2},
+		{StepRefresh, 2},
 		{StepReview, 3},
 		{StepTest, 4},
 		{StepDocument, 5},
@@ -50,6 +50,26 @@ func TestStepNameUnmarshalJSON_LegacyBabysit(t *testing.T) {
 	}
 	if step != StepCI {
 		t.Fatalf("step = %q, want %q", step, StepCI)
+	}
+}
+
+func TestStepNameUnmarshalJSON_LegacyRebase(t *testing.T) {
+	var step StepName
+	if err := json.Unmarshal([]byte(`"rebase"`), &step); err != nil {
+		t.Fatalf("unmarshal step name: %v", err)
+	}
+	if step != StepRefresh {
+		t.Fatalf("step = %q, want refresh", step)
+	}
+}
+
+func TestStepNameScan_LegacyRebase(t *testing.T) {
+	var step StepName
+	if err := step.Scan("rebase"); err != nil {
+		t.Fatalf("scan step name: %v", err)
+	}
+	if step != StepRefresh {
+		t.Fatalf("step = %q, want refresh", step)
 	}
 }
 

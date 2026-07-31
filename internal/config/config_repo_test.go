@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -216,5 +217,22 @@ func TestLoadRepo_LegacyAutoFixBabysit(t *testing.T) {
 	}
 	if *cfg.AutoFix.CI != 0 {
 		t.Fatalf("ci auto-fix = %d, want 0", *cfg.AutoFix.CI)
+	}
+}
+
+func TestLoadRepo_LegacyAutoFixRebase(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte("auto_fix:\n  rebase: 2\n"))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	if cfg.AutoFix.Refresh == nil || *cfg.AutoFix.Refresh != 2 {
+		t.Fatalf("refresh auto-fix = %v, want 2", cfg.AutoFix.Refresh)
+	}
+}
+
+func TestLoadRepo_RejectsRefreshAndLegacyRebaseAutoFix(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("auto_fix:\n  refresh: 2\n  rebase: 1\n"))
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want ambiguous auto-fix refusal", err)
 	}
 }

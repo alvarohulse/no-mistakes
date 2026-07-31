@@ -487,8 +487,8 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	if raw.AutoFix.CI == nil || *raw.AutoFix.CI != defaults.CI {
 		t.Errorf("YAML auto_fix.ci = %v, Go default = %d", raw.AutoFix.CI, defaults.CI)
 	}
-	if raw.AutoFix.Rebase == nil || *raw.AutoFix.Rebase != defaults.Rebase {
-		t.Errorf("YAML auto_fix.rebase = %v, Go default = %d", raw.AutoFix.Rebase, defaults.Rebase)
+	if raw.AutoFix.Refresh == nil || *raw.AutoFix.Refresh != defaults.Refresh {
+		t.Errorf("YAML auto_fix.refresh = %v, Go default = %d", raw.AutoFix.Refresh, defaults.Refresh)
 	}
 }
 
@@ -499,7 +499,7 @@ func TestLoadGlobal_AutoFixDefaults(t *testing.T) {
 	}
 	// AutoFix should be nil (unset) in GlobalConfig
 	if cfg.AutoFix.Lint != nil || cfg.AutoFix.Test != nil || cfg.AutoFix.Review != nil ||
-		cfg.AutoFix.Document != nil || cfg.AutoFix.CI != nil || cfg.AutoFix.Rebase != nil {
+		cfg.AutoFix.Document != nil || cfg.AutoFix.CI != nil || cfg.AutoFix.Refresh != nil {
 		t.Errorf("expected all AutoFix fields to be nil for defaults, got %+v", cfg.AutoFix)
 	}
 }
