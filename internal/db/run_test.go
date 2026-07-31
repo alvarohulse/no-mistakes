@@ -106,6 +106,36 @@ func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	}
 }
 
+func TestParkRunForEnvironmentFailureIsActiveAndStepIndependent(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := d.ParkRunForEnvironmentFailure(run.ID, "post-worktree hook failed with exit code 23"); err != nil {
+		t.Fatalf("park environment failure: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Status != types.RunRunning || got.AwaitingAgentSince == nil {
+		t.Fatalf("parked run = status %s awaiting %v", got.Status, got.AwaitingAgentSince)
+	}
+	if got.Error == nil || *got.Error != "post-worktree hook failed with exit code 23" {
+		t.Fatalf("parked error = %v", got.Error)
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get steps: %v", err)
+	}
+	if len(steps) != 0 {
+		t.Fatalf("environment park created step records: %+v", steps)
+	}
+}
+
 func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

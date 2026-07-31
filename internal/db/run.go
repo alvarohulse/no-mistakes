@@ -40,15 +40,12 @@ type Run struct {
 	CustodyReturnedAt *int64
 	Error             *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
-	// at a gate awaiting the driving agent's response (an awaiting_approval or
-	// fix_review step). It is nil whenever the run is not parked: the executor
-	// sets it on gate entry and clears it the moment the agent responds (or the
-	// wait is cancelled). It is observability only and does not affect gate
-	// resolution.
+	// awaiting the driving agent. Most parks are awaiting_approval or fix_review
+	// steps; a launch-time environmental failure can park before step records
+	// exist. It is nil whenever the run is not parked.
 	AwaitingAgentSince *int64
-	// ParkedMS accumulates the run's total parked-at-gate wall time in
-	// milliseconds across every gate wait (local performance telemetry;
-	// step duration_ms values exclude this time).
+	// ParkedMS accumulates the run's total parked wall time in milliseconds
+	// (local performance telemetry; step duration_ms values exclude this time).
 	ParkedMS        int64
 	Intent          *string
 	IntentSource    *string
@@ -485,10 +482,26 @@ func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
 	return nil
 }
 
+// ParkRunForEnvironmentFailure records a non-terminal launch-time environment
+// failure. It keeps the run active, publishes the diagnostic, and stamps the
+// same awaiting-agent marker used by step approval gates.
+func (d *DB) ParkRunForEnvironmentFailure(id, errMsg string) error {
+	ts := now()
+	_, err := d.sql.Exec(
+		`UPDATE runs SET status = ?, error = ?, awaiting_agent_since = ?, updated_at = ? WHERE id = ?`,
+		types.RunRunning, errMsg, ts, ts, id,
+	)
+	if err != nil {
+		return fmt.Errorf("park run for environment failure: %w", err)
+	}
+	return nil
+}
+
 // SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
 // stamping awaiting_agent_since with the current time. Called by the executor
-// when a step enters a gate (awaiting_approval / fix_review). This is a pollable
-// observability signal only; it does not change gate resolution.
+// when a step enters a gate (awaiting_approval / fix_review). Launch-time
+// environment failures use ParkRunForEnvironmentFailure so their diagnostic
+// and marker become observable atomically.
 func (d *DB) SetRunAwaitingAgent(id string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
@@ -500,8 +513,7 @@ func (d *DB) SetRunAwaitingAgent(id string) error {
 
 // ClearRunAwaitingAgent clears the awaiting-agent marker on a run. Called by the
 // executor the moment the agent responds (or the approval wait is cancelled) and
-// the run resumes, so awaiting_agent_since is non-nil exactly while a gate is
-// actually parked.
+// the run resumes.
 func (d *DB) ClearRunAwaitingAgent(id string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`, now(), id)
 	if err != nil {

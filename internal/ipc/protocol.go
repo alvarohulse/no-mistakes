@@ -240,10 +240,10 @@ type RunInfo struct {
 	PRURL            *string         `json:"pr_url,omitempty"`
 	Error            *string         `json:"error,omitempty"`
 	CIReady          bool            `json:"ci_ready,omitempty"`
-	// AwaitingAgent is true while the run is parked at a gate awaiting the
-	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
-	// parked, so a supervisor can read "parked for N seconds" in one call. Both
-	// are observability only and clear the moment the agent responds.
+	// AwaitingAgent is true while the run is parked awaiting the driving agent.
+	// Most parks are step approval gates; launch-time environmental failures can
+	// park before step records exist. AwaitingAgentSince lets a supervisor read
+	// "parked for N seconds" in one call.
 	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
 	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
 	Steps              []StepResultInfo `json:"steps,omitempty"`

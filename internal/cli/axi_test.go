@@ -49,6 +49,39 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 	}
 }
 
+func TestPostWorktreeEnvironmentParkRendering(t *testing.T) {
+	parkedSince := time.Now().Unix()
+	errMsg := "post-worktree hook failed with exit code 23: authenticate first"
+	rv := runViewFromDB(&db.Run{
+		ID:                 "r1",
+		Branch:             "feature/x",
+		HeadSHA:            "abcdef1234567890",
+		Status:             types.RunRunning,
+		Error:              &errMsg,
+		AwaitingAgentSince: &parkedSince,
+	}, nil)
+
+	message, ok := rv.environmentalFailurePark()
+	if !ok || message != errMsg {
+		t.Fatalf("environmentalFailurePark() = %q, %v", message, ok)
+	}
+	out := axiDoc(environmentalFailureGateFields(message)...)
+	for _, want := range []string{
+		"kind: environment",
+		"status: parked",
+		"post-worktree hook failed with exit code 23",
+		"Correct the environment outside no-mistakes",
+		"no-mistakes axi abort",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("environment gate missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "axi respond") {
+		t.Errorf("environment gate must not offer a step response:\n%s", out)
+	}
+}
+
 func TestFindingsTally(t *testing.T) {
 	rv := runView{Steps: []stepView{
 		{FindingsJSON: findingsJSON(t, []types.Finding{

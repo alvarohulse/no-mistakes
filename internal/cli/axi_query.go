@@ -86,6 +86,8 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 	}
 	if gate, ok := rv.awaitingStep(); ok {
 		fields = append(fields, gateFields(gate)...)
+	} else if message, ok := rv.environmentalFailurePark(); ok {
+		fields = append(fields, environmentalFailureGateFields(message)...)
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeFor(rv.Status)})
 		if run.Error != nil && *run.Error != "" {

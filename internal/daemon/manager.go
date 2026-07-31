@@ -825,21 +825,22 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("load_repo_config")
 		return "", fmt.Errorf("load repo config: %w", err)
 	}
-	// SECURITY: load the code-executing selection fields (commands.*, the
+	// SECURITY: load the code-executing selection fields (commands.*,
+	// hooks.post_worktree, the
 	// run-wide agent, and per-step agent routes) from the trusted default-branch
 	// copy of .no-mistakes.yaml rather
 	// than the pushed SHA. The worktree is checked out at headSHA (the
 	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/agent routes and let any pushed SHA run arbitrary shell
+	// contributor's commands/hooks/agent routes and let any pushed SHA run arbitrary shell
 	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
 	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
-	// EffectiveRepoConfig replaces commands + agent routes with the trusted
+	// EffectiveRepoConfig replaces commands + hooks + agent routes with the trusted
 	// default-branch values unless the maintainer has explicitly opted in.
 	//
 	// allow_repo_commands is itself read ONLY from the trusted copy: a
 	// contributor cannot self-enable it from the pushed branch. A readable
 	// trusted tree with no config leaves the opt-in false and forces
-	// commands/agent routes empty. An unreadable trusted tree aborts below.
+	// commands/hooks/agent routes empty. An unreadable trusted tree aborts below.
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
 	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
@@ -851,12 +852,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
-		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
-	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) {
-		// Surface the silent override so a maintainer who shipped a commands.*
-		// or agent change on a feature branch understands why it did not run.
+		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
+	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) {
+		// Surface the silent override so a maintainer who shipped a commands.*,
+		// hooks.*, or agent change on a feature branch understands why it did not run.
 		// This is not an error: it is the secure default in action.
-		slog.Info("repo commands/agent routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
+		slog.Info("repo commands/hooks/agent routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
 
@@ -940,7 +941,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+		var executeErr error
+		if hookErr := runPostWorktreeHook(runCtx, wtDir, cfg); hookErr != nil {
+			executeErr = m.parkPostWorktreeFailure(runCtx, run, repo, hookErr)
+		} else {
+			executeErr = executor.Execute(runCtx, run, repo, wtDir)
+		}
+		if executeErr != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -956,7 +963,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			}
 			addRunPerformanceSummary(m.db, run.ID, fields)
 			telemetry.Track("run", fields)
-			slog.Error("pipeline failed", "run_id", run.ID, "error", err)
+			slog.Error("pipeline failed", "run_id", run.ID, "error", executeErr)
 		} else {
 			fields := telemetry.Fields{
 				"action":      "finished",

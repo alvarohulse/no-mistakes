@@ -1369,12 +1369,12 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // trusted-only so a pushed branch cannot enable or defeat the gate-agent
 // project-instruction boundary. When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
-// TRUSTED default-branch copy) to honoring the pushed branch's commands and
-// agent selection, including step routes.
+// TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
+// and agent selection, including step routes.
 // When there is no trusted copy and the maintainer has not opted in, all
 // code-executing selectors are forced empty (Agent "" and nil Agents inherit
-// the global agent; empty step routes inherit that run route; Commands{} yields
-// built-in defaults) rather than falling back to the pushed branch - this blocks
+// the global agent; empty step routes inherit that run route; Commands{} and
+// Hooks{} disable shell execution) rather than falling back to the pushed branch - this blocks
 // the supply-chain vector for repos that ship .no-mistakes.yaml only on feature
 // branches.
 //

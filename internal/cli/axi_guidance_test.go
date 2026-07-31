@@ -52,6 +52,13 @@ var canonicalTestFileApprovalPhrases = []string{
 	"does not auto-resolve it",
 }
 
+var canonicalPostWorktreeParkPhrases = []string{
+	"post-worktree hook",
+	"environment",
+	"no-mistakes axi abort",
+	"fresh run",
+}
+
 const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"
 
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
@@ -183,6 +190,23 @@ func TestTestFileApprovalGuidance_SyncedAcrossSurfaces(t *testing.T) {
 		for _, phrase := range canonicalTestFileApprovalPhrases {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing test-file approval guidance phrase %q", name, phrase)
+			}
+		}
+	}
+}
+
+func TestPostWorktreeEnvironmentParkGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	message := "post-worktree hook failed with exit code 23: authenticate first"
+	surfaces := map[string]string{
+		"skill body":       skill.Markdown(),
+		"agents guide":     readAgentsGuide(t),
+		"axi run help":     newAxiRunCmd().Long,
+		"environment gate": axiDoc(environmentalFailureGateFields(message)...),
+	}
+	for name, content := range surfaces {
+		for _, phrase := range canonicalPostWorktreeParkPhrases {
+			if !strings.Contains(strings.ToLower(content), phrase) {
+				t.Errorf("%s is missing post-worktree park guidance phrase %q", name, phrase)
 			}
 		}
 	}

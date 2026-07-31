@@ -108,6 +108,7 @@ wrong.
 Before starting, run ` + "`no-mistakes axi`" + ` (home view).
 If it shows an active run on your current branch, inspect it with ` + "`no-mistakes axi status`" + `.
 If it is parked at a gate, drive it with ` + "`no-mistakes axi respond`" + `.
+The exception is a ` + "`gate.kind: environment`" + ` park from a failed post-worktree hook: it has no step or auto-fix loop. Correct the environment outside no-mistakes, run ` + "`no-mistakes axi abort`" + `, then start a fresh run. ` + "`--yes`" + ` never resolves this controller gate.
 Reattach an in-flight run by re-running ` + "`no-mistakes axi run`" + ` when it still matches your current ` + "`HEAD`" + ` - either as the submitted head or as the current pipeline head.
 Only ` + "`no-mistakes axi abort`" + ` it when you mean to discard that run before starting over; aborting is a between-runs action, never a way to take over or bypass a gate while a run is still going (see [Validate and decide](#validate-and-decide)).
 If it shows an active run on another branch, leave that run alone and start validation for your current branch with ` + "`no-mistakes axi run --intent \"...\"`" + `.
@@ -150,9 +151,10 @@ Run the pipeline and decide on its findings as they come up:
    return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `. Never idle-wait
    for the run to move forward by itself.
    When that status output includes ` + "`awaiting_agent: parked <duration>`" + ` under the run,
-   the run is parked at an approval or fix-review gate and waiting for you to
-   send ` + "`axi respond`" + `. The field is observability only: it does not change
-   gate resolution, auto-resume the run, or make ` + "`--yes`" + ` the default.
+   the run is waiting for you. An ordinary approval or fix-review gate needs
+   ` + "`axi respond`" + `. A ` + "`gate.kind: environment`" + ` post-worktree-hook failure instead
+   needs the abort-and-fresh-run recovery above. The field is observability only:
+   it does not change gate resolution, auto-resume the run, or make ` + "`--yes`" + ` the default.
    While a step is actively ` + "`running`" + ` or ` + "`fixing`" + `, ` + "`axi status`" + ` may include
    ` + "`active_steps`" + ` with ` + "`active_for`" + `, ` + "`last_activity`" + `, a native ` + "`agent_pid`" + ` when
    a subprocess agent is running, and the current round such as ` + "`round 1`" + `,
@@ -308,7 +310,7 @@ no-mistakes axi abort --run <id>   # cancel a specific run by id (works outside 
 ## Reading the output
 
 - Output is TOON: ` + "`key: value`" + ` pairs, ` + "`name[N]{cols}:`" + ` tables, and ` + "`help[N]:`" + ` hints.
-- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `; that means the run is parked at a gate awaiting your ` + "`axi respond`" + `.
+- A non-terminal run object may include ` + "`awaiting_agent: parked <duration>`" + ` immediately after ` + "`status`" + `. Respond to an ordinary step gate; for ` + "`gate.kind: environment`" + `, follow its post-worktree-hook recovery help instead.
 - A run object with a ` + "`running`" + ` or ` + "`fixing`" + ` step may include an ` + "`active_steps`" + ` table. Use it to see the active duration, latest activity, native agent PID, and current execution or fix round.
 - The ` + "`help`" + ` list at the bottom of most responses tells you the next commands to run.
 - Errors are printed as ` + "`error: ...`" + ` on stdout with a ` + "`help`" + ` list; act on the suggestion.

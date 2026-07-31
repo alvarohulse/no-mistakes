@@ -204,6 +204,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 	}
 
 	gated := false
+	environmentGated := false
 	hasBranchSync := false
 	fingerprint := env.repo.ID + "|" + daemonState
 	if currentActive != nil {
@@ -218,6 +219,10 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
 			fields = append(fields, gateFields(gate)...)
+		} else if message, ok := rv.environmentalFailurePark(); ok {
+			gated = true
+			environmentGated = true
+			fields = append(fields, environmentalFailureGateFields(message)...)
 		}
 		fingerprint += "|" + runStateFingerprint(rv)
 	} else if otherActive != nil {
@@ -249,7 +254,9 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 			help = append(help, fmt.Sprintf("Another active run is on %s; leave it alone unless you are working on that branch", otherActive.Branch))
 		}
 	case gated:
-		help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
+		if !environmentGated {
+			help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
+		}
 	default:
 		help = append(help, "Run `no-mistakes axi status` to inspect the active run")
 	}
