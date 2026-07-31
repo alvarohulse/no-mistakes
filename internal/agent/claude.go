@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // claudeMaxRetries is the number of additional attempts past the initial
@@ -155,11 +156,13 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 	}
 
 	return &Result{
-		Output:                result.StructuredOutput,
-		Text:                  result.text,
-		Usage:                 usage,
-		UsageReported:         usage.Reported,
-		CacheCreationReported: usage.CacheCreationReported,
+		Output:                    result.StructuredOutput,
+		Text:                      result.text,
+		Usage:                     usage,
+		UsageReported:             usage.Reported,
+		CacheCreationReported:     usage.CacheCreationReported,
+		AgentObservations:         result.agentObservations,
+		AgentObservationsReported: result.agentObservationsReported,
 	}, nil
 }
 
@@ -275,13 +278,15 @@ type claudeEvent struct {
 
 // claudeResult captures the parsed result event.
 type claudeResult struct {
-	Subtype          string
-	IsError          bool
-	StructuredOutput json.RawMessage
-	text             string // accumulated text from assistant events
-	rawEvent         json.RawMessage
-	sessionID        string // durable session identity from the event stream
-	model            string // model reported by assistant events
+	Subtype                   string
+	IsError                   bool
+	StructuredOutput          json.RawMessage
+	text                      string // accumulated text from assistant events
+	rawEvent                  json.RawMessage
+	sessionID                 string // durable session identity from the event stream
+	model                     string // model reported by assistant events
+	agentObservations         []types.AgentObservation
+	agentObservationsReported bool
 }
 
 type claudeUsage struct {
@@ -298,8 +303,14 @@ type claudeMessage struct {
 }
 
 type claudeContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string `json:"type"`
+	Text  string `json:"text"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Input struct {
+		SubagentType string `json:"subagent_type"`
+		Name         string `json:"name"`
+	} `json:"input"`
 }
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
@@ -310,6 +321,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var textBuf string
 	var lastSessionID string
 	var lastModel string
+	observations := newAgentObservationCollector(true)
 
 	for scanner.Scan() {
 		select {
@@ -355,6 +367,13 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 						onChunk(c.Text)
 					}
 				}
+				if c.Type == "tool_use" && (c.Name == "Agent" || c.Name == "Task") {
+					identity := c.Input.SubagentType
+					if identity == "" {
+						identity = c.Input.Name
+					}
+					observations.observe(c.ID, identity)
+				}
 			}
 
 		case "result":
@@ -362,13 +381,15 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
 				*result = &claudeResult{
-					Subtype:          event.Subtype,
-					IsError:          event.IsError,
-					StructuredOutput: event.StructuredOutput,
-					text:             textBuf,
-					rawEvent:         raw,
-					sessionID:        lastSessionID,
-					model:            lastModel,
+					Subtype:                   event.Subtype,
+					IsError:                   event.IsError,
+					StructuredOutput:          event.StructuredOutput,
+					text:                      textBuf,
+					rawEvent:                  raw,
+					sessionID:                 lastSessionID,
+					model:                     lastModel,
+					agentObservations:         observations.observations,
+					agentObservationsReported: observations.reported,
 				}
 			}
 		}

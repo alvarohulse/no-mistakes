@@ -84,10 +84,11 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 
 	// Process SSE events until session.idle
 	state := &opencodeStreamState{
-		sessionID:  sessionID,
-		onChunk:    opts.OnChunk,
-		textParts:  make(map[string]*opencodeTextPart),
-		usageByMsg: make(map[string]TokenUsage),
+		sessionID:    sessionID,
+		onChunk:      opts.OnChunk,
+		textParts:    make(map[string]*opencodeTextPart),
+		usageByMsg:   make(map[string]TokenUsage),
+		observations: newAgentObservationCollector(true),
 	}
 	err = parseOpencodeSSE(eventBody, state)
 	streamCancel()
@@ -130,6 +131,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 			state.usage = accumulateUsage(state.usageByMsg)
 		}
 		for _, part := range mr.resp.Parts {
+			state.observeOpencodeTool(part.ID, part.Type, part.Tool, part.State)
 			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
 				continue
 			}
@@ -167,11 +169,13 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	// Prefer structured output from response
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
 		return &Result{
-			Output:                mr.resp.Info.Structured,
-			Text:                  state.lastText,
-			Usage:                 state.usage,
-			UsageReported:         state.usage.Reported,
-			CacheCreationReported: state.usage.CacheCreationReported,
+			Output:                    mr.resp.Info.Structured,
+			Text:                      state.lastText,
+			Usage:                     state.usage,
+			UsageReported:             state.usage.Reported,
+			CacheCreationReported:     state.usage.CacheCreationReported,
+			AgentObservations:         state.observations.observations,
+			AgentObservationsReported: true,
 		}, nil
 	}
 
@@ -195,7 +199,12 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	if outputText == "" {
 		outputText = state.lastText
 	}
-	return finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
+	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
+	if result != nil {
+		result.AgentObservations = state.observations.observations
+		result.AgentObservationsReported = true
+	}
+	return result, err
 }
 
 func (a *opencodeAgent) Close() error {

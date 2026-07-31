@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     round                 INTEGER NOT NULL,
     purpose               TEXT NOT NULL,
     agent                 TEXT NOT NULL,
+    invocation_mode       TEXT NOT NULL DEFAULT 'harness_cli',
+    agent_observations_json TEXT,
     model                 TEXT,
     model_provider        TEXT,
     session_mode          TEXT NOT NULL,
@@ -196,5 +198,7 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_files INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN invocation_mode TEXT NOT NULL DEFAULT 'harness_cli'`,
+	`ALTER TABLE agent_invocations ADD COLUMN agent_observations_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN pr_note TEXT`,
 }

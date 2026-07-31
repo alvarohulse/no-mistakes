@@ -23,12 +23,21 @@ type opencodeStreamEventProperties struct {
 }
 
 type opencodeEventPart struct {
-	ID        string            `json:"id,omitempty"`
-	MessageID string            `json:"messageID,omitempty"`
-	Type      string            `json:"type,omitempty"`
-	Text      string            `json:"text,omitempty"`
-	Tokens    *opencodeTokens   `json:"tokens,omitempty"`
-	Metadata  *opencodeMetadata `json:"metadata,omitempty"`
+	ID        string             `json:"id,omitempty"`
+	MessageID string             `json:"messageID,omitempty"`
+	Type      string             `json:"type,omitempty"`
+	Text      string             `json:"text,omitempty"`
+	Tool      string             `json:"tool,omitempty"`
+	State     *opencodeToolState `json:"state,omitempty"`
+	Tokens    *opencodeTokens    `json:"tokens,omitempty"`
+	Metadata  *opencodeMetadata  `json:"metadata,omitempty"`
+}
+
+type opencodeToolState struct {
+	Input struct {
+		SubagentType string `json:"subagent_type,omitempty"`
+		Agent        string `json:"agent,omitempty"`
+	} `json:"input,omitempty"`
 }
 
 type opencodeEventInfo struct {
@@ -92,9 +101,12 @@ func (e *opencodeMessageError) IsStructuredOutput() bool {
 }
 
 type opencodeMessagePart struct {
-	Type     string            `json:"type,omitempty"`
-	Text     string            `json:"text,omitempty"`
-	Metadata *opencodeMetadata `json:"metadata,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Text     string             `json:"text,omitempty"`
+	ID       string             `json:"id,omitempty"`
+	Tool     string             `json:"tool,omitempty"`
+	State    *opencodeToolState `json:"state,omitempty"`
+	Metadata *opencodeMetadata  `json:"metadata,omitempty"`
 }
 
 // opencodeTextPart tracks accumulated text for a part ID during streaming.
@@ -120,4 +132,5 @@ type opencodeStreamState struct {
 	filteredPartIDs map[string]bool
 	hasEmittedText  bool
 	hadToolActivity bool
+	observations    *agentObservationCollector
 }

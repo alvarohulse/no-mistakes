@@ -75,17 +75,18 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 
 	sessionKey := invocationSessionKey(opts, result)
 	inv := db.AgentInvocation{
-		RunID:       a.runID,
-		StepName:    string(a.stepName),
-		Round:       a.round(),
-		Purpose:     purpose,
-		Agent:       agentName,
-		SessionMode: invocationSessionMode(opts),
-		SessionKey:  sessionKey,
-		StartedAt:   startedAt.Unix(),
-		CompletedAt: completedAt.Unix(),
-		DurationMS:  completedAt.Sub(startedAt).Milliseconds(),
-		ExitStatus:  "ok",
+		RunID:          a.runID,
+		StepName:       string(a.stepName),
+		Round:          a.round(),
+		Purpose:        purpose,
+		Agent:          agentName,
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		SessionMode:    invocationSessionMode(opts),
+		SessionKey:     sessionKey,
+		StartedAt:      startedAt.Unix(),
+		CompletedAt:    completedAt.Unix(),
+		DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
+		ExitStatus:     "ok",
 	}
 	if opts.SessionFallback && opts.SessionFallbackReason != "" {
 		reason := opts.SessionFallbackReason
@@ -121,6 +122,8 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		return
 	}
 	inv.Model = result.Model
+	inv.AgentObservationsReported = result.AgentObservationsReported
+	inv.AgentObservations = append([]types.AgentObservation(nil), result.AgentObservations...)
 	if result.ModelProvider != "" {
 		provider := result.ModelProvider
 		inv.ModelProvider = &provider
