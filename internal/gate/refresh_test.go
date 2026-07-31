@@ -27,6 +27,27 @@ func TestRemoteIdentityTreatsEquivalentGitRemoteFormsAsEqual(t *testing.T) {
 	}
 }
 
+func TestRegisteredRemoteIdentityToleratesRedactedCredential(t *testing.T) {
+	t.Parallel()
+	plain, err := RegisteredRemoteIdentity("https://github.com/owner/project.git")
+	if err != nil {
+		t.Fatalf("RegisteredRemoteIdentity(plain): %v", err)
+	}
+	redacted, err := RegisteredRemoteIdentity("https://redacted@github.com/owner/project.git")
+	if err != nil {
+		t.Fatalf("RegisteredRemoteIdentity(redacted): %v", err)
+	}
+	if plain != redacted || plain != "github.com/owner/project" {
+		t.Fatalf("identities diverged: plain=%q redacted=%q", plain, redacted)
+	}
+	if _, err := RemoteIdentity("https://redacted@github.com/owner/project.git"); err == nil {
+		t.Fatal("RemoteIdentity should still reject credential-bearing remotes")
+	}
+	if _, err := RegisteredRemoteIdentity("https://redacted@github.com"); err == nil {
+		t.Fatal("RegisteredRemoteIdentity should reject a partial remote even with userinfo")
+	}
+}
+
 func TestRefreshRepoURLsSSHToHTTPS(t *testing.T) {
 	ctx := context.Background()
 	database, workDir := refreshFixture(t, "git@example.com:owner/project.git", "")

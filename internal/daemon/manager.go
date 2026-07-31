@@ -880,7 +880,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		return "", fmt.Errorf("load global config: %w", err)
 	}
 	globalCfg := globalInput.Config
-	pushedRepoInput, err := loadRepoConfigInput(filepath.Join(wtDir, ".no-mistakes.yaml"), db.ConfigSourceBranch, headSHA)
+	pushedRepoInput, err := loadPushedRepoConfigInput(ctx, wtDir, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
 		trackStartFailure("load_repo_config")

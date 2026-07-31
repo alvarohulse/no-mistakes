@@ -77,7 +77,7 @@ func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool))
 	if err != nil {
 		return nil, fmt.Errorf("%s repo binding is invalid", machineRepoConfigEnv)
 	}
-	registeredIdentity, err := gate.RemoteIdentity(repo.UpstreamURL)
+	registeredIdentity, err := gate.RegisteredRemoteIdentity(repo.UpstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("registered repository remote cannot be validated for %s", machineRepoConfigEnv)
 	}
@@ -105,6 +105,33 @@ func ValidateMachineRepoConfigPath(rawPath string) (string, error) {
 		return "", fmt.Errorf("%s must be an absolute path", machineRepoConfigEnv)
 	}
 	return filepath.Clean(path), nil
+}
+
+// loadPushedRepoConfigInput reads the branch (pushed) .no-mistakes.yaml from the
+// committed blob at headSHA rather than the worktree filesystem. Recovery
+// revalidates this source via git.ShowFileBytes at the same ref
+// (loadRecordedRepoConfig), so working-tree normalization (core.autocrlf, a
+// smudge/clean filter) must not make the launch-time digest diverge from the
+// blob digest and abort recovery. Presence is still determined from the
+// worktree, which startRun checks out exactly at headSHA: a missing file yields
+// an empty config with no recorded source, matching recovery's
+// emptyWhenMissing branch.
+func loadPushedRepoConfigInput(ctx context.Context, wtDir, headSHA string) (*repoConfigInput, error) {
+	if _, err := os.Stat(filepath.Join(wtDir, ".no-mistakes.yaml")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &repoConfigInput{Config: &config.RepoConfig{}}, nil
+		}
+		return nil, err
+	}
+	data, err := git.ShowFileBytes(ctx, wtDir, headSHA, ".no-mistakes.yaml")
+	if err != nil {
+		return nil, err
+	}
+	repoConfig, err := config.LoadRepoFromBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	return repoConfigInputFromBytes(repoConfig, data, db.ConfigSourceBranch, headSHA), nil
 }
 
 func loadRepoConfigInput(path, kind, ref string) (*repoConfigInput, error) {
