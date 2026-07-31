@@ -134,7 +134,7 @@ func lookupSSHHostname(ctx context.Context, alias string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(lookupCtx, "ssh", "-G", "--", alias)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, shellenv.DefaultProcessTerminationGrace)
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
 		return "", err

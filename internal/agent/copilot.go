@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -18,8 +19,9 @@ import (
 // emitting JSONL events on stdout. The lifecycle is codex/pi-shaped: one
 // process per Run, no managed server.
 type copilotAgent struct {
-	bin       string
-	extraArgs []string
+	bin                     string
+	extraArgs               []string
+	processTerminationGrace time.Duration
 }
 
 func (a *copilotAgent) Name() string { return "copilot" }
@@ -41,7 +43,7 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup

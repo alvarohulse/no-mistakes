@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -31,7 +32,8 @@ type claudeAgent struct {
 	extraArgs []string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses claude's project-level settings/memory surface.
-	disableProjectSettings bool
+	disableProjectSettings  bool
+	processTerminationGrace time.Duration
 }
 
 func (a *claudeAgent) Name() string { return "claude" }
@@ -79,7 +81,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	// EOF, early-child-exit, cancellation, and WaitDelay cleanup paths.
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup

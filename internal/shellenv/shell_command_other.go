@@ -2,12 +2,15 @@
 
 package shellenv
 
-import "os/exec"
+import (
+	"os/exec"
+	"time"
+)
 
 // ConfigureShellCommand is a no-op on platforms that lack process groups
 // (and a process-tree kill primitive). Context cancellation falls back to the
 // exec.CommandContext default of terminating the direct child only.
-func ConfigureShellCommand(cmd *exec.Cmd) {}
+func ConfigureShellCommand(cmd *exec.Cmd, _ time.Duration) {}
 
 // StartShellCommand starts cmd on platforms without extra process-tree setup.
 // It exists so call sites can use the same lifecycle helpers on every platform.

@@ -23,7 +23,8 @@ type codexAgent struct {
 	extraArgs []string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
-	disableProjectSettings bool
+	disableProjectSettings  bool
+	processTerminationGrace time.Duration
 }
 
 func (a *codexAgent) Name() string { return "codex" }
@@ -94,7 +95,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup

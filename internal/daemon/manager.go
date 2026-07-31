@@ -282,8 +282,9 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		created := make([]agent.Agent, 0, len(names))
 		for _, name := range names {
 			next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
-				ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
-				DisableProjectSettings: cfg.DisableProjectSettings,
+				ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
+				DisableProjectSettings:  cfg.DisableProjectSettings,
+				ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 			})
 			if err != nil {
 				for _, current := range created {

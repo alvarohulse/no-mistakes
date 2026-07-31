@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -17,9 +18,10 @@ import (
 const acpxScannerMaxTokenSize = 256 * 1024 * 1024
 
 type acpxAgent struct {
-	bin        string
-	target     string
-	rawCommand string
+	bin                     string
+	target                  string
+	rawCommand              string
+	processTerminationGrace time.Duration
 }
 
 func (a *acpxAgent) Name() string { return "acp:" + a.target }
@@ -59,7 +61,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	started, err := startNativeAgentCommand(cmd)
 	if err != nil {

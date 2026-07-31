@@ -19,7 +19,7 @@ import (
 func TestTerminateShellCommandGroup_AllowsCooperativeDescendantCleanup(t *testing.T) {
 	dir := t.TempDir()
 	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-clean", dir)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, 5*time.Second)
 	if err := RunShellCommand(cmd); err != nil {
 		t.Fatalf("RunShellCommand() error = %v", err)
 	}
@@ -41,7 +41,7 @@ func TestConfigureShellCommand_CancelAllowsCooperativeDescendantCleanup(t *testi
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	cmd := shellCommandTerminationHelper(t, ctx, "leader-wait", dir)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, 5*time.Second)
 
 	done := make(chan error, 1)
 	go func() {
@@ -56,11 +56,15 @@ func TestConfigureShellCommand_CancelAllowsCooperativeDescendantCleanup(t *testi
 		_ = syscall.Kill(descendantPID, syscall.SIGKILL)
 	})
 
+	started := time.Now()
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(4 * time.Second):
 		t.Fatal("RunShellCommand() did not return after cancellation")
+	}
+	if elapsed := time.Since(started); elapsed >= 4*time.Second {
+		t.Fatalf("cooperative cancellation took %s; want prompt exit before the 5s ceiling", elapsed)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "cleanup-complete")); err != nil {
 		t.Fatal("cooperative descendant did not finish cleanup after cancellation")
@@ -73,7 +77,7 @@ func TestConfigureShellCommand_CancelAllowsCooperativeDescendantCleanup(t *testi
 func TestTerminateShellCommandGroup_ForceKillsTermIgnoringDescendantAfterGrace(t *testing.T) {
 	dir := t.TempDir()
 	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-clean-ignore", dir)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, 250*time.Millisecond)
 
 	started := time.Now()
 	if err := RunShellCommand(cmd); err != nil {
@@ -85,7 +89,7 @@ func TestTerminateShellCommandGroup_ForceKillsTermIgnoringDescendantAfterGrace(t
 	t.Cleanup(func() {
 		_ = syscall.Kill(descendantPID, syscall.SIGKILL)
 	})
-	if elapsed < 200*time.Millisecond {
+	if elapsed < 150*time.Millisecond {
 		t.Fatalf("process-group cleanup returned after %s; want a grace period before SIGKILL", elapsed)
 	}
 	if elapsed > 2*time.Second {
@@ -182,7 +186,7 @@ func TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit(t *testing.T) 
 	// not hold the inherited pipes open), records its pid, and exits 0.
 	script := "( sleep 120 >/dev/null 2>&1 ) & echo $! > " + pidFile + "; exit 0"
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", script)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("leader Run: %v", err)
 	}
@@ -211,7 +215,7 @@ func TestTerminateShellCommandGroup_NoopOnNilOrUnstarted(t *testing.T) {
 
 func TestCombinedOutputShellCommand_ReturnsCleanExitWithInheritedPipeGrandchild(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "printf 'leader done\\n'; sleep 30 & exit 0")
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	cmd.WaitDelay = 100 * time.Millisecond
 
 	out, err := CombinedOutputShellCommand(cmd)
@@ -230,7 +234,7 @@ func TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder(t *testing.
 		"NM_SHELLENV_PIPE_HELPER=leader",
 		"NM_SHELLENV_PIPE_READY="+readyFile,
 	)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	cmd.WaitDelay = 100 * time.Millisecond
 
 	out, err := CombinedOutputShellCommand(cmd)

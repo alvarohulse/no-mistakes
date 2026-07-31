@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -238,21 +239,25 @@ func stepAuthConfigured(sctx *pipeline.StepContext, provider scm.Provider) bool 
 // runShellCommand executes a shell command and returns stdout+stderr, exit code, and error.
 // A non-zero exit code is not treated as an error - only exec failures return error.
 func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, error) {
-	return runShellCommandWithEnv(ctx, dir, nil, cmdStr)
+	return runShellCommandWithEnv(ctx, dir, nil, cmdStr, shellenv.DefaultProcessTerminationGrace)
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
+	processTerminationGrace := shellenv.DefaultProcessTerminationGrace
+	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
+		processTerminationGrace = sctx.Config.ProcessTerminationGrace
+	}
+	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr, processTerminationGrace)
 }
 
-func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
+func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string, processTerminationGrace time.Duration) (string, int, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, processTerminationGrace)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)

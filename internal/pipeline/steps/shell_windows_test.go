@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 func TestRunShellCommandWithEnv_UsesCmdAndIgnoresUserShell(t *testing.T) {
@@ -21,7 +23,7 @@ func TestRunShellCommandWithEnv_UsesCmdAndIgnoresUserShell(t *testing.T) {
 	t.Setenv("SHELL", shellPath)
 	t.Setenv("USER_SHELL_MARKER", marker)
 
-	output, exitCode, err := runShellCommandWithEnv(context.Background(), workDir, []string{"STEP_SPECIAL=from-step"}, `echo %STEP_SPECIAL%`)
+	output, exitCode, err := runShellCommandWithEnv(context.Background(), workDir, []string{"STEP_SPECIAL=from-step"}, `echo %STEP_SPECIAL%`, shellenv.DefaultProcessTerminationGrace)
 	if err != nil {
 		t.Fatal(err)
 	}

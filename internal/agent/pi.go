@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -21,7 +22,8 @@ type piAgent struct {
 	extraArgs []string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses pi's project-level AGENTS.md/CLAUDE.md discovery.
-	disableProjectSettings bool
+	disableProjectSettings  bool
+	processTerminationGrace time.Duration
 }
 
 func (a *piAgent) Name() string { return "pi" }
@@ -53,7 +55,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
