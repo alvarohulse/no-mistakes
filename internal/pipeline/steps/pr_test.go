@@ -142,6 +142,43 @@ func TestPRStep_DoesNotRetargetMatchingStackedBase(t *testing.T) {
 	}
 }
 
+func TestPRStep_RetargetsStackedBaseOnceAcrossReruns(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	baseFile := filepath.Join(t.TempDir(), "pr-base")
+	if err := os.WriteFile(baseFile, []byte("old-base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "FAKE_CLI_PR_BASE_FILE="+baseFile)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("first PR update: %v", err)
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("rerun PR update: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(logData), "--base dependency"); got != 1 {
+		t.Fatalf("retarget calls = %d, want one across initial update and rerun:\n%s", got, logData)
+	}
+	baseData, err := os.ReadFile(baseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(baseData) != "dependency" {
+		t.Fatalf("persisted fake PR base = %q, want dependency", baseData)
+	}
+}
+
 func TestPRStep_RetargetFailureStopsRun(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -253,6 +290,52 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	}
 }
 
+func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	sctx.Run.RefreshStrategy = types.RefreshStrategyMerge
+	refreshStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(refreshStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	cleanFindings := `{"findings":[],"summary":"clean"}`
+	if err := sctx.DB.SetStepFindings(refreshStep.ID, cleanFindings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(refreshStep.ID, 1, "initial", &cleanFindings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+		RunID:          sctx.Run.ID,
+		StepName:       "rebase",
+		Round:          1,
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		StartedAt:      1,
+		CompletedAt:    2,
+		DurationMS:     1,
+		ExitStatus:     "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := (&PRStep{}).buildPipelineSection(sctx)
+	for _, want := range []string{
+		"| Merge r1 | codex (harness_cli) | - |",
+		"<summary>✅ **Merge** - passed</summary>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("merge pipeline summary missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "**Refresh**") {
+		t.Fatalf("pipeline displayed canonical identity instead of strategy label:\n%s", got)
+	}
+}
+
 func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 	t.Parallel()
 	got := agentTelemetryTable([]db.AgentInvocation{
@@ -269,7 +352,7 @@ func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 			InvocationMode:            types.AgentInvocationModeHarnessCLI,
 			AgentObservationsReported: true,
 		},
-	})
+	}, types.RefreshStrategyRebase)
 
 	for _, want := range []string{
 		"| Test r1 | claude (harness_cli) | - |",
@@ -278,6 +361,20 @@ func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agent telemetry table missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestAgentTelemetryTableNormalizesHistoricalRefreshInvocationForDisplay(t *testing.T) {
+	t.Parallel()
+	got := agentTelemetryTable([]db.AgentInvocation{{
+		StepName:       "rebase",
+		Round:          1,
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+	}}, types.RefreshStrategyMerge)
+
+	if !strings.Contains(got, "| Merge r1 | codex (harness_cli) | - |") {
+		t.Fatalf("historical rebase invocation did not use merge display label:\n%s", got)
 	}
 }
 
@@ -293,7 +390,7 @@ func TestTruncatePipelineSectionTreatsAgentTelemetryTableAsAtomic(t *testing.T) 
 		Agent:                     "codex",
 		InvocationMode:            types.AgentInvocationModeHarnessCLI,
 		AgentObservationsReported: true,
-	}})
+	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
 		noMistakesPRSignature+"\n\n",
@@ -332,7 +429,7 @@ func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing
 		Agent:                     "codex",
 		InvocationMode:            types.AgentInvocationModeHarnessCLI,
 		AgentObservationsReported: true,
-	}})
+	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
 		noMistakesPRSignature+"\n\n",

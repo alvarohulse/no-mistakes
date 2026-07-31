@@ -114,6 +114,12 @@ func fakeRecordSuccessHandler() {
 func fakeGHHandler(args []string) {
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
+	prBaseFile := os.Getenv("FAKE_CLI_PR_BASE_FILE")
+	if prBaseFile != "" {
+		if data, err := os.ReadFile(prBaseFile); err == nil {
+			prBase = strings.TrimSpace(string(data))
+		}
+	}
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
@@ -137,6 +143,17 @@ func fakeGHHandler(args []string) {
 		if os.Getenv("FAKE_CLI_FAIL_EDIT") == "1" {
 			fmt.Fprintln(os.Stderr, "edit failed")
 			os.Exit(1)
+		}
+		if prBaseFile != "" {
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--base" {
+					if err := os.WriteFile(prBaseFile, []byte(args[i+1]), 0o644); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						os.Exit(1)
+					}
+					break
+				}
+			}
 		}
 		os.Exit(0)
 	}

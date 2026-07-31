@@ -142,6 +142,62 @@ func TestResolveRefreshStrategyPrecedence(t *testing.T) {
 	}
 }
 
+func TestRunRefreshStrategyPrecedenceUsesExplicitThenTrustedConfig(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	repo, _ := setupTestGitRepo(t, p, d, "refresh-precedence-repo")
+	configYAML := "auto_fix:\n  lint: 0\n  test: 0\n  review: 0\nrefresh:\n  strategy: merge\n"
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "configure merge refresh")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	headSHA := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var configured ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir("refresh-precedence-repo"),
+		Ref:  "refs/heads/main",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  headSHA,
+	}, &configured); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, configured.RunID)
+	configuredRun, err := d.GetRun(configured.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuredRun.RefreshStrategy != types.RefreshStrategyMerge {
+		t.Fatalf("trusted config strategy = %q, want merge", configuredRun.RefreshStrategy)
+	}
+
+	var explicit ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID:          "refresh-precedence-repo",
+		Branch:          "main",
+		RefreshStrategy: types.RefreshStrategyRebase,
+	}, &explicit); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, explicit.RunID)
+	explicitRun, err := d.GetRun(explicit.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitRun.RefreshStrategy != types.RefreshStrategyRebase {
+		t.Fatalf("explicit strategy = %q, want rebase over trusted merge", explicitRun.RefreshStrategy)
+	}
+}
+
 func TestPushReceivedAllowsDifferentBranchRunsConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
@@ -371,6 +427,69 @@ func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
 		if step.StepName == types.StepReview && step.Status != types.StepStatusSkipped {
 			t.Fatalf("review status = %s, want %s", step.Status, types.StepStatusSkipped)
 		}
+	}
+}
+
+func TestRerunPersistsExplicitRefreshSelectionAndInheritsStackBase(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	_, headSHA := setupTestGitRepo(t, p, d, "refresh-rerun-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:            p.RepoDir("refresh-rerun-repo"),
+		Ref:             "refs/heads/main",
+		Old:             "0000000000000000000000000000000000000000",
+		New:             headSHA,
+		RefreshStrategy: types.RefreshStrategyRebase,
+		StackedOn:       "dependency",
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+
+	var second ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID:          "refresh-rerun-repo",
+		Branch:          "main",
+		RefreshStrategy: types.RefreshStrategyMerge,
+		StackedOn:       "dependency-v2",
+	}, &second); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, second.RunID)
+	secondRun, err := d.GetRun(second.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRun.RefreshStrategy != types.RefreshStrategyMerge || secondRun.StackedOn != "dependency-v2" {
+		t.Fatalf("explicit rerun selection = (%q, %q), want (merge, dependency-v2)", secondRun.RefreshStrategy, secondRun.StackedOn)
+	}
+
+	var third ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID: "refresh-rerun-repo",
+		Branch: "main",
+	}, &third); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, third.RunID)
+	thirdRun, err := d.GetRun(third.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thirdRun.RefreshStrategy != types.RefreshStrategyRebase {
+		t.Fatalf("unconfigured rerun strategy = %q, want default rebase", thirdRun.RefreshStrategy)
+	}
+	if thirdRun.StackedOn != "dependency-v2" {
+		t.Fatalf("inherited rerun stack base = %q, want dependency-v2", thirdRun.StackedOn)
 	}
 }
 

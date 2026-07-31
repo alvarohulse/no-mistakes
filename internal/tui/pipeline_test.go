@@ -32,20 +32,41 @@ func TestStepStatusIcon(t *testing.T) {
 
 func TestStepLabel(t *testing.T) {
 	tests := []struct {
-		name  types.StepName
-		label string
+		name     types.StepName
+		strategy types.RefreshStrategy
+		label    string
 	}{
-		{types.StepReview, "Review"},
-		{types.StepTest, "Test"},
-		{types.StepLint, "Lint"},
-		{types.StepDocument, "Document"},
-		{types.StepPush, "Push"},
-		{types.StepPR, "PR"},
-		{types.StepCI, "CI"},
+		{types.StepRefresh, types.RefreshStrategyRebase, "Rebase"},
+		{types.StepRefresh, types.RefreshStrategyMerge, "Merge"},
+		{types.StepReview, types.RefreshStrategyMerge, "Review"},
+		{types.StepTest, "", "Test"},
+		{types.StepLint, "", "Lint"},
+		{types.StepDocument, "", "Document"},
+		{types.StepPush, "", "Push"},
+		{types.StepPR, "", "PR"},
+		{types.StepCI, "", "CI"},
 	}
 	for _, tt := range tests {
-		if got := stepLabel(tt.name); got != tt.label {
-			t.Errorf("stepLabel(%s) = %q, want %q", tt.name, got, tt.label)
+		if got := stepLabel(tt.name, tt.strategy); got != tt.label {
+			t.Errorf("stepLabel(%s, %s) = %q, want %q", tt.name, tt.strategy, got, tt.label)
+		}
+	}
+}
+
+func TestRenderPipelineView_LabelsRefreshFromRunStrategy(t *testing.T) {
+	for _, tt := range []struct {
+		strategy types.RefreshStrategy
+		want     string
+	}{
+		{strategy: types.RefreshStrategyRebase, want: "Rebase"},
+		{strategy: types.RefreshStrategyMerge, want: "Merge"},
+	} {
+		run := testRun()
+		run.RefreshStrategy = tt.strategy
+		run.Steps = []ipc.StepResultInfo{{StepName: types.StepRefresh, Status: types.StepStatusRunning}}
+		out := stripANSI(renderPipelineView(run, run.Steps, 80, 0, 40))
+		if !strings.Contains(out, tt.want) {
+			t.Fatalf("strategy %q missing label %q in:\n%s", tt.strategy, tt.want, out)
 		}
 	}
 }
@@ -305,7 +326,7 @@ func TestRenderPipelineView_HidesFixActionWhenDisabled(t *testing.T) {
 	run.Steps[0].Status = types.StepStatusAwaitingApproval
 
 	// Action bar is now rendered outside the pipeline box per DESIGN.md.
-	out := stripANSI(renderActionBar(run.Steps, true, false, false, 0, 5, false, true))
+	out := stripANSI(renderActionBar(run.Steps, run.RefreshStrategy, true, false, false, 0, 5, false, true))
 	if strings.Contains(out, "f fix") {
 		t.Fatal("expected fix action to be hidden when disabled")
 	}

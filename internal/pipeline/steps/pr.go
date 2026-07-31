@@ -238,7 +238,7 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) string {
 		slog.Warn("failed to query agent invocations for pipeline summary", "error", err)
 	}
 
-	return buildPipelineStatusSummary(steps, rounds, invocations)
+	return buildPipelineStatusSummary(steps, rounds, invocations, sctx.Run.RefreshStrategy)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a

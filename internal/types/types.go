@@ -77,6 +77,42 @@ func normalizeStepName(s StepName) StepName {
 	}
 }
 
+// Canonical returns the persisted machine identity for a step, including
+// historical aliases that older runs may still carry.
+func (s StepName) Canonical() StepName {
+	return normalizeStepName(s)
+}
+
+// DisplayName returns the human-facing step label. Refresh keeps one canonical
+// identity while its label reflects the strategy selected for the run.
+func (s StepName) DisplayName(strategy RefreshStrategy) string {
+	switch s.Canonical() {
+	case StepIntent:
+		return "Intent"
+	case StepRefresh:
+		if strategy.OrDefault() == RefreshStrategyMerge {
+			return "Merge"
+		}
+		return "Rebase"
+	case StepReview:
+		return "Review"
+	case StepTest:
+		return "Test"
+	case StepDocument:
+		return "Document"
+	case StepLint:
+		return "Lint"
+	case StepPush:
+		return "Push"
+	case StepPR:
+		return "PR"
+	case StepCI:
+		return "CI"
+	default:
+		return string(s)
+	}
+}
+
 func (s *StepName) UnmarshalJSON(data []byte) error {
 	var raw string
 	if err := json.Unmarshal(data, &raw); err != nil {

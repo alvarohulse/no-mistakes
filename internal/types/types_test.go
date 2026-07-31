@@ -35,6 +35,34 @@ func TestRefreshStrategyDefaultsToRebase(t *testing.T) {
 	}
 }
 
+func TestStepDisplayNameUsesRefreshStrategyWithoutChangingIdentity(t *testing.T) {
+	tests := []struct {
+		name     StepName
+		strategy RefreshStrategy
+		want     string
+	}{
+		{name: StepRefresh, strategy: RefreshStrategyRebase, want: "Rebase"},
+		{name: StepRefresh, strategy: RefreshStrategyMerge, want: "Merge"},
+		{name: StepRefresh, strategy: "", want: "Rebase"},
+		{name: StepName("rebase"), strategy: RefreshStrategyMerge, want: "Merge"},
+		{name: StepReview, strategy: RefreshStrategyMerge, want: "Review"},
+		{name: StepPR, strategy: RefreshStrategyMerge, want: "PR"},
+	}
+
+	for _, tt := range tests {
+		if got := tt.name.DisplayName(tt.strategy); got != tt.want {
+			t.Errorf("%q.DisplayName(%q) = %q, want %q", tt.name, tt.strategy, got, tt.want)
+		}
+	}
+
+	if got := StepName("rebase").Canonical(); got != StepRefresh {
+		t.Fatalf("legacy rebase canonical identity = %q, want refresh", got)
+	}
+	if got := StepRefresh.Canonical(); got != StepRefresh {
+		t.Fatalf("refresh canonical identity = %q, want refresh", got)
+	}
+}
+
 func TestAllStepsOrder(t *testing.T) {
 	steps := AllSteps()
 	if len(steps) != 9 {
