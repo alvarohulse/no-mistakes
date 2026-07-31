@@ -172,7 +172,7 @@ Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `
 
 Each supported native backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible native routes also fail.
 
-Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. Failing before launch prevents a configured model from silently normalizing or disappearing.
+Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins; the model compatibility rule remains fail-closed rather than silently claiming a model the ACP backend may normalize.
 
 For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
 
