@@ -29,6 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Set a typed per-step `model` when a phase needs a specific model rather than the selected backend's default; always declare its vendor explicitly.
 - Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice; leave `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -116,6 +117,19 @@ Repo config takes precedence over global config.
 # ~/.no-mistakes/config.yaml or .no-mistakes.yaml
 agent: [codex, claude]
 ```
+
+### Per-step model and high-risk adversary
+
+```yaml
+# .no-mistakes.yaml
+review:
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: codex
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+```
+
+The controller runs the separately routed adversary only when the primary Review reports high risk. The vendors must differ, and the adversary never shares the primary's durable reviewer or fixer session. Per-step models currently require native backends; model+ACP routes fail before work starts until ACP spawn plumbing is available.
 
 ### Optional ACP target
 
@@ -229,7 +243,7 @@ Each invocation returns:
 - **Text** - raw text output
 - **Usage** - token counts (input, output, cache read, cache creation)
 - **SessionID** and **Resumed** - the adapter-native session identity and whether this invocation resumed it, when supported
-- **Model** and **Provider** - adapter-reported serving metadata when available
+- **Model** and **Provider** - adapter-observed serving metadata when available, otherwise the controller-configured route identity
 
 One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
@@ -275,9 +289,13 @@ That resume command has a narrower flag surface than `codex exec`, so a resume t
 
 Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.rovodev` flags are inserted before no-mistakes' managed serve flags. Communicates via REST API and SSE streaming. Each invocation creates a session, sends the prompt, streams results, then deletes the session. Structured output is handled by injecting schema instructions into a system prompt, then parsing the final text with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, and validates the result against the requested schema while allowing `null` for optional fields.
 
+Rovo Dev does not expose a verified model-selection interface for this managed-server path, so a first-class per-step model route fails before launch instead of sending an unverified flag.
+
 ## OpenCode
 
 Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.opencode` flags are inserted before no-mistakes' managed serve flags. Similar session lifecycle to Rovo Dev: create session, send message, stream SSE events until idle, delete session. Supports `json_schema` format in the message request for structured output, with `retryCount: 2` so the model gets a second chance to emit a structured response. When opencode reports `info.error.name = "StructuredOutputError"` (the model did not call the StructuredOutput tool after those retries), no-mistakes surfaces a clean error including the retry count rather than falling through to text-parsing the streamed reasoning prose. When native structured output is genuinely absent, it falls back to parsing the final text with the same JSON fence and bare-object fallback, validating that fallback result against the requested schema while allowing `null` for optional fields.
+
+A first-class OpenCode model name uses `provider/model` form. no-mistakes parses it and sends `{providerID, modelID}` in each message request; it is not a flag on `opencode serve`.
 
 ## Pi
 
