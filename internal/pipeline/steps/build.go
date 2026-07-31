@@ -128,6 +128,7 @@ Rules:
 - Do NOT run linters, formatters, or static analysis tools unless they are an inseparable part of the repository's canonical build command.
 - Do NOT update documentation.
 - Do NOT modify source files during this verification pass.
+- Before finishing, remove transient build outputs or caches created in the working tree so they are not committed and pushed.
 - If no meaningful build or compile command exists, return an ask-user finding that explains what you inspected and why the Build gate cannot be established.
 - Return structured findings with severity, description, and action, plus a non-empty "tested" array containing every build or compile command you ran.
 - Set action to "auto-fix" for objective build failures that can be safely fixed, "ask-user" when the build cannot be established, and "no-op" only for informational context attached to an actionable result.%s`,
