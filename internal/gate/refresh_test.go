@@ -9,6 +9,24 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 )
 
+func TestRemoteIdentityTreatsEquivalentGitRemoteFormsAsEqual(t *testing.T) {
+	t.Parallel()
+	forms := []string{
+		"https://github.com/Owner/Project.git",
+		"ssh://git@github.com/owner/project",
+		"git@github.com:owner/project.git",
+	}
+	for _, form := range forms {
+		identity, err := RemoteIdentity(form)
+		if err != nil {
+			t.Fatalf("RemoteIdentity(%q): %v", form, err)
+		}
+		if identity != "github.com/owner/project" {
+			t.Fatalf("RemoteIdentity(%q) = %q, want github.com/owner/project", form, identity)
+		}
+	}
+}
+
 func TestRefreshRepoURLsSSHToHTTPS(t *testing.T) {
 	ctx := context.Background()
 	database, workDir := refreshFixture(t, "git@example.com:owner/project.git", "")

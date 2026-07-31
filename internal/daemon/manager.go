@@ -767,6 +767,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	} else {
 		repo = refreshed
 	}
+	machineRepoCfg, err := loadMachineRepoConfig(repo, os.LookupEnv)
+	if err != nil {
+		trackStartFailure("machine_repo_config")
+		return "", err
+	}
 
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
@@ -885,6 +890,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
+	if machineRepoCfg != nil {
+		effectiveRepoCfg = config.OverlayRepoConfig(effectiveRepoCfg, machineRepoCfg.Config)
+		slog.Warn("NM_REPO_CONFIG is enabled: honoring machine-local repo configuration", "run_id", run.ID)
+	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
 	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) {

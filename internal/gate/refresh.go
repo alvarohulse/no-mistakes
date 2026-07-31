@@ -153,6 +153,17 @@ type refreshRemote struct {
 	identity string
 }
 
+// RemoteIdentity returns the normalized host/path identity for a supported
+// Git remote. Equivalent HTTPS, ssh://, and scp-like forms resolve to the same
+// value; credentials, partial remotes, and unsupported schemes are rejected.
+func RemoteIdentity(raw string) (string, error) {
+	remote, err := inspectRefreshRemote(raw)
+	if err != nil {
+		return "", err
+	}
+	return remote.identity, nil
+}
+
 func inspectRefreshRemote(raw string) (refreshRemote, error) {
 	trimmed := strings.TrimSpace(raw)
 	info := refreshRemote{raw: trimmed}
