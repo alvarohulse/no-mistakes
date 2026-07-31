@@ -76,6 +76,7 @@ AI code review of your diff.
 - Does not treat code shape or duplication alone as evidence of a systemic defect, demand speculative redesign, block explicitly authorized short-term containment merely because a later durable fix is possible, expand the user's scope, or promote optional improvements into blockers
 - Agent returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-user`)
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
+- When a [Review adversary](/no-mistakes/reference/repo-config/#per-step-agent-and-model-routes) is configured and the primary review returns `risk_level: high`, runs one independent cross-vendor adversarial review in a separate cold session and merges its namespaced findings into the same Review gate; low- and medium-risk reviews do not invoke it
 - With the default `session_reuse: true`, Claude and Codex reuse one reviewer session across the initial review and every full rereview, and a separate fixer session across review-fix turns
 - A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
 - Atomically records the exact commit examined when a full review completes successfully; a parked review retains its candidate only for recovery, while failed, skipped, superseded, and legacy reviews grant no inferred approval authority
