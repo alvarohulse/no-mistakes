@@ -14,7 +14,7 @@ func composeACPTargetCommand(target, rawCommand string, extraArgs []string, mode
 		return rawCommand, nil
 	}
 	if rawCommand == "" {
-		return "", fmt.Errorf("target %q has no raw command to receive agent_args_override; configure acp_registry_overrides.%s", target, target)
+		return "", fmt.Errorf("target %q has no raw command to receive a configured model or agent_args_override; configure acp_registry_overrides.%s", target, target)
 	}
 
 	command, err := splitACPXCommandLine(rawCommand)

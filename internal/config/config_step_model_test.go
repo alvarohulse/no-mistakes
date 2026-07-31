@@ -228,7 +228,7 @@ func TestEffectiveRepoConfig_StepModelsAndAdversaryAreTrustedSelectors(t *testin
 	}
 }
 
-func TestResolveAgent_ModelNarrowsAutoAndRefusesACP(t *testing.T) {
+func TestResolveAgent_ModelNarrowsAutoAndValidatesACP(t *testing.T) {
 	t.Run("auto probes only compatible backends", func(t *testing.T) {
 		var probed []string
 		cfg := &Config{
@@ -261,7 +261,7 @@ func TestResolveAgent_ModelNarrowsAutoAndRefusesACP(t *testing.T) {
 		}
 	})
 
-	t.Run("model plus ACP fails before launch", func(t *testing.T) {
+	t.Run("bare model family plus ACP resolves", func(t *testing.T) {
 		cfg := &Config{
 			Agent:  types.AgentClaude,
 			Agents: []types.AgentName{types.AgentClaude},
@@ -275,13 +275,68 @@ func TestResolveAgent_ModelNarrowsAutoAndRefusesACP(t *testing.T) {
 		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 			return "/fake/bin/" + bin, nil
 		})
-		if err == nil {
-			t.Fatal("ResolveAgent() accepted a model on ACP")
+		if err != nil {
+			t.Fatalf("ResolveAgent() error = %v", err)
 		}
-		for _, want := range []string{"ACP", "model", "not supported"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error should contain %q, got %v", want, err)
-			}
+		if got := cfg.StepAgents[types.StepReview]; !reflect.DeepEqual(got, []types.AgentName{types.AgentCursor}) {
+			t.Fatalf("review agents = %v, want [cursor]", got)
+		}
+	})
+
+	t.Run("bracketed ACP models fail before route probing", func(t *testing.T) {
+		models := []string{
+			"claude-opus-5[effort=high]",
+			"claude-opus-5[]",
+			"claude-opus-5[",
+			"claude-opus-5]",
+			"[claude-opus-5]",
+			"claude-opus-5[[effort=high]]",
+			"claude-opus-5[effort=high][fast=true]",
+		}
+		for _, model := range models {
+			t.Run(model, func(t *testing.T) {
+				cfg := &Config{
+					Agent:  types.AgentClaude,
+					Agents: []types.AgentName{types.AgentClaude},
+					StepAgents: map[types.StepName][]types.AgentName{
+						types.StepReview: {types.AgentCursor},
+					},
+					StepModels: map[types.StepName]ModelRoute{
+						types.StepReview: {Name: model, Vendor: "anthropic"},
+					},
+				}
+				var probed []string
+				err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+					probed = append(probed, bin)
+					return "/fake/bin/" + bin, nil
+				})
+				if err == nil || !strings.Contains(err.Error(), model) || !strings.Contains(err.Error(), "bare model family") {
+					t.Fatalf("ResolveAgent() error = %v, want bracketed ACP refusal", err)
+				}
+				for _, bin := range probed {
+					if bin == "acpx" || bin == "cursor-agent" {
+						t.Fatalf("invalid ACP route probed %q before refusal: %v", bin, probed)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("native backend keeps parameterized model", func(t *testing.T) {
+		cfg := &Config{
+			Agent:  types.AgentClaude,
+			Agents: []types.AgentName{types.AgentClaude},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentClaude},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "claude-opus-5[effort=high]", Vendor: "anthropic"},
+			},
+		}
+		if err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			return "/fake/bin/" + bin, nil
+		}); err != nil {
+			t.Fatalf("ResolveAgent() error = %v", err)
 		}
 	})
 

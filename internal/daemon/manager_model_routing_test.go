@@ -38,3 +38,29 @@ func TestNewPipelineAgents_CarriesPrimaryAndAdversaryModelIdentity(t *testing.T)
 		t.Fatalf("unconfigured test model = %#v, want empty", got)
 	}
 }
+
+func TestNewPipelineAgents_CarriesACPModelIdentity(t *testing.T) {
+	cfg := &config.Config{
+		Agent:  types.AgentClaude,
+		Agents: []types.AgentName{types.AgentClaude},
+		StepAgents: map[types.StepName][]types.AgentName{
+			types.StepReview: {types.AgentCursor},
+		},
+		StepModels: map[types.StepName]config.ModelRoute{
+			types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"},
+		},
+		AgentArgsOverride: map[string][]string{
+			"cursor": {"--model", "claude-sonnet-5"},
+		},
+	}
+	routes, err := newPipelineAgents(context.Background(), cfg, fakeLookPath)
+	if err != nil {
+		t.Fatalf("newPipelineAgents() error = %v", err)
+	}
+	defer routes.Close()
+
+	want := agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}
+	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepReview)); got != want {
+		t.Fatalf("review model = %#v, want %#v", got, want)
+	}
+}

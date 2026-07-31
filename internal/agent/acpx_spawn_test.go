@@ -136,3 +136,66 @@ func TestAcpxAgent_Run_CursorPassesConfiguredArgsToTargetSpawn(t *testing.T) {
 		}
 	}
 }
+
+func TestAcpxAgent_Run_CursorFirstClassModelWinsAndReportsIdentity(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "argv.txt")
+	promptFile := filepath.Join(dir, "prompt.txt")
+	t.Setenv("NM_TEST_ACPX_ARGS_FILE", argsFile)
+	t.Setenv("NM_TEST_ACPX_PROMPT_FILE", promptFile)
+	stub := writeStubAcpx(t, dir)
+
+	a, err := NewWithOptions(
+		types.AgentCursor,
+		stub,
+		[]string{"-m", "claude-sonnet-5", "--model=claude-haiku-5", "--effort", "high"},
+		Options{Model: "claude-opus-5", Vendor: "anthropic"},
+	)
+	if err != nil {
+		t.Fatalf("NewWithOptions(%q): %v", types.AgentCursor, err)
+	}
+	defer a.Close()
+	if got := ConfiguredModel(a); got != (ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}) {
+		t.Fatalf("configured model = %#v", got)
+	}
+
+	var attempt Attempt
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt: "review this change",
+		CWD:    dir,
+		OnAttempt: func(got Attempt) {
+			attempt = got
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Model != "claude-opus-5" || res.ModelProvider != "anthropic" {
+		t.Fatalf("result model identity = %q/%q", res.Model, res.ModelProvider)
+	}
+	if attempt.Result == nil || attempt.Result.Model != "claude-opus-5" || attempt.Result.ModelProvider != "anthropic" {
+		t.Fatalf("attempt result = %+v, want configured model identity", attempt.Result)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("stub acpx never recorded argv: %v", err)
+	}
+	argv := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(argv) < 2 || argv[0] != "--agent" {
+		t.Fatalf("spawned argv = %q, want leading --agent <command>", argv)
+	}
+	if got, want := argv[1], "cursor-agent --effort high --model claude-opus-5 acp"; got != want {
+		t.Fatalf("target command = %q, want %q", got, want)
+	}
+	if promptData, err := os.ReadFile(promptFile); err != nil {
+		t.Fatalf("stub acpx never copied prompt file: %v", err)
+	} else if string(promptData) != "review this change" {
+		t.Fatalf("prompt file = %q, want original prompt", promptData)
+	}
+	for _, arg := range argv {
+		if arg == "review this change" {
+			t.Fatalf("spawned argv = %q, prompt must not be passed in argv", argv)
+		}
+	}
+}

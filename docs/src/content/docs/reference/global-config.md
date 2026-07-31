@@ -121,7 +121,7 @@ test:
 An unconfigured step inherits the run-wide `agent`. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. Review session reuse stays scoped to the selected Review route.
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
-`<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. Repo model routes override matching global model routes. Each supported native backend receives the model through its verified interface on every invocation and fix round; the first-class field wins over a model default in `agent_args_override`. `push` has no agent or model route.
+`<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. Repo model routes override matching global model routes. Each supported backend receives the model through its verified interface on every invocation and fix round; the first-class field wins over a model default in `agent_args_override`. `push` has no agent or model route.
 
 ```yaml
 review:
@@ -129,11 +129,11 @@ review:
   model: {name: gpt-5.6-sol, vendor: openai}
 ```
 
-Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible native backend is runnable, startup fails loudly.
+Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
 
 `review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
 
-ACP targets and aliases accept global `agent_args_override` entries when no-mistakes can compose a raw target command. First-class model+ACP routes are still rejected before work begins; the model compatibility rule remains fail-closed rather than silently claiming a model the ACP backend may normalize.
+ACP targets and aliases accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; Cursor receives `cursor-agent --model claude-opus-5 acp`. Any name containing `[` or `]` is refused during launch-time config validation, including parameterized (`claude-opus-5[effort=high]`), empty, nested, repeated, and unmatched bracket forms. Native backends continue to accept their parameterized model syntax. This narrow rule prevents ACP from silently normalizing a requested variant to the family's default.
 
 ### acpx_path
 

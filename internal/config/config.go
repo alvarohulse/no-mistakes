@@ -1064,9 +1064,9 @@ agent: auto
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. A model is a typed name plus an
 # explicit lowercase vendor; adapters translate it through their verified
-# native interface. OpenCode names use provider/model. Rovo Dev and ACP reject
-# model routes because their managed integrations expose no verified model
-# selection interface.
+# interface. OpenCode names use provider/model. Rovo Dev rejects model routes.
+# ACP accepts bare model families but rejects bracketed parameter variants,
+# which ACP servers may silently normalize.
 # Unconfigured steps inherit the run-wide agent and its default model.
 # Supported sections: intent, refresh, review, test, document, lint, pr, ci.
 # review:
@@ -1438,7 +1438,10 @@ func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) err
 		return nil
 	}
 	if isACPAgent(name) {
-		return fmt.Errorf("model %q is not supported for ACP agent %q because ACP model compatibility validation remains fail-closed", model.Name, name)
+		if !types.IsBareACPModelName(model.Name) {
+			return fmt.Errorf("parameterized or malformed bracketed model %q is not supported for ACP agent %q; configure a bare model family", model.Name, name)
+		}
+		return nil
 	}
 	if name == types.AgentOpenCode && !validOpenCodeModelName(model.Name) {
 		return fmt.Errorf("agent %q requires model %q to use provider/model form", name, model.Name)
