@@ -213,6 +213,7 @@ Press `e` to add or edit extra guidance for the current finding. Press `+` to ad
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
+The one exception is the Test step's test-file safety gate: a finding raised because the agent changed a test file requires an explicit response, so yolo leaves it parked instead of resolving it.
 
 ## Outcome banner
 

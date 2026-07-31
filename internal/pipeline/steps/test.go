@@ -286,10 +286,11 @@ func testFileChangeFindings(changes []testFileChange) []Finding {
 			description = fmt.Sprintf("existing test file modified by agent: %s", change.Path)
 		}
 		findings = append(findings, Finding{
-			Severity:    "warning",
-			Action:      types.ActionAskUser,
-			File:        change.Path,
-			Description: description,
+			Severity:                 "warning",
+			Action:                   types.ActionAskUser,
+			File:                     change.Path,
+			Description:              description,
+			RequiresExplicitApproval: true,
 		})
 	}
 	return findings

@@ -79,9 +79,11 @@ func newAxiRunCmd() *cobra.Command {
 		Short: "Validate your code changes, blocking until a decision point or the outcome",
 		Long: "Triggers a pipeline run for the current branch and drives it. Without\n" +
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
-			"prints it. With --yes it auto-resolves every gate (fixing actionable\n" +
+			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
-			"accepting the result) until a decision point or outcome.\n\n" +
+			"accepting the result) until a decision point or outcome. A Test gate\n" +
+			"created because the agent changed a test file requires explicit approval;\n" +
+			"--yes does not auto-resolve it.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -117,7 +119,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every gate (fix findings, then accept) until a decision point or outcome")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added to the PR Notes section (maximum 16 KiB; applies only to a new run)")
@@ -494,8 +496,9 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNo
 // driveRun subscribes to a run and reconciles authoritative state on transition
 // events until it reaches an approval gate, a terminal state, or CI checks
 // pass, streaming step transitions to progress (stderr). When
-// autoApprove is set it resolves each gate and continues; otherwise it returns
-// at the first gate so the caller can surface it for a human/agent decision.
+// autoApprove is set it resolves each eligible gate and continues; otherwise
+// it returns at the first gate so the caller can surface it for a human/agent
+// decision. A gate with an explicit-approval finding always returns unchanged.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
 // findings is fixed (every finding selected), and the resulting fix_review is
@@ -535,7 +538,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove {
+			if !autoApprove || gateRequiresExplicitApproval(gate) {
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -563,6 +566,14 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, true, nil
 		}
 	}
+}
+
+func gateRequiresExplicitApproval(gate stepView) bool {
+	if gate.Name != string(types.StepTest) {
+		return false
+	}
+	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
+	return err == nil && types.HasExplicitApprovalFindings(parsed)
 }
 
 // ciReadyToMerge reports whether the CI step is actively monitoring and its logs
@@ -774,7 +785,10 @@ func newAxiRespondCmd() *cobra.Command {
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
-			"blocks until the next gate, CI-ready decision point, or final outcome.\n\n" +
+			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
+			"With --yes, eligible subsequent gates are resolved automatically. A Test\n" +
+			"gate created because the agent changed a test file requires explicit approval;\n" +
+			"--yes does not auto-resolve it.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
@@ -800,7 +814,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every subsequent gate until a decision point or outcome")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve every eligible subsequent gate until a decision point or outcome")
 	return cmd
 }
 

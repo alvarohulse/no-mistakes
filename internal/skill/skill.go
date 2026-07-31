@@ -278,16 +278,19 @@ it to the user before you respond:
   ` + "`respond`" + ` call: ` + "`--action fix`" + ` (pass their guidance through
   ` + "`--instructions`" + `), ` + "`--action approve`" + `, or ` + "`--action skip`" + `.
 
-The one exception is ` + "`--yes`" + ` (below): it is the user's standing consent to
-drive every gate unattended, so under ` + "`--yes`" + ` you resolve ` + "`ask-user`" + `
-findings automatically instead of stopping to ask.
+The normal exception is ` + "`--yes`" + ` (below): it is the user's standing consent to
+drive eligible gates unattended, so under ` + "`--yes`" + ` you resolve ordinary
+` + "`ask-user`" + ` findings automatically instead of stopping to ask. A Test gate created
+because the pipeline agent changed a test file requires explicit approval;
+` + "`--yes`" + ` does not auto-resolve it. Stop at that gate and relay its test-file
+finding before responding.
 
 If you have clear consent to drive the run automatically, pass ` + "`--yes`" + ` to ` + "`axi run`" + `
 or ` + "`axi respond`" + `. It treats every actionable finding - ` + "`auto-fix`" + ` and
 ` + "`ask-user`" + ` alike - as consent to fix it, selects every current finding for one
 fix round, accepts the resulting fix review, and approves gates with only
-` + "`no-op`" + ` findings. Only use it when the user has asked you to drive the whole
-run without checking back.
+` + "`no-op`" + ` findings, except for the explicit test-file approval gate above. Only
+use it when the user has asked you to drive the whole run without checking back.
 
 ## Inspecting state
 

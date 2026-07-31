@@ -58,6 +58,77 @@ func axiScenario(t *testing.T) string {
 	return path
 }
 
+func testFileApprovalScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test-file-approval-scenario.yaml")
+	content := `actions:
+  - match: "You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.\n\nContext:\n- branch: feature/axi-test-file-approval"
+    text: "tests passed after changing an existing test"
+    edits:
+      - path: "existing_test.py"
+        new: "def test_existing():\n    assert True\n"
+    structured:
+      findings: []
+      summary: "all tests passed"
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      artifacts: []
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected in the diff"
+      risk_scope: source-or-external
+      tested:
+        - "fakeagent: simulated test run"
+      testing_summary: "simulated tests passed"
+      artifacts: []
+      title: "test: exercise explicit test-file approval"
+      body: "## Summary\nexercise explicit test-file approval"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write test-file approval scenario: %v", err)
+	}
+	return path
+}
+
+func TestAxiYesParksWhenTestAgentChangesTestFile(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "codex", Scenario: testFileApprovalScenario(t)})
+	h.CommitChange("init-axi-test-file-approval", "seed.txt", "seed\n", "seed for axi init")
+	initWorktree := h.AddWorktree("init-axi-test-file-approval")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("nm init: %v\n%s", err, out)
+	}
+
+	h.CommitChange("feature/axi-test-file-approval", "existing_test.py", "def test_existing():\n    assert False\n", "add existing test")
+	worktree := h.AddWorktree("feature/axi-test-file-approval")
+
+	out, err := h.RunInDir(worktree, "axi", "run", "--yes", "--intent", axiIntent)
+	if err != nil {
+		t.Fatalf("axi run --yes (expected explicit-approval gate, exit 0): %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"gate:",
+		"step: test",
+		"status: awaiting_approval",
+		"existing test file modified by agent: existing_test.py",
+		"requires explicit approval",
+		"--yes does not auto-resolve it",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("axi run --yes test-file gate output missing %q in:\n%s", want, out)
+		}
+	}
+
+	run := waitForStepStatus(t, h, "feature/axi-test-file-approval", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	h.Respond(run.ID, types.StepTest, types.ActionAbort)
+	if completed := h.WaitForRun("feature/axi-test-file-approval", 60*time.Second); completed.Status != types.RunFailed {
+		t.Fatalf("test-file approval run status after abort = %s, want failed", completed.Status)
+	}
+}
+
 // TestAxiAgentJourney proves an autonomous agent can drive a full no-mistakes
 // pipeline headlessly through the `no-mistakes axi` surface in an isolated
 // dummy environment: init installs the skill, the home view reports state,
