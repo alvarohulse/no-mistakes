@@ -79,8 +79,8 @@ commands:
 		t.Fatalf("config source kinds = %q, want global,branch,default,machine-local", kinds)
 	}
 	firstMachine := configSourceByKind(t, firstRun.ConfigSources, db.ConfigSourceMachine)
-	if firstMachine.Path != path {
-		t.Fatalf("stored machine path = %q, want %q", firstMachine.Path, path)
+	if wantPath := canonicalMachinePath(t, path); firstMachine.Path != wantPath {
+		t.Fatalf("stored machine path = %q, want %q", firstMachine.Path, wantPath)
 	}
 
 	updated := `repo: git@github.com:test/repo.git
@@ -194,8 +194,8 @@ func TestLoadMachineRepoConfigAcceptsEquivalentBoundRemoteAndDigestsBytes(t *tes
 	if loaded.Config.Agent != types.AgentOpenCode || loaded.Config.Commands.Test != "machine-test" {
 		t.Fatalf("loaded config = %+v, want machine agent and test command", loaded.Config)
 	}
-	if loaded.Path != path {
-		t.Fatalf("path = %q, want canonical %q", loaded.Path, path)
+	if wantPath := canonicalMachinePath(t, path); loaded.Path != wantPath {
+		t.Fatalf("path = %q, want canonical %q", loaded.Path, wantPath)
 	}
 	wantDigest := sha256.Sum256(data)
 	if loaded.Digest != hex.EncodeToString(wantDigest[:]) {
@@ -502,6 +502,19 @@ func fixedEnv(path string) func(string) (string, bool) {
 		}
 		return path, true
 	}
+}
+
+// canonicalMachinePath resolves a path the same way loadMachineRepoConfig
+// canonicalizes NM_REPO_CONFIG before storing it (filepath.EvalSymlinks), so
+// path assertions match the stored value on platforms whose temp dirs are
+// symlinks (macOS /var -> /private/var) or 8.3 short names (Windows RUNNER~1).
+func canonicalMachinePath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolve canonical machine path %q: %v", path, err)
+	}
+	return resolved
 }
 
 func writeMachineRepoConfig(t *testing.T, dir, contents string) string {
