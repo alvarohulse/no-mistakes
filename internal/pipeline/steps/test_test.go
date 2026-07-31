@@ -371,67 +371,186 @@ func TestTestStep_TestChangesSurviveFailedFixRound(t *testing.T) {
 	}
 }
 
-func TestTestStep_EvidenceAgentModifiesExistingTest_NeedsApproval(t *testing.T) {
-	for _, staged := range []bool{false, true} {
-		name := "unstaged"
-		if staged {
-			name = "staged"
+func TestTestStep_EvidenceAgentTestFileMutations_NeedOneExplicitApproval(t *testing.T) {
+	tests := []struct {
+		name            string
+		oldPath         string
+		newPath         string
+		mutation        string
+		wantFile        string
+		descriptionText []string
+	}{
+		{
+			name:            "modified",
+			oldPath:         "component behavior_test.go",
+			newPath:         "component behavior_test.go",
+			mutation:        "modify",
+			wantFile:        "component behavior_test.go",
+			descriptionText: []string{"existing test file modified by agent"},
+		},
+		{
+			name:            "deleted",
+			oldPath:         "component behavior_test.go",
+			mutation:        "delete",
+			wantFile:        "component behavior_test.go",
+			descriptionText: []string{"existing test file deleted by agent"},
+		},
+		{
+			name:            "renamed/test to test",
+			oldPath:         "old component_test.go",
+			newPath:         "new component_test.go",
+			mutation:        "rename",
+			wantFile:        "new component_test.go",
+			descriptionText: []string{"test file renamed by agent", "old component_test.go", "new component_test.go"},
+		},
+		{
+			name:            "renamed/test to non-test",
+			oldPath:         "old component_test.go",
+			newPath:         "component.go",
+			mutation:        "rename",
+			wantFile:        "component.go",
+			descriptionText: []string{"test file renamed by agent", "old component_test.go", "component.go"},
+		},
+		{
+			name:            "renamed/non-test to test",
+			oldPath:         "old component.go",
+			newPath:         "new component_test.go",
+			mutation:        "rename",
+			wantFile:        "new component_test.go",
+			descriptionText: []string{"test file renamed by agent", "old component.go", "new component_test.go"},
+		},
+	}
+	for _, tt := range tests {
+		for _, staged := range []bool{false, true} {
+			name := tt.name + "/unstaged"
+			if staged {
+				name = tt.name + "/staged"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, _ := setupGitRepo(t)
+				oldFullPath := filepath.Join(dir, tt.oldPath)
+				newFullPath := filepath.Join(dir, tt.newPath)
+				if err := os.WriteFile(oldFullPath, []byte("package component\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", tt.oldPath)
+				gitCmd(t, dir, "commit", "-m", "add component file")
+				headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+				ag := &mockAgent{
+					name: "test",
+					runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						var err error
+						switch tt.mutation {
+						case "modify":
+							err = os.WriteFile(oldFullPath, []byte("package component\n\n// weakened assertion\n"), 0o644)
+						case "delete":
+							err = os.Remove(oldFullPath)
+						case "rename":
+							err = os.Rename(oldFullPath, newFullPath)
+						}
+						if err != nil {
+							return nil, err
+						}
+						if staged {
+							gitCmd(t, dir, "add", "--all")
+						}
+						return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"tests passed","tested":["go test ./..."],"testing_summary":"tests passed"}`)}, nil
+					},
+				}
+				sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+				outcome, err := (&TestStep{}).Execute(sctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !outcome.NeedsApproval {
+					t.Fatal("expected approval when the agent mutates a test file")
+				}
+
+				var findings Findings
+				if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+					t.Fatal(err)
+				}
+				if len(findings.Items) != 1 {
+					t.Fatalf("expected one test-file finding, got %+v", findings.Items)
+				}
+				finding := findings.Items[0]
+				if finding.Severity != "warning" || finding.Action != types.ActionAskUser {
+					t.Fatalf("test-file finding = severity %q action %q, want warning/%s", finding.Severity, finding.Action, types.ActionAskUser)
+				}
+				if finding.File != tt.wantFile {
+					t.Fatalf("test-file finding path = %q, want %q", finding.File, tt.wantFile)
+				}
+				for _, text := range tt.descriptionText {
+					if !strings.Contains(finding.Description, text) {
+						t.Fatalf("test-file finding description = %q, want %q", finding.Description, text)
+					}
+				}
+				if !finding.RequiresExplicitApproval {
+					t.Fatal("test-file finding must require explicit approval")
+				}
+			})
 		}
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			dir, baseSHA, _ := setupGitRepo(t)
-			const testFile = "component behavior_test.go"
-			testPath := filepath.Join(dir, testFile)
-			if err := os.WriteFile(testPath, []byte("package component\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, dir, "add", testFile)
-			gitCmd(t, dir, "commit", "-m", "add component test")
-			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	}
+}
 
-			ag := &mockAgent{
-				name: "test",
-				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-					if err := os.WriteFile(testPath, []byte("package component\n\n// weakened assertion\n"), 0o644); err != nil {
-						return nil, err
-					}
-					if staged {
-						gitCmd(t, dir, "add", testFile)
-					}
-					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"tests passed","tested":["go test ./..."],"testing_summary":"tests passed"}`)}, nil
-				},
-			}
-			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+func TestTestStep_RetainsDeletionAndRenameApprovalsFromPreviousRound(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"tests passed","tested":["focused check"],"testing_summary":"tests passed"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
 
-			outcome, err := (&TestStep{}).Execute(sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !outcome.NeedsApproval {
-				t.Fatal("expected approval when the agent modifies an existing test file")
-			}
+	const deletedPath = "deleted behavior_test.go"
+	const oldRenamePath = "old -> behavior_test.go"
+	const newRenamePath = "new -> behavior_test.go"
+	priorFindings, err := json.Marshal(Findings{Items: testFileChangeFindings([]testFileChange{
+		{Path: deletedPath, Kind: testFileDeleted},
+		{Path: newRenamePath, PreviousPath: oldRenamePath, Kind: testFileRenamed},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorFindingsJSON := string(priorFindings)
+	if _, err := sctx.DB.InsertStepRound(sctx.StepResultID, 1, "initial", &priorFindingsJSON, nil, 10); err != nil {
+		t.Fatal(err)
+	}
 
-			var findings Findings
-			if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
-				t.Fatal(err)
-			}
-			if len(findings.Items) != 1 {
-				t.Fatalf("expected one modified-test-file finding, got %+v", findings.Items)
-			}
-			finding := findings.Items[0]
-			if finding.Severity != "warning" || finding.Action != types.ActionAskUser {
-				t.Fatalf("modified-test-file finding = severity %q action %q, want warning/%s", finding.Severity, finding.Action, types.ActionAskUser)
-			}
-			if finding.File != testFile {
-				t.Fatalf("modified-test-file finding path = %q, want %q", finding.File, testFile)
-			}
-			if !strings.Contains(finding.Description, "existing test file modified by agent") {
-				t.Fatalf("modified-test-file finding description = %q", finding.Description)
-			}
-			if !finding.RequiresExplicitApproval {
-				t.Fatal("modified-test-file finding must require explicit approval")
-			}
-		})
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("expected prior test-file mutations to continue requiring approval")
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 2 {
+		t.Fatalf("retained findings = %+v, want deletion and rename", findings.Items)
+	}
+	for _, finding := range findings.Items {
+		if finding.Action != types.ActionAskUser || !finding.RequiresExplicitApproval {
+			t.Fatalf("retained finding = %+v, want explicit ask-user approval", finding)
+		}
+	}
+	if findings.Items[0].File != deletedPath {
+		t.Fatalf("deletion path = %q, want %q", findings.Items[0].File, deletedPath)
+	}
+	if findings.Items[1].File != newRenamePath || !strings.Contains(findings.Items[1].Description, oldRenamePath) {
+		t.Fatalf("rename finding = %+v, want %q -> %q", findings.Items[1], oldRenamePath, newRenamePath)
 	}
 }
 

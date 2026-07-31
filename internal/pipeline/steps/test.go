@@ -282,8 +282,13 @@ func testFileChangeFindings(changes []testFileChange) []Finding {
 	findings := make([]Finding, 0, len(changes))
 	for _, change := range changes {
 		description := fmt.Sprintf("new test file written by agent: %s", change.Path)
-		if change.Kind == testFileModified {
+		switch change.Kind {
+		case testFileModified:
 			description = fmt.Sprintf("existing test file modified by agent: %s", change.Path)
+		case testFileDeleted:
+			description = fmt.Sprintf("existing test file deleted by agent: %s", change.Path)
+		case testFileRenamed:
+			description = fmt.Sprintf("test file renamed by agent: %s -> %s", change.PreviousPath, change.Path)
 		}
 		findings = append(findings, Finding{
 			Severity:                 "warning",
@@ -332,6 +337,17 @@ func testFileChangeFromFinding(finding Finding) (testFileChange, bool) {
 	}
 	if finding.Description == fmt.Sprintf("existing test file modified by agent: %s", finding.File) {
 		return testFileChange{Path: finding.File, Kind: testFileModified}, true
+	}
+	if finding.Description == fmt.Sprintf("existing test file deleted by agent: %s", finding.File) {
+		return testFileChange{Path: finding.File, Kind: testFileDeleted}, true
+	}
+	const renamePrefix = "test file renamed by agent: "
+	renameSuffix := " -> " + finding.File
+	if strings.HasPrefix(finding.Description, renamePrefix) && strings.HasSuffix(finding.Description, renameSuffix) {
+		previousPath := strings.TrimSuffix(strings.TrimPrefix(finding.Description, renamePrefix), renameSuffix)
+		if previousPath != "" {
+			return testFileChange{Path: finding.File, PreviousPath: previousPath, Kind: testFileRenamed}, true
+		}
 	}
 	return testFileChange{}, false
 }
