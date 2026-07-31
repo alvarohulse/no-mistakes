@@ -220,7 +220,12 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) string {
 		rounds[sr.ID] = r
 	}
 
-	return BuildPipelineStatusSummary(steps, rounds)
+	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+	if err != nil {
+		slog.Warn("failed to query agent invocations for pipeline summary", "error", err)
+	}
+
+	return buildPipelineStatusSummary(steps, rounds, invocations)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -269,6 +274,14 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 	}
 	if testingMD != "" {
 		sections = appendGeneratedSections(whatChanged, riskLine, "", pipelineMD)
+		core := prependIntentSection(sections, sctx)
+		if scm.PRBodyLen(core) <= bodyLimit {
+			return core
+		}
+	}
+	withoutTelemetry := pipelineSectionWithoutAgentTelemetry(pipelineMD)
+	if withoutTelemetry != pipelineMD {
+		sections = appendGeneratedSections(whatChanged, riskLine, "", withoutTelemetry)
 		core := prependIntentSection(sections, sctx)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
@@ -453,6 +466,11 @@ func truncatePipelineSection(pipelineMD string, maxBytes int) string {
 	}
 
 	header, updates := splitPipelineSectionHeader(pipelineMD)
+	_, updates = splitPipelineAgentTelemetry(updates)
+	withoutTelemetry := header + updates
+	if len(withoutTelemetry) <= maxBytes {
+		return withoutTelemetry
+	}
 	groups := parsePipelineUpdateGroups(updates)
 	totalUnits := countPipelineUpdateUnits(groups)
 	if totalUnits == 0 {
@@ -475,12 +493,14 @@ func truncatePipelineSection(pipelineMD string, maxBytes int) string {
 
 func minimumPipelineOmissionSection(pipelineMD string) string {
 	header, updates := splitPipelineSectionHeader(pipelineMD)
+	_, updates = splitPipelineAgentTelemetry(updates)
 	totalUnits := countPipelineUpdateUnits(parsePipelineUpdateGroups(updates))
 	return header + pipelineUpdatesOmissionMarker(totalUnits) + "\n"
 }
 
 func minimumPipelineRetainingLatestUpdate(pipelineMD string) string {
 	header, updates := splitPipelineSectionHeader(pipelineMD)
+	_, updates = splitPipelineAgentTelemetry(updates)
 	groups := parsePipelineUpdateGroups(updates)
 	totalUnits := countPipelineUpdateUnits(groups)
 	if totalUnits == 0 {
@@ -534,6 +554,27 @@ func splitPipelineSectionHeader(pipelineMD string) (string, string) {
 
 	headerEnd := len(heading) + introEnd + len("\n\n")
 	return pipelineMD[:headerEnd], pipelineMD[headerEnd:]
+}
+
+func splitPipelineAgentTelemetry(updates string) (string, string) {
+	if !strings.HasPrefix(updates, pipelineAgentTelemetryTableHeader) {
+		return "", updates
+	}
+	tableEnd := strings.Index(updates, "\n\n")
+	if tableEnd < 0 {
+		return updates, ""
+	}
+	tableEnd += len("\n\n")
+	return updates[:tableEnd], updates[tableEnd:]
+}
+
+func pipelineSectionWithoutAgentTelemetry(pipelineMD string) string {
+	header, updates := splitPipelineSectionHeader(pipelineMD)
+	telemetry, updates := splitPipelineAgentTelemetry(updates)
+	if telemetry == "" {
+		return pipelineMD
+	}
+	return header + updates
 }
 
 func parsePipelineUpdateGroups(updates string) []pipelineUpdateGroup {

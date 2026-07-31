@@ -369,7 +369,7 @@ no-mistakes stats --agents
 no-mistakes stats --run <id>
 ```
 
-This detailed performance evidence stays local in `state.sqlite`; it is not sent to telemetry.
+The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry. The generated PR's existing Pipeline section includes only the compact step/round, top-level invocation, and nested-agent attribution subset.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes doctor

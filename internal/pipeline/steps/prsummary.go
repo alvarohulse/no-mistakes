@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	maxEmbeddedArtifactBytes       = 16 * 1024
-	maxEmbeddedArtifactsTotalBytes = 32 * 1024
-	noMistakesPRSignature          = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
+	maxEmbeddedArtifactBytes          = 16 * 1024
+	maxEmbeddedArtifactsTotalBytes    = 32 * 1024
+	noMistakesPRSignature             = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
+	pipelineAgentTelemetryTableHeader = "| Step | Agent (via) | Nested agents |\n| --- | --- | --- |\n"
 )
 
 type testingArtifactRenderState struct {
@@ -75,6 +76,10 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 }
 
 func BuildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
+	return buildPipelineStatusSummary(steps, rounds, nil)
+}
+
+func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation) string {
 	var statusLines []string
 	for _, sr := range steps {
 		if shouldOmitPipelineStep(sr) {
@@ -98,12 +103,69 @@ func BuildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.
 	b.WriteString("## Pipeline\n\n")
 	b.WriteString(noMistakesPRSignature)
 	b.WriteString("\n\n")
+	b.WriteString(agentTelemetryTable(invocations))
 	for _, line := range statusLines {
 		b.WriteString("<details>\n<summary>")
 		b.WriteString(line)
 		b.WriteString("</summary>\n</details>\n")
 	}
 	return b.String()
+}
+
+func agentTelemetryTable(invocations []db.AgentInvocation) string {
+	if len(invocations) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(pipelineAgentTelemetryTableHeader)
+	for _, invocation := range invocations {
+		step := stepDisplayName(types.StepName(invocation.StepName))
+		if invocation.Round > 0 {
+			step += fmt.Sprintf(" r%d", invocation.Round)
+		}
+		agentName := valueOrUnreported(invocation.Agent)
+		invocationMode := valueOrUnreported(string(invocation.InvocationMode))
+		fmt.Fprintf(&b, "| %s | %s (%s) | %s |\n",
+			markdownTableCell(step),
+			markdownTableCell(agentName),
+			markdownTableCell(invocationMode),
+			markdownTableCell(agentObservationsLabel(invocation)),
+		)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func agentObservationsLabel(invocation db.AgentInvocation) string {
+	if !invocation.AgentObservationsReported {
+		return "-"
+	}
+	if len(invocation.AgentObservations) == 0 {
+		return "none"
+	}
+
+	observations := make([]string, 0, len(invocation.AgentObservations))
+	for _, observation := range invocation.AgentObservations {
+		observations = append(observations, fmt.Sprintf("%s (%s)",
+			valueOrUnreported(observation.Identity),
+			valueOrUnreported(string(observation.InvocationMode)),
+		))
+	}
+	return strings.Join(observations, ", ")
+}
+
+func valueOrUnreported(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func markdownTableCell(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // BuildTestingSummary extracts a deterministic Testing section from the test step.
