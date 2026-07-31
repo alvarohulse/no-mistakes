@@ -22,6 +22,16 @@ func reviewWorkload(ctx context.Context, workDir, base, head string) *agent.Invo
 	return &agent.InvocationWorkload{Files: files, Lines: lines}
 }
 
+func effectiveBaseBranch(sctx *pipeline.StepContext) string {
+	if stackedOn := strings.TrimSpace(sctx.Run.StackedOn); stackedOn != "" {
+		return stackedOn
+	}
+	if defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch); defaultBranch != "" {
+		return defaultBranch
+	}
+	return "main"
+}
+
 // resolveBaseSHA returns a usable base SHA for diff/log operations.
 // When baseSHA is the zero ref (new branch push), it tries git merge-base
 // against the default branch, falling back to the empty tree SHA.
