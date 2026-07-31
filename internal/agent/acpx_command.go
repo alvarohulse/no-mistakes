@@ -97,7 +97,7 @@ func splitACPXCommandLine(value string) ([]string, error) {
 			hasPart = true
 			continue
 		}
-		if char == ' ' || char == '\t' || char == '\r' || char == '\n' {
+		if isECMAScriptWhitespace(char) {
 			flush()
 			continue
 		}
@@ -119,9 +119,31 @@ func splitACPXCommandLine(value string) ([]string, error) {
 }
 
 func quoteACPXCommandArg(arg string) string {
-	if arg != "" && !strings.ContainsAny(arg, " \t\r\n'\"\\") {
+	if arg != "" && strings.IndexFunc(arg, acpxCommandArgNeedsQuotes) < 0 {
 		return arg
 	}
 	replacer := strings.NewReplacer("\\", "\\\\", "\"", "\\\"")
 	return "\"" + replacer.Replace(arg) + "\""
+}
+
+func acpxCommandArgNeedsQuotes(char rune) bool {
+	return isECMAScriptWhitespace(char) || char == '\'' || char == '"' || char == '\\'
+}
+
+// isECMAScriptWhitespace matches the current ECMAScript \s character set used
+// by acpx's command tokenizer. unicode.IsSpace is intentionally broader: it
+// includes U+0085, which acpx retains inside an argument.
+func isECMAScriptWhitespace(char rune) bool {
+	if char >= '\u0009' && char <= '\u000d' {
+		return true
+	}
+	if char >= '\u2000' && char <= '\u200a' {
+		return true
+	}
+	switch char {
+	case '\u0020', '\u00a0', '\u1680', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff':
+		return true
+	default:
+		return false
+	}
 }
