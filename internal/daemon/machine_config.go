@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 const machineRepoConfigEnv = "NM_REPO_CONFIG"
@@ -26,6 +28,11 @@ type machineRepoConfig struct {
 
 type repoConfigInput struct {
 	Config *config.RepoConfig
+	Source *db.ConfigSource
+}
+
+type globalConfigInput struct {
+	Config *config.GlobalConfig
 	Source *db.ConfigSource
 }
 
@@ -106,6 +113,38 @@ func loadRepoConfigInput(path, kind, ref string) (*repoConfigInput, error) {
 	return repoConfigInputFromBytes(repoConfig, data, kind, ref), nil
 }
 
+func loadGlobalConfigInput(path string) (*globalConfigInput, error) {
+	resolvedPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	resolvedPath = filepath.Clean(resolvedPath)
+	if target, err := filepath.EvalSymlinks(resolvedPath); err == nil {
+		resolvedPath = target
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &globalConfigInput{Config: config.DefaultGlobalConfig()}, nil
+		}
+		return nil, err
+	}
+	globalConfig, err := config.LoadGlobalFromBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	return &globalConfigInput{
+		Config: globalConfig,
+		Source: &db.ConfigSource{
+			Kind:   db.ConfigSourceGlobal,
+			Digest: configDigest(data),
+			Path:   resolvedPath,
+		},
+	}, nil
+}
+
 func repoConfigInputFromBytes(repoConfig *config.RepoConfig, data []byte, kind, ref string) *repoConfigInput {
 	return &repoConfigInput{
 		Config: repoConfig,
@@ -113,7 +152,10 @@ func repoConfigInputFromBytes(repoConfig *config.RepoConfig, data []byte, kind, 
 	}
 }
 
-func effectiveRepoConfigAndSources(global *config.GlobalConfig, pushed, trusted *repoConfigInput, machine *machineRepoConfig) (*config.RepoConfig, []db.ConfigSource) {
+func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *repoConfigInput, machine *machineRepoConfig) (*config.RepoConfig, []db.ConfigSource) {
+	if global == nil {
+		global = &globalConfigInput{Config: config.DefaultGlobalConfig()}
+	}
 	if pushed == nil {
 		pushed = &repoConfigInput{Config: &config.RepoConfig{}}
 	}
@@ -130,18 +172,24 @@ func effectiveRepoConfigAndSources(global *config.GlobalConfig, pushed, trusted 
 		return effective
 	}
 	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
-	resolved := config.Merge(global, effective)
+	if machine == nil {
+		return effective, nil
+	}
+	resolved := config.Merge(global.Config, effective)
 
 	var sources []db.ConfigSource
+	if global.Source != nil && !reflect.DeepEqual(resolved, config.Merge(config.DefaultGlobalConfig(), effective)) {
+		sources = append(sources, *global.Source)
+	}
 	if pushed.Source != nil {
 		withoutPushed := resolve(&config.RepoConfig{}, trustedConfig, allowRepoCommands)
-		if !reflect.DeepEqual(resolved, config.Merge(global, withoutPushed)) {
+		if !reflect.DeepEqual(resolved, config.Merge(global.Config, withoutPushed)) {
 			sources = append(sources, *pushed.Source)
 		}
 	}
 	if trusted != nil && trusted.Source != nil {
 		withoutTrusted := resolve(pushed.Config, nil, false)
-		if !reflect.DeepEqual(resolved, config.Merge(global, withoutTrusted)) {
+		if !reflect.DeepEqual(resolved, config.Merge(global.Config, withoutTrusted)) {
 			sources = append(sources, *trusted.Source)
 		}
 	}
@@ -182,6 +230,112 @@ func validateRecoveredMachineRepoConfig(sources []db.ConfigSource, machine *mach
 		return fmt.Errorf("recovered run %s digest differs from launch", machineRepoConfigEnv)
 	}
 	return nil
+}
+
+func loadRecordedRunConfig(ctx context.Context, run *db.Run, workDir string, machine *machineRepoConfig) (*config.Config, error) {
+	globalInput, err := loadRecordedGlobalConfig(run.ConfigSources)
+	if err != nil {
+		return nil, err
+	}
+	pushedInput, err := loadRecordedRepoConfig(ctx, workDir, run.ConfigSources, db.ConfigSourceBranch, true)
+	if err != nil {
+		return nil, err
+	}
+	trustedInput, err := loadRecordedRepoConfig(ctx, workDir, run.ConfigSources, db.ConfigSourceDefault, false)
+	if err != nil {
+		return nil, err
+	}
+	effective, sources := effectiveRepoConfigAndSources(globalInput, pushedInput, trustedInput, machine)
+	if !reflect.DeepEqual(sources, run.ConfigSources) {
+		return nil, fmt.Errorf("recovered run config provenance differs from launch")
+	}
+	return config.Merge(globalInput.Config, effective), nil
+}
+
+func loadRecordedGlobalConfig(sources []db.ConfigSource) (*globalConfigInput, error) {
+	source, err := uniqueConfigSource(sources, db.ConfigSourceGlobal)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return &globalConfigInput{Config: config.DefaultGlobalConfig()}, nil
+	}
+	if strings.TrimSpace(source.Path) == "" {
+		return nil, fmt.Errorf("recorded global config source has no path")
+	}
+	data, err := os.ReadFile(source.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read launch-time global config: %w", err)
+	}
+	if configDigest(data) != source.Digest {
+		return nil, fmt.Errorf("recovered run global config digest differs from launch")
+	}
+	globalConfig, err := config.LoadGlobalFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse launch-time global config: %w", err)
+	}
+	copy := *source
+	return &globalConfigInput{Config: globalConfig, Source: &copy}, nil
+}
+
+func loadRecordedRepoConfig(ctx context.Context, workDir string, sources []db.ConfigSource, kind string, emptyWhenMissing bool) (*repoConfigInput, error) {
+	source, err := uniqueConfigSource(sources, kind)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		if emptyWhenMissing {
+			return &repoConfigInput{Config: &config.RepoConfig{}}, nil
+		}
+		return nil, nil
+	}
+	if strings.TrimSpace(source.Ref) == "" {
+		return nil, fmt.Errorf("recorded %s config source has no ref", kind)
+	}
+	data, err := git.ShowFileBytes(ctx, workDir, source.Ref, ".no-mistakes.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("read launch-time %s config: %w", kind, err)
+	}
+	if configDigest(data) != source.Digest {
+		return nil, fmt.Errorf("recovered run %s config digest differs from launch", kind)
+	}
+	repoConfig, err := config.LoadRepoFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse launch-time %s config: %w", kind, err)
+	}
+	copy := *source
+	return &repoConfigInput{Config: repoConfig, Source: &copy}, nil
+}
+
+func uniqueConfigSource(sources []db.ConfigSource, kind string) (*db.ConfigSource, error) {
+	var found *db.ConfigSource
+	for i := range sources {
+		if sources[i].Kind != kind {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("run records multiple %s config sources", kind)
+		}
+		copy := sources[i]
+		found = &copy
+	}
+	return found, nil
+}
+
+func hasConfigSourceKind(sources []db.ConfigSource, kind string) bool {
+	for _, source := range sources {
+		if source.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func repoConfigFromInput(input *repoConfigInput) *config.RepoConfig {
+	if input == nil {
+		return nil
+	}
+	return input.Config
 }
 
 func configDigest(data []byte) string {

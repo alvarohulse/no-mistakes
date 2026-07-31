@@ -183,6 +183,19 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 }
 
 func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) (*config.Config, error) {
+	machineRepoCfg, err := loadMachineRepoConfig(repo, os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRecoveredMachineRepoConfig(run.ConfigSources, machineRepoCfg); err != nil {
+		return nil, err
+	}
+	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceMachine) {
+		return loadRecordedRunConfig(ctx, run, workDir, machineRepoCfg)
+	}
+
+	// Runs launched without NM_REPO_CONFIG retain the historical recovery path
+	// bit-for-bit: reload current global, branch, and trusted-default config.
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
@@ -190,13 +203,6 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	pushedRepoInput, err := loadRepoConfigInput(filepath.Join(workDir, ".no-mistakes.yaml"), db.ConfigSourceBranch, run.HeadSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
-	}
-	machineRepoCfg, err := loadMachineRepoConfig(repo, os.LookupEnv)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateRecoveredMachineRepoConfig(run.ConfigSources, machineRepoCfg); err != nil {
-		return nil, err
 	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
@@ -216,7 +222,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return nil, err
 	}
 	trustedRepoInput := loadTrustedRepoConfigInput(ctx, workDir, trustedSHA, run.ID)
-	effectiveRepoCfg, _ := effectiveRepoConfigAndSources(globalCfg, pushedRepoInput, trustedRepoInput, machineRepoCfg)
+	effectiveRepoCfg := config.EffectiveRepoConfig(pushedRepoInput.Config, repoConfigFromInput(trustedRepoInput), trustedRepoInput != nil && trustedRepoInput.Config.AllowRepoCommands)
 	return config.Merge(globalCfg, effectiveRepoCfg), nil
 }
 
@@ -565,7 +571,7 @@ func loadTrustedRepoConfigInput(ctx context.Context, wtDir, trustedSHA, runID st
 		// potentially stale origin/<defaultBranch> ref.
 		return nil
 	}
-	content, err := git.ShowFile(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
+	content, err := git.ShowFileBytes(ctx, wtDir, trustedSHA, ".no-mistakes.yaml")
 	if err != nil {
 		// Path absent on the default branch is the common "repo has no
 		// trusted commands" case; log at debug so it isn't noisy. Other
@@ -574,12 +580,12 @@ func loadTrustedRepoConfigInput(ctx context.Context, wtDir, trustedSHA, runID st
 		slog.Debug("trusted repo config: not present on default branch", "run_id", runID, "sha", trustedSHA, "error", err)
 		return nil
 	}
-	trusted, err := config.LoadRepoFromBytes([]byte(content))
+	trusted, err := config.LoadRepoFromBytes(content)
 	if err != nil {
 		slog.Warn("trusted repo config: parse failed; commands/agent routes from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
 		return nil
 	}
-	return repoConfigInputFromBytes(trusted, []byte(content), db.ConfigSourceDefault, trustedSHA)
+	return repoConfigInputFromBytes(trusted, content, db.ConfigSourceDefault, trustedSHA)
 }
 
 // assertGateTrustedConfigReadable fails a run LOUD when the trusted
@@ -867,12 +873,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}()
 
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
 		trackStartFailure("load_global_config")
 		return "", fmt.Errorf("load global config: %w", err)
 	}
+	globalCfg := globalInput.Config
 	pushedRepoInput, err := loadRepoConfigInput(filepath.Join(wtDir, ".no-mistakes.yaml"), db.ConfigSourceBranch, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -909,7 +916,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trustedRepoCfg = trustedRepoInput.Config
 	}
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalCfg, pushedRepoInput, trustedRepoInput, machineRepoCfg)
+	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalInput, pushedRepoInput, trustedRepoInput, machineRepoCfg)
 	if machineRepoCfg != nil {
 		slog.Warn("NM_REPO_CONFIG is enabled: honoring machine-local repo configuration", "run_id", run.ID)
 	}

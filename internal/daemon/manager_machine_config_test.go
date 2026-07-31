@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -18,6 +19,9 @@ import (
 func TestRunStartMachineRepoConfigOverridesCommittedCommandsAndAgent(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database := newRefreshRunFixture(t)
+	if err := os.WriteFile(p.ConfigFile(), []byte("process_termination_grace: 11s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	repo, _ := setupTestGitRepo(t, p, database, "machine-config-precedence")
 	committed := `agent: claude
 commands:
@@ -71,8 +75,8 @@ commands:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if kinds := configSourceKinds(firstRun.ConfigSources); kinds != "branch,default,machine-local" {
-		t.Fatalf("config source kinds = %q, want branch,default,machine-local", kinds)
+	if kinds := configSourceKinds(firstRun.ConfigSources); kinds != "global,branch,default,machine-local" {
+		t.Fatalf("config source kinds = %q, want global,branch,default,machine-local", kinds)
 	}
 	firstMachine := configSourceByKind(t, firstRun.ConfigSources, db.ConfigSourceMachine)
 	if firstMachine.Path != path {
@@ -251,7 +255,12 @@ func TestLoadMachineRepoConfigRejectsSymlinksAcrossRepositoryBoundary(t *testing
 }
 
 func TestEffectiveRepoConfigSourcesIncludeOnlyContributingCommittedInputs(t *testing.T) {
-	global := &config.GlobalConfig{Agent: types.AgentClaude}
+	globalConfig := config.DefaultGlobalConfig()
+	globalConfig.Agent = types.AgentClaude
+	global := &globalConfigInput{
+		Config: globalConfig,
+		Source: &db.ConfigSource{Kind: db.ConfigSourceGlobal, Digest: "global", Path: "/private/global.yaml"},
+	}
 	pushedConfig, err := config.LoadRepoFromBytes([]byte("ignore_patterns: [vendor/**]\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -272,8 +281,34 @@ func TestEffectiveRepoConfigSourcesIncludeOnlyContributingCommittedInputs(t *tes
 	if effective.Commands.Test != "machine-test" {
 		t.Fatalf("commands.test = %q, want machine-test", effective.Commands.Test)
 	}
-	if kinds := configSourceKinds(sources); kinds != "branch,machine-local" {
-		t.Fatalf("config source kinds = %q, want branch,machine-local; trusted command was fully displaced", kinds)
+	if kinds := configSourceKinds(sources); kinds != "global,branch,machine-local" {
+		t.Fatalf("config source kinds = %q, want global,branch,machine-local; trusted command was fully displaced", kinds)
+	}
+}
+
+func TestEffectiveRepoConfigSourcesDoNotInventDigestForBuiltInGlobalDefaults(t *testing.T) {
+	machineConfig, err := config.LoadRepoFromBytes([]byte("repo: https://github.com/test/repo\ncommands:\n  test: machine-test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := &machineRepoConfig{Config: machineConfig, Path: "/private/machine.yaml", Digest: "machine"}
+	pushed := &repoConfigInput{Config: &config.RepoConfig{}}
+	withoutMachine, sources := effectiveRepoConfigAndSources(&globalConfigInput{Config: config.DefaultGlobalConfig()}, pushed, nil, nil)
+	if withoutMachine.Refresh.Strategy.OrDefault() != types.RefreshStrategyRebase || len(sources) != 0 {
+		t.Fatalf("unset NM_REPO_CONFIG changed defaults or recorded sources: config=%+v sources=%#v", withoutMachine, sources)
+	}
+
+	_, sources = effectiveRepoConfigAndSources(&globalConfigInput{Config: config.DefaultGlobalConfig()}, pushed, nil, machine)
+	if kinds := configSourceKinds(sources); kinds != "machine-local" {
+		t.Fatalf("built-in defaults produced config source kinds %q, want only machine-local", kinds)
+	}
+
+	_, sources = effectiveRepoConfigAndSources(&globalConfigInput{
+		Config: config.DefaultGlobalConfig(),
+		Source: &db.ConfigSource{Kind: db.ConfigSourceGlobal, Digest: "same-as-defaults", Path: "/private/global.yaml"},
+	}, pushed, nil, machine)
+	if kinds := configSourceKinds(sources); kinds != "machine-local" {
+		t.Fatalf("semantically empty global file produced config source kinds %q, want only machine-local", kinds)
 	}
 }
 
@@ -335,6 +370,101 @@ func TestLoadRecoveredConfigRefusesMachineConfigDigestDrift(t *testing.T) {
 	}
 	if _, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath); err == nil || !strings.Contains(err.Error(), "digest differs") {
 		t.Fatalf("drift recovery error = %v, want digest mismatch refusal", err)
+	}
+}
+
+func TestLoadRecoveredConfigRefusesGlobalConfigDigestDrift(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	globalBytes := []byte("process_termination_grace: 11s\n")
+	if err := os.WriteFile(p.ConfigFile(), globalBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo, head := setupTestGitRepo(t, p, database, "global-config-recovery")
+	path := writeMachineRepoConfig(t, t.TempDir(), "repo: https://github.com/test/repo\ncommands:\n  test: launch-test\n")
+	t.Setenv(machineRepoConfigEnv, path)
+	machine, err := loadMachineRepoConfig(repo, fixedEnv(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalInput, err := loadGlobalConfigInput(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []db.ConfigSource{*globalInput.Source, {Kind: db.ConfigSourceMachine, Digest: machine.Digest, Path: machine.Path}}
+	if err := database.UpdateRunConfigSources(run.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+	run.ConfigSources = sources
+	manager := NewRunManager(database, p, nil)
+	t.Cleanup(manager.Shutdown)
+
+	cfg, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath)
+	if err != nil {
+		t.Fatalf("load unchanged recovered config: %v", err)
+	}
+	if cfg.ProcessTerminationGrace.String() != "11s" {
+		t.Fatalf("recovered process grace = %s, want 11s", cfg.ProcessTerminationGrace)
+	}
+	if err := os.WriteFile(p.ConfigFile(), []byte("process_termination_grace: 12s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath); err == nil || !strings.Contains(err.Error(), "global config digest differs") {
+		t.Fatalf("global drift recovery error = %v, want digest mismatch refusal", err)
+	}
+}
+
+func TestLoadRecoveredConfigUsesLaunchRefsAfterCommittedConfigAdvances(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	repo, _ := setupTestGitRepo(t, p, database, "committed-config-recovery")
+	launchBytes := []byte("commands:\n  lint: launch-lint\nignore_patterns: [launch/**]\n")
+	configPath := filepath.Join(repo.WorkingPath, ".no-mistakes.yaml")
+	if err := os.WriteFile(configPath, launchBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "launch config")
+	launchHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	path := writeMachineRepoConfig(t, t.TempDir(), "repo: https://github.com/test/repo\ncommands:\n  test: launch-test\n")
+	t.Setenv(machineRepoConfigEnv, path)
+	machine, err := loadMachineRepoConfig(repo, fixedEnv(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := config.LoadRepoFromBytes(launchBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalInput := &globalConfigInput{Config: config.DefaultGlobalConfig()}
+	pushed := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceBranch, launchHead)
+	trusted := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceDefault, launchHead)
+	_, sources := effectiveRepoConfigAndSources(globalInput, pushed, trusted, machine)
+	run, err := database.InsertRun(repo.ID, "main", launchHead, refreshTestZeroSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunConfigSources(run.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+	run.ConfigSources = sources
+
+	if err := os.WriteFile(configPath, []byte("commands:\n  lint: changed-lint\nignore_patterns: [changed/**]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "advance config")
+	manager := NewRunManager(database, p, nil)
+	t.Cleanup(manager.Shutdown)
+
+	cfg, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath)
+	if err != nil {
+		t.Fatalf("load pinned recovered config: %v", err)
+	}
+	if cfg.Commands.Lint != "launch-lint" || !reflect.DeepEqual(cfg.IgnorePatterns, []string{"launch/**"}) {
+		t.Fatalf("recovered committed config = lint %q ignore %v, want launch values", cfg.Commands.Lint, cfg.IgnorePatterns)
 	}
 }
 

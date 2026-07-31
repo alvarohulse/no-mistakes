@@ -1475,15 +1475,21 @@ func DefaultGlobalConfig() *GlobalConfig {
 
 // LoadGlobal reads global config from path. Returns defaults if file doesn't exist.
 func LoadGlobal(path string) (*GlobalConfig, error) {
-	cfg := DefaultGlobalConfig()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return cfg, nil
+			return DefaultGlobalConfig(), nil
 		}
 		return nil, fmt.Errorf("read global config: %w", err)
 	}
+	return LoadGlobalFromBytes(data)
+}
+
+// LoadGlobalFromBytes parses global configuration from exact source bytes.
+// It is used by recovery to revalidate a launch-recorded global config digest
+// without silently switching to a newer file.
+func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
+	cfg := DefaultGlobalConfig()
 
 	var raw globalConfigRaw
 	dec := yaml.NewDecoder(bytes.NewReader(data))

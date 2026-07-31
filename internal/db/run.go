@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	ConfigSourceGlobal  = "global"
 	ConfigSourceBranch  = "branch"
 	ConfigSourceDefault = "default"
 	ConfigSourceMachine = "machine-local"
