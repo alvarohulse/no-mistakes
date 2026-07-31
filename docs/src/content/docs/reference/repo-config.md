@@ -172,7 +172,7 @@ Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `
 
 Each supported native backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible native routes also fail.
 
-Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. Failing before launch prevents a configured model from silently normalizing or disappearing.
+Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins; the model compatibility rule remains fail-closed rather than silently claiming a model the ACP backend may normalize.
 
 For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
 
@@ -190,7 +190,7 @@ When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
-ACP targets and aliases remain valid agent-only step routes when no native CLI override is required. Global `agent_args_override` supports native agents only, and first-class step models currently do too: ACP construction fails rather than silently discarding model or reasoning selection.
+ACP targets and aliases accept global `agent_args_override` entries when their target spawn command is composable. First-class step models remain native-only: ACP construction fails rather than silently claiming a model the backend may normalize.
 
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
 

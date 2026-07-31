@@ -403,7 +403,7 @@ func TestResolveAgent_AllowsACPRouteWithoutUnsupportedOverride(t *testing.T) {
 	}
 }
 
-func TestLoadGlobal_AgentArgsOverrideRejectsACPTargetActionably(t *testing.T) {
+func TestLoadGlobal_AgentArgsOverrideAcceptsACPTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := `review:
   agent: cursor
@@ -411,18 +411,22 @@ agent_args_override:
   cursor:
     - --model
     - claude-opus-4-8
+  "acp:gemini":
+    - --profile
+    - work
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := LoadGlobal(path)
-	if err == nil {
-		t.Fatal("expected ACP agent_args_override to be rejected")
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal() error = %v", err)
 	}
-	for _, want := range []string{"cursor", "ACP", "agent_args_override", "not supported"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error should contain %q, got %v", want, err)
-		}
+	if got, want := cfg.AgentArgsOverride["cursor"], []string{"--model", "claude-opus-4-8"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("cursor args = %v, want %v", got, want)
+	}
+	if got, want := cfg.AgentArgsOverride["acp:gemini"], []string{"--profile", "work"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("acp:gemini args = %v, want %v", got, want)
 	}
 }

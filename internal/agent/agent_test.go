@@ -79,12 +79,12 @@ func TestNewWithOptions_ThreadsProcessTerminationGraceToNativeCommands(t *testin
 	}
 }
 
-func TestNewWithOptions_ACPRejectsIgnoredExtraArgs(t *testing.T) {
-	_, err := NewWithOptions(types.AgentCursor, "acpx", []string{"--model", "claude-opus-4-8"}, Options{})
+func TestNewWithOptions_ACPArgsRequireComposableRawCommand(t *testing.T) {
+	_, err := NewWithOptions("acp:gemini", "acpx", []string{"--model", "gemini-3.5-pro"}, Options{})
 	if err == nil {
-		t.Fatal("expected ACP extra args to be rejected")
+		t.Fatal("expected ACP extra args without a raw command to be rejected")
 	}
-	for _, want := range []string{"cursor", "ACP", "agent_args_override", "not supported"} {
+	for _, want := range []string{"gemini", "agent_args_override", "acp_registry_overrides.gemini"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error should contain %q, got %v", want, err)
 		}
