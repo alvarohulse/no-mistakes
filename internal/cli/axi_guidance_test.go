@@ -59,7 +59,7 @@ var canonicalPostWorktreeParkPhrases = []string{
 	"fresh run",
 }
 
-const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"
+const canonicalPipelineAgentPrerequisite = "a supported native agent binary (including `agent: cursor`) or an explicit `acp:<target>` through `acpx`"
 
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
 // agent-driving guidance stays in sync across its three surfaces: the skill

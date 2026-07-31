@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. An optional machine-local file can use the same shape with the additional required `repo:` binding described below.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
+`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, and the Review adversary route from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
@@ -123,10 +123,9 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
-`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
-Its availability uses the global `acpx_path` and `acp_registry_overrides.cursor` settings when present.
-`acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` uses the same default command as `cursor`.
+`auto` resolves native agents in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`. If none is available, it probes the registered `acp:cursor` fallback.
+`cursor` is the native `cursor-agent` print-mode backend.
+`acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` keeps the built-in `cursor-agent acp` command.
 Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If the selected explicit agent or `auto` is unavailable, the gate fails before its first pipeline step rather than reporting partial validation as passed.
@@ -138,7 +137,7 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
-After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
+`cursor` and `acp:cursor` are distinct native and ACP backends, so both remain in an ordered fallback list.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
@@ -170,9 +169,9 @@ review:
 
 Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
 
-Each supported backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible routes also fail.
+Each supported backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex/Cursor resumed Review sessions. Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameters. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible routes also fail.
 
-ACP targets and aliases, including `cursor`, accept bracket-free model families. `auto` preserves native-first probe order and falls through to available ACP aliases only for those bare families; the same resolver handles primary and Review-adversary routes. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native backends continue accepting their parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
+ACP targets, including `acp:cursor`, accept bracket-free model families. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native Cursor continues accepting its parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
 
 For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
 
@@ -190,7 +189,7 @@ When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
-ACP targets and aliases accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
+ACP targets accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
 
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
 
@@ -245,12 +244,12 @@ Suppress project-level agent settings and instructions for every gate-agent star
 
 This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, or harness-specific project settings would give a validation agent an operator identity and authority that it must not adopt.
 When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step while preserving user-level agent configuration.
-Codex, Claude, and Pi are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling).
+Codex, Claude, Pi, and Cursor are verified. Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling). Native Cursor and `acp:cursor` always launch with an instruction-free primary workspace and the real run worktree as an added root, even when this option is false.
 The setting applies to both new and resumed sessions.
 
 The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
 It also fails if `agent_args_override` defeats suppression, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
-When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
+When this option is `false`, missing, or `null`, other agents retain their existing project-setting behavior; Cursor's mandatory containment remains active.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 A pushed branch cannot enable it or disable a trusted opt-in.

@@ -5,8 +5,8 @@ description: Supported AI agents, how to pick one, and how they integrate.
 
 `no-mistakes` is pipeline-agent-agnostic by design: the gate should mean the same thing regardless of which supported agent backend you prefer.
 It is not runner-free.
-Every validation run requires a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`.
-The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
+Every validation run requires a supported native agent binary (including `agent: cursor`) or an explicit `acp:<target>` through `acpx`.
+The default `agent: auto` setting picks the first supported native agent and selects the registered `acp:cursor` target only when no native agent is runnable.
 
 The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
@@ -48,7 +48,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
+| Cursor | `cursor-agent` | Subprocess per invocation, Cursor stream JSON |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
 ## Runner requirements
@@ -78,7 +78,7 @@ Running the gate from Antigravity or another Gemini-based coding environment doe
 Choose one of these supported setups:
 
 1. Install any supported native agent CLI and leave `agent: auto`, or select it explicitly in `~/.no-mistakes/config.yaml`.
-2. Install both `cursor-agent` and `acpx`, then leave `agent: auto` or select `agent: cursor`.
+2. Install `cursor-agent`, then leave `agent: auto` or select `agent: cursor`. Install `acpx` too only if you want the `acp:cursor` fallback.
 3. Install `acpx`, confirm that the Gemini ACP target works locally, and configure `agent: acp:gemini`.
 
 ```yaml
@@ -134,8 +134,7 @@ The controller runs the separately routed adversary only when the primary Review
 ### Optional ACP target
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
-`agent: auto` probes native agents and first-class ACP aliases (such as `cursor`), and never auto-selects arbitrary `acp:<target>` entries.
-With a typed model route, `auto` keeps compatible native backends first and considers ACP aliases only for bracket-free model families.
+`agent: auto` probes native agents, then the registered `acp:cursor` fallback, and never auto-selects arbitrary `acp:<target>` entries.
 
 The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns the exact resolution order, fallback-list filtering and retry semantics, and the failure behavior when no entry is runnable.
 
@@ -216,13 +215,13 @@ Five global config fields tune resolution and invocation, and the [Global Config
 
 - [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
 - [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) - extra CLI flags per native agent or composable ACP target spawn for model selection, service tier, reasoning depth, or permission mode, including the reserved-flag rules and smart defaults. Keep it global-only; it reflects your local agent setup rather than repo policy.
-- [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
-- [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
+- [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets, including `acp:cursor`.
+- [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacement of the registered `cursor-agent acp` default, plus their availability-probing rules.
 - [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude and Codex keep one durable reviewer session and a separate review-fixer session per run, every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
+With the default `session_reuse: true`, Claude, Codex, and Cursor keep one durable reviewer session and a separate review-fixer session per run, every rereview still evaluates the entire branch diff, and resume failures fall back to fresh same-role sessions instead of skipping review.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
 
 ## Agent interface
@@ -246,7 +245,7 @@ Each invocation returns:
 - **SessionID** and **Resumed** - the adapter-native session identity and whether this invocation resumed it, when supported
 - **Model** and **Provider** - adapter-observed serving metadata when available, otherwise the controller-configured route identity
 
-One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
+One-shot subprocess agents (Claude, Codex, Cursor, Pi, Copilot CLI, and acpx) are invocation-scoped.
 After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, so agent-spawned test workers, build watchers, and dev servers do not survive the step.
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
@@ -286,6 +285,12 @@ Codex model and config overrides, such as `-m gpt-5.4`, `-c service_tier="priori
 For review-loop reuse, Codex resumes the reported thread with `codex exec resume <id> -`, again reading the prompt from stdin.
 That resume command has a narrower flag surface than `codex exec`, so a resume that rejects an override falls back to a fresh same-role session rather than skipping the review turn.
 
+## Cursor
+
+Spawns `cursor-agent --model <model> -p --output-format stream-json` for each invocation and sends the prompt on stdin. Cursor's terminal `result` event supplies the final text and camelCase usage counters; its `system/init` event supplies the durable session ID used by `--resume`. Cursor exposes no native JSON-schema flag, so structured output uses a soft prompt contract and validates the terminal text before returning it.
+
+Cursor automatically loads repo-controlled `AGENTS.md`, `.cursor/rules/*.mdc`, and `.cursorrules` from its primary workspace. no-mistakes therefore always creates an instruction-free primary `--workspace`, exposes the real run worktree through `--add-dir`, and tells Cursor to target that absolute path for every repository and git operation. The containment is mandatory for fresh and resumed sessions and cannot be replaced through `agent_args_override`.
+
 ## Rovo Dev
 
 Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.rovodev` flags are inserted before no-mistakes' managed serve flags. Communicates via REST API and SSE streaming. Each invocation creates a session, sends the prompt, streams results, then deletes the session. Structured output is handled by injecting schema instructions into a system prompt, then parsing the final text with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, and validates the result against the requested schema while allowing `null` for optional fields.
@@ -313,21 +318,17 @@ Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 
-## ACP aliases
+## Registered Cursor ACP fallback
 
-ACP aliases are first-class agent names that resolve to ACP targets.
-`agent: cursor` is the first alias: it is shorthand for the `cursor` ACP target with the default raw command `cursor-agent acp`, not a separate native backend.
-`agent: acp:cursor` uses that same default command, so either spelling works without an `acp_registry_overrides.cursor` entry.
+`agent: acp:cursor` retains the built-in raw command `cursor-agent acp`, so it works without an `acp_registry_overrides.cursor` entry when both `cursor-agent` and `acpx` are installed. It remains an explicit fallback for Cursor print-mode schema drift and may follow native Cursor in an ordered list: `agent: [cursor, acp:cursor]`.
 
-Because aliases still run through acpx, they use `acpx_path` for the bridge binary and share the same ACP prompt and structured-output behavior as `agent: acp:<target>`.
-Unlike arbitrary `acp:<target>` entries, aliases may participate in `agent: auto` when their availability checks pass.
-The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP availability, bridge-path, command-override, and equivalent-spelling deduplication rules.
+Cursor ACP uses the same mandatory clean-primary-workspace containment as native Cursor while keeping the real worktree as the ACP session cwd. The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP availability, bridge-path, and command-override rules.
 
 ## ACP via acpx
 
 ACP support is optional and requires a separately installed `acpx` binary.
 Use `agent: acp:<target>` to run a target known to acpx, for example `agent: acp:gemini`.
-When the target matches a first-class alias such as `acp:cursor`, no-mistakes supplies that alias' default raw command.
+When the target is `acp:cursor`, no-mistakes supplies its registered default raw command.
 Configure custom target commands in the [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides).
 
 Spawns an `acpx` subprocess for each invocation with `exec -f <prompt-file>`. The prompt (including any appended JSON schema for structured output) is written to a temporary file first so large prompts do not exceed OS command-line length limits, notably the 8191-character cap on Windows. The temp file is removed when the invocation exits. no-mistakes also passes JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
@@ -351,13 +352,14 @@ $ no-mistakes doctor
   – opencode (not found)
   – pi (not found)
   – copilot (not found)
+  – cursor (not found (cursor-agent))
   – acpx (not found)
-  – cursor (not found (cursor-agent, acpx))
+  – acp:cursor (not found (cursor-agent, acpx))
   ✓ gate validation claude is runnable
 ```
 
 `✓` = available, `–` = not found (optional), `✗` = problem detected.
-The standalone `acpx` and `cursor` rows inspect the default binary names.
+The standalone `cursor` row checks native print mode. `acp:cursor` checks the registered ACP fallback separately.
 The `gate validation` line is the decisive result: when the configured global runner is unavailable, doctor fails because a complete gate cannot validate without it.
 See the [Global Config Reference](/no-mistakes/reference/global-config/) for ACP availability and probing behavior.
 Every new validation run resolves its effective agent again after applying any trusted repository-level override.

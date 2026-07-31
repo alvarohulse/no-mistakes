@@ -85,13 +85,12 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 | Values  | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | `auto`                                                                                      |
 
-`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
-`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
-With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
-`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
+`auto` resolves native agents in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`. If none is available, it probes the registered `acp:cursor` fallback.
+`cursor` is the native `cursor-agent` print-mode backend and does not require `acpx`.
+`acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`. `acp:cursor` has the built-in default command `cursor-agent acp` and remains available as an explicit or ordered fallback.
 Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
-If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
+If an explicit agent is unavailable, `auto` finds no native agent or registered ACP fallback, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
 
 You can also set an ordered fallback list:
@@ -101,7 +100,7 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
-After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
+`cursor` and `acp:cursor` are distinct native and ACP backends, so a list such as `[cursor, acp:cursor]` keeps both in that order.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
@@ -129,15 +128,15 @@ review:
   model: {name: gpt-5.6-sol, vendor: openai}
 ```
 
-Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
+Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameter overrides. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
 
 `review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
 
-ACP targets and aliases accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; Cursor receives `cursor-agent --model claude-opus-5 acp`. For `agent: auto`, compatible native backends keep priority, then available ACP aliases are considered for a bare family. Any name containing `[` or `]` is refused during launch-time config validation, including parameterized (`claude-opus-5[effort=high]`), empty, nested, repeated, and unmatched bracket forms. Native backends continue to accept their parameterized model syntax, while `auto` never probes ACP aliases for those names. This narrow rule prevents ACP from silently normalizing a requested variant to the family's default.
+ACP targets accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; `acp:cursor` receives `cursor-agent --model claude-opus-5 acp`. Any name containing `[` or `]` is refused for ACP during launch-time config validation because Cursor ACP normalizes parameterized variants to the family default. Native Cursor continues to accept the exact parameterized model string.
 
 ### acpx_path
 
-Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP aliases such as `agent: cursor`.
+Path to the user-installed `acpx` binary used for `agent: acp:<target>`, including `agent: acp:cursor`.
 
 |         |          |
 | ------- | -------- |
@@ -148,8 +147,8 @@ Path to the user-installed `acpx` binary used for `agent: acp:<target>` and ACP 
 
 Map an ACP target name to a raw ACP agent command.
 When `agent: acp:<target>` matches an override key, no-mistakes runs `acpx --agent <command>` instead of `acpx <target>`.
-ACP aliases use the same target keys. For example, `agent: cursor` and `agent: acp:cursor` resolve to the `cursor` target, so set `cursor` to override the default `cursor-agent acp` command.
-Values are trimmed; a blank or whitespace-only value behaves as no override, so an alias keeps its default command.
+The registered `acp:cursor` target uses the `cursor` override key to replace its default `cursor-agent acp` command.
+Values are trimmed; a blank or whitespace-only value behaves as no override, so a registered target keeps its default command.
 Availability checks always resolve `acpx_path`. They also probe the executable named first in the effective non-blank raw command when it is a bare command name or clean absolute path. Relative, quoted, or escaped raw commands are not pre-probed; `acpx` executes them from the worktree. These checks do not invoke the ACP target or test its credentials.
 
 |         |                     |
@@ -169,7 +168,7 @@ acp_registry_overrides:
 
 Custom binary paths for native agents.
 When set, `no-mistakes` uses this path instead of looking up the binary on `PATH`.
-ACP agents and aliases use `acpx_path` for the bridge; use `acp_registry_overrides` to replace a raw target command such as `cursor-agent acp`.
+ACP agents use `acpx_path` for the bridge; use `acp_registry_overrides` to replace a raw target command such as `cursor-agent acp`.
 
 |         |                                   |
 | ------- | --------------------------------- |
@@ -186,12 +185,13 @@ Default native binary names when no override is set:
 | `opencode` | `opencode` |
 | `pi`       | `pi`       |
 | `copilot`  | `copilot`  |
+| `cursor`   | `cursor-agent` |
 
 ### agent_args_override
 
 Extra CLI flags to pass to each agent.
 Use this to set service tier, reasoning effort, permission mode, model selection where the underlying command supports it, or any other supported flag.
-ACP aliases and explicit `acp:<target>` keys pass their flags into the ACP target's raw spawn command. Cursor flags are inserted before its `acp` subcommand, so one `cursor` target can select model families dynamically. Other ACP raw commands receive configured flags at the end. A registry target with no known raw command fails construction and names the required `acp_registry_overrides.<target>` key instead of silently discarding its flags. The equivalent `cursor` and `acp:cursor` spellings share an override when only one is configured; an exact key wins when both are present.
+The `cursor` key configures native print mode. Explicit `acp:<target>` keys pass their flags into the ACP target's raw spawn command; `acp:cursor` falls back to the legacy `cursor` key only when no exact key exists. Cursor ACP flags are inserted before its `acp` subcommand. Other ACP raw commands receive configured flags at the end. A registry target with no known raw command fails construction and names the required `acp_registry_overrides.<target>` key instead of silently discarding its flags.
 
 |         |                                                                                     |
 | ------- | ----------------------------------------------------------------------------------- |
@@ -209,14 +209,16 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`, `--model`                                                  |
 | `pi`       | `--mode`, `--no-session`                                                                                    |
 | `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
+| `cursor`, `acp:cursor` | `-p`, `--print`, `--output-format`, `resume`, `--resume`, `--continue`, `--workspace`, `--add-dir`, `--trust` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
-The Claude and Codex session-control forms are reserved so no-mistakes can keep reviewer and fixer conversations role-isolated.
+The Claude, Codex, and Cursor session-control forms are reserved so no-mistakes can keep reviewer and fixer conversations role-isolated. Cursor workspace flags are reserved because no-mistakes owns the clean-primary-workspace containment boundary.
 
 Smart defaults:
 
 - For `claude`, supplying `--permission-mode` (or `--dangerously-skip-permissions`) suppresses the default `--dangerously-skip-permissions`.
 - For `codex`, supplying `--ask-for-approval`, `--sandbox`, or `--dangerously-bypass-approvals-and-sandbox` suppresses the default `--dangerously-bypass-approvals-and-sandbox`.
+- For `cursor`, supplying `-f`, `--force`, `--yolo`, or `--auto-review` suppresses the default `--force`.
 
 Permission and sandbox flags affect the underlying agent, but they do not disable no-mistakes' pipeline prompt steering.
 Pipeline agents are still told to keep intentional writes inside the worktree and avoid mutating system state outside it.
@@ -329,7 +331,7 @@ Per-run, per-role agent session reuse for the review loop.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`, Cursor via `--resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
 The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
 When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.

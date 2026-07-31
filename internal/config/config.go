@@ -1107,7 +1107,7 @@ process_termination_grace: "10s"
 # Reuse one durable agent session per run for the review loop: the reviewer
 # keeps a single session across the initial review and every full rereview,
 # and review fixes keep a separate fixer session. Roles never share a session.
-# Supported for claude and codex; other agents run cold. Set false to force
+# Supported for claude, codex, and cursor; other agents run cold. Set false to force
 # every agent invocation cold.
 session_reuse: true
 
