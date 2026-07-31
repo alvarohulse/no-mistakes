@@ -100,9 +100,10 @@ type runView struct {
 	Status  string
 	HeadSHA string
 	PRURL   string
-	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
-	// awaiting the driving agent, or nil when the run is not parked. It powers
-	// the top-level parked signal in the run object.
+	Error   string
+	// AwaitingAgentSince is the unix-seconds time the run parked awaiting the
+	// driving agent, or nil when the run is not parked. It powers the top-level
+	// parked signal in the run object.
 	AwaitingAgentSince *int64
 	Steps              []stepView
 }
@@ -117,6 +118,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
+	}
+	if r.Error != nil {
+		rv.Error = *r.Error
 	}
 	for _, s := range r.Steps {
 		sv := stepView{
@@ -157,6 +161,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
 	}
+	if r.Error != nil {
+		rv.Error = *r.Error
+	}
 	for _, s := range steps {
 		sv := stepView{
 			ID:             s.ID,
@@ -192,6 +199,17 @@ func (rv runView) awaitingStep() (stepView, bool) {
 		}
 	}
 	return stepView{}, false
+}
+
+// environmentalFailurePark reports the launch-time controller gate used when
+// deterministic worktree preparation fails before any pipeline step starts.
+// It deliberately has no synthetic step: the hook performs no verification
+// and cannot enter a step auto-fix loop.
+func (rv runView) environmentalFailurePark() (string, bool) {
+	if rv.AwaitingAgentSince == nil || terminalStatus(rv.Status) || rv.Error == "" || len(rv.Steps) != 0 {
+		return "", false
+	}
+	return rv.Error, true
 }
 
 // formatParkedFor renders how long a run has been parked awaiting the agent,
@@ -477,6 +495,20 @@ func gateFields(gate stepView) []toon.Field {
 			fmt.Sprintf("Run `no-mistakes axi logs --step %s --full` to read the full step log", gate.Name),
 			"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 			preserveGateFixCommitsGuidance,
+		}},
+	}
+}
+
+func environmentalFailureGateFields(message string) []toon.Field {
+	return []toon.Field{
+		{Key: "gate", Value: toon.NewObject(
+			toon.Field{Key: "kind", Value: "environment"},
+			toon.Field{Key: "status", Value: "parked"},
+			toon.Field{Key: "summary", Value: truncate(message, maxGateSummary)},
+		)},
+		{Key: "help", Value: []string{
+			"Correct the environment outside no-mistakes; the post-worktree hook is deterministic controller work and has no auto-fix loop.",
+			"The run worktree is preserved while parked. Run `no-mistakes axi abort`, then start a fresh run after correcting the environment.",
 		}},
 	}
 }

@@ -145,6 +145,37 @@ func TestDriveRunDetectsTerminalStateAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestDriveRunReturnsAtPostWorktreeEnvironmentPark(t *testing.T) {
+	parkedSince := time.Now().Unix()
+	errMsg := "post-worktree hook failed with exit code 23: authenticate first"
+	for _, autoApprove := range []bool{false, true} {
+		t.Run(map[bool]string{false: "manual", true: "auto_yes"}[autoApprove], func(t *testing.T) {
+			source := &scriptedRunStateSource{
+				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+				runs: []*ipc.RunInfo{{
+					ID:                 "run-1",
+					Status:             types.RunRunning,
+					AwaitingAgent:      true,
+					AwaitingAgentSince: &parkedSince,
+					Error:              &errMsg,
+				}},
+			}
+			reconciler := newRunReconciler(source, "run-1")
+			defer reconciler.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			run, ciReady, err := driveRunWithReconciler(ctx, io.Discard, nil, reconciler, "run-1", autoApprove, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ciReady || run == nil || run.Error == nil || *run.Error != errMsg {
+				t.Fatalf("drive result = %#v, ciReady=%v; want environment park", run, ciReady)
+			}
+		})
+	}
+}
+
 func TestRunReconciler_ReconnectsBeforeReconcilingDisconnectedTransition(t *testing.T) {
 	firstEvents := make(chan ipc.Event)
 	secondEvents := make(chan ipc.Event)

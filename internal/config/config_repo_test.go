@@ -145,6 +145,25 @@ func TestLoadRepo_PartialCommands(t *testing.T) {
 	}
 }
 
+func TestLoadRepo_PostWorktreeHook(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".no-mistakes.yaml")
+	data := `hooks:
+  post_worktree: "yarn install --immutable"
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadRepo(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Hooks.PostWorktree != "yarn install --immutable" {
+		t.Errorf("hooks.post_worktree = %q, want %q", cfg.Hooks.PostWorktree, "yarn install --immutable")
+	}
+}
+
 func TestLoadRepo_InvalidYAML(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".no-mistakes.yaml")

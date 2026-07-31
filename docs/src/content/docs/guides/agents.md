@@ -56,6 +56,8 @@ A complete gate never degrades silently when its configured pipeline agent is un
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
 This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 
+The optional trusted `hooks.post_worktree` post-worktree hook is different: it is deterministic controller preparation in the disposable run worktree, not a pipeline step or agent invocation. It runs once before `intent`, in its own process group, so package installation, environment symlinks, and cache warming can affect every later phase without creating a verification record. If it fails, the run parks at `gate.kind: environment` with no step auto-fix loop. Correct the environment outside no-mistakes, run `no-mistakes axi abort`, then start a fresh run; `--yes` never resolves this controller gate.
+
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
 | --- | ---: | --- |
 | Install, `init`, daemon lifecycle, `status`, `runs`, and `doctor` | Yes | Local setup and diagnostics remain available. `doctor` reports that gate validation is unavailable. |
@@ -184,6 +186,7 @@ Then commit follow-up work on top so every pipeline fix commit remains in the br
 The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 A Test gate created because the pipeline agent changed a test file requires explicit approval; `--yes` does not auto-resolve it, so the run parks with the test-file finding visible until the driver responds directly.
+An environmental post-worktree-hook park also stops `--yes`, but it has no step to respond to: follow its help to correct the environment, abort the parked run, and start fresh.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
 ## Binary resolution

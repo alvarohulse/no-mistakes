@@ -91,6 +91,9 @@ func newAxiRunCmd() *cobra.Command {
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
 			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
 			"first step when none can run.\n\n" +
+			"A failed post-worktree hook parks before any pipeline step. Correct the\n" +
+			"environment outside no-mistakes, run `no-mistakes axi abort`, then start a\n" +
+			"fresh run; --yes never resolves this controller gate.\n\n" +
 			"--pr-note or --pr-note-file injects trusted author text into the PR body's\n" +
 			"## Notes section. The flags are mutually exclusive, limited to 16 KiB, and\n" +
 			"apply only when starting a new run.\n\n" +
@@ -537,6 +540,9 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 		if terminalStatus(rv.Status) {
 			return run, false, nil
 		}
+		if _, ok := rv.environmentalFailurePark(); ok {
+			return run, false, nil
+		}
 		if gate, ok := rv.awaitingStep(); ok {
 			if !autoApprove || gateRequiresExplicitApproval(gate) {
 				return run, false, nil
@@ -723,6 +729,11 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		emitDoc(cmd, fields...)
 		return nil
 	}
+	if message, ok := rv.environmentalFailurePark(); ok {
+		fields = append(fields, environmentalFailureGateFields(message)...)
+		emitDoc(cmd, fields...)
+		return nil
+	}
 
 	fields = append(fields, toon.Field{Key: "outcome", Value: outcomeFor(rv.Status)})
 	if run.Error != nil && *run.Error != "" {
@@ -789,6 +800,8 @@ func newAxiRespondCmd() *cobra.Command {
 			"With --yes, eligible subsequent gates are resolved automatically. A Test\n" +
 			"gate created because the agent changed a test file requires explicit approval;\n" +
 			"--yes does not auto-resolve it.\n\n" +
+			"This command does not clear a post-worktree environment park because that\n" +
+			"controller gate has no pipeline step; follow the gate's abort-and-rerun help.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,

@@ -6,15 +6,15 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent` plus every `<step>.agent` route select which processes launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `agent`, and `<step>.agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent` plus every `<step>.agent` route select which processes launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, and `<step>.agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `document.instructions` and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
 Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than `intent.agent`, and `test.evidence`) are still read from the pushed branch.
 
-If you genuinely want per-branch `commands`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
+If you genuinely want per-branch `commands`, `hooks`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
 
 ```yaml
@@ -30,6 +30,9 @@ commands:
   # Targeted local validation only - not a full-repo CI-parity suite.
   test: "go test ./internal/cli -run '^TestDoctor' -count=1"
   format: "gofmt -w ."
+
+hooks:
+  post_worktree: "yarn install --immutable"
 
 ignore_patterns:
   - "*.generated.go"
@@ -123,14 +126,29 @@ ACP targets and aliases remain valid step routes when no native CLI override is 
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `agent`, and every `<step>.agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `hooks.post_worktree`, `agent`, and every `<step>.agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `agent`, and per-step routes from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, and per-step routes from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+
+### hooks.post_worktree
+
+Deterministic preparation command run once in the newly-created run worktree before the `intent` step. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (no post-worktree preparation) |
+
+Use this for worktree-local setup that later phases need, such as `yarn install`, symlinking an environment file, or warming a cache. It is controller work, not verification: it creates no pipeline step or receipt, and its effects remain in the run worktree for later phases. The command runs in its own process group; after it exits or is cancelled, no-mistakes terminates surviving descendants.
+
+On failure, the run parks before `intent` at `gate.kind: environment`; no step record or auto-fix round is created. Correct the external environment, run `no-mistakes axi abort`, then start a fresh run. `--yes` never auto-resolves this park.
+
+Because the hook executes arbitrary shell with the daemon's credentials, it follows the same trusted-default-branch boundary as `commands.*`. A pushed-branch hook is ignored unless the trusted default branch explicitly enables `allow_repo_commands`.
 
 ### disable_project_settings
 
