@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -198,23 +199,32 @@ func (m *ModelRoute) UnmarshalYAML(value *yaml.Node) error {
 	}
 	raw.Name = strings.TrimSpace(raw.Name)
 	raw.Vendor = strings.TrimSpace(raw.Vendor)
-	if raw.Name == "" && raw.Vendor == "" {
-		*m = ModelRoute{}
+	model := ModelRoute{Name: raw.Name, Vendor: raw.Vendor}
+	if err := model.Validate(); err != nil {
+		return err
+	}
+	*m = model
+	return nil
+}
+
+// Validate checks that a configured model has a complete, canonical identity.
+// The zero value remains valid because model routing is optional.
+func (m ModelRoute) Validate() error {
+	if m.Name == "" && m.Vendor == "" {
 		return nil
 	}
-	if raw.Name == "" {
+	if strings.TrimSpace(m.Name) == "" {
 		return fmt.Errorf("model.name is required when model is configured")
 	}
-	if raw.Vendor == "" {
+	if m.Name != strings.TrimSpace(m.Name) || strings.IndexFunc(m.Name, unicode.IsControl) >= 0 {
+		return fmt.Errorf("model.name must not contain surrounding whitespace or control characters")
+	}
+	if m.Vendor == "" {
 		return fmt.Errorf("model.vendor is required when model is configured")
 	}
-	if raw.Vendor != strings.ToLower(raw.Vendor) || !validVendorIdentity(raw.Vendor) {
-		return fmt.Errorf("model.vendor %q must be a lowercase identifier containing only letters, digits, and hyphens", raw.Vendor)
+	if m.Vendor != strings.ToLower(m.Vendor) || !validVendorIdentity(m.Vendor) {
+		return fmt.Errorf("model.vendor %q must be a lowercase identifier containing only letters, digits, and hyphens", m.Vendor)
 	}
-	if strings.ContainsAny(raw.Name, "\r\n\x00") {
-		return fmt.Errorf("model.name must be a single non-empty line")
-	}
-	*m = ModelRoute{Name: raw.Name, Vendor: raw.Vendor}
 	return nil
 }
 

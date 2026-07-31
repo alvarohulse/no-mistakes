@@ -219,14 +219,15 @@ func validateResolvedAgents(route string, agents []types.AgentName) error {
 }
 
 func validateResolvedModel(route string, model resolvedAgentModel, required bool) error {
-	if model.Name == "" && model.Vendor == "" && !required {
-		return nil
-	}
-	if model.Name == "" || model.Vendor == "" {
+	configured := config.ModelRoute{Name: model.Name, Vendor: model.Vendor}
+	if configured == (config.ModelRoute{}) {
+		if !required {
+			return nil
+		}
 		return fmt.Errorf("resolved %s model identity is incomplete", route)
 	}
-	if model.Vendor != strings.ToLower(model.Vendor) || strings.ContainsAny(model.Name, "\r\n\x00") {
-		return fmt.Errorf("resolved %s model identity is invalid", route)
+	if err := configured.Validate(); err != nil {
+		return fmt.Errorf("resolved %s model identity is invalid: %w", route, err)
 	}
 	return nil
 }

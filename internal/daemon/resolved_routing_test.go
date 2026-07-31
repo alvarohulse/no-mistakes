@@ -66,6 +66,44 @@ func TestRestoreResolvedAgentRoutingDistinguishesLegacyAndInvalidNewRuns(t *test
 	}
 }
 
+func TestRestoreResolvedAgentRoutingRejectsInvalidModelIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+	}{
+		{name: "whitespace-only name", model: `{"name":"   ","vendor":"openai"}`},
+		{name: "vendor spacing", model: `{"name":"gemini-3.5-pro","vendor":"google labs"}`},
+		{name: "incomplete identity", model: `{"name":"gpt-5.6-sol","vendor":""}`},
+		{name: "control character", model: `{"name":"gpt-5.6\u0001-sol","vendor":"openai"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			persisted := `{"version":1,"default_agents":["pi"],"step_routes":{"test":{"agents":["pi"],"model":` + tt.model + `}}}`
+			cfg := &config.Config{}
+
+			if _, err := restoreResolvedAgentRouting(cfg, &persisted, false); err == nil {
+				t.Fatalf("restore accepted invalid persisted model identity %s", tt.model)
+			}
+			if len(cfg.StepAgents) != 0 || len(cfg.StepModels) != 0 {
+				t.Fatalf("restore mutated config before rejecting corrupt model identity: agents=%v models=%v", cfg.StepAgents, cfg.StepModels)
+			}
+		})
+	}
+}
+
+func TestRestoreResolvedAgentRoutingAcceptsParameterizedModelIdentity(t *testing.T) {
+	persisted := `{"version":1,"default_agents":["pi"],"step_routes":{"test":{"agents":["pi"],"model":{"name":"openai/gpt-5.6?reasoning_effort=high","vendor":"openai-compatible-v2"}}}}`
+	cfg := &config.Config{}
+
+	if _, err := restoreResolvedAgentRouting(cfg, &persisted, false); err != nil {
+		t.Fatalf("restore rejected valid parameterized model identity: %v", err)
+	}
+	want := config.ModelRoute{Name: "openai/gpt-5.6?reasoning_effort=high", Vendor: "openai-compatible-v2"}
+	if got := cfg.StepModels[types.StepTest]; got != want {
+		t.Fatalf("restored model = %+v, want %+v", got, want)
+	}
+}
+
 func TestValidateResolvedAgentRoutingRejectsChangedConcreteFallback(t *testing.T) {
 	cfg := resolvedRoutingTestConfig()
 	encoded, err := marshalResolvedAgentRouting(cfg, false)

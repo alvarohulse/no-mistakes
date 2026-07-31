@@ -64,8 +64,11 @@ func TestLoadRepo_StepModelSchemaIsStrict(t *testing.T) {
 		want string
 	}{
 		{name: "scalar", yaml: "review:\n  model: claude-opus-5\n", want: "mapping"},
+		{name: "whitespace-only name", yaml: "review:\n  model: {name: '   ', vendor: openai}\n", want: "name"},
 		{name: "missing name", yaml: "review:\n  model: {vendor: anthropic}\n", want: "name"},
 		{name: "missing vendor", yaml: "review:\n  model: {name: claude-opus-5}\n", want: "vendor"},
+		{name: "invalid vendor spacing", yaml: "review:\n  model: {name: gemini-3.5-pro, vendor: 'google labs'}\n", want: "identifier"},
+		{name: "model control character", yaml: "review:\n  model: {name: \"gpt-5.6\\t-sol\", vendor: openai}\n", want: "control"},
 		{name: "unknown model field", yaml: "review:\n  model: {name: claude-opus-5, vendor: anthropic, provider: bedrock}\n", want: "provider"},
 		{name: "unknown review field", yaml: "review:\n  adversary: codex\n", want: "adversary"},
 		{name: "non-canonical vendor", yaml: "review:\n  model: {name: gpt-5.6-sol, vendor: OpenAI}\n", want: "lowercase"},
@@ -77,6 +80,20 @@ func TestLoadRepo_StepModelSchemaIsStrict(t *testing.T) {
 				t.Fatalf("LoadRepoFromBytes() error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadRepo_ParameterizedModelIdentityRemainsValid(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte(`
+review:
+  model: {name: "openai/gpt-5.6?reasoning_effort=high", vendor: openai-compatible-v2}
+`))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	want := ModelRoute{Name: "openai/gpt-5.6?reasoning_effort=high", Vendor: "openai-compatible-v2"}
+	if got := cfg.Review.Model; got != want {
+		t.Fatalf("review model = %+v, want %+v", got, want)
 	}
 }
 
