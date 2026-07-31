@@ -203,7 +203,11 @@ review:
 
 func TestStartRunPersistsResolvedRoutingWithoutPublicConfigProvenance(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
-	if err := os.WriteFile(p.ConfigFile(), []byte("agent_path_override:\n  codex: /bin/true\n  claude: /bin/true\n"), 0o600); err != nil {
+	agentDir := t.TempDir()
+	codexBin := writeRunnableMockAgent(t, agentDir, "codex")
+	claudeBin := writeRunnableMockAgent(t, agentDir, "claude")
+	overrideYAML := "agent_path_override:\n  codex: " + codexBin + "\n  claude: " + claudeBin + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(overrideYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	repo, _ := setupTestGitRepo(t, p, database, "resolved-routing-start")

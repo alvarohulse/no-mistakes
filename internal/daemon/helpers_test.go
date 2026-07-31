@@ -332,6 +332,27 @@ func testClaudeProjectDirName(cwd string) string {
 	return replacer.Replace(cwd)
 }
 
+// writeRunnableMockAgent writes a cross-platform no-op executable that resolves
+// as a runnable agent binary. Tests that replace the pipeline with a custom step
+// factory never actually invoke the agent, so the script only has to exist and be
+// executable; this avoids depending on platform-specific paths like /bin/true,
+// which is absent on macOS (/usr/bin/true) and Windows.
+func writeRunnableMockAgent(t *testing.T, dir, name string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, name+".bat")
+		if err := os.WriteFile(path, []byte("@echo off\r\nexit /b 0\r\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func writeMockClaude(t *testing.T, dir string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
