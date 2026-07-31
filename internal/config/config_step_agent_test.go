@@ -22,6 +22,7 @@ intent:
   enabled: false
 refresh:
   agent: codex
+  strategy: merge
 review:
   agent: [codex, claude]
 test:
@@ -68,6 +69,9 @@ ci:
 	}
 	if cfg.Intent.Enabled == nil || *cfg.Intent.Enabled {
 		t.Fatal("intent.enabled was not preserved")
+	}
+	if cfg.Refresh.Strategy != types.RefreshStrategyMerge {
+		t.Fatalf("refresh.strategy = %q, want merge", cfg.Refresh.Strategy)
 	}
 }
 
@@ -117,6 +121,20 @@ func TestLoadRepo_RejectsRefreshAndLegacyRebaseSections(t *testing.T) {
 	_, err := LoadRepoFromBytes([]byte("refresh:\n  agent: codex\nrebase:\n  agent: claude\n"))
 	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
 		t.Fatalf("LoadRepoFromBytes() error = %v, want ambiguous-section refusal", err)
+	}
+}
+
+func TestLoadRepo_RejectsInvalidRefreshStrategy(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("refresh:\n  strategy: reset\n"))
+	if err == nil || !strings.Contains(err.Error(), "expected rebase or merge") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want strategy refusal", err)
+	}
+}
+
+func TestLoadRepo_LegacyRebaseRejectsNewStrategyField(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("rebase:\n  strategy: merge\n"))
+	if err == nil || !strings.Contains(err.Error(), "strategy") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want legacy-section field refusal", err)
 	}
 }
 
@@ -318,14 +336,16 @@ func TestMerge_StepAgentsOverrideGlobalAndFallBackToRunAgent(t *testing.T) {
 
 func TestEffectiveRepoConfig_StepAgentsAreTrustedCodeExecutingSelectors(t *testing.T) {
 	pushed := &RepoConfig{
-		Review: StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}},
-		Test:   TestRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
-		Intent: IntentRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
+		Refresh: RefreshRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}, Strategy: types.RefreshStrategyMerge},
+		Review:  StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}},
+		Test:    TestRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
+		Intent:  IntentRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
 	}
 	trusted := &RepoConfig{
-		Review: StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}},
-		Test:   TestRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude}},
-		Intent: IntentRaw{Agent: types.AgentPi, Agents: []types.AgentName{types.AgentPi}},
+		Refresh: RefreshRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}, Strategy: types.RefreshStrategyRebase},
+		Review:  StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}},
+		Test:    TestRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude}},
+		Intent:  IntentRaw{Agent: types.AgentPi, Agents: []types.AgentName{types.AgentPi}},
 	}
 
 	got := EffectiveRepoConfig(pushed, trusted, false)
@@ -334,6 +354,8 @@ func TestEffectiveRepoConfig_StepAgentsAreTrustedCodeExecutingSelectors(t *testi
 	}
 	if optIn := EffectiveRepoConfig(pushed, trusted, true); !reflect.DeepEqual(optIn.ConfiguredStepAgents(), pushed.ConfiguredStepAgents()) {
 		t.Fatalf("opt-in step agents = %v, want pushed %v", optIn.ConfiguredStepAgents(), pushed.ConfiguredStepAgents())
+	} else if optIn.Refresh.Strategy != types.RefreshStrategyRebase {
+		t.Fatalf("opt-in refresh strategy = %q, want trusted rebase", optIn.Refresh.Strategy)
 	}
 	if noTrusted := EffectiveRepoConfig(pushed, nil, false); len(noTrusted.ConfiguredStepAgents()) != 0 {
 		t.Fatalf("step agents without trusted config = %v, want empty", noTrusted.ConfiguredStepAgents())

@@ -124,7 +124,7 @@ type RepoConfig struct {
 	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
 	Commit            CommitRaw    `yaml:"commit"`
 	Intent            IntentRaw    `yaml:"intent"`
-	Refresh           StepAgentRaw `yaml:"refresh"`
+	Refresh           RefreshRaw   `yaml:"refresh"`
 	Review            StepAgentRaw `yaml:"review"`
 	Test              TestRaw      `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
@@ -181,6 +181,46 @@ func resolveLegacyStepConfig(refresh, legacyRebase *StepAgentRaw) (StepAgentRaw,
 	return StepAgentRaw{}, nil
 }
 
+// RefreshRaw is the repository refresh-step configuration. Strategy is
+// repository-only because it changes how the branch history is incorporated;
+// global refresh configuration remains limited to agent routing.
+type RefreshRaw struct {
+	Agent    types.AgentName
+	Agents   []types.AgentName
+	Strategy types.RefreshStrategy
+}
+
+func (c *RefreshRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent    agentList `yaml:"agent"`
+		Strategy string    `yaml:"strategy"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	strategy, err := types.ParseRefreshStrategy(raw.Strategy)
+	if err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Strategy = strategy
+	return nil
+}
+
+func resolveLegacyRepoRefreshConfig(refresh *RefreshRaw, legacyRebase *StepAgentRaw) (RefreshRaw, error) {
+	if refresh != nil && legacyRebase != nil {
+		return RefreshRaw{}, fmt.Errorf("refresh and legacy rebase sections cannot both be set")
+	}
+	if refresh != nil {
+		return *refresh, nil
+	}
+	if legacyRebase != nil {
+		return RefreshRaw{Agent: legacyRebase.Agent, Agents: copyAgents(legacyRebase.Agents)}, nil
+	}
+	return RefreshRaw{}, nil
+}
+
 // DocumentRaw is the YAML representation of document-step settings.
 type DocumentRaw struct {
 	Agent  types.AgentName   `yaml:"-"`
@@ -215,7 +255,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		AutoFix                AutoFixRaw    `yaml:"auto_fix"`
 		Commit                 CommitRaw     `yaml:"commit"`
 		Intent                 IntentRaw     `yaml:"intent"`
-		Refresh                *StepAgentRaw `yaml:"refresh"`
+		Refresh                *RefreshRaw   `yaml:"refresh"`
 		LegacyRebase           *StepAgentRaw `yaml:"rebase"`
 		Review                 StepAgentRaw  `yaml:"review"`
 		Test                   TestRaw       `yaml:"test"`
@@ -238,7 +278,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.AutoFix = raw.AutoFix
 	c.Commit = raw.Commit
 	c.Intent = raw.Intent
-	refresh, err := resolveLegacyStepConfig(raw.Refresh, raw.LegacyRebase)
+	refresh, err := resolveLegacyRepoRefreshConfig(raw.Refresh, raw.LegacyRebase)
 	if err != nil {
 		return err
 	}
@@ -342,6 +382,7 @@ type Config struct {
 	Intent                  Intent
 	Test                    Test
 	Document                Document
+	RefreshStrategy         types.RefreshStrategy
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
 	// project-level settings/instructions suppressed; the daemon fails the run
@@ -1441,6 +1482,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	}
 	effective := *pushed
 	if trusted != nil {
+		effective.Refresh.Strategy = trusted.Refresh.Strategy
 		effective.Document.Instructions = trusted.Document.Instructions
 		// disable_project_settings is a security boundary: honor it ONLY from the
 		// trusted default-branch copy so a pushed branch cannot turn the opt-out
@@ -1449,6 +1491,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// separately when it could not be READ at all), so falsy is correct.
 		effective.DisableProjectSettings = trusted.DisableProjectSettings
 	} else {
+		effective.Refresh.Strategy = ""
 		effective.Document.Instructions = ""
 		effective.DisableProjectSettings = false
 	}
@@ -1462,7 +1505,8 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Agents = copyAgents(trusted.Agents)
 		effective.Intent.Agent = trusted.Intent.Agent
 		effective.Intent.Agents = copyAgents(trusted.Intent.Agents)
-		effective.Refresh = copyStepAgentRaw(trusted.Refresh)
+		effective.Refresh.Agent = trusted.Refresh.Agent
+		effective.Refresh.Agents = copyAgents(trusted.Refresh.Agents)
 		effective.Review = copyStepAgentRaw(trusted.Review)
 		effective.Test.Agent = trusted.Test.Agent
 		effective.Test.Agents = copyAgents(trusted.Test.Agents)
@@ -1478,7 +1522,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Agents = nil
 		effective.Intent.Agent = ""
 		effective.Intent.Agents = nil
-		effective.Refresh = StepAgentRaw{}
+		effective.Refresh = RefreshRaw{}
 		effective.Review = StepAgentRaw{}
 		effective.Test.Agent = ""
 		effective.Test.Agents = nil
@@ -1666,6 +1710,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:                  intent,
 		Test:                    test,
 		Document:                Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		RefreshStrategy:         repo.Refresh.Strategy.OrDefault(),
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,

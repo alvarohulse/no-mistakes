@@ -77,6 +77,24 @@ func TestFormatSkipPushOptions(t *testing.T) {
 	}
 }
 
+func TestRefreshSelectionPushOptionsRoundTrip(t *testing.T) {
+	options := formatRefreshSelectionPushOptions(types.RefreshStrategyMerge, "feature/dependency")
+	strategy, stackedOn, err := parseRefreshSelectionPushOptions(append([]string{"no-mistakes.skip=test"}, options...))
+	if err != nil {
+		t.Fatalf("parseRefreshSelectionPushOptions() error = %v", err)
+	}
+	if strategy != types.RefreshStrategyMerge || stackedOn != "feature/dependency" {
+		t.Fatalf("refresh selection = (%q, %q), want (merge, feature/dependency)", strategy, stackedOn)
+	}
+}
+
+func TestParseRefreshSelectionPushOptionsRejectsInvalidStrategy(t *testing.T) {
+	_, _, err := parseRefreshSelectionPushOptions([]string{"no-mistakes.refresh-strategy=reset"})
+	if err == nil {
+		t.Fatal("expected invalid refresh strategy to fail")
+	}
+}
+
 func TestIntentPushOptionRoundTrip(t *testing.T) {
 	// Multi-line, comma- and colon-bearing intent must survive the
 	// line-oriented push-option transport intact.

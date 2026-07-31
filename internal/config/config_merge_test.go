@@ -26,6 +26,16 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	if cfg.ProcessTerminationGrace != 750*time.Millisecond {
 		t.Errorf("process_termination_grace = %v", cfg.ProcessTerminationGrace)
 	}
+	if cfg.RefreshStrategy != types.RefreshStrategyRebase {
+		t.Errorf("refresh strategy = %q, want rebase", cfg.RefreshStrategy)
+	}
+}
+
+func TestMerge_UsesRepoRefreshStrategy(t *testing.T) {
+	cfg := Merge(DefaultGlobalConfig(), &RepoConfig{Refresh: RefreshRaw{Strategy: types.RefreshStrategyMerge}})
+	if cfg.RefreshStrategy != types.RefreshStrategyMerge {
+		t.Fatalf("refresh strategy = %q, want merge", cfg.RefreshStrategy)
+	}
 }
 
 func TestMerge_RepoOverridesAgent(t *testing.T) {

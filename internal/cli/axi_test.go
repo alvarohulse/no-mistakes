@@ -532,7 +532,10 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note")
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", refreshSelection{
+		Strategy:  types.RefreshStrategyMerge,
+		StackedOn: "feature/dependency",
+	})
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
 	}
@@ -541,6 +544,22 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
+	}
+	if params.RefreshStrategy != types.RefreshStrategyMerge || params.StackedOn != "feature/dependency" {
+		t.Fatalf("refresh selection = (%q, %q), want (merge, feature/dependency)", params.RefreshStrategy, params.StackedOn)
+	}
+}
+
+func TestRunCommandsExposeRefreshSelectionFlags(t *testing.T) {
+	for name, cmd := range map[string]*cobra.Command{
+		"axi run": newAxiRunCmd(),
+		"rerun":   newRerunCmd(),
+	} {
+		for _, flag := range []string{"refresh-strategy", "stacked-on"} {
+			if cmd.Flags().Lookup(flag) == nil {
+				t.Errorf("%s is missing --%s", name, flag)
+			}
+		}
 	}
 }
 
@@ -869,7 +888,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, refreshSelection{}, false); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()

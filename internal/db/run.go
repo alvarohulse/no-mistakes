@@ -15,6 +15,8 @@ type Run struct {
 	Branch           string
 	HeadSHA          string
 	BaseSHA          string
+	RefreshStrategy  types.RefreshStrategy
+	StackedOn        string
 	SubmittedHeadSHA *string
 	// ReviewApprovedHeadSHA is the exact commit approved by the last
 	// successfully completed full review. It is nil for legacy runs and until
@@ -58,13 +60,13 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	return row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
@@ -77,37 +79,66 @@ func scanRun(row interface {
 
 // InsertRun creates a new run record.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
-	return d.InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, "")
+	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, RunOptions{})
 }
 
 // InsertRunWithPRNote atomically creates a run with its optional PR note.
 func (d *DB) InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, prNote string) (*Run, error) {
+	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, RunOptions{PRNote: prNote})
+}
+
+// RunOptions are immutable selections stamped onto a run at creation.
+type RunOptions struct {
+	PRNote          string
+	RefreshStrategy types.RefreshStrategy
+	StackedOn       string
+}
+
+// InsertRunWithOptions atomically creates a run with its refresh selection and
+// optional PR note.
+func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions) (*Run, error) {
 	ts := now()
+	strategy := opts.RefreshStrategy.OrDefault()
+	stackedOn := strings.TrimSpace(opts.StackedOn)
 	r := &Run{
 		ID:               newID(),
 		RepoID:           repoID,
 		Branch:           branch,
 		HeadSHA:          headSHA,
 		BaseSHA:          baseSHA,
+		RefreshStrategy:  strategy,
+		StackedOn:        stackedOn,
 		SubmittedHeadSHA: &headSHA,
 		Status:           types.RunPending,
 		CreatedAt:        ts,
 		UpdatedAt:        ts,
 	}
 	var notePtr *string
-	if prNote != "" {
-		note := prNote
+	if opts.PRNote != "" {
+		note := opts.PRNote
 		r.PRNote = &note
 		notePtr = &note
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), headSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
 	return r, nil
+}
+
+// UpdateRunRefreshSelection persists the strategy resolved from trusted config
+// before pipeline execution starts.
+func (d *DB) UpdateRunRefreshSelection(id string, strategy types.RefreshStrategy, stackedOn string) error {
+	strategy = strategy.OrDefault()
+	stackedOn = strings.TrimSpace(stackedOn)
+	_, err := d.sql.Exec(`UPDATE runs SET refresh_strategy = ?, stacked_on = ?, updated_at = ? WHERE id = ?`, strategy, nullableString(stackedOn), now(), id)
+	if err != nil {
+		return fmt.Errorf("update run refresh selection: %w", err)
+	}
+	return nil
 }
 
 // GetRun returns a run by ID.

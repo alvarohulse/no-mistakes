@@ -64,6 +64,37 @@ func TestInsertRunWithPRNote_PersistsAtomically(t *testing.T) {
 	}
 }
 
+func TestInsertRunWithOptions_PersistsRefreshSelection(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo-refresh-options", "git@example.com:repo.git", "main")
+
+	run, err := d.InsertRunWithOptions(repo.ID, "feature", "head", "base", RunOptions{
+		RefreshStrategy: types.RefreshStrategyMerge,
+		StackedOn:       "feature/dependency",
+	})
+	if err != nil {
+		t.Fatalf("InsertRunWithOptions() error = %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if got.RefreshStrategy != types.RefreshStrategyMerge {
+		t.Fatalf("refresh strategy = %q, want merge", got.RefreshStrategy)
+	}
+	if got.StackedOn != "feature/dependency" {
+		t.Fatalf("stacked on = %q, want feature/dependency", got.StackedOn)
+	}
+
+	legacyDefault, err := d.InsertRun(repo.ID, "feature-default", "head2", "base2")
+	if err != nil {
+		t.Fatalf("InsertRun() error = %v", err)
+	}
+	if legacyDefault.RefreshStrategy != types.RefreshStrategyRebase {
+		t.Fatalf("default refresh strategy = %q, want rebase", legacyDefault.RefreshStrategy)
+	}
+}
+
 func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

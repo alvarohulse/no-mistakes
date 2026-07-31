@@ -103,6 +103,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			refreshStrategy, stackedOn, err := parseRefreshSelectionPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			intent, err := parseIntentPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -129,13 +133,15 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:      gatePath,
-				Ref:       ref,
-				Old:       oldSHA,
-				New:       newSHA,
-				SkipSteps: skipSteps,
-				Intent:    intent,
-				PRNote:    prNote,
+				Gate:            gatePath,
+				Ref:             ref,
+				Old:             oldSHA,
+				New:             newSHA,
+				SkipSteps:       skipSteps,
+				RefreshStrategy: refreshStrategy,
+				StackedOn:       stackedOn,
+				Intent:          intent,
+				PRNote:          prNote,
 			}, &result)
 		},
 	}
@@ -178,6 +184,46 @@ func parseSkipPushOptions(options []string) ([]types.StepName, error) {
 		steps = append(steps, parsed...)
 	}
 	return dedupeSteps(steps), nil
+}
+
+const (
+	refreshStrategyPushOptionPrefix = "no-mistakes.refresh-strategy="
+	stackedOnPushOptionPrefix       = "no-mistakes.stacked-on="
+)
+
+func formatRefreshSelectionPushOptions(strategy types.RefreshStrategy, stackedOn string) []string {
+	var options []string
+	if strategy != "" {
+		options = append(options, refreshStrategyPushOptionPrefix+string(strategy))
+	}
+	if stackedOn = strings.TrimSpace(stackedOn); stackedOn != "" {
+		options = append(options, stackedOnPushOptionPrefix+stackedOn)
+	}
+	return options
+}
+
+func parseRefreshSelectionPushOptions(options []string) (types.RefreshStrategy, string, error) {
+	var strategy types.RefreshStrategy
+	stackedOn := ""
+	for _, option := range options {
+		if value, ok := strings.CutPrefix(option, refreshStrategyPushOptionPrefix); ok {
+			parsed, err := types.ParseRefreshStrategy(value)
+			if err != nil || parsed == "" {
+				if err == nil {
+					err = fmt.Errorf("refresh strategy is required")
+				}
+				return "", "", err
+			}
+			strategy = parsed
+		}
+		if value, ok := strings.CutPrefix(option, stackedOnPushOptionPrefix); ok {
+			stackedOn = strings.TrimSpace(value)
+			if stackedOn == "" {
+				return "", "", fmt.Errorf("stacked-on branch is required")
+			}
+		}
+	}
+	return strategy, stackedOn, nil
 }
 
 func parseSkipSteps(value string) ([]types.StepName, error) {

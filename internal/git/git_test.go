@@ -325,6 +325,18 @@ func TestCreateBranchDuplicate(t *testing.T) {
 	}
 }
 
+func TestValidateBranchName(t *testing.T) {
+	ctx := context.Background()
+	if err := ValidateBranchName(ctx, t.TempDir(), "feature/dependency"); err != nil {
+		t.Fatalf("ValidateBranchName(valid) error = %v", err)
+	}
+	for _, name := range []string{"", "refs/heads/main", "bad branch", "feature..dependency", "-danger"} {
+		if err := ValidateBranchName(ctx, t.TempDir(), name); err == nil {
+			t.Errorf("ValidateBranchName(%q) accepted an invalid short branch name", name)
+		}
+	}
+}
+
 func TestCommitAll(t *testing.T) {
 	dir := initTestRepo(t)
 	ctx := context.Background()

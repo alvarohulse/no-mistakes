@@ -429,6 +429,26 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 	return Run(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// ValidateBranchName accepts a short branch name suitable for refs/heads.
+// Callers store and display the short form, so fully qualified refs are
+// rejected even though Git would otherwise accept them as nested names.
+func ValidateBranchName(ctx context.Context, dir, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("branch name is empty")
+	}
+	if strings.HasPrefix(name, "refs/") {
+		return fmt.Errorf("branch %q must be a short branch name, not a ref", name)
+	}
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("branch %q cannot start with '-'", name)
+	}
+	if _, err := Run(ctx, dir, "check-ref-format", "refs/heads/"+name); err != nil {
+		return fmt.Errorf("invalid branch %q: %w", name, err)
+	}
+	return nil
+}
+
 // IsDetachedHEAD reports whether the working tree is in a detached-HEAD state
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.

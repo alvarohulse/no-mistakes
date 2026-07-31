@@ -130,6 +130,18 @@ func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {
 	}
 }
 
+func TestResolveRefreshStrategyPrecedence(t *testing.T) {
+	if got := resolveRefreshStrategy(types.RefreshStrategyMerge, types.RefreshStrategyRebase); got != types.RefreshStrategyMerge {
+		t.Fatalf("explicit strategy = %q, want merge", got)
+	}
+	if got := resolveRefreshStrategy("", types.RefreshStrategyMerge); got != types.RefreshStrategyMerge {
+		t.Fatalf("configured strategy = %q, want merge", got)
+	}
+	if got := resolveRefreshStrategy("", ""); got != types.RefreshStrategyRebase {
+		t.Fatalf("default strategy = %q, want rebase", got)
+	}
+}
+
 func TestPushReceivedAllowsDifferentBranchRunsConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

@@ -38,6 +38,34 @@ const (
 	StepCI       StepName = "ci"
 )
 
+// RefreshStrategy controls how the refresh step incorporates its base branch.
+type RefreshStrategy string
+
+const (
+	RefreshStrategyRebase RefreshStrategy = "rebase"
+	RefreshStrategyMerge  RefreshStrategy = "merge"
+)
+
+// ParseRefreshStrategy validates a configured or command-line strategy. An
+// empty value means no explicit selection and is resolved by OrDefault.
+func ParseRefreshStrategy(value string) (RefreshStrategy, error) {
+	strategy := RefreshStrategy(strings.ToLower(strings.TrimSpace(value)))
+	switch strategy {
+	case "", RefreshStrategyRebase, RefreshStrategyMerge:
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("unsupported refresh strategy %q (expected rebase or merge)", value)
+	}
+}
+
+// OrDefault resolves an unset strategy to the safe historical behavior.
+func (s RefreshStrategy) OrDefault() RefreshStrategy {
+	if s == "" {
+		return RefreshStrategyRebase
+	}
+	return s
+}
+
 func normalizeStepName(s StepName) StepName {
 	switch s {
 	case "babysit":
@@ -75,7 +103,7 @@ func (s *StepName) Scan(src any) error {
 }
 
 func (s StepName) Value() (driver.Value, error) {
-	return string(s), nil
+	return string(normalizeStepName(s)), nil
 }
 
 // StepOrder returns the fixed execution order for a step (1-indexed).

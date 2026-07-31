@@ -633,12 +633,12 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote)
+	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote, params.RefreshStrategy, params.StackedOn)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
 // optional intent and PR note are stamped onto the new run.
-func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string) (string, error) {
+func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -675,13 +675,16 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
+	if strings.TrimSpace(stackedOn) == "" {
+		stackedOn = latestForBranch.StackedOn
+	}
 
 	baseSHA := latestForBranch.BaseSHA
 	if matchingHead != nil {
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote)
+	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote, refreshStrategy, stackedOn)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -698,12 +701,19 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
+func resolveRefreshStrategy(explicit, configured types.RefreshStrategy) types.RefreshStrategy {
+	if explicit != "" {
+		return explicit
+	}
+	return configured.OrDefault()
+}
+
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts. A non-empty prNote is
 // stamped onto the run so the PR step renders it verbatim and feeds it to the
 // PR summary prompt.
-func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string) (string, error) {
+func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -717,6 +727,23 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	if m.shuttingDown.Load() {
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
+	}
+	parsedStrategy, err := types.ParseRefreshStrategy(string(refreshStrategy))
+	if err != nil {
+		trackStartFailure("refresh_strategy")
+		return "", err
+	}
+	refreshStrategy = parsedStrategy
+	stackedOn = strings.TrimSpace(stackedOn)
+	if stackedOn != "" {
+		if stackedOn == branch {
+			trackStartFailure("stacked_on")
+			return "", fmt.Errorf("stacked-on branch cannot match run branch %q", branch)
+		}
+		if err := git.ValidateBranchName(ctx, m.paths.RepoDir(repo.ID), stackedOn); err != nil {
+			trackStartFailure("stacked_on")
+			return "", fmt.Errorf("invalid stacked-on branch: %w", err)
+		}
 	}
 
 	// Serialize per repo+branch to prevent two concurrent pushes from both
@@ -746,7 +773,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// intent (which falls back to transcript inference), the note has no
 	// fallback, so writing it in the same insert avoids ever creating a run that
 	// is missing its guaranteed "## Notes" content.
-	run, err := m.db.InsertRunWithPRNote(repo.ID, branch, headSHA, baseSHA, strings.TrimSpace(prNote))
+	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
+		PRNote:          strings.TrimSpace(prNote),
+		RefreshStrategy: refreshStrategy,
+		StackedOn:       stackedOn,
+	})
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -860,6 +891,14 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		slog.Info("repo commands/hooks/agent routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
+	if err := m.db.UpdateRunRefreshSelection(run.ID, resolvedRefreshStrategy, stackedOn); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_refresh_selection")
+		return "", err
+	}
+	run.RefreshStrategy = resolvedRefreshStrategy
+	run.StackedOn = stackedOn
 
 	agents, err := newPipelineAgents(ctx, cfg, exec.LookPath)
 	if err != nil {

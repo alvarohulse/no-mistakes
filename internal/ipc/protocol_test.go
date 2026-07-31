@@ -125,11 +125,13 @@ func TestResponseError(t *testing.T) {
 
 func TestPushReceivedParams(t *testing.T) {
 	params := PushReceivedParams{
-		Gate:      "/path/to/gate.git",
-		Ref:       "refs/heads/main",
-		Old:       "aaa",
-		New:       "bbb",
-		SkipSteps: []types.StepName{types.StepTest, types.StepLint},
+		Gate:            "/path/to/gate.git",
+		Ref:             "refs/heads/main",
+		Old:             "aaa",
+		New:             "bbb",
+		SkipSteps:       []types.StepName{types.StepTest, types.StepLint},
+		RefreshStrategy: types.RefreshStrategyMerge,
+		StackedOn:       "feature/dependency",
 	}
 	data, _ := json.Marshal(params)
 	var got PushReceivedParams
@@ -141,6 +143,9 @@ func TestPushReceivedParams(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.SkipSteps, params.SkipSteps) {
 		t.Errorf("skip_steps = %+v, want %+v", got.SkipSteps, params.SkipSteps)
+	}
+	if got.RefreshStrategy != params.RefreshStrategy || got.StackedOn != params.StackedOn {
+		t.Errorf("refresh selection = (%q, %q), want (%q, %q)", got.RefreshStrategy, got.StackedOn, params.RefreshStrategy, params.StackedOn)
 	}
 }
 
@@ -181,7 +186,13 @@ func TestGetActiveRunParams(t *testing.T) {
 }
 
 func TestRerunParams(t *testing.T) {
-	params := RerunParams{RepoID: "repo456", Branch: "feature", SkipSteps: []types.StepName{types.StepReview}}
+	params := RerunParams{
+		RepoID:          "repo456",
+		Branch:          "feature",
+		SkipSteps:       []types.StepName{types.StepReview},
+		RefreshStrategy: types.RefreshStrategyMerge,
+		StackedOn:       "feature/dependency",
+	}
 	data, _ := json.Marshal(params)
 	var got RerunParams
 	if err := json.Unmarshal(data, &got); err != nil {
@@ -195,6 +206,9 @@ func TestRerunParams(t *testing.T) {
 	}
 	if len(got.SkipSteps) != 1 || got.SkipSteps[0] != types.StepReview {
 		t.Errorf("skip_steps = %#v, want review", got.SkipSteps)
+	}
+	if got.RefreshStrategy != params.RefreshStrategy || got.StackedOn != params.StackedOn {
+		t.Errorf("refresh selection = (%q, %q), want (%q, %q)", got.RefreshStrategy, got.StackedOn, params.RefreshStrategy, params.StackedOn)
 	}
 }
 
@@ -246,6 +260,8 @@ func TestRunInfoRoundTrip(t *testing.T) {
 		HeadSHA:          "abc123",
 		SubmittedHeadSHA: &submittedHead,
 		BaseSHA:          "def456",
+		RefreshStrategy:  types.RefreshStrategyMerge,
+		StackedOn:        "feature/dependency",
 		Status:           types.RunRunning,
 		PRURL:            &prURL,
 		CreatedAt:        1700000000,
@@ -264,6 +280,9 @@ func TestRunInfoRoundTrip(t *testing.T) {
 	}
 	if got.SubmittedHeadSHA == nil || *got.SubmittedHeadSHA != submittedHead {
 		t.Errorf("submitted_head_sha = %v, want %q", got.SubmittedHeadSHA, submittedHead)
+	}
+	if got.RefreshStrategy != types.RefreshStrategyMerge || got.StackedOn != "feature/dependency" {
+		t.Errorf("refresh selection = (%q, %q), want (merge, feature/dependency)", got.RefreshStrategy, got.StackedOn)
 	}
 }
 
@@ -289,6 +308,16 @@ func TestStepResultInfoRoundTrip(t *testing.T) {
 	}
 	if got.ExitCode == nil || *got.ExitCode != 0 {
 		t.Errorf("exit_code = %v, want 0", got.ExitCode)
+	}
+}
+
+func TestStepResultInfoLegacyRebaseNormalizesToRefresh(t *testing.T) {
+	var got StepResultInfo
+	if err := json.Unmarshal([]byte(`{"step_name":"rebase"}`), &got); err != nil {
+		t.Fatalf("unmarshal legacy step: %v", err)
+	}
+	if got.StepName != types.StepRefresh {
+		t.Fatalf("step name = %q, want refresh", got.StepName)
 	}
 }
 

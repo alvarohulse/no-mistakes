@@ -31,6 +31,11 @@ const maxPRNotePushOptionBytes = 16 * 1024
 
 const maxAggregatePushOptionBytes = 28 * 1024
 
+type refreshSelection struct {
+	Strategy  types.RefreshStrategy
+	StackedOn string
+}
+
 func pushOptionsWithinTransport(options []string) bool {
 	total := 0
 	for _, option := range options {
@@ -73,6 +78,8 @@ func newAxiRunCmd() *cobra.Command {
 	var intent string
 	var prNote string
 	var prNoteFile string
+	var refreshStrategyValue string
+	var stackedOn string
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -102,11 +109,24 @@ func newAxiRunCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			refreshStrategy, err := types.ParseRefreshStrategy(refreshStrategyValue)
+			if err != nil {
+				return emitError(cmd, 2, err.Error(), "Use --refresh-strategy rebase or --refresh-strategy merge")
+			}
+			selectionProvided := cmd.Flags().Changed("refresh-strategy") || cmd.Flags().Changed("stacked-on")
+			if cmd.Flags().Changed("refresh-strategy") && refreshStrategy == "" {
+				return emitError(cmd, 2, "--refresh-strategy requires rebase or merge")
+			}
+			if cmd.Flags().Changed("stacked-on") && strings.TrimSpace(stackedOn) == "" {
+				return emitError(cmd, 2, "--stacked-on requires a branch")
+			}
+			selection := refreshSelection{Strategy: refreshStrategy, StackedOn: strings.TrimSpace(stackedOn)}
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
-				"auto_yes":    autoYes,
-				"has_intent":  strings.TrimSpace(intent) != "",
-				"has_skip":    strings.TrimSpace(skipValue) != "",
-				"has_pr_note": strings.TrimSpace(prNote) != "" || strings.TrimSpace(prNoteFile) != "",
+				"auto_yes":       autoYes,
+				"has_intent":     strings.TrimSpace(intent) != "",
+				"has_skip":       strings.TrimSpace(skipValue) != "",
+				"has_pr_note":    strings.TrimSpace(prNote) != "" || strings.TrimSpace(prNoteFile) != "",
+				"has_stacked_on": selection.StackedOn != "",
 			}, func() error {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
@@ -118,7 +138,7 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
 						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided)
+				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided, selection, selectionProvided)
 			})
 		},
 	}
@@ -127,6 +147,8 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added to the PR Notes section (maximum 16 KiB; applies only to a new run)")
 	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note (maximum 16 KiB)")
+	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy for a new run: rebase or merge (default: trusted config, then rebase)")
+	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; used as the refresh and pull-request base")
 	return cmd
 }
 
@@ -166,7 +188,7 @@ func prNoteTransportSizeError(size int64) error {
 	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool, selection refreshSelection, selectionProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiRunEnv()
 	if err != nil {
@@ -181,6 +203,14 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	if branch == "HEAD" {
 		return emitError(cmd, 1, "detached HEAD: check out a branch before validating",
 			"Run `git switch -c <branch>` to put your commits on a branch")
+	}
+	if selection.StackedOn != "" {
+		if selection.StackedOn == branch {
+			return emitError(cmd, 2, "--stacked-on cannot name the branch being validated")
+		}
+		if err := git.ValidateBranchName(ctx, ".", selection.StackedOn); err != nil {
+			return emitError(cmd, 2, fmt.Sprintf("invalid --stacked-on branch: %v", err))
+		}
 	}
 
 	headSHA, err := git.Run(ctx, ".", "rev-parse", "HEAD")
@@ -202,6 +232,10 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	if runID != "" && noteProvided {
 		return emitError(cmd, 2, "a run is already active for this branch; --pr-note applies only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the note")
+	}
+	if runID != "" && selectionProvided {
+		return emitError(cmd, 2, "a run is already active for this branch; refresh options apply only when starting a new run",
+			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the refresh options")
 	}
 	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
@@ -228,7 +262,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 				`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note, selection)
 		if err != nil {
 			if ownershipErr, ok := err.(*branchOwnershipError); ok {
 				return emitBranchOwnershipError(cmd, ownershipErr)
@@ -368,8 +402,9 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string, selection refreshSelection) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
+	pushOptions = append(pushOptions, formatRefreshSelectionPushOptions(selection.Strategy, selection.StackedOn)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
@@ -408,7 +443,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote, selection), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -492,8 +527,16 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRNote: prNote}
+func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string, selection refreshSelection) *ipc.RerunParams {
+	return &ipc.RerunParams{
+		RepoID:          repoID,
+		Branch:          branch,
+		SkipSteps:       skipSteps,
+		RefreshStrategy: selection.Strategy,
+		StackedOn:       selection.StackedOn,
+		Intent:          intent,
+		PRNote:          prNote,
+	}
 }
 
 // driveRun subscribes to a run and reconciles authoritative state on transition

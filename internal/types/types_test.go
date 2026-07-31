@@ -5,6 +5,36 @@ import (
 	"testing"
 )
 
+func TestParseRefreshStrategy(t *testing.T) {
+	tests := []struct {
+		value string
+		want  RefreshStrategy
+	}{
+		{value: "", want: ""},
+		{value: "rebase", want: RefreshStrategyRebase},
+		{value: " MERGE ", want: RefreshStrategyMerge},
+	}
+	for _, tt := range tests {
+		got, err := ParseRefreshStrategy(tt.value)
+		if err != nil {
+			t.Fatalf("ParseRefreshStrategy(%q) error = %v", tt.value, err)
+		}
+		if got != tt.want {
+			t.Fatalf("ParseRefreshStrategy(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+
+	if _, err := ParseRefreshStrategy("reset"); err == nil {
+		t.Fatal("ParseRefreshStrategy(reset) accepted an unsupported strategy")
+	}
+}
+
+func TestRefreshStrategyDefaultsToRebase(t *testing.T) {
+	if got := RefreshStrategy("").OrDefault(); got != RefreshStrategyRebase {
+		t.Fatalf("empty strategy defaults to %q, want %q", got, RefreshStrategyRebase)
+	}
+}
+
 func TestAllStepsOrder(t *testing.T) {
 	steps := AllSteps()
 	if len(steps) != 9 {
@@ -70,6 +100,16 @@ func TestStepNameScan_LegacyRebase(t *testing.T) {
 	}
 	if step != StepRefresh {
 		t.Fatalf("step = %q, want refresh", step)
+	}
+}
+
+func TestStepNameValue_CanonicalizesLegacyRebase(t *testing.T) {
+	value, err := StepName("rebase").Value()
+	if err != nil {
+		t.Fatalf("Value() error = %v", err)
+	}
+	if value != "refresh" {
+		t.Fatalf("Value() = %q, want refresh", value)
 	}
 }
 
