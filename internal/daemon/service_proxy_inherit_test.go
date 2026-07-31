@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -141,6 +142,98 @@ func TestReinstallLaunchAgentInheritsProxyFromExistingPlistWhenEnvUnset(t *testi
 	}
 	if !strings.Contains(string(data), "<key>HTTPS_PROXY</key>") {
 		t.Fatal("forwarded proxy was stripped from the plist on env-less restart")
+	}
+}
+
+func TestReinstallManagedServiceTracksMachineRepoConfigOptIn(t *testing.T) {
+	tests := []struct {
+		name           string
+		goos           string
+		install        func(*paths.Paths, string) error
+		definitionPath func(*paths.Paths) string
+		marker         string
+	}{
+		{
+			name:           "systemd",
+			goos:           "linux",
+			install:        installSystemdUserService,
+			definitionPath: systemdUserServicePath,
+			marker:         "NM_REPO_CONFIG=",
+		},
+		{
+			name:           "launchd",
+			goos:           "darwin",
+			install:        installLaunchAgent,
+			definitionPath: launchAgentPath,
+			marker:         "<key>NM_REPO_CONFIG</key>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			home := t.TempDir()
+			cleanup := stubServiceRuntime(t)
+			defer cleanup()
+			runtimeGOOS = tt.goos
+			serviceUserHomeDir = func() (string, error) { return home, nil }
+			serviceCurrentUser = func() (*user.User, error) { return &user.User{Uid: "501"}, nil }
+			serviceExecutablePath = func() (string, error) { return "/usr/local/bin/no-mistakes", nil }
+			serviceCommandRunner = func(string, ...string) ([]byte, error) { return nil, nil }
+			for _, key := range proxyEnvKeys {
+				t.Setenv(key, "")
+			}
+			t.Setenv(machineRepoConfigEnv, "")
+			if err := os.Unsetenv(machineRepoConfigEnv); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.install(p, "/usr/local/bin/no-mistakes"); err != nil {
+				t.Fatal(err)
+			}
+
+			healthChecks := 0
+			daemonHealthCheck = func(*paths.Paths) (bool, error) {
+				healthChecks++
+				return healthChecks%2 == 0, nil
+			}
+			t.Setenv(machineRepoConfigEnv, "/home/u/.config/no-mistakes/repo.yaml")
+			changed, err := reinstallManagedServiceIfChanged(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatalf("setting NM_REPO_CONFIG did not refresh %s", tt.name)
+			}
+			definitionPath := tt.definitionPath(p)
+			data, err := os.ReadFile(definitionPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), tt.marker) {
+				t.Fatalf("%s did not forward machine repo config:\n%s", tt.name, data)
+			}
+
+			if err := os.Unsetenv(machineRepoConfigEnv); err != nil {
+				t.Fatal(err)
+			}
+			changed, err = reinstallManagedServiceIfChanged(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !changed {
+				t.Fatalf("unsetting NM_REPO_CONFIG did not refresh %s", tt.name)
+			}
+			data, err = os.ReadFile(definitionPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), tt.marker) {
+				t.Fatalf("unset machine repo config remained in %s:\n%s", tt.name, data)
+			}
+		})
 	}
 }
 

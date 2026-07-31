@@ -29,6 +29,10 @@ func TestServiceDefinitionMatchesRootRejectsPrefixOnlyMatch(t *testing.T) {
 	if serviceDefinitionMatchesRoot([]byte(`<Task><Exec><Command>C:\nm.exe</Command><Arguments>`+buildWindowsTaskCommand(`C:\nm.exe`, otherRoot)+`</Arguments></Exec></Task>`), p) {
 		t.Fatal("expected windows task root prefix collision to be rejected")
 	}
+	otherLauncher := filepath.Join(otherRoot, windowsDaemonLauncherPrefix+"0123456789ab"+windowsDaemonLauncherSuffix)
+	if serviceDefinitionMatchesRoot([]byte(`<Task><Exec><Command>powershell.exe</Command><Arguments>-File `+xmlEscaped(quoteWindowsTaskArg(otherLauncher))+`</Arguments></Exec></Task>`), p) {
+		t.Fatal("expected windows launcher root prefix collision to be rejected")
+	}
 
 	if !serviceDefinitionMatchesRoot([]byte(renderLaunchAgent("/opt/no-mistakes/bin/no-mistakes", p, home)), p) {
 		t.Fatal("expected exact launch agent root match")
@@ -38,6 +42,10 @@ func TestServiceDefinitionMatchesRootRejectsPrefixOnlyMatch(t *testing.T) {
 	}
 	if !serviceDefinitionMatchesRoot([]byte(`<Task><Exec><Command>C:\nm.exe</Command><Arguments>`+buildWindowsTaskCommand(`C:\nm.exe`, root)+`</Arguments></Exec></Task>`), p) {
 		t.Fatal("expected exact windows task root match")
+	}
+	launcher := filepath.Join(root, windowsDaemonLauncherPrefix+"0123456789ab"+windowsDaemonLauncherSuffix)
+	if !serviceDefinitionMatchesRoot([]byte(`<Task><Exec><Command>powershell.exe</Command><Arguments>-File `+xmlEscaped(quoteWindowsTaskArg(launcher))+`</Arguments></Exec></Task>`), p) {
+		t.Fatal("expected exact windows launcher root match")
 	}
 }
 

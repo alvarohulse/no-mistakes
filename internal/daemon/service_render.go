@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -37,6 +38,11 @@ func serviceDefinitionMatchesRoot(data []byte, p *paths.Paths) bool {
 		if strings.Contains(text, suffix) {
 			return true
 		}
+	}
+	launcherPrefix := strings.ToLower(xmlEscaped(filepath.Join(root, windowsDaemonLauncherPrefix)))
+	launcherText := strings.ToLower(text)
+	if strings.Contains(launcherText, "-file ") && strings.Contains(launcherText, launcherPrefix) && strings.Contains(launcherText, windowsDaemonLauncherSuffix) {
+		return true
 	}
 	return false
 }
@@ -123,7 +129,7 @@ func isProxyEnvKey(key string) bool {
 // systemdUnitProxyEnv extracts the forwarded proxy `Environment=` entries from a
 // rendered systemd unit, mirroring systemdUnitExecutable. Entries are returned
 // in file order with systemd's `%` -> `%%` doubling undone, so feeding the
-// result back through renderSystemdUnitWithProxyEnv reproduces the unit
+// result back through renderSystemdUnitWithForwardedEnv reproduces the unit
 // byte-for-byte. The fixed HOME/PATH Environment= lines are skipped. This lets
 // drift detection (and a reinstall) inherit a proxy already baked into the
 // on-disk unit when the current shell has no proxy variables exported, instead
@@ -155,7 +161,7 @@ func systemdUnitProxyEnv(data []byte) [][2]string {
 // EnvironmentVariables <dict> of a rendered launchd plist, mirroring
 // launchAgentExecutable. Pairs are returned in file order with XML escaping
 // undone by the decoder; the fixed HOME/PATH keys are skipped. Feeding the
-// result back through renderLaunchAgentWithProxyEnv reproduces the plist. See
+// result back through renderLaunchAgentWithForwardedEnv reproduces the plist. See
 // serviceProxyEnv.
 func launchAgentProxyEnv(data []byte) [][2]string {
 	decoder := xml.NewDecoder(bytes.NewReader(data))

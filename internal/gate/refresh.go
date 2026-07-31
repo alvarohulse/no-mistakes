@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -10,6 +11,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+// errCredentialBearingRemote reports a remote whose userinfo carries
+// credentials. Its host/path identity is still resolved on the returned
+// refreshRemote so trusted callers can compare bindings without the credential.
+var errCredentialBearingRemote = errors.New("credential-bearing remote")
 
 // RefreshFailureReason is a bounded, URL-free reason safe to emit in logs.
 type RefreshFailureReason string
@@ -153,6 +159,34 @@ type refreshRemote struct {
 	identity string
 }
 
+// RemoteIdentity returns the normalized host/path identity for a supported
+// Git remote. Equivalent HTTPS, ssh://, and scp-like forms resolve to the same
+// value; credentials, partial remotes, and unsupported schemes are rejected.
+func RemoteIdentity(raw string) (string, error) {
+	remote, err := inspectRefreshRemote(raw)
+	if err != nil {
+		return "", err
+	}
+	return remote.identity, nil
+}
+
+// RegisteredRemoteIdentity returns the host/path identity of a remote already
+// trusted as machine state, such as a stored upstream URL that safeurl.Redact
+// left as https://redacted@host/path. Unlike RemoteIdentity it tolerates
+// embedded userinfo because the value is machine-owned and only the host and
+// path participate in the binding comparison; every other rejection (partial,
+// unsupported, malformed) still fails.
+func RegisteredRemoteIdentity(raw string) (string, error) {
+	remote, err := inspectRefreshRemote(raw)
+	if err != nil && !errors.Is(err, errCredentialBearingRemote) {
+		return "", err
+	}
+	if remote.identity == "" {
+		return "", fmt.Errorf("invalid remote")
+	}
+	return remote.identity, nil
+}
+
 func inspectRefreshRemote(raw string) (refreshRemote, error) {
 	trimmed := strings.TrimSpace(raw)
 	info := refreshRemote{raw: trimmed}
@@ -171,14 +205,14 @@ func inspectRefreshRemote(raw string) (refreshRemote, error) {
 			if parsed.User != nil {
 				remotePath = parsed.Path
 				info.identity = refreshRemoteIdentity(trimmed, remotePath)
-				return info, fmt.Errorf("credential-bearing remote")
+				return info, errCredentialBearingRemote
 			}
 		case "ssh", "git":
 			if parsed.User != nil {
 				if _, hasPassword := parsed.User.Password(); hasPassword {
 					remotePath = parsed.Path
 					info.identity = refreshRemoteIdentity(trimmed, remotePath)
-					return info, fmt.Errorf("credential-bearing remote")
+					return info, errCredentialBearingRemote
 				}
 			}
 		default:

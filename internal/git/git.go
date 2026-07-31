@@ -699,9 +699,32 @@ func RefExists(ctx context.Context, dir, ref string) (bool, error) {
 // error from Run; callers that need to distinguish "absent" from a real
 // failure should check RefExists first or inspect the error text.
 func ShowFile(ctx context.Context, dir, ref, path string) (string, error) {
-	out, err := Run(ctx, dir, "show", fmt.Sprintf("%s:%s", ref, path))
+	out, err := ShowFileBytes(ctx, dir, ref, path)
 	if err != nil {
 		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ShowFileBytes returns the exact blob bytes stored at ref:path without the
+// whitespace trimming performed by Run. Config provenance hashes this form so
+// a digest always describes the bytes Git actually stored.
+func ShowFileBytes(ctx context.Context, dir, ref, path string) ([]byte, error) {
+	args := []string{"show", fmt.Sprintf("%s:%s", ref, path)}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = NonInteractiveEnv(dir)
+	winproc.Harden(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return out, nil
 }

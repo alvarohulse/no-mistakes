@@ -2,10 +2,30 @@ package git
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestShowFileBytesPreservesExactBlobBytes(t *testing.T) {
+	ctx := context.Background()
+	repo := initTestRepo(t)
+	want := []byte("repo: https://example.com/owner/repo\n\n")
+	if err := os.WriteFile(filepath.Join(repo, ".no-mistakes.yaml"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", ".no-mistakes.yaml")
+	run(t, repo, "git", "commit", "-m", "add config")
+
+	got, err := ShowFileBytes(ctx, repo, "HEAD", ".no-mistakes.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("blob bytes = %q, want %q", got, want)
+	}
+}
 
 func TestRefExists(t *testing.T) {
 	ctx := context.Background()

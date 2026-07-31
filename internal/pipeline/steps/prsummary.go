@@ -21,7 +21,26 @@ const (
 	maxEmbeddedArtifactsTotalBytes    = 32 * 1024
 	noMistakesPRSignature             = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
 	pipelineAgentTelemetryTableHeader = "| Step | Agent (via) | Nested agents |\n| --- | --- | --- |\n"
+	pipelineConfigSourcesPrefix       = "Config sources: "
 )
+
+func configSourcesSummary(sources []db.ConfigSource) string {
+	if len(sources) == 0 {
+		return ""
+	}
+	labels := make([]string, 0, len(sources))
+	for _, source := range sources {
+		digest := strings.TrimSpace(source.Digest)
+		if len(digest) > 12 {
+			digest = digest[:12]
+		}
+		if digest == "" {
+			digest = "-"
+		}
+		labels = append(labels, fmt.Sprintf("`%s@sha256:%s`", markdownTableCell(source.Kind), digest))
+	}
+	return pipelineConfigSourcesPrefix + strings.Join(labels, ", ") + "\n\n"
+}
 
 type testingArtifactRenderState struct {
 	remainingEmbeddedBytes int

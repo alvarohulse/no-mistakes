@@ -238,7 +238,12 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) string {
 		slog.Warn("failed to query agent invocations for pipeline summary", "error", err)
 	}
 
-	return buildPipelineStatusSummary(steps, rounds, invocations, sctx.Run.RefreshStrategy)
+	summary := buildPipelineStatusSummary(steps, rounds, invocations, sctx.Run.RefreshStrategy)
+	configSources := configSourcesSummary(sctx.Run.ConfigSources)
+	if summary == "" || configSources == "" {
+		return summary
+	}
+	return strings.Replace(summary, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+configSources, 1)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -487,7 +492,7 @@ func truncatePipelineSection(pipelineMD string, maxBytes int) string {
 	groups := parsePipelineUpdateGroups(updates)
 	totalUnits := countPipelineUpdateUnits(groups)
 	if totalUnits == 0 {
-		return pipelineOmissionSectionWithinLimit(header, 0, maxBytes)
+		return pipelineConfigHeaderFallback(header, 0, maxBytes)
 	}
 
 	for omitted := 1; omitted < totalUnits; omitted++ {
@@ -501,7 +506,17 @@ func truncatePipelineSection(pipelineMD string, maxBytes int) string {
 		return candidate
 	}
 
-	return pipelineOmissionSectionWithinLimit(header, totalUnits, maxBytes)
+	return pipelineConfigHeaderFallback(header, totalUnits, maxBytes)
+}
+
+func pipelineConfigHeaderFallback(header string, omitted, maxBytes int) string {
+	if omission := pipelineOmissionSectionWithinLimit(header, omitted, maxBytes); omission != "" {
+		return omission
+	}
+	if strings.Contains(header, pipelineConfigSourcesPrefix) && len(header) <= maxBytes {
+		return header
+	}
+	return ""
 }
 
 func minimumPipelineOmissionSection(pipelineMD string) string {
@@ -566,6 +581,11 @@ func splitPipelineSectionHeader(pipelineMD string) (string, string) {
 	}
 
 	headerEnd := len(heading) + introEnd + len("\n\n")
+	if strings.HasPrefix(pipelineMD[headerEnd:], pipelineConfigSourcesPrefix) {
+		if configEnd := strings.Index(pipelineMD[headerEnd:], "\n\n"); configEnd >= 0 {
+			headerEnd += configEnd + len("\n\n")
+		}
+	}
 	return pipelineMD[:headerEnd], pipelineMD[headerEnd:]
 }
 

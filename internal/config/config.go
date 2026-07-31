@@ -109,6 +109,7 @@ type globalConfigRaw struct {
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {
+	Repo           string            `yaml:"repo"`
 	Agent          types.AgentName   `yaml:"agent"`
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
@@ -147,6 +148,7 @@ type RepoConfig struct {
 	// able to turn it off (or on). Default false; a plain bool so a missing key
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
+	present                map[string]bool
 }
 
 // StepAgentRaw is the YAML representation of one step's optional agent route.
@@ -247,6 +249,7 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
+		Repo                   string        `yaml:"repo"`
 		Agent                  agentList     `yaml:"agent"`
 		Commands               Commands      `yaml:"commands"`
 		Hooks                  Hooks         `yaml:"hooks"`
@@ -269,6 +272,8 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
+	c.present = repoConfigPresence(value)
+	c.Repo = strings.TrimSpace(raw.Repo)
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Commands = raw.Commands
@@ -291,6 +296,201 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.CI = raw.CI
 	c.DisableProjectSettings = raw.DisableProjectSettings
 	return nil
+}
+
+// OverlayRepoConfig applies only fields explicitly present in override. It is
+// used for machine-local repo config, where omitted fields continue to inherit
+// the already-resolved committed configuration while explicit empty values can
+// deliberately clear commands and agent routes.
+func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
+	if base == nil {
+		base = &RepoConfig{}
+	}
+	if override == nil {
+		return cloneRepoConfig(base)
+	}
+	out := cloneRepoConfig(base)
+	if override.has("repo") {
+		out.Repo = override.Repo
+	}
+	if override.has("agent") {
+		out.Agent = override.Agent
+		out.Agents = copyAgents(override.Agents)
+	}
+	if override.has("commands.lint") {
+		out.Commands.Lint = override.Commands.Lint
+	}
+	if override.has("commands.test") {
+		out.Commands.Test = override.Commands.Test
+	}
+	if override.has("commands.format") {
+		out.Commands.Format = override.Commands.Format
+	}
+	if override.has("hooks.post_worktree") {
+		out.Hooks.PostWorktree = override.Hooks.PostWorktree
+	}
+	if override.has("ignore_patterns") {
+		out.IgnorePatterns = copyStrings(override.IgnorePatterns)
+	}
+	if override.has("allow_repo_commands") {
+		out.AllowRepoCommands = override.AllowRepoCommands
+	}
+	if override.has("auto_fix.lint") {
+		out.AutoFix.Lint = override.AutoFix.Lint
+	}
+	if override.has("auto_fix.test") {
+		out.AutoFix.Test = override.AutoFix.Test
+	}
+	if override.has("auto_fix.review") {
+		out.AutoFix.Review = override.AutoFix.Review
+	}
+	if override.has("auto_fix.document") {
+		out.AutoFix.Document = override.AutoFix.Document
+	}
+	if override.has("auto_fix.ci", "auto_fix.babysit") {
+		out.AutoFix.CI = override.AutoFix.CI
+	}
+	if override.has("auto_fix.refresh", "auto_fix.rebase") {
+		out.AutoFix.Refresh = override.AutoFix.Refresh
+	}
+	if override.has("commit.fix_message") {
+		out.Commit.FixMessage = override.Commit.FixMessage
+	}
+	if override.has("intent.agent") {
+		out.Intent.Agent = override.Intent.Agent
+		out.Intent.Agents = copyAgents(override.Intent.Agents)
+	}
+	if override.has("intent.enabled") {
+		out.Intent.Enabled = override.Intent.Enabled
+	}
+	if override.has("intent.threshold") {
+		out.Intent.Threshold = override.Intent.Threshold
+	}
+	if override.has("intent.slack_days") {
+		out.Intent.SlackDays = override.Intent.SlackDays
+	}
+	if override.has("intent.disabled_readers") {
+		out.Intent.DisabledReaders = copyStrings(override.Intent.DisabledReaders)
+	}
+	if override.has("refresh.agent", "rebase.agent") {
+		out.Refresh.Agent = override.Refresh.Agent
+		out.Refresh.Agents = copyAgents(override.Refresh.Agents)
+	}
+	if override.has("refresh.strategy") {
+		out.Refresh.Strategy = override.Refresh.Strategy
+	}
+	if override.has("review.agent") {
+		out.Review = copyStepAgentRaw(override.Review)
+	}
+	if override.has("test.agent") {
+		out.Test.Agent = override.Test.Agent
+		out.Test.Agents = copyAgents(override.Test.Agents)
+	}
+	if override.has("test.evidence.store_in_repo") {
+		out.Test.Evidence.StoreInRepo = override.Test.Evidence.StoreInRepo
+	}
+	if override.has("test.evidence.dir") {
+		out.Test.Evidence.Dir = override.Test.Evidence.Dir
+	}
+	if override.has("document.agent") {
+		out.Document.Agent = override.Document.Agent
+		out.Document.Agents = copyAgents(override.Document.Agents)
+	}
+	if override.has("document.instructions") {
+		out.Document.Instructions = override.Document.Instructions
+	}
+	if override.has("lint.agent") {
+		out.Lint = copyStepAgentRaw(override.Lint)
+	}
+	if override.has("pr.agent") {
+		out.PR = copyStepAgentRaw(override.PR)
+	}
+	if override.has("ci.agent") {
+		out.CI = copyStepAgentRaw(override.CI)
+	}
+	if override.has("disable_project_settings") {
+		out.DisableProjectSettings = override.DisableProjectSettings
+	}
+	return out
+}
+
+func (c *RepoConfig) has(paths ...string) bool {
+	for _, path := range paths {
+		if c.present[path] {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneRepoConfig(src *RepoConfig) *RepoConfig {
+	out := *src
+	out.Agents = copyAgents(src.Agents)
+	out.IgnorePatterns = copyStrings(src.IgnorePatterns)
+	out.Intent.Agents = copyAgents(src.Intent.Agents)
+	out.Intent.DisabledReaders = copyStrings(src.Intent.DisabledReaders)
+	out.Refresh.Agents = copyAgents(src.Refresh.Agents)
+	out.Review = copyStepAgentRaw(src.Review)
+	out.Test.Agents = copyAgents(src.Test.Agents)
+	out.Document.Agents = copyAgents(src.Document.Agents)
+	out.Lint = copyStepAgentRaw(src.Lint)
+	out.PR = copyStepAgentRaw(src.PR)
+	out.CI = copyStepAgentRaw(src.CI)
+	if src.present != nil {
+		out.present = make(map[string]bool, len(src.present))
+		for path, present := range src.present {
+			out.present[path] = present
+		}
+	}
+	return &out
+}
+
+func copyStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
+}
+
+func repoConfigPresence(value *yaml.Node) map[string]bool {
+	present := make(map[string]bool)
+	collectRepoConfigPresence(value, "", present)
+	return present
+}
+
+func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[string]bool) {
+	if value == nil {
+		return
+	}
+	if value.Kind == yaml.AliasNode {
+		collectRepoConfigPresence(value.Alias, prefix, present)
+		return
+	}
+	if value.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		if key == "<<" {
+			merged := value.Content[i+1]
+			if merged.Kind == yaml.SequenceNode {
+				for _, item := range merged.Content {
+					collectRepoConfigPresence(item, prefix, present)
+				}
+			} else {
+				collectRepoConfigPresence(merged, prefix, present)
+			}
+			continue
+		}
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+		present[path] = true
+		collectRepoConfigPresence(value.Content[i+1], path, present)
+	}
 }
 
 // Commands holds optional per-repo command overrides.
@@ -1275,15 +1475,21 @@ func DefaultGlobalConfig() *GlobalConfig {
 
 // LoadGlobal reads global config from path. Returns defaults if file doesn't exist.
 func LoadGlobal(path string) (*GlobalConfig, error) {
-	cfg := DefaultGlobalConfig()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return cfg, nil
+			return DefaultGlobalConfig(), nil
 		}
 		return nil, fmt.Errorf("read global config: %w", err)
 	}
+	return LoadGlobalFromBytes(data)
+}
+
+// LoadGlobalFromBytes parses global configuration from exact source bytes.
+// It is used by recovery to revalidate a launch-recorded global config digest
+// without silently switching to a newer file.
+func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
+	cfg := DefaultGlobalConfig()
 
 	var raw globalConfigRaw
 	dec := yaml.NewDecoder(bytes.NewReader(data))
