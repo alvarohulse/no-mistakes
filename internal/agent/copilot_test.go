@@ -53,6 +53,15 @@ func TestCopilotAgent_BuildArgs_ExtraArgsFirst(t *testing.T) {
 	}
 }
 
+func TestCopilotAgent_BuildArgs_FirstClassModelWins(t *testing.T) {
+	ca := &copilotAgent{bin: "copilot", extraArgs: []string{"--model", "old"}, model: "gpt-5.6-sol"}
+	args := ca.buildArgs("fix it")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--model old") || !strings.Contains(joined, "--model gpt-5.6-sol") {
+		t.Fatalf("buildArgs = %v, want only first-class model", args)
+	}
+}
+
 func TestCopilotAgent_BuildArgs_UserPermissionSuppressesDefault(t *testing.T) {
 	tests := []struct {
 		name     string

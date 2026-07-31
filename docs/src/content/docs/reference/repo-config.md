@@ -6,13 +6,13 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. An optional machine-local file can use the same shape with the additional required `repo:` binding described below.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent` plus every `<step>.agent` route select which processes launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, and `<step>.agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, and the Review adversary route from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than `intent.agent`, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
@@ -46,7 +46,10 @@ For enabled runs, no-mistakes stores full SHA-256 digests and private source pat
 agent: codex
 
 review:
-  agent: [codex, claude]
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: codex
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
 
 refresh:
   strategy: merge
@@ -141,7 +144,7 @@ If a pipeline invocation fails because that agent process cannot start or exits 
 Structured findings and schema/output validation problems do not trigger fallback.
 This per-repo `agent` value, including every fallback entry, is still read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands` is enabled there.
 
-### Per-step agent routes
+### Per-step agent and model routes
 
 Set `<step>.agent` to route `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
 
@@ -155,13 +158,41 @@ ci:
 
 Unconfigured steps inherit the run-wide route. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review's durable reviewer/fixer sessions use only the Review route, and invocation telemetry records the concrete provider used after fallback.
 
+Set `<step>.model` to a typed model identity with both an exact backend model name and an explicit vendor:
+
+```yaml
+review:
+  agent: codex
+  model:
+    name: gpt-5.6-sol
+    vendor: openai
+```
+
+Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
+
+Each supported native backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible native routes also fail.
+
+Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. Failing before launch prevents a configured model from silently normalizing or disappearing.
+
+For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
+
+```yaml
+review:
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: codex
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+```
+
+`review.adversary_agent` accepts the same scalar or ordered availability-fallback form as `agent`, but it is not part of `review.agent`'s invocation fallback list. Both model objects are required, and their declared vendors must differ. The controller runs the adversary only after the primary Review returns `risk_level: high`, in a cold session isolated from the primary reviewer/fixer sessions, then merges and namespaces its findings into the same Review gate. Low- and medium-risk reviews do not invoke it.
+
 When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds into the document step's combined housekeeping pass, which runs on the `document` route; the `lint` route then applies only if that step falls back to its own pass. Set `commands.lint` if you want the `lint` route to own the lint duty directly.
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
-ACP targets and aliases remain valid step routes when no native CLI override is required. Global `agent_args_override` supports native agents only: ACP keys are rejected and ACP construction fails rather than silently discarding extra model or reasoning flags.
+ACP targets and aliases remain valid agent-only step routes when no native CLI override is required. Global `agent_args_override` supports native agents only, and first-class step models currently do too: ACP construction fails rather than silently discarding model or reasoning selection.
 
-The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts only agent routing and cannot select a strategy.
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
 
 ### refresh.strategy
 
@@ -179,7 +210,7 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `hooks.post_worktree`, `agent`, and every `<step>.agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `hooks.post_worktree`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |

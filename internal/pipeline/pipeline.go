@@ -15,9 +15,14 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 // AgentRoutes is an immutable run-scoped routing table. Steps with no explicit
 // entry use Default, preserving the run-wide agent behavior.
 type AgentRoutes struct {
-	Default agent.Agent
-	ByStep  map[types.StepName]agent.Agent
+	Default         agent.Agent
+	ByStep          map[types.StepName]agent.Agent
+	ReviewAdversary agent.Agent
 }
+
+// AdversaryForReview returns the separately configured high-risk reviewer.
+// It is deliberately not part of the primary Review fallback list.
+func (r AgentRoutes) AdversaryForReview() agent.Agent { return r.ReviewAdversary }
 
 // AgentForStep returns the configured step route or the run-wide fallback.
 func (r AgentRoutes) AgentForStep(step types.StepName) agent.Agent {
@@ -34,6 +39,7 @@ type StepContext struct {
 	Repo             *db.Repo
 	WorkDir          string
 	Agent            agent.Agent
+	ReviewAdversary  agent.Agent
 	Config           *config.Config
 	DB               *db.DB
 	Log              func(string) // discrete log line (newline-terminated, user-visible + file)

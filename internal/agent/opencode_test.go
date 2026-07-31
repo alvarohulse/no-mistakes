@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,7 @@ func TestOpencodeAgent_CloseWithoutServer(t *testing.T) {
 // TestOpencodeAgent_FullFlow tests the full session lifecycle using a mock HTTP server.
 func TestOpencodeAgent_FullFlow(t *testing.T) {
 	calledPaths := make(map[string]bool)
+	var messageModel map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calledPaths[r.Method+" "+r.URL.Path] = true
 		switch {
@@ -38,6 +40,13 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
 
 		case r.URL.Path == "/session/test-session-456/message" && r.Method == http.MethodPost:
+			var body struct {
+				Model map[string]string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode message body: %v", err)
+			}
+			messageModel = body.Model
 			// Return message response with structured output
 			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","structured":{"success":true,"summary":"all good"},"tokens":{"input":100,"output":50}},"parts":[{"type":"text","text":"{\"success\":true,\"summary\":\"all good\"}"}]}`)
 
@@ -53,6 +62,7 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 
 	a := &opencodeAgent{
 		bin:    "opencode",
+		model:  "anthropic/claude-opus-5",
 		server: &managedServer{port: mustParsePort(server.URL)},
 	}
 
@@ -102,6 +112,10 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 	}
 	if !calledPaths["POST /session/test-session-456/message"] {
 		t.Error("expected POST /session/{id}/message call")
+	}
+	wantModel := map[string]string{"providerID": "anthropic", "modelID": "claude-opus-5"}
+	if !reflect.DeepEqual(messageModel, wantModel) {
+		t.Fatalf("message model = %v, want %v", messageModel, wantModel)
 	}
 }
 

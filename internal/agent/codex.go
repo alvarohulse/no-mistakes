@@ -21,6 +21,7 @@ import (
 type codexAgent struct {
 	bin       string
 	extraArgs []string
+	model     string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
 	disableProjectSettings  bool
@@ -170,12 +171,19 @@ func (a *codexAgent) Close() error { return nil }
 // -s/--sandbox as of codex 0.144): unsupported user extraArgs make the
 // invocation fail fast and the caller's cold fallback preserves correctness.
 func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+11)
+	args := make([]string, 0, len(a.extraArgs)+13)
 	args = append(args, "exec")
 	if resumeID != "" {
 		args = append(args, "resume")
 	}
-	args = append(args, a.extraArgs...)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "-m", "--model")
+	}
+	args = append(args, extraArgs...)
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
 	if resumeID != "" {
 		args = append(args, resumeID)
 	}

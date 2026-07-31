@@ -11,7 +11,10 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 agent: auto
 
 review:
-  agent: [codex, claude]
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: codex
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
 
 acpx_path: acpx
 
@@ -103,7 +106,7 @@ If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
 
-### Per-step agent routes
+### Per-step agent and model routes
 
 Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`.
 
@@ -118,7 +121,19 @@ test:
 An unconfigured step inherits the run-wide `agent`. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. Review session reuse stays scoped to the selected Review route.
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
-ACP targets and aliases are valid routes when they need no native CLI overrides. `agent_args_override` is native-only: an ACP key such as `cursor` or `acp:gemini` is rejected, and ACP construction fails rather than silently ignoring extra model or reasoning flags. Route that step to a native agent when it depends on those flags.
+`<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. Repo model routes override matching global model routes. Each supported native backend receives the model through its verified interface on every invocation and fix round; the first-class field wins over a model default in `agent_args_override`. `push` has no agent or model route.
+
+```yaml
+review:
+  agent: codex
+  model: {name: gpt-5.6-sol, vendor: openai}
+```
+
+Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible native backend is runnable, startup fails loudly.
+
+`review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
+
+ACP targets and aliases remain valid agent-only routes when they need no native CLI overrides. `agent_args_override` is native-only, and every first-class model+ACP route is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. This prevents an ACP key such as `cursor` or `acp:gemini` from silently ignoring model or reasoning selection.
 
 ### acpx_path
 
@@ -175,7 +190,7 @@ Default native binary names when no override is set:
 ### agent_args_override
 
 Extra CLI flags to pass to each native agent.
-Use this to set model selection, service tier, reasoning effort, permission mode, or any other flag the underlying agent supports.
+Use this to set service tier, reasoning effort, permission mode, model selection where the underlying command supports it, or any other supported flag.
 ACP targets and aliases do not accept these overrides; configuring an ACP key fails with an actionable error instead of silently discarding the flags.
 
 |         |                                                           |
@@ -191,7 +206,7 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `claude`   | `-p`, `--print`, `--verbose`, `--output-format`, `--json-schema`, `-r`, `--resume`, `--session-id`, `-c`, `--continue`, `--fork-session` |
 | `codex`    | `exec`, `resume`, `--resume`, `--session`, `--session-id`, `--thread`, `--thread-id`, `--last`, `--json`, `--color` |
 | `rovodev`  | `rovodev`, `serve`, `--disable-session-token`                                                               |
-| `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`                                                             |
+| `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`, `--model`                                                  |
 | `pi`       | `--mode`, `--no-session`                                                                                    |
 | `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
 
@@ -225,9 +240,6 @@ agent_args_override:
   rovodev:
     - --profile
     - work
-  opencode:
-    - --model
-    - gpt-5
   pi:
     - --provider
     - google

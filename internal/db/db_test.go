@@ -76,7 +76,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"refresh_strategy", "stacked_on", "submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+	for _, column := range []string{"refresh_strategy", "stacked_on", "resolved_agent_routing_json", "submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -133,6 +133,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if len(run.ConfigSources) != 0 {
 		t.Fatalf("legacy run config sources = %#v, want empty", run.ConfigSources)
+	}
+	if run.ResolvedAgentRouting != nil {
+		t.Fatalf("legacy run gained resolved routing snapshot: %q", *run.ResolvedAgentRouting)
 	}
 }
 

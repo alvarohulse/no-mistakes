@@ -21,6 +21,7 @@ import (
 type copilotAgent struct {
 	bin                     string
 	extraArgs               []string
+	model                   string
 	processTerminationGrace time.Duration
 }
 
@@ -146,8 +147,15 @@ func copilotErrorDetail(copilotErr, stderr string) string {
 // added; --no-ask-user is always added so the agent never blocks waiting for
 // interactive input.
 func (a *copilotAgent) buildArgs(prompt string) []string {
-	args := make([]string, 0, len(a.extraArgs)+8)
-	args = append(args, a.extraArgs...)
+	args := make([]string, 0, len(a.extraArgs)+10)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--model")
+	}
+	args = append(args, extraArgs...)
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
 	args = append(args,
 		"-p", prompt,
 		"--output-format", "json",

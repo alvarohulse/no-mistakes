@@ -39,10 +39,10 @@ func TestBuildOpencodeServeArgs_Default(t *testing.T) {
 }
 
 func TestBuildOpencodeServeArgs_ExtraArgsInserted(t *testing.T) {
-	got := buildOpencodeServeArgs([]string{"--model", "gpt-5"}, 9999)
+	got := buildOpencodeServeArgs([]string{"--log-level", "DEBUG"}, 9999)
 	want := []string{
 		"serve",
-		"--model", "gpt-5",
+		"--log-level", "DEBUG",
 		"--hostname", "127.0.0.1",
 		"--port", "9999",
 		"--print-logs",

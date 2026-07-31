@@ -30,6 +30,7 @@ const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 type claudeAgent struct {
 	bin       string
 	extraArgs []string
+	model     string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses claude's project-level settings/memory surface.
 	disableProjectSettings  bool
@@ -176,8 +177,15 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // (never --fork-session: the session identity must stay stable so later
 // turns keep resuming the same conversation).
 func (a *claudeAgent) buildArgs(schema json.RawMessage, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+11)
-	args = append(args, a.extraArgs...)
+	args := make([]string, 0, len(a.extraArgs)+13)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--model")
+	}
+	args = append(args, extraArgs...)
+	if a.model != "" {
+		args = append(args, "--model", a.model)
+	}
 	args = append(args,
 		"-p",
 		"--verbose",

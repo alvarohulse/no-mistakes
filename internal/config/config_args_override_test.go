@@ -29,8 +29,8 @@ agent_args_override:
     - --profile
     - work
   opencode:
-    - --model
-    - gpt-5
+    - --log-level
+    - DEBUG
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ agent_args_override:
 		"claude":   {"--permission-mode", "acceptEdits"},
 		"codex":    {"-m", "gpt-5.4", "-c", `service_tier="priority"`, "-c", `model_reasoning_effort="low"`},
 		"rovodev":  {"--profile", "work"},
-		"opencode": {"--model", "gpt-5"},
+		"opencode": {"--log-level", "DEBUG"},
 	}
 	for agent, want := range cases {
 		got := cfg.AgentArgsOverride[agent]
@@ -118,6 +118,7 @@ func TestLoadGlobal_AgentArgsOverride_ReservedArgsRejected(t *testing.T) {
 		{"opencode", "--hostname"},
 		{"opencode", "--port"},
 		{"opencode", "--print-logs"},
+		{"opencode", "--model"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.agent+"_"+tt.arg, func(t *testing.T) {

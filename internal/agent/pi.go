@@ -20,6 +20,7 @@ import (
 type piAgent struct {
 	bin       string
 	extraArgs []string
+	model     string
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses pi's project-level AGENTS.md/CLAUDE.md discovery.
 	disableProjectSettings  bool
@@ -123,7 +124,11 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 // opt-out, the context-file suppression flag comes first. User extras otherwise
 // precede the managed flags that no-mistakes requires for JSONL parsing.
 func (a *piAgent) buildArgs() []string {
-	args := make([]string, 0, len(a.extraArgs)+5)
+	args := make([]string, 0, len(a.extraArgs)+7)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--model")
+	}
 	// Project-settings opt-out (trusted-only; see config.DisableProjectSettings):
 	// disable AGENTS.md/CLAUDE.md discovery so an agent-orchestration target
 	// (firstmate) cannot install a fleet-captain identity on the gate agent.
@@ -132,17 +137,20 @@ func (a *piAgent) buildArgs() []string {
 	// instruction files exactly as before (backward-compat).
 	pinIndex := -1
 	if a.disableProjectSettings {
-		pinIndex = piNoContextFilesArgIndex(a.extraArgs)
+		pinIndex = piNoContextFilesArgIndex(extraArgs)
 		contextFlag := "--no-context-files"
 		if pinIndex >= 0 {
-			contextFlag = a.extraArgs[pinIndex]
+			contextFlag = extraArgs[pinIndex]
 		}
 		args = append(args, contextFlag)
 	}
-	for i, arg := range a.extraArgs {
+	for i, arg := range extraArgs {
 		if i != pinIndex {
 			args = append(args, arg)
 		}
+	}
+	if a.model != "" {
+		args = append(args, "--model", a.model)
 	}
 	args = append(args, "--mode", "json", "--no-session")
 	return args

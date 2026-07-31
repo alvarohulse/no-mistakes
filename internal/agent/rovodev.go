@@ -105,7 +105,7 @@ func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string) (string, er
 // buildRovodevServeArgs builds `acli`'s serve argv with user-supplied extras
 // inserted after the "rovodev serve" subcommands and before the managed flags.
 func buildRovodevServeArgs(extraArgs []string, port int) []string {
-	args := make([]string, 0, len(extraArgs)+4)
+	args := make([]string, 0, len(extraArgs)+6)
 	args = append(args, "rovodev", "serve")
 	args = append(args, extraArgs...)
 	args = append(args, "--disable-session-token", fmt.Sprintf("%d", port))
