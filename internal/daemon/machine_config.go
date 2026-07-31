@@ -41,16 +41,10 @@ func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool))
 	if !set {
 		return nil, nil
 	}
-	rawPath = strings.TrimSpace(rawPath)
-	if rawPath == "" {
-		return nil, fmt.Errorf("%s is set but empty", machineRepoConfigEnv)
-	}
-
-	path, err := filepath.Abs(rawPath)
+	path, err := ValidateMachineRepoConfigPath(rawPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s path: %w", machineRepoConfigEnv, err)
+		return nil, err
 	}
-	path = filepath.Clean(path)
 	resolvedPath, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s target: %w", machineRepoConfigEnv, err)
@@ -96,6 +90,21 @@ func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool))
 		Path:   resolvedPath,
 		Digest: configDigest(data),
 	}, nil
+}
+
+// ValidateMachineRepoConfigPath validates the environment-level path contract
+// shared by run startup and doctor. Relative paths are refused because managed
+// daemons resolve them from the service working directory, not the shell that
+// installed or refreshed the service.
+func ValidateMachineRepoConfigPath(rawPath string) (string, error) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return "", fmt.Errorf("%s is set but empty", machineRepoConfigEnv)
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("%s must be an absolute path", machineRepoConfigEnv)
+	}
+	return filepath.Clean(path), nil
 }
 
 func loadRepoConfigInput(path, kind, ref string) (*repoConfigInput, error) {

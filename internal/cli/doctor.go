@@ -80,6 +80,25 @@ func newDoctorCmd() *cobra.Command {
 					ok("data directory", p.Root())
 				}
 
+				if rawPath, set := os.LookupEnv("NM_REPO_CONFIG"); set {
+					path, err := daemon.ValidateMachineRepoConfigPath(rawPath)
+					if err != nil {
+						fail("machine config", err.Error())
+						allOK = false
+					} else if data, err := os.ReadFile(path); err != nil {
+						fail("machine config", fmt.Sprintf("unreadable (%v)", err))
+						allOK = false
+					} else if repoCfg, err := config.LoadRepoFromBytes(data); err != nil {
+						fail("machine config", fmt.Sprintf("invalid (%v)", err))
+						allOK = false
+					} else if strings.TrimSpace(repoCfg.Repo) == "" {
+						fail("machine config", "invalid (repo binding is required)")
+						allOK = false
+					} else {
+						ok("machine config", path)
+					}
+				}
+
 				if p != nil {
 					if _, err := os.Stat(p.DB()); os.IsNotExist(err) {
 						warn("database      ", "not found "+sDim.Render("(will be created on first use)"))

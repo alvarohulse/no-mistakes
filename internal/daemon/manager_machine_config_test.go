@@ -170,6 +170,14 @@ func TestLoadMachineRepoConfigRequiresNonEmptyPath(t *testing.T) {
 	}
 }
 
+func TestLoadMachineRepoConfigRequiresAbsolutePath(t *testing.T) {
+	repo := &db.Repo{WorkingPath: t.TempDir(), UpstreamURL: "https://github.com/owner/project.git"}
+	_, err := loadMachineRepoConfig(repo, fixedEnv("config/repo.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+		t.Fatalf("error = %v, want explicit relative-path refusal", err)
+	}
+}
+
 func TestLoadMachineRepoConfigAcceptsEquivalentBoundRemoteAndDigestsBytes(t *testing.T) {
 	repo := &db.Repo{WorkingPath: t.TempDir(), UpstreamURL: "https://github.com/Owner/Project.git"}
 	configDir := t.TempDir()
