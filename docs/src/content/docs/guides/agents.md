@@ -129,12 +129,13 @@ review:
   adversary_model: {name: gpt-5.6-sol, vendor: openai}
 ```
 
-The controller runs the separately routed adversary only when the primary Review reports high risk. The vendors must differ, and the adversary never shares the primary's durable reviewer or fixer session. Per-step models currently require native backends; model+ACP routes fail before work starts until ACP spawn plumbing is available.
+The controller runs the separately routed adversary only when the primary Review reports high risk. The vendors must differ, and the adversary never shares the primary's durable reviewer or fixer session. ACP routes with composable target commands accept bare model families; bracketed variants fail before work starts because ACP may silently normalize them.
 
 ### Optional ACP target
 
 If you install `acpx` separately, you can opt into any ACP target with the `acp:` prefix, for example `agent: acp:gemini`.
 `agent: auto` probes native agents and first-class ACP aliases (such as `cursor`), and never auto-selects arbitrary `acp:<target>` entries.
+With a typed model route, `auto` keeps compatible native backends first and considers ACP aliases only for bracket-free model families.
 
 The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns the exact resolution order, fallback-list filtering and retry semantics, and the failure behavior when no entry is runnable.
 
@@ -330,6 +331,7 @@ When the target matches a first-class alias such as `acp:cursor`, no-mistakes su
 Configure custom target commands in the [Global Config Reference](/no-mistakes/reference/global-config/#acp_registry_overrides).
 
 Spawns an `acpx` subprocess for each invocation with `exec -f <prompt-file>`. The prompt (including any appended JSON schema for structured output) is written to a temporary file first so large prompts do not exceed OS command-line length limits, notably the 8191-character cap on Windows. The temp file is removed when the invocation exits. no-mistakes also passes JSON output, approve-all permissions, denied non-interactive permission prompts, and the repo worktree as `--cwd`.
+For a first-class bare model family on a composable target command, no-mistakes places the exact model on the target spawn command and records the configured name and vendor. Bracketed model variants are rejected before launch rather than accepted and normalized by the ACP server.
 Structured output is handled by appending the requested JSON schema to the prompt file and validating the final assistant text.
 
 ## Checking agent availability

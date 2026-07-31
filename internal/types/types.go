@@ -295,6 +295,13 @@ func ACPTargetFor(name AgentName) (string, bool) {
 	return target, true
 }
 
+// IsBareACPModelName reports whether model can be selected faithfully through
+// ACP target startup. Bracketed Cursor variants are normalized by its ACP
+// server, so every bracket form fails closed before launch.
+func IsBareACPModelName(model string) bool {
+	return model != "" && !strings.ContainsAny(model, "[]")
+}
+
 // ACPRawCommand resolves the raw command acpx runs for an ACP target: a
 // registry override is trimmed and wins when non-blank, otherwise the alias
 // default command is used.

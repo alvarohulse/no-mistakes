@@ -1064,9 +1064,9 @@ agent: auto
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. A model is a typed name plus an
 # explicit lowercase vendor; adapters translate it through their verified
-# native interface. OpenCode names use provider/model. Rovo Dev and ACP reject
-# model routes because their managed integrations expose no verified model
-# selection interface.
+# interface. OpenCode names use provider/model. Rovo Dev rejects model routes.
+# ACP accepts bare model families but rejects bracketed parameter variants,
+# which ACP servers may silently normalize.
 # Unconfigured steps inherit the run-wide agent and its default model.
 # Supported sections: intent, refresh, review, test, document, lint, pr, ci.
 # review:
@@ -1371,8 +1371,8 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 			return "", fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
 		}
 	}
-	if model.Name != "" {
-		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto only probes native backends capable of the declared vendor", model.Name, model.Vendor, strings.Join(probed, ", "))
+	if model.Name != "" && !types.IsBareACPModelName(model.Name) {
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); ACP aliases require a bare model family", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
 	for _, alias := range types.ACPAliases() {
 		available, bins, err := c.acpAvailable(alias.Name, lookPath)
@@ -1383,6 +1383,9 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 		if available {
 			return alias.Name, nil
 		}
+	}
+	if model.Name != "" {
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto probed compatible native backends and ACP aliases", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
@@ -1438,7 +1441,10 @@ func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) err
 		return nil
 	}
 	if isACPAgent(name) {
-		return fmt.Errorf("model %q is not supported for ACP agent %q because ACP model compatibility validation remains fail-closed", model.Name, name)
+		if !types.IsBareACPModelName(model.Name) {
+			return fmt.Errorf("parameterized or malformed bracketed model %q is not supported for ACP agent %q; configure a bare model family", model.Name, name)
+		}
+		return nil
 	}
 	if name == types.AgentOpenCode && !validOpenCodeModelName(model.Name) {
 		return fmt.Errorf("agent %q requires model %q to use provider/model form", name, model.Name)

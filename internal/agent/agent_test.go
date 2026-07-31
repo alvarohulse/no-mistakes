@@ -140,10 +140,34 @@ func (*modelAttemptAgent) Run(_ context.Context, opts RunOpts) (*Result, error) 
 	return result, nil
 }
 
-func TestNewWithOptions_ACPRejectsFirstClassModel(t *testing.T) {
-	_, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
-	if err == nil || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "ACP") {
-		t.Fatalf("NewWithOptions() error = %v, want ACP model-routing refusal", err)
+func TestNewWithOptions_ACPCarriesBareModelIdentity(t *testing.T) {
+	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+	defer a.Close()
+	if got := ConfiguredModel(a); got != (ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}) {
+		t.Fatalf("configured model = %#v", got)
+	}
+}
+
+func TestNewWithOptions_ACPRejectsBracketedModelNames(t *testing.T) {
+	models := []string{
+		"claude-opus-5[effort=high]",
+		"claude-opus-5[]",
+		"claude-opus-5[",
+		"claude-opus-5]",
+		"[claude-opus-5]",
+		"claude-opus-5[[effort=high]]",
+		"claude-opus-5[effort=high][fast=true]",
+	}
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			_, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: model, Vendor: "anthropic"})
+			if err == nil || !strings.Contains(err.Error(), model) || !strings.Contains(err.Error(), "bare model family") {
+				t.Fatalf("NewWithOptions() error = %v, want bracketed ACP refusal", err)
+			}
+		})
 	}
 }
 

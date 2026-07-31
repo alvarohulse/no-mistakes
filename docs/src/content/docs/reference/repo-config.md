@@ -170,9 +170,9 @@ review:
 
 Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
 
-Each supported native backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible native routes also fail.
+Each supported backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex resumed Review sessions. Claude and Codex accept their native model names. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible routes also fail.
 
-Every model route whose resolved agent is an ACP target or alias, including `cursor`, is rejected before work begins; the model compatibility rule remains fail-closed rather than silently claiming a model the ACP backend may normalize.
+ACP targets and aliases, including `cursor`, accept bracket-free model families. `auto` preserves native-first probe order and falls through to available ACP aliases only for those bare families; the same resolver handles primary and Review-adversary routes. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native backends continue accepting their parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
 
 For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
 
@@ -190,7 +190,7 @@ When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
-ACP targets and aliases accept global `agent_args_override` entries when their target spawn command is composable. First-class step models remain native-only: ACP construction fails rather than silently claiming a model the backend may normalize.
+ACP targets and aliases accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
 
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
 
