@@ -111,9 +111,10 @@ type RepoConfig struct {
 	Agent          types.AgentName   `yaml:"agent"`
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
+	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format}, agent, and every step agent route) from a contributor's
+	// fields (commands.{test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -194,6 +195,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
 		Agent                  agentList    `yaml:"agent"`
 		Commands               Commands     `yaml:"commands"`
+		Hooks                  Hooks        `yaml:"hooks"`
 		IgnorePatterns         []string     `yaml:"ignore_patterns"`
 		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
 		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
@@ -215,6 +217,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Commands = raw.Commands
+	c.Hooks = raw.Hooks
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
@@ -236,6 +239,13 @@ type Commands struct {
 	Lint   string `yaml:"lint"`
 	Test   string `yaml:"test"`
 	Format string `yaml:"format"`
+}
+
+// Hooks holds deterministic controller commands that run outside pipeline
+// step execution. Like Commands, hook values are trusted code-executing
+// configuration and are never sourced from an untrusted pushed branch.
+type Hooks struct {
+	PostWorktree string `yaml:"post_worktree"`
 }
 
 // AutoFixRaw is the YAML representation of auto-fix config.
@@ -276,6 +286,7 @@ type Config struct {
 	LogLevel                string
 	SessionReuse            bool
 	Commands                Commands
+	Hooks                   Hooks
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
 	Commit                  Commit
@@ -1346,8 +1357,8 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The code-executing selection fields - Commands (run verbatim via sh -c on
-// the daemon host), Agent/Agents, and every per-step agent route (select which
+// The code-executing selection fields - Commands and Hooks (run verbatim via
+// sh -c on the daemon host), Agent/Agents, and every per-step agent route (select which
 // processes launch with the maintainer's credentials, including fallback lists
 // and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
@@ -1393,6 +1404,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	}
 	if trusted != nil {
 		effective.Commands = trusted.Commands
+		effective.Hooks = trusted.Hooks
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
 		effective.Intent.Agent = trusted.Intent.Agent
@@ -1408,6 +1420,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.CI = copyStepAgentRaw(trusted.CI)
 	} else {
 		effective.Commands = Commands{}
+		effective.Hooks = Hooks{}
 		effective.Agent = ""
 		effective.Agents = nil
 		effective.Intent.Agent = ""
@@ -1593,6 +1606,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		LogLevel:                global.LogLevel,
 		SessionReuse:            global.SessionReuse,
 		Commands:                repo.Commands,
+		Hooks:                   repo.Hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
 		Commit:                  commit,

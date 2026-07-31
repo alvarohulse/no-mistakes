@@ -40,6 +40,7 @@ func TestMerge_RepoOverridesAgent(t *testing.T) {
 		Commands: Commands{
 			Test: "make test",
 		},
+		Hooks: Hooks{PostWorktree: "yarn install --immutable"},
 	}
 
 	cfg := Merge(global, repo)
@@ -51,6 +52,9 @@ func TestMerge_RepoOverridesAgent(t *testing.T) {
 	}
 	if cfg.Commands.Test != "make test" {
 		t.Errorf("test = %q", cfg.Commands.Test)
+	}
+	if cfg.Hooks.PostWorktree != "yarn install --immutable" {
+		t.Errorf("hooks.post_worktree = %q", cfg.Hooks.PostWorktree)
 	}
 	if cfg.CITimeout != 4*time.Hour {
 		t.Errorf("ci_timeout = %v", cfg.CITimeout)
