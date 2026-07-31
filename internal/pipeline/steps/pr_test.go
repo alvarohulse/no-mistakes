@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -94,6 +95,148 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	}
 	if run.PRURL == nil || *run.PRURL != "https://github.com/test/repo/pull/42" {
 		t.Errorf("PR URL = %v, want https://github.com/test/repo/pull/42", run.PRURL)
+	}
+}
+
+func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+		RunID:                     sctx.Run.ID,
+		StepName:                  string(types.StepReview),
+		Round:                     1,
+		Purpose:                   "review",
+		Agent:                     "codex",
+		InvocationMode:            types.AgentInvocationModeHarnessCLI,
+		AgentObservationsReported: true,
+		AgentObservations: []types.AgentObservation{{
+			Identity:       "Explore",
+			InvocationMode: types.AgentInvocationModeSubagentTool,
+		}},
+		SessionMode: db.InvocationModeStarted,
+		StartedAt:   1,
+		CompletedAt: 2,
+		DurationMS:  1,
+		ExitStatus:  "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := (&PRStep{}).buildPipelineSection(sctx)
+	want := "| Step | Agent (via) | Nested agents |\n" +
+		"| --- | --- | --- |\n" +
+		"| Review r1 | codex (harness_cli) | Explore (subagent_tool) |"
+	if !strings.Contains(got, want) {
+		t.Fatalf("pipeline agent telemetry table missing:\n%s", got)
+	}
+	if !strings.Contains(got, "<summary>✅ **Review** - completed</summary>") {
+		t.Fatalf("pipeline status missing after telemetry table:\n%s", got)
+	}
+}
+
+func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
+	t.Parallel()
+	got := agentTelemetryTable([]db.AgentInvocation{
+		{
+			StepName:       string(types.StepTest),
+			Round:          1,
+			Agent:          "claude",
+			InvocationMode: types.AgentInvocationModeHarnessCLI,
+		},
+		{
+			StepName:                  string(types.StepDocument),
+			Round:                     1,
+			Agent:                     "codex",
+			InvocationMode:            types.AgentInvocationModeHarnessCLI,
+			AgentObservationsReported: true,
+		},
+	})
+
+	for _, want := range []string{
+		"| Test r1 | claude (harness_cli) | - |",
+		"| Document r1 | codex (harness_cli) | none |",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("agent telemetry table missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestTruncatePipelineSectionTreatsAgentTelemetryTableAsAtomic(t *testing.T) {
+	t.Parallel()
+	withoutTelemetry := pipelineMarkdownForTest(
+		"review round 001 - older update",
+		"review round 002 - newest update",
+	)
+	table := agentTelemetryTable([]db.AgentInvocation{{
+		StepName:                  string(types.StepReview),
+		Round:                     1,
+		Agent:                     "codex",
+		InvocationMode:            types.AgentInvocationModeHarnessCLI,
+		AgentObservationsReported: true,
+	}})
+	withTelemetry := strings.Replace(
+		withoutTelemetry,
+		noMistakesPRSignature+"\n\n",
+		noMistakesPRSignature+"\n\n"+table,
+		1,
+	)
+
+	if got := truncatePipelineSection(withTelemetry, len(withTelemetry)); got != withTelemetry {
+		t.Fatalf("exact-limit pipeline changed:\n%s", got)
+	}
+	if got := truncatePipelineSection(withTelemetry, len(withTelemetry)-1); got != withoutTelemetry {
+		t.Fatalf("one-byte overflow should remove only the complete telemetry table\nwant:\n%s\n\ngot:\n%s", withoutTelemetry, got)
+	}
+
+	limit := len(withoutTelemetry) - 1
+	want := truncatePipelineSection(withoutTelemetry, limit)
+	got := truncatePipelineSection(withTelemetry, limit)
+	if got != want {
+		t.Fatalf("telemetry removal changed existing pipeline clamp priorities or markers\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+	for _, fragment := range []string{"| Step | Agent (via) | Nested agents |", "| --- | --- | --- |", "| Review r1 |"} {
+		if strings.Contains(got, fragment) {
+			t.Fatalf("clamped pipeline retained partial telemetry fragment %q:\n%s", fragment, got)
+		}
+	}
+}
+
+func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{}
+	whatChanged := "## What Changed\n\n- keep the reviewer summary"
+	withoutTelemetry := pipelineMarkdownForTest("review round 001 - latest update")
+	table := agentTelemetryTable([]db.AgentInvocation{{
+		StepName:                  string(types.StepReview),
+		Round:                     1,
+		Agent:                     "codex",
+		InvocationMode:            types.AgentInvocationModeHarnessCLI,
+		AgentObservationsReported: true,
+	}})
+	withTelemetry := strings.Replace(
+		withoutTelemetry,
+		noMistakesPRSignature+"\n\n",
+		noMistakesPRSignature+"\n\n"+table,
+		1,
+	)
+	header, _ := splitPipelineSectionHeader(withTelemetry)
+	limit := scm.PRBodyLen(whatChanged + "\n\n" + header + pipelineAgentTelemetryTableHeader[:24] + "\n\n…(description truncated)")
+
+	want := assemblePRBody(sctx, whatChanged, "", "", withoutTelemetry, limit)
+	got := assemblePRBody(sctx, whatChanged, "", "", withTelemetry, limit)
+	if got != want {
+		t.Fatalf("provider clamp should remove telemetry as a complete unit before applying existing priorities\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+	if strings.Contains(got, "| Step | Agent") || strings.Contains(got, "| --- |") {
+		t.Fatalf("provider clamp retained a partial telemetry table:\n%s", got)
 	}
 }
 
