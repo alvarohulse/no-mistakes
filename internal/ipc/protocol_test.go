@@ -129,7 +129,7 @@ func TestPushReceivedParams(t *testing.T) {
 		Ref:             "refs/heads/main",
 		Old:             "aaa",
 		New:             "bbb",
-		SkipSteps:       []types.StepName{types.StepTest, types.StepLint},
+		SkipSteps:       []types.StepName{types.StepBuild, types.StepTest, types.StepLint},
 		RefreshStrategy: types.RefreshStrategyMerge,
 		StackedOn:       "feature/dependency",
 	}

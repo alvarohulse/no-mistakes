@@ -49,6 +49,14 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 	}
 }
 
+func TestRunViewFromDBRendersBuildStep(t *testing.T) {
+	run := &db.Run{ID: "r1", Branch: "feature/x", HeadSHA: "abcdef1234567890", Status: types.RunRunning}
+	rv := runViewFromDB(run, []*db.StepResult{{StepName: types.StepBuild, Status: types.StepStatusRunning}})
+	if len(rv.Steps) != 1 || rv.Steps[0].Name != "build" || rv.Steps[0].Label != "Build" {
+		t.Fatalf("build step view = %#v", rv.Steps)
+	}
+}
+
 func TestPostWorktreeEnvironmentParkRendering(t *testing.T) {
 	parkedSince := time.Now().Unix()
 	errMsg := "post-worktree hook failed with exit code 23: authenticate first"

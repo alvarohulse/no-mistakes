@@ -74,6 +74,7 @@ type GlobalConfig struct {
 	Intent       IntentRaw
 	Refresh      StepAgentRaw
 	Review       ReviewRaw
+	Build        StepAgentRaw
 	Test         TestRaw
 	Document     DocumentRaw
 	Lint         StepAgentRaw
@@ -101,6 +102,7 @@ type globalConfigRaw struct {
 	Refresh                 *StepAgentRaw       `yaml:"refresh"`
 	LegacyRebase            *StepAgentRaw       `yaml:"rebase"`
 	Review                  ReviewRaw           `yaml:"review"`
+	Build                   StepAgentRaw        `yaml:"build"`
 	Test                    TestRaw             `yaml:"test"`
 	Document                DocumentRaw         `yaml:"document"`
 	Lint                    StepAgentRaw        `yaml:"lint"`
@@ -117,18 +119,19 @@ type RepoConfig struct {
 	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
+	// fields (commands.{build,test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
 	// the pushed branch controls nothing that executes, including model selection.
-	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
-	AutoFix           AutoFixRaw `yaml:"auto_fix"`
-	Commit            CommitRaw  `yaml:"commit"`
-	Intent            IntentRaw  `yaml:"intent"`
-	Refresh           RefreshRaw `yaml:"refresh"`
-	Review            ReviewRaw  `yaml:"review"`
-	Test              TestRaw    `yaml:"test"`
+	AllowRepoCommands bool         `yaml:"allow_repo_commands"`
+	AutoFix           AutoFixRaw   `yaml:"auto_fix"`
+	Commit            CommitRaw    `yaml:"commit"`
+	Intent            IntentRaw    `yaml:"intent"`
+	Refresh           RefreshRaw   `yaml:"refresh"`
+	Review            ReviewRaw    `yaml:"review"`
+	Build             StepAgentRaw `yaml:"build"`
+	Test              TestRaw      `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
 	// steers the document step's gate prompt, so it is honored ONLY from the
 	// trusted default-branch copy of .no-mistakes.yaml (see
@@ -364,6 +367,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Refresh                *RefreshRaw   `yaml:"refresh"`
 		LegacyRebase           *StepAgentRaw `yaml:"rebase"`
 		Review                 ReviewRaw     `yaml:"review"`
+		Build                  StepAgentRaw  `yaml:"build"`
 		Test                   TestRaw       `yaml:"test"`
 		Document               DocumentRaw   `yaml:"document"`
 		Lint                   StepAgentRaw  `yaml:"lint"`
@@ -392,6 +396,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	c.Refresh = refresh
 	c.Review = raw.Review
+	c.Build = raw.Build
 	c.Test = raw.Test
 	c.Document = raw.Document
 	c.Lint = raw.Lint
@@ -423,6 +428,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("commands.lint") {
 		out.Commands.Lint = override.Commands.Lint
 	}
+	if override.has("commands.build") {
+		out.Commands.Build = override.Commands.Build
+	}
 	if override.has("commands.test") {
 		out.Commands.Test = override.Commands.Test
 	}
@@ -440,6 +448,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("auto_fix.lint") {
 		out.AutoFix.Lint = override.AutoFix.Lint
+	}
+	if override.has("auto_fix.build") {
+		out.AutoFix.Build = override.AutoFix.Build
 	}
 	if override.has("auto_fix.test") {
 		out.AutoFix.Test = override.AutoFix.Test
@@ -501,6 +512,13 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("review.adversary_model") {
 		out.Review.AdversaryModel = override.Review.AdversaryModel
+	}
+	if override.has("build.agent") {
+		out.Build.Agent = override.Build.Agent
+		out.Build.Agents = copyAgents(override.Build.Agents)
+	}
+	if override.has("build.model") {
+		out.Build.Model = override.Build.Model
 	}
 	if override.has("test.agent") {
 		out.Test.Agent = override.Test.Agent
@@ -569,6 +587,7 @@ func cloneRepoConfig(src *RepoConfig) *RepoConfig {
 	out.Intent.DisabledReaders = copyStrings(src.Intent.DisabledReaders)
 	out.Refresh.Agents = copyAgents(src.Refresh.Agents)
 	out.Review = copyReviewRaw(src.Review)
+	out.Build = copyStepAgentRaw(src.Build)
 	out.Test.Agents = copyAgents(src.Test.Agents)
 	out.Document.Agents = copyAgents(src.Document.Agents)
 	out.Lint = copyStepAgentRaw(src.Lint)
@@ -634,6 +653,7 @@ func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[stri
 // Commands holds optional per-repo command overrides.
 type Commands struct {
 	Lint   string `yaml:"lint"`
+	Build  string `yaml:"build"`
 	Test   string `yaml:"test"`
 	Format string `yaml:"format"`
 }
@@ -649,6 +669,7 @@ type Hooks struct {
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type AutoFixRaw struct {
 	Lint     *int `yaml:"lint"`
+	Build    *int `yaml:"build"`
 	Test     *int `yaml:"test"`
 	Review   *int `yaml:"review"`
 	Document *int `yaml:"document"`
@@ -660,6 +681,7 @@ type AutoFixRaw struct {
 func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Lint         *int `yaml:"lint"`
+		Build        *int `yaml:"build"`
 		Test         *int `yaml:"test"`
 		Review       *int `yaml:"review"`
 		Document     *int `yaml:"document"`
@@ -675,6 +697,7 @@ func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 		return fmt.Errorf("auto_fix.refresh and legacy auto_fix.rebase cannot both be set")
 	}
 	c.Lint = raw.Lint
+	c.Build = raw.Build
 	c.Test = raw.Test
 	c.Review = raw.Review
 	c.Document = raw.Document
@@ -691,6 +714,7 @@ func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 // A value of 0 means auto-fix is disabled (requires manual approval).
 type AutoFix struct {
 	Lint     int
+	Build    int
 	Test     int
 	Review   int
 	Document int
@@ -984,6 +1008,7 @@ func (c *RepoConfig) ConfiguredStepAgents() map[types.StepName][]types.AgentName
 	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
 	addStepAgentRoute(routes, types.StepRefresh, c.Refresh.Agent, c.Refresh.Agents)
 	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
+	addStepAgentRoute(routes, types.StepBuild, c.Build.Agent, c.Build.Agents)
 	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
 	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
 	addStepAgentRoute(routes, types.StepLint, c.Lint.Agent, c.Lint.Agents)
@@ -1000,6 +1025,7 @@ func (c *RepoConfig) ConfiguredStepModels() map[types.StepName]ModelRoute {
 	addStepModelRoute(routes, types.StepIntent, c.Intent.Model)
 	addStepModelRoute(routes, types.StepRefresh, c.Refresh.Model)
 	addStepModelRoute(routes, types.StepReview, c.Review.Model)
+	addStepModelRoute(routes, types.StepBuild, c.Build.Model)
 	addStepModelRoute(routes, types.StepTest, c.Test.Model)
 	addStepModelRoute(routes, types.StepDocument, c.Document.Model)
 	addStepModelRoute(routes, types.StepLint, c.Lint.Model)
@@ -1013,6 +1039,7 @@ func (c *GlobalConfig) configuredStepAgents() map[types.StepName][]types.AgentNa
 	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
 	addStepAgentRoute(routes, types.StepRefresh, c.Refresh.Agent, c.Refresh.Agents)
 	addStepAgentRoute(routes, types.StepReview, c.Review.Agent, c.Review.Agents)
+	addStepAgentRoute(routes, types.StepBuild, c.Build.Agent, c.Build.Agents)
 	addStepAgentRoute(routes, types.StepTest, c.Test.Agent, c.Test.Agents)
 	addStepAgentRoute(routes, types.StepDocument, c.Document.Agent, c.Document.Agents)
 	addStepAgentRoute(routes, types.StepLint, c.Lint.Agent, c.Lint.Agents)
@@ -1026,6 +1053,7 @@ func (c *GlobalConfig) configuredStepModels() map[types.StepName]ModelRoute {
 	addStepModelRoute(routes, types.StepIntent, c.Intent.Model)
 	addStepModelRoute(routes, types.StepRefresh, c.Refresh.Model)
 	addStepModelRoute(routes, types.StepReview, c.Review.Model)
+	addStepModelRoute(routes, types.StepBuild, c.Build.Model)
 	addStepModelRoute(routes, types.StepTest, c.Test.Model)
 	addStepModelRoute(routes, types.StepDocument, c.Document.Model)
 	addStepModelRoute(routes, types.StepLint, c.Lint.Model)
@@ -1068,7 +1096,7 @@ agent: auto
 # ACP accepts bare model families but rejects bracketed parameter variants,
 # which ACP servers may silently normalize.
 # Unconfigured steps inherit the run-wide agent and its default model.
-# Supported sections: intent, refresh, review, test, document, lint, pr, ci.
+# Supported sections: intent, refresh, review, build, test, document, lint, pr, ci.
 # review:
 #   agent: claude
 #   model: {name: claude-opus-5, vendor: anthropic}
@@ -1138,6 +1166,7 @@ log_level: info
 auto_fix:
   refresh: 3
   lint: 3
+  build: 3
   test: 3
   review: 0
   document: 3
@@ -1151,7 +1180,7 @@ auto_fix:
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
-# intent, and feed it to review, test, document, lint, and PR agents so they
+# intent, and feed it to review, build, test, document, lint, and PR agents so they
 # understand what you were trying to do - not just the diff.
 intent:
   enabled: true
@@ -1247,6 +1276,7 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		types.StepIntent,
 		types.StepRefresh,
 		types.StepReview,
+		types.StepBuild,
 		types.StepTest,
 		types.StepDocument,
 		types.StepLint,
@@ -1925,6 +1955,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	}
 	cfg.Refresh = refresh
 	cfg.Review = raw.Review
+	cfg.Build = raw.Build
 	cfg.Test = raw.Test
 	cfg.Document = raw.Document
 	cfg.Lint = raw.Lint
@@ -2067,6 +2098,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Refresh.Agents = copyAgents(trusted.Refresh.Agents)
 		effective.Refresh.Model = trusted.Refresh.Model
 		effective.Review = copyReviewRaw(trusted.Review)
+		effective.Build = copyStepAgentRaw(trusted.Build)
 		effective.Test.Agent = trusted.Test.Agent
 		effective.Test.Agents = copyAgents(trusted.Test.Agents)
 		effective.Test.Model = trusted.Test.Model
@@ -2086,6 +2118,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Intent.Model = ModelRoute{}
 		effective.Refresh = RefreshRaw{}
 		effective.Review = ReviewRaw{}
+		effective.Build = StepAgentRaw{}
 		effective.Test.Agent = ""
 		effective.Test.Agents = nil
 		effective.Test.Model = ModelRoute{}
@@ -2187,6 +2220,7 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 func autoFixDefaults() AutoFix {
 	return AutoFix{
 		Lint:     3,
+		Build:    3,
 		Test:     3,
 		Review:   0,
 		Document: 3,
@@ -2199,6 +2233,9 @@ func autoFixDefaults() AutoFix {
 func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	if src.Lint != nil {
 		dst.Lint = *src.Lint
+	}
+	if src.Build != nil {
+		dst.Build = *src.Build
 	}
 	if src.Test != nil {
 		dst.Test = *src.Test
@@ -2223,6 +2260,8 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 	switch step {
 	case types.StepLint:
 		return c.AutoFix.Lint
+	case types.StepBuild:
+		return c.AutoFix.Build
 	case types.StepTest:
 		return c.AutoFix.Test
 	case types.StepReview:

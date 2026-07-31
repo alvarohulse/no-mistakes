@@ -12,7 +12,7 @@ target only after every check passes, and opens a clean PR automatically.
 
 AI agents can write and modify code faster than most teams can validate it. The
 expensive part is no longer producing the diff. It is making sure the diff is
-rebased, reviewed, tested, documented, linted, and safe to share.
+rebased, reviewed, built, tested, documented, linted, and safe to share.
 
 Pre-commit hooks help, but they need to stay lightweight and they block your
 working tree. CI helps, but it usually runs after the push is already public.
@@ -22,7 +22,7 @@ ready.
 `no-mistakes` sits in that gap. It gives you a deliberate local gate before the
 branch reaches the configured push target:
 
-- **Before** the code is public, it rebases, runs a structured AI code review, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR.
+- **Before** the code is public, it rebases, runs a structured AI code review, builds the changed production code, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR.
 - **After** the push, it watches CI and auto-fixes failures. On GitHub, GitLab, and Azure DevOps it also watches PR mergeability and fixes merge conflicts on the branch.
 - **Throughout**, every step can pause for your approval. You see the findings, pick what to fix, and decide when to ship.
 
@@ -53,7 +53,7 @@ flowchart LR
   hook["post-receive notification"]
   daemon["Daemon"]
   worktree["Disposable worktree"]
-  pipeline["intent -> refresh -> review -> test -> document -> lint -> push -> pr -> ci"]
+  pipeline["intent -> refresh -> review -> build -> test -> document -> lint -> push -> pr -> ci"]
   target["Push target"]
 
   repo -->|"git push no-mistakes"| gate
@@ -75,12 +75,12 @@ When a branch passes the gate, it means:
 
 - it was checked against fresh upstream and the pushed-branch target
 - the fixed pipeline ran in order
-- review, tests, user-facing test evidence when available, docs, and lint happened before the branch reached the configured push target
+- review, build, tests, user-facing test evidence when available, docs, and lint happened before the branch reached the configured push target
 - you had a chance to approve, fix, skip, or abort any blocking step
 
 ## What you get
 
-- A fixed, opinionated pipeline: `intent → refresh → review → test → document → lint → push → pr → ci`. Refresh displays as Rebase or Merge for the selected strategy. Order is not configurable; what each step runs is.
+- A fixed, opinionated pipeline: `intent → refresh → review → build → test → document → lint → push → pr → ci`. Refresh displays as Rebase or Merge for the selected strategy. Order is not configurable; what each step runs is.
 - Choice of agent: `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, or `cursor`, plus explicit `acp:<target>` runners through `acpx`, with per-repo override and ordered fallbacks; every gate requires a runnable configured pipeline agent.
 - A TUI to watch, approve, fix, skip, or abort any step.
 - A `/no-mistakes` agent skill so a coding agent can do a task and gate it, or gate existing committed work, backed by a non-interactive `no-mistakes axi` interface.

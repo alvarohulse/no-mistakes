@@ -50,6 +50,33 @@ func TestResolvedAgentRoutingSnapshotRestoresConcreteLaunchIdentity(t *testing.T
 	}
 }
 
+func TestResolvedAgentRoutingSnapshotAcceptsBuildRoute(t *testing.T) {
+	cfg := &config.Config{
+		Agent:  types.AgentClaude,
+		Agents: []types.AgentName{types.AgentClaude},
+		StepAgents: map[types.StepName][]types.AgentName{
+			types.StepBuild: {types.AgentCodex},
+		},
+		StepModels: map[types.StepName]config.ModelRoute{
+			types.StepBuild: {Name: "gpt-5.6-sol", Vendor: "openai"},
+		},
+	}
+	encoded, err := marshalResolvedAgentRouting(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := &config.Config{}
+	if _, err := restoreResolvedAgentRouting(restored, &encoded, false); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored.StepAgents[types.StepBuild], []types.AgentName{types.AgentCodex}) {
+		t.Fatalf("restored build agents = %v", restored.StepAgents[types.StepBuild])
+	}
+	if got := restored.StepModels[types.StepBuild]; got != (config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}) {
+		t.Fatalf("restored build model = %#v", got)
+	}
+}
+
 func TestRestoreResolvedAgentRoutingDistinguishesLegacyAndInvalidNewRuns(t *testing.T) {
 	cfg := &config.Config{}
 	legacy, err := restoreResolvedAgentRouting(cfg, nil, false)

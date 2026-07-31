@@ -28,14 +28,14 @@ import (
 //     hook installation)
 //   - `git push no-mistakes <branch>` (real git transport, hook fires,
 //     daemon receives push notification)
-//   - the eight pipeline steps in sequence (rebase, review, test,
+//   - the ten pipeline steps in sequence (intent, refresh, review, build, test,
 //     document, lint, push, pr, ci)
 //   - real subprocess invocations of the agent binary, parsed by
 //     no-mistakes' real agent package
 //   - SQLite persistence and IPC retrieval of run state
 //
 // PR and CI steps gracefully skip because the upstream is a local file://
-// path with no SCM provider. Test/Lint steps don't run real commands
+// path with no SCM provider. Build, Test, and Lint don't run real commands
 // because no commands are configured; they delegate to the agent which
 // returns the canned "no findings" response.
 //
@@ -253,7 +253,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertNoPRCreated(t, run)
 
 	// The agent must have been called at least for review and document.
-	// Test and lint also call the agent because no commands are
+	// Build, test, and lint also call the agent because no commands are
 	// configured - the steps delegate detection to the agent.
 	invs := h.AgentInvocations()
 	if len(invs) == 0 {
@@ -276,6 +276,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertReviewPrompt(t, h, run, invs)
 	assertDocumentPrompt(t, h, run, invs)
 	assertDocumentStepNoGaps(t, run.Steps)
+	assertNoCommandBuildStep(t, run.Steps, invs)
 	assertNoCommandTestStep(t, run.Steps, invs)
 	if sawPromptContainingAll(invs, "Detect the linting and formatting tools", "branch: feature/e2e") {
 		t.Errorf("expected combined housekeeping to avoid a separate lint prompt, got %d:\n%s", len(invs), summarisePrompts(invs))
@@ -301,6 +302,8 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertFailingTestCommandRun(t, h)
 	assertFailingLintCommandRun(t, h)
 	if agentName == "claude" {
+		assertFailingBuildCommandRun(t, h)
+		assertBuildCommandAutoFixRun(t, h)
 		assertDifferentBranchDoesNotCancelActiveRun(t, h)
 		assertInvalidConfigPushCleansWorktree(t, h)
 		assertDocumentMissingFindingsRun(t, h)
@@ -400,6 +403,21 @@ func cleanReviewScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scenario.yaml")
 	content := `actions:
+  - match: "Fix the unresolved build or compile failure in this repository.\n\nContext:\n- branch: build-command-autofix"
+    text: "fixed build input"
+    edits:
+      - path: "build-input.txt"
+        old: "broken"
+        new: "fixed"
+    structured:
+      summary: "fix build input"
+  - match: "Verify that this repository builds or compiles successfully."
+    text: "build passed"
+    structured:
+      findings: []
+      summary: "build passed"
+      tested:
+        - "fakeagent: simulated build"
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:
@@ -1084,7 +1102,7 @@ func assertEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 	if run.Status != types.RunCompleted {
 		t.Fatalf("empty-after-rebase run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
-	for _, stepName := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
+	for _, stepName := range []types.StepName{types.StepReview, types.StepBuild, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
 		step, ok := findStep(run.Steps, stepName)
 		if !ok {
 			t.Fatalf("expected %s step in empty-after-rebase run", stepName)
@@ -1227,7 +1245,7 @@ func assertNonEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 	if strings.TrimSpace(string(mergeBase)) != strings.TrimSpace(string(mainSHA)) {
 		t.Fatalf("non-empty-after-rebase merge-base = %s, want upstream main %s", strings.TrimSpace(string(mergeBase)), strings.TrimSpace(string(mainSHA)))
 	}
-	for _, stepName := range []types.StepName{types.StepRefresh, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush} {
+	for _, stepName := range []types.StepName{types.StepRefresh, types.StepReview, types.StepBuild, types.StepTest, types.StepDocument, types.StepLint, types.StepPush} {
 		step, ok := findStep(run.Steps, stepName)
 		if !ok {
 			t.Fatalf("expected %s step in non-empty-after-rebase run", stepName)
@@ -1376,6 +1394,11 @@ func assertGateRefDeletionDoesNotCreateRun(t *testing.T, h *Harness, branch stri
 
 func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	t.Helper()
+	buildCommandLog := filepath.Join(h.NMHome, "configured-build-command.log")
+	buildCommand := filepath.Join(h.BinDir, "nm-build-e2e")
+	if err := os.WriteFile(buildCommand, []byte("#!/bin/sh\nprintf build-ran > \""+buildCommandLog+"\"\n"), 0o755); err != nil {
+		t.Fatalf("write e2e build command: %v", err)
+	}
 	testCommandLog := filepath.Join(h.NMHome, "configured-test-command.log")
 	testCommand := filepath.Join(h.BinDir, "nm-test-e2e")
 	if err := os.WriteFile(testCommand, []byte("#!/bin/sh\nprintf test-ran > \""+testCommandLog+"\"\n"), 0o755); err != nil {
@@ -1386,7 +1409,7 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	if err := os.WriteFile(lintCommand, []byte("#!/bin/sh\nprintf lint-ran > \""+lintCommandLog+"\"\n"), 0o755); err != nil {
 		t.Fatalf("write e2e lint command: %v", err)
 	}
-	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-test-e2e\n  lint: nm-lint-e2e\n"
+	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  build: nm-build-e2e\n  test: nm-test-e2e\n  lint: nm-lint-e2e\n"
 	head := h.CommitChange("configured-commands", ".no-mistakes.yaml", config, "enable configured checks")
 	h.PushToGate("configured-commands")
 	run := h.WaitForRun("configured-commands", 60*time.Second)
@@ -1394,6 +1417,17 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 		t.Fatalf("configured command run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	assertNoUnexpectedAutofixCommits(t, run, head)
+	buildStep, ok := findStep(run.Steps, types.StepBuild)
+	if !ok || buildStep.Status != types.StepStatusCompleted {
+		t.Fatalf("configured build step = %+v, want completed", buildStep)
+	}
+	buildLogData, err := os.ReadFile(buildCommandLog)
+	if err != nil {
+		t.Fatalf("read configured build command log: %v", err)
+	}
+	if string(buildLogData) != "build-ran" {
+		t.Fatalf("configured build command log = %q", string(buildLogData))
+	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in configured command run")
@@ -1430,6 +1464,9 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 		t.Fatalf("configured lint command log = %q", string(lintLogData))
 	}
 	invs := h.AgentInvocations()
+	if sawPromptContainingAll(invs, "detect and run the appropriate build or compile command", "branch: configured-commands") {
+		t.Fatalf("configured build command should not call the agent for build detection; invocations:\n%s", summarisePrompts(invs))
+	}
 	if sawPromptContainingAll(invs, "You are validating a code change by testing it", "branch: configured-commands") {
 		t.Fatalf("configured test command should not call the agent for test detection; invocations:\n%s", summarisePrompts(invs))
 	}
@@ -2284,6 +2321,65 @@ func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 	}
 }
 
+func assertFailingBuildCommandRun(t *testing.T, h *Harness) {
+	t.Helper()
+	failingCommand := filepath.Join(h.BinDir, "nm-build-fails-e2e")
+	if err := os.WriteFile(failingCommand, []byte("#!/bin/sh\necho configured build failed\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write failing e2e build command: %v", err)
+	}
+	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  build: nm-build-fails-e2e\n  test: true\n  lint: true\nauto_fix:\n  build: 0\n"
+	h.CommitChange("failing-build-command", ".no-mistakes.yaml", config, "configure failing build command")
+	h.PushToGate("failing-build-command")
+	run := waitForStepStatus(t, h, "failing-build-command", types.StepBuild, types.StepStatusAwaitingApproval, 60*time.Second)
+	buildStep, ok := findStep(run.Steps, types.StepBuild)
+	if !ok || buildStep.FindingsJSON == nil {
+		t.Fatal("expected failing build step with findings")
+	}
+	findings, err := types.ParseFindingsJSON(*buildStep.FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Severity != "error" || findings.Items[0].Action != types.ActionAutoFix || !strings.Contains(findings.Summary, "configured build failed") {
+		t.Fatalf("failing build findings = %#v / %q", findings.Items, findings.Summary)
+	}
+	h.Respond(run.ID, types.StepBuild, types.ActionSkip)
+	completed := h.WaitForRun("failing-build-command", 60*time.Second)
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("failing build run status = %s, error=%v", completed.Status, completed.Error)
+	}
+	completedBuild, ok := findStep(completed.Steps, types.StepBuild)
+	if !ok || completedBuild.Status != types.StepStatusSkipped {
+		t.Fatalf("failing build step after skip = %+v", completedBuild)
+	}
+}
+
+func assertBuildCommandAutoFixRun(t *testing.T, h *Harness) {
+	t.Helper()
+	command := filepath.Join(h.BinDir, "nm-build-autofix-e2e")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nif grep -q '^fixed$' build-input.txt; then exit 0; fi\necho build input is broken\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write auto-fix e2e build command: %v", err)
+	}
+	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  build: nm-build-autofix-e2e\n  test: true\n  lint: true\n"
+	h.CommitChange("build-command-autofix", "build-input.txt", "broken\n", "add broken build input")
+	h.CommitChange("build-command-autofix", ".no-mistakes.yaml", config, "configure auto-fix build command")
+	h.PushToGate("build-command-autofix")
+	completed := h.WaitForRun("build-command-autofix", 60*time.Second)
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("build auto-fix run status = %s, error=%v", completed.Status, completed.Error)
+	}
+	buildStep, ok := findStep(completed.Steps, types.StepBuild)
+	if !ok || buildStep.Status != types.StepStatusCompleted || len(buildStep.FixSummaries) == 0 || buildStep.FixSummaries[0] != "fix build input" {
+		t.Fatalf("auto-fixed build step = %+v", buildStep)
+	}
+	content, err := h.runGit(context.Background(), h.UpstreamDir, "show", "refs/heads/build-command-autofix:build-input.txt")
+	if err != nil {
+		t.Fatalf("read auto-fixed build input: %v\n%s", err, content)
+	}
+	if strings.TrimSpace(string(content)) != "fixed" {
+		t.Fatalf("auto-fixed build input = %q, want fixed", content)
+	}
+}
+
 func assertFailingLintCommandRun(t *testing.T, h *Harness) {
 	t.Helper()
 	failingCommand := filepath.Join(h.BinDir, "nm-lint-fails-e2e")
@@ -2760,7 +2856,7 @@ func assertPushedHead(t *testing.T, runHeadSHA, upstreamHeadSHA string) {
 
 func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
-	expected := []types.StepName{types.StepIntent, types.StepRefresh, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
+	expected := []types.StepName{types.StepIntent, types.StepRefresh, types.StepReview, types.StepBuild, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
 	if len(steps) != len(expected) {
 		t.Fatalf("pipeline recorded %d steps, want %d", len(steps), len(expected))
 	}
@@ -2771,6 +2867,20 @@ func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 		if step.StepName != expected[i] {
 			t.Errorf("step %d name = %s, want %s", i, step.StepName, expected[i])
 		}
+	}
+}
+
+func assertNoCommandBuildStep(t *testing.T, steps []ipc.StepResultInfo, invs []Invocation) {
+	t.Helper()
+	buildStep, ok := findStep(steps, types.StepBuild)
+	if !ok {
+		t.Fatal("expected build step in no-command run")
+	}
+	if buildStep.Status != types.StepStatusCompleted {
+		t.Fatalf("no-command build step status = %s, want completed", buildStep.Status)
+	}
+	if !sawPromptContainingAll(invs, "detect and run the appropriate build or compile command", "branch: feature/e2e") {
+		t.Fatalf("no-command Build did not invoke the agent:\n%s", summarisePrompts(invs))
 	}
 }
 

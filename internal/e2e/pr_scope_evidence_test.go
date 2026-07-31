@@ -61,6 +61,8 @@ func writeFinalPRScopeScenario(t *testing.T) string {
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no risks detected"
+      tested:
+        - "fakeagent: simulated build"
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write final PR scope scenario: %v", err)

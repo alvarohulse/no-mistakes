@@ -25,6 +25,7 @@ func TestRunStartMachineRepoConfigOverridesCommittedCommandsAndAgent(t *testing.
 	repo, _ := setupTestGitRepo(t, p, database, "machine-config-precedence")
 	committed := `agent: claude
 commands:
+  build: committed-build
   test: committed-test
   lint: committed-lint
 auto_fix:
@@ -43,7 +44,11 @@ auto_fix:
 	path := writeMachineRepoConfig(t, t.TempDir(), `repo: git@github.com:test/repo.git
 agent: opencode
 commands:
+  build: machine-build
   test: machine-test
+build:
+  agent: codex
+  model: {name: gpt-5.6-sol, vendor: openai}
 `)
 	t.Setenv(machineRepoConfigEnv, path)
 	step := &captureRunConfigStep{captured: make(chan capturedRunConfig, 2)}
@@ -64,6 +69,9 @@ commands:
 		}
 		if got.testCommand != "machine-test" {
 			t.Fatalf("commands.test = %q, want machine-test", got.testCommand)
+		}
+		if got.buildCommand != "machine-build" || got.buildModel != "gpt-5.6-sol" {
+			t.Fatalf("build config = %q/%q, want machine-build/gpt-5.6-sol", got.buildCommand, got.buildModel)
 		}
 		if got.lintCommand != "committed-lint" {
 			t.Fatalf("commands.lint = %q, want inherited committed-lint", got.lintCommand)
@@ -131,9 +139,11 @@ func TestRunStartRejectsMachineRepoBindingBeforeCreatingRun(t *testing.T) {
 }
 
 type capturedRunConfig struct {
-	agent       types.AgentName
-	testCommand string
-	lintCommand string
+	agent        types.AgentName
+	buildCommand string
+	buildModel   string
+	testCommand  string
+	lintCommand  string
 }
 
 type captureRunConfigStep struct {
@@ -144,9 +154,11 @@ func (s *captureRunConfigStep) Name() types.StepName { return types.StepReview }
 
 func (s *captureRunConfigStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	s.captured <- capturedRunConfig{
-		agent:       sctx.Config.Agent,
-		testCommand: sctx.Config.Commands.Test,
-		lintCommand: sctx.Config.Commands.Lint,
+		agent:        sctx.Config.Agent,
+		buildCommand: sctx.Config.Commands.Build,
+		buildModel:   sctx.Config.ConfiguredModelForStep(types.StepBuild).Name,
+		testCommand:  sctx.Config.Commands.Test,
+		lintCommand:  sctx.Config.Commands.Lint,
 	}
 	return &pipeline.StepOutcome{}, nil
 }

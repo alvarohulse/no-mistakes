@@ -234,7 +234,7 @@ func validateResolvedModel(route string, model resolvedAgentModel, required bool
 
 func resolvedRoutingStep(step types.StepName) bool {
 	switch step {
-	case types.StepIntent, types.StepRefresh, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPR, types.StepCI:
+	case types.StepIntent, types.StepRefresh, types.StepReview, types.StepBuild, types.StepTest, types.StepDocument, types.StepLint, types.StepPR, types.StepCI:
 		return true
 	default:
 		return false

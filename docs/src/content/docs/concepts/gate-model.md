@@ -19,7 +19,7 @@ flowchart TD
   hook["post-receive notification"]
   daemon["Daemon"]
   worktree["Disposable worktree"]
-  pipeline["intent -> refresh -> review -> test -> document -> lint -> push -> pr -> ci"]
+  pipeline["intent -> refresh -> review -> build -> test -> document -> lint -> push -> pr -> ci"]
   target["Push target"]
   db["SQLite state"]
   ipc["IPC socket"]
@@ -70,7 +70,7 @@ That is a core design choice, not an implementation detail.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
 5. The daemon creates a detached worktree for this run.
-6. The pipeline runs in order: `intent -> refresh -> review -> test -> document -> lint -> push -> pr -> ci`. The refresh step displays as Rebase or Merge for its persisted strategy.
+6. The pipeline runs in order: `intent -> refresh -> review -> build -> test -> document -> lint -> push -> pr -> ci`. The refresh step displays as Rebase or Merge for its persisted strategy.
 7. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
@@ -85,7 +85,7 @@ That is a core design choice, not an implementation detail.
 - **Named remote** - `origin` is never hijacked. You push to `no-mistakes` on purpose, so regular `git push` still works normally.
 - **Recursive-run containment** - managed gate identity and authenticated daemon peer ancestry prevent active validation steps from starting or controlling another pipeline. `NO_MISTAKES_GATE` is diagnostic evidence only, not authorization.
 - **Disposable worktrees** - each run happens in its own detached worktree under `~/.no-mistakes/worktrees/`. The daemon can safely modify files, run tests, and commit fixes without touching your working directory.
-- **Fixed pipeline** - the step order is opinionated and not configurable: `intent → refresh → review → test → document → lint → push → pr → ci`. What you _can_ configure is the commands each step runs, how many auto-fix attempts are allowed, the refresh strategy, and whether transcript-based intent extraction is used when intent is not supplied directly.
+- **Fixed pipeline** - the step order is opinionated and not configurable: `intent → refresh → review → build → test → document → lint → push → pr → ci`. What you _can_ configure is the commands each step runs, how many auto-fix attempts are allowed, the refresh strategy, and whether transcript-based intent extraction is used when intent is not supplied directly.
 - **Remote data-loss guard** - force-pushes are checked against the live push target and refused when they would discard commits the run did not incorporate.
 
 ## Why it is built this way

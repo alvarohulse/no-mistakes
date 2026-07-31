@@ -12,7 +12,7 @@ import (
 )
 
 func TestLogConfiguredCommandOutputKeepsFullFileLogAndBoundsIPC(t *testing.T) {
-	for _, step := range []types.StepName{types.StepTest, types.StepLint} {
+	for _, step := range []types.StepName{types.StepBuild, types.StepTest, types.StepLint} {
 		t.Run(string(step), func(t *testing.T) {
 			middle := "IPC_MUST_OMIT_THIS_MIDDLE"
 			output := "HEAD\n" + strings.Repeat("a", configuredCommandFailureSummaryMaxBytes) + middle + strings.Repeat("b", configuredCommandFailureSummaryMaxBytes) + "\nTAIL🙂\n"

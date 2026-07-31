@@ -11,7 +11,7 @@ The goal is not to make you configure a mini CI system. The default path should
 work. Config exists for the parts that genuinely vary by machine or repo:
 
 - which agent or ordered fallback list you prefer
-- which test or lint commands are the canonical ones for this repo
+- which build, test, or lint commands are the canonical ones for this repo
 - where test evidence artifacts should be stored
 - how aggressive the auto-fix loop should be
 - which subject template pipeline-generated fix commits should use
@@ -44,7 +44,7 @@ local.
 
 If you are not sure where to start, configure these in this order:
 
-1. Set `commands.lint` (and a **targeted** `commands.test` only when you want a deterministic local baseline - not a full CI suite) so the gate runs the exact local checks your repo expects.
+1. Set `commands.build`, `commands.lint`, and a **targeted** `commands.test` only where you want deterministic local baselines (Test is not a full CI suite) so the gate runs the exact local checks your repo expects.
 2. Override `agent` per repo only when one codebase clearly works better with a different tool or fallback order.
 3. Tune `auto_fix` after you have seen how much automation you actually want.
 
@@ -65,10 +65,10 @@ Machine-local overrides require an absolute path outside the repository and a ma
 
 ## Explicit commands versus agent detection
 
-Explicit `commands.test` and `commands.lint` give you deterministic local baseline behavior, while leaving either empty asks the configured agent to fill the gap: empty `commands.test` has the agent select the smallest relevant tests under the targeted-validation contract (broad regression stays in remote CI), and empty `commands.lint` folds lint into the document step's combined housekeeping pass.
+Explicit `commands.build`, `commands.test`, and `commands.lint` give you deterministic local baseline behavior. With an empty `commands.build`, the Build agent detects and runs a meaningful compile command and must report what it ran. With an empty `commands.test`, the Test agent selects the smallest relevant tests under the targeted-validation contract (broad regression stays in remote CI). An empty `commands.lint` folds lint into the document step's combined housekeeping pass.
 An empty `commands.format` runs no separate formatter, so configure it explicitly when the push step must format agent changes.
 Either way, available user intent can trigger an evidence-oriented agent follow-up after a successful test baseline, and evidence stays in a temporary local directory unless the repo opts into `test.evidence.store_in_repo`.
-The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics (including that `commands.test` is targeted, not CI-parity), command process lifetime, and the `ignore_patterns` match rules.
+The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics (including Build/Test separation and that `commands.test` is targeted, not CI-parity), command process lifetime, and the `ignore_patterns` match rules.
 
 Before a new validation gate starts, its effective agent configuration must resolve to a runnable native agent or ACP runner; otherwise the gate fails before its first pipeline step, even when explicit commands are configured.
 Run `no-mistakes doctor` to check the global runner, and see [Choosing an Agent](/no-mistakes/guides/agents/) for how agent selection and fallback lists behave.

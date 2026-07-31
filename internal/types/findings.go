@@ -38,7 +38,7 @@ const (
 	FindingCategoryLint          = "lint"
 )
 
-// Finding represents a single review, test, lint, or PR comment finding.
+// Finding represents a single review, build, test, lint, or PR comment finding.
 type Finding struct {
 	ID                       string `json:"id,omitempty"`
 	Severity                 string `json:"severity"`

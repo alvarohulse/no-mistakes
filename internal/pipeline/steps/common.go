@@ -44,6 +44,34 @@ var findingsSchema = json.RawMessage(`{
 	"required": ["findings", "summary"]
 }`)
 
+var buildFindingsSchema = json.RawMessage(`{
+	"type": "object",
+	"properties": {
+		"findings": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "string"},
+					"severity": {"type": "string", "enum": ["error", "warning", "info"]},
+					"file": {"type": "string"},
+					"line": {"type": "integer"},
+					"description": {"type": "string"},
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}
+				},
+				"required": ["severity", "description", "action"]
+			}
+		},
+		"summary": {"type": "string"},
+		"tested": {
+			"type": "array",
+			"items": {"type": "string"},
+			"minItems": 1
+		}
+	},
+	"required": ["findings", "summary", "tested"]
+}`)
+
 var testFindingsSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
@@ -133,6 +161,7 @@ func AllSteps() []pipeline.Step {
 		&IntentStep{},
 		&RefreshStep{},
 		&ReviewStep{},
+		&BuildStep{},
 		&TestStep{},
 		&DocumentStep{},
 		&LintStep{},
