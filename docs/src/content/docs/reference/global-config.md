@@ -133,7 +133,7 @@ Claude and Codex accept their native model names. OpenCode requires `name` in `p
 
 `review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
 
-ACP targets and aliases remain valid agent-only routes when they need no native CLI overrides. `agent_args_override` is native-only, and C1 also refuses every first-class model+ACP route: an ACP key such as `cursor` or `acp:gemini` is rejected before work begins rather than silently ignoring model or reasoning selection. C2 owns ACP model spawn plumbing.
+ACP targets and aliases remain valid agent-only routes when they need no native CLI overrides. `agent_args_override` is native-only, and every first-class model+ACP route is rejected before work begins because no-mistakes does not yet pass configured model selection into ACP target startup. This prevents an ACP key such as `cursor` or `acp:gemini` from silently ignoring model or reasoning selection.
 
 ### acpx_path
 

@@ -142,8 +142,8 @@ func (*modelAttemptAgent) Run(_ context.Context, opts RunOpts) (*Result, error) 
 
 func TestNewWithOptions_ACPRejectsFirstClassModel(t *testing.T) {
 	_, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
-	if err == nil || !strings.Contains(err.Error(), "C2") {
-		t.Fatalf("NewWithOptions() error = %v, want C2 dependency", err)
+	if err == nil || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "ACP") {
+		t.Fatalf("NewWithOptions() error = %v, want ACP model-routing refusal", err)
 	}
 }
 

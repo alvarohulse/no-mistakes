@@ -829,7 +829,7 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
 	if target, ok := types.ACPTargetFor(name); ok {
 		if opts.Model != "" {
-			return nil, fmt.Errorf("model %q is not supported for ACP agent %q in C1; C2 must add model spawn plumbing first", opts.Model, name)
+			return nil, fmt.Errorf("model %q is not supported for ACP agent %q because configured model selection is not passed into ACP target startup", opts.Model, name)
 		}
 		if len(extraArgs) > 0 {
 			return nil, fmt.Errorf("agent_args_override is not supported for ACP agent %q; route the step to a native agent for model or reasoning overrides", name)

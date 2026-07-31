@@ -261,7 +261,7 @@ func TestResolveAgent_ModelNarrowsAutoAndRefusesACP(t *testing.T) {
 		if err == nil {
 			t.Fatal("ResolveAgent() accepted a model on ACP")
 		}
-		for _, want := range []string{"ACP", "model", "C2"} {
+		for _, want := range []string{"ACP", "model", "not supported"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error should contain %q, got %v", want, err)
 			}
