@@ -20,6 +20,28 @@ type Agent interface {
 	Close() error
 }
 
+// ModelIdentity is the controller-declared model identity for a routed agent.
+// It is distinct from wire-observed Result.Model: adapters do not all expose
+// the served model, but the controller must still retain the exact model and
+// explicit vendor it placed on the backend command line.
+type ModelIdentity struct {
+	Name   string
+	Vendor string
+}
+
+// ModelIdentityReporter exposes an agent's controller-declared route.
+type ModelIdentityReporter interface {
+	ConfiguredModel() ModelIdentity
+}
+
+// ConfiguredModel returns a routed model identity when one was configured.
+func ConfiguredModel(a Agent) ModelIdentity {
+	if reporter, ok := a.(ModelIdentityReporter); ok {
+		return reporter.ConfiguredModel()
+	}
+	return ModelIdentity{}
+}
+
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt      string
@@ -253,6 +275,11 @@ type InvocationWorkload struct {
 // targets, to raw ACP agent commands.
 type Options struct {
 	ACPRegistryOverrides map[string]string
+	// Model and Vendor are the typed per-step model route. Model is translated
+	// to the backend's managed model flag; Vendor is controller identity and is
+	// never inferred from Model naming.
+	Model  string
+	Vendor string
 	// ProcessTerminationGrace is the maximum time a process group gets to exit
 	// after SIGTERM before cleanup escalates to SIGKILL.
 	ProcessTerminationGrace time.Duration
@@ -801,28 +828,90 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
 	if target, ok := types.ACPTargetFor(name); ok {
+		if opts.Model != "" {
+			return nil, fmt.Errorf("model %q is not supported for ACP agent %q in C1; C2 must add model spawn plumbing first", opts.Model, name)
+		}
 		if len(extraArgs) > 0 {
 			return nil, fmt.Errorf("agent_args_override is not supported for ACP agent %q; route the step to a native agent for model or reasoning overrides", name)
 		}
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	}
+	var created Agent
 	switch name {
 	case types.AgentClaude:
-		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
+		created = &claudeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 	case types.AgentCodex:
-		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
+		created = &codexAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 	case types.AgentRovoDev:
-		return &rovodevAgent{bin: bin, extraArgs: extraArgs}, nil
+		created = &rovodevAgent{bin: bin, extraArgs: extraArgs, model: opts.Model}
 	case types.AgentOpenCode:
-		return &opencodeAgent{bin: bin, extraArgs: extraArgs}, nil
+		created = &opencodeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model}
 	case types.AgentPi:
-		return &piAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
+		created = &piAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 	case types.AgentCopilot:
-		return &copilotAgent{bin: bin, extraArgs: extraArgs, processTerminationGrace: opts.ProcessTerminationGrace}, nil
+		created = &copilotAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, processTerminationGrace: opts.ProcessTerminationGrace}
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
+	if opts.Model == "" {
+		return created, nil
+	}
+	if opts.Vendor == "" {
+		_ = created.Close()
+		return nil, fmt.Errorf("model vendor is required for routed model %q", opts.Model)
+	}
+	return &modelIdentityAgent{inner: created, identity: ModelIdentity{Name: opts.Model, Vendor: opts.Vendor}}, nil
+}
+
+type modelIdentityAgent struct {
+	inner    Agent
+	identity ModelIdentity
+}
+
+func (a *modelIdentityAgent) Name() string { return a.inner.Name() }
+
+func (a *modelIdentityAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
+	previousAttempt := opts.OnAttempt
+	opts.OnAttempt = func(attempt Attempt) {
+		a.apply(attempt.Result)
+		if previousAttempt != nil {
+			previousAttempt(attempt)
+		}
+	}
+	result, err := a.inner.Run(ctx, opts)
+	a.apply(result)
+	return result, err
+}
+
+func (a *modelIdentityAgent) apply(result *Result) {
+	if result == nil {
+		return
+	}
+	if result.Model == "" {
+		result.Model = a.identity.Name
+	}
+	if result.ModelProvider == "" {
+		result.ModelProvider = a.identity.Vendor
+	}
+}
+
+func (a *modelIdentityAgent) Close() error { return a.inner.Close() }
+
+func (a *modelIdentityAgent) ConfiguredModel() ModelIdentity { return a.identity }
+
+func (a *modelIdentityAgent) SupportsSessionResume() bool {
+	return SupportsSessionResume(a.inner)
+}
+
+func (a *modelIdentityAgent) SupportsSessionProvider(provider string) bool {
+	return SupportsSessionProvider(a.inner, provider)
+}
+
+func (a *modelIdentityAgent) ReportsAgentAttempts() bool { return ReportsAgentAttempts(a.inner) }
+
+func (a *modelIdentityAgent) NeutralizesGateInstructions() bool {
+	return NeutralizesGateInstructions(a.inner)
 }
 
 // NewNoop returns an agent that does nothing. Used for demo mode where

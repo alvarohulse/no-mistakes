@@ -291,11 +291,13 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		return nil, err
 	}
 	routes := &pipelineAgents{routes: pipeline.AgentRoutes{ByStep: make(map[types.StepName]agent.Agent)}}
-	build := func(names []types.AgentName) (agent.Agent, error) {
+	build := func(names []types.AgentName, model config.ModelRoute) (agent.Agent, error) {
 		created := make([]agent.Agent, 0, len(names))
 		for _, name := range names {
 			next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 				ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
+				Model:                   model.Name,
+				Vendor:                  model.Vendor,
 				DisableProjectSettings:  cfg.DisableProjectSettings,
 				ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 			})
@@ -318,7 +320,7 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		return routed, nil
 	}
 
-	defaultAgent, err := build(cfg.Agents)
+	defaultAgent, err := build(cfg.Agents, config.ModelRoute{})
 	if err != nil {
 		return nil, err
 	}
@@ -334,15 +336,27 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		types.StepCI,
 	} {
 		names := cfg.StepAgents[step]
-		if len(names) == 0 {
+		model := cfg.ConfiguredModelForStep(step)
+		if len(names) == 0 && model.Name == "" {
 			continue
 		}
-		routed, routeErr := build(names)
+		if len(names) == 0 {
+			names = cfg.Agents
+		}
+		routed, routeErr := build(names, model)
 		if routeErr != nil {
 			_ = routes.Close()
 			return nil, fmt.Errorf("create %s agent route: %w", step, routeErr)
 		}
 		routes.routes.ByStep[step] = routed
+	}
+	if len(cfg.ReviewAdversaryAgents) > 0 {
+		adversary, routeErr := build(cfg.ReviewAdversaryAgents, cfg.ReviewAdversaryModel)
+		if routeErr != nil {
+			_ = routes.Close()
+			return nil, fmt.Errorf("create review adversary route: %w", routeErr)
+		}
+		routes.routes.ReviewAdversary = adversary
 	}
 	return routes, nil
 }
@@ -465,6 +479,22 @@ func stepAgentRoutesEqual(a, b map[types.StepName][]types.AgentName) bool {
 		}
 	}
 	return true
+}
+
+func stepModelRoutesEqual(a, b map[types.StepName]config.ModelRoute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for step, model := range a {
+		if b[step] != model {
+			return false
+		}
+	}
+	return true
+}
+
+func reviewAdversaryRoutesEqual(a, b config.ReviewRaw) bool {
+	return agentListsEqual(a.AdversaryAgents, b.AdversaryAgents) && a.AdversaryModel == b.AdversaryModel
 }
 
 // Subscribe registers a channel to receive events for a run.
@@ -889,7 +919,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	repoCfg := pushedRepoInput.Config
 	// SECURITY: load the code-executing selection fields (commands.*,
 	// hooks.post_worktree, the
-	// run-wide agent, and per-step agent routes) from the trusted default-branch
+	// run-wide agent, per-step agent/model routes, and the Review adversary) from the trusted default-branch
 	// copy of .no-mistakes.yaml rather
 	// than the pushed SHA. The worktree is checked out at headSHA (the
 	// contributor's branch), so reading repoCfg above would honor a
@@ -922,11 +952,11 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
-	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) {
+	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) || !stepModelRoutesEqual(repoCfg.ConfiguredStepModels(), effectiveRepoCfg.ConfiguredStepModels()) || !reviewAdversaryRoutesEqual(repoCfg.Review, effectiveRepoCfg.Review) {
 		// Surface the silent override so a maintainer who shipped a commands.*,
 		// hooks.*, or agent change on a feature branch understands why it did not run.
 		// This is not an error: it is the secure default in action.
-		slog.Info("repo commands/hooks/agent routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
+		slog.Info("repo commands/hooks/agent/model routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
 	}
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
 	if err := m.db.UpdateRunConfigSources(run.ID, configSources); err != nil {

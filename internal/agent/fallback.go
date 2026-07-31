@@ -33,6 +33,19 @@ func (a *fallbackAgent) Name() string {
 	return a.agents[0].Name()
 }
 
+func (a *fallbackAgent) ConfiguredModel() ModelIdentity {
+	if len(a.agents) == 0 {
+		return ModelIdentity{}
+	}
+	identity := ConfiguredModel(a.agents[0])
+	for _, current := range a.agents[1:] {
+		if ConfiguredModel(current) != identity {
+			return ModelIdentity{}
+		}
+	}
+	return identity
+}
+
 func (a *fallbackAgent) SupportsSessionResume() bool {
 	for _, current := range a.agents {
 		if SupportsSessionResume(current) {

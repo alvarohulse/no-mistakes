@@ -31,6 +31,10 @@ type perfRecordingAgent struct {
 
 func (a *perfRecordingAgent) Name() string { return a.inner.Name() }
 
+func (a *perfRecordingAgent) ConfiguredModel() agent.ModelIdentity {
+	return agent.ConfiguredModel(a.inner)
+}
+
 func (a *perfRecordingAgent) Close() error { return a.inner.Close() }
 
 // SupportsSessionResume forwards the wrapped adapter's session capability.

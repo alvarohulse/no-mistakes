@@ -91,6 +91,50 @@ func TestNewWithOptions_ACPRejectsIgnoredExtraArgs(t *testing.T) {
 	}
 }
 
+func TestNewWithOptions_CarriesConfiguredModelIdentity(t *testing.T) {
+	a, err := NewWithOptions(types.AgentCodex, "codex", nil, Options{Model: "gpt-5.6-sol", Vendor: "openai"})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error = %v", err)
+	}
+	defer a.Close()
+	if got := ConfiguredModel(a); got != (ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}) {
+		t.Fatalf("configured model = %#v", got)
+	}
+}
+
+func TestModelIdentityAgent_StampsConcreteAttempts(t *testing.T) {
+	inner := &modelAttemptAgent{}
+	a := &modelIdentityAgent{inner: inner, identity: ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}}
+	var got Attempt
+	_, err := a.Run(context.Background(), RunOpts{OnAttempt: func(attempt Attempt) { got = attempt }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Result == nil || got.Result.Model != "gpt-5.6-sol" || got.Result.ModelProvider != "openai" {
+		t.Fatalf("attempt result = %+v, want declared model identity", got.Result)
+	}
+}
+
+type modelAttemptAgent struct{}
+
+func (*modelAttemptAgent) Name() string               { return "test" }
+func (*modelAttemptAgent) Close() error               { return nil }
+func (*modelAttemptAgent) ReportsAgentAttempts() bool { return true }
+func (*modelAttemptAgent) Run(_ context.Context, opts RunOpts) (*Result, error) {
+	result := &Result{}
+	if opts.OnAttempt != nil {
+		opts.OnAttempt(Attempt{Agent: "test", Result: result})
+	}
+	return result, nil
+}
+
+func TestNewWithOptions_ACPRejectsFirstClassModel(t *testing.T) {
+	_, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
+	if err == nil || !strings.Contains(err.Error(), "C2") {
+		t.Fatalf("NewWithOptions() error = %v, want C2 dependency", err)
+	}
+}
+
 func TestNew_ACPAgent(t *testing.T) {
 	a, err := New("acp:gemini", "acpx", nil)
 	if err != nil {

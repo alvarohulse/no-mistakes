@@ -268,6 +268,32 @@ Risk assessment (after listing all findings):
 		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
 		findings = stripped
 	}
+	if findings.RiskLevel == "high" && sctx.ReviewAdversary != nil {
+		sctx.Log("high-risk review: running independent adversarial review...")
+		adversaryResult, adversaryErr := sctx.ReviewAdversary.Run(sctx.Ctx, agent.RunOpts{
+			Prompt:     "Perform an independent adversarial review. Do not assume the primary reviewer was correct, and do not inherit or defer to its framing.\n\n" + prompt,
+			CWD:        sctx.WorkDir,
+			JSONSchema: reviewFindingsSchema,
+			OnChunk:    sctx.LogChunk,
+			Purpose:    "review-adversary",
+			Workload:   workload,
+		})
+		if adversaryErr != nil {
+			return nil, fmt.Errorf("agent adversarial review: %w", adversaryErr)
+		}
+		adversaryFindings := Findings{}
+		if adversaryResult.Output != nil {
+			if err := json.Unmarshal(adversaryResult.Output, &adversaryFindings); err != nil {
+				sctx.Log("could not parse adversarial structured output, using text response")
+				adversaryFindings = Findings{Summary: adversaryResult.Text}
+			}
+		}
+		if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(adversaryFindings); n > 0 {
+			sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) from adversarial review", n))
+			adversaryFindings = stripped
+		}
+		findings = mergeAdversarialReviewFindings(findings, adversaryFindings)
+	}
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	findingsJSON, _ := json.Marshal(findings)
@@ -278,6 +304,48 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	})
+}
+
+func mergeAdversarialReviewFindings(primary, adversary Findings) Findings {
+	merged := primary
+	for i, finding := range adversary.Items {
+		finding.ID = fmt.Sprintf("review-adversary-%d", i+1)
+		merged.Items = append(merged.Items, finding)
+	}
+	if adversary.Summary != "" {
+		if merged.Summary == "" {
+			merged.Summary = "adversary: " + adversary.Summary
+		} else {
+			merged.Summary += "; adversary: " + adversary.Summary
+		}
+	}
+	if reviewRiskRank(adversary.RiskLevel) > reviewRiskRank(merged.RiskLevel) {
+		merged.RiskLevel = adversary.RiskLevel
+	}
+	if adversary.RiskRationale != "" {
+		if merged.RiskRationale == "" {
+			merged.RiskRationale = "adversary: " + adversary.RiskRationale
+		} else {
+			merged.RiskRationale += "; adversary: " + adversary.RiskRationale
+		}
+	}
+	if adversary.RiskScope == types.FindingsRiskScopeSourceOrExternal {
+		merged.RiskScope = adversary.RiskScope
+	}
+	return merged
+}
+
+func reviewRiskRank(level string) int {
+	switch level {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 // approvedReviewOutcome captures the immutable commit examined by this full

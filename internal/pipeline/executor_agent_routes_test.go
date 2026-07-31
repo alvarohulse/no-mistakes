@@ -6,6 +6,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -100,6 +101,59 @@ func TestExecutor_ReviewRouteOwnsDurableSessionReuse(t *testing.T) {
 	}
 	if got := reviewAgent.calls[1].session; got == nil || got.ID != "sess-1" || got.Agent != "codex" {
 		t.Fatalf("second review session = %+v, want resumed codex sess-1", got)
+	}
+}
+
+func TestExecutor_ReviewAdversaryIsInstrumentedAndSessionIsolated(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	primary := newFakeSessionAgent()
+	primary.name = "codex"
+	adversary := &routedTestAgent{name: "claude"}
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if _, err := sctx.RunAgentSession(SessionRoleReviewer, agent.RunOpts{Purpose: "review"}); err != nil {
+				return nil, err
+			}
+			if sctx.ReviewAdversary == nil {
+				t.Fatal("review adversary route was not attached to the step context")
+			}
+			if _, err := sctx.ReviewAdversary.Run(sctx.Ctx, agent.RunOpts{Purpose: "review-adversary"}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	exec := NewExecutorWithAgentRoutes(
+		database,
+		p,
+		&config.Config{SessionReuse: true},
+		AgentRoutes{Default: primary, ByStep: map[types.StepName]agent.Agent{types.StepReview: primary}, ReviewAdversary: adversary},
+		[]Step{step},
+		nil,
+	)
+
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(primary.calls) != 1 || primary.calls[0].session == nil {
+		t.Fatalf("primary session calls = %+v, want one managed reviewer session", primary.calls)
+	}
+	if adversary.calls != 1 {
+		t.Fatalf("adversary calls = %d, want 1", adversary.calls)
+	}
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocations) != 2 {
+		t.Fatalf("invocations = %+v, want primary and adversary", invocations)
+	}
+	if invocations[0].Agent != "codex" || invocations[0].Purpose != "review" {
+		t.Fatalf("primary invocation = %+v", invocations[0])
+	}
+	if invocations[1].Agent != "claude" || invocations[1].Purpose != "review-adversary" || invocations[1].SessionMode != db.InvocationModeCold {
+		t.Fatalf("adversary invocation = %+v", invocations[1])
 	}
 }
 

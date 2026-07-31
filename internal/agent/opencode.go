@@ -12,6 +12,7 @@ import (
 type opencodeAgent struct {
 	bin       string
 	extraArgs []string
+	model     string
 	mu        sync.Mutex
 	server    *managedServer
 }

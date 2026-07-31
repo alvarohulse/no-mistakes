@@ -680,17 +680,24 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	stepAgent := e.agents.AgentForStep(stepName)
-	if stepAgent != nil {
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
-		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
-		stepAgent = &perfRecordingAgent{
-			inner:    stepAgent,
+	instrumentAgent := func(inner agent.Agent) agent.Agent {
+		if inner == nil {
+			return nil
+		}
+		inner = &gateStepBoundaryAgent{inner: inner, phase: stepName}
+		inner = &lifecycleAgent{inner: inner, onLifecycle: onAgentLifecycle}
+		return &perfRecordingAgent{
+			inner:    inner,
 			db:       e.db,
 			runID:    run.ID,
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
 		}
+	}
+	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName))
+	var reviewAdversary agent.Agent
+	if stepName == types.StepReview {
+		reviewAdversary = instrumentAgent(e.agents.AdversaryForReview())
 	}
 	sctx := &StepContext{
 		Ctx:              ctx,
@@ -698,6 +705,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:             repo,
 		WorkDir:          workDir,
 		Agent:            stepAgent,
+		ReviewAdversary:  reviewAdversary,
 		Config:           e.config,
 		DB:               e.db,
 		StepResultID:     sr.ID,
@@ -1005,6 +1013,10 @@ type gateStepBoundaryAgent struct {
 
 func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
+func (a *gateStepBoundaryAgent) ConfiguredModel() agent.ModelIdentity {
+	return agent.ConfiguredModel(a.inner)
+}
+
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Prompt = gateguidance.PromptBoundary(string(a.phase)) + opts.Prompt
 	return a.inner.Run(ctx, opts)
@@ -1035,6 +1047,10 @@ type lifecycleAgent struct {
 
 func (a *lifecycleAgent) Name() string {
 	return a.inner.Name()
+}
+
+func (a *lifecycleAgent) ConfiguredModel() agent.ModelIdentity {
+	return agent.ConfiguredModel(a.inner)
 }
 
 func (a *lifecycleAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {

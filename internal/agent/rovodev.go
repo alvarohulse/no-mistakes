@@ -17,6 +17,7 @@ import (
 type rovodevAgent struct {
 	bin       string
 	extraArgs []string
+	model     string
 	mu        sync.Mutex
 	server    *managedServer
 }
@@ -93,7 +94,7 @@ func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("rovodev port: %w", err)
 	}
-	args := buildRovodevServeArgs(a.extraArgs, port)
+	args := buildRovodevServeArgs(a.extraArgs, a.model, port)
 	srv, err := startServerWithPort(ctx, "rovodev", a.bin, args, cwd, "/healthcheck", port)
 	if err != nil {
 		return "", fmt.Errorf("rovodev server: %w", err)
@@ -104,10 +105,13 @@ func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string) (string, er
 
 // buildRovodevServeArgs builds `acli`'s serve argv with user-supplied extras
 // inserted after the "rovodev serve" subcommands and before the managed flags.
-func buildRovodevServeArgs(extraArgs []string, port int) []string {
-	args := make([]string, 0, len(extraArgs)+4)
+func buildRovodevServeArgs(extraArgs []string, model string, port int) []string {
+	args := make([]string, 0, len(extraArgs)+6)
 	args = append(args, "rovodev", "serve")
 	args = append(args, extraArgs...)
+	if model != "" {
+		args = append(args, "--model", model)
+	}
 	args = append(args, "--disable-session-token", fmt.Sprintf("%d", port))
 	return args
 }

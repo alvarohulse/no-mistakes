@@ -315,11 +315,11 @@ review:
 
 func TestMerge_StepAgentsOverrideGlobalAndFallBackToRunAgent(t *testing.T) {
 	global := DefaultGlobalConfig()
-	global.Review = StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}}
+	global.Review = ReviewRaw{StepAgentRaw: StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}}}
 	global.Test.Agent = types.AgentPi
 	global.Test.Agents = []types.AgentName{types.AgentPi}
 	repo := &RepoConfig{
-		Review: StepAgentRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude, types.AgentCodex}},
+		Review: ReviewRaw{StepAgentRaw: StepAgentRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude, types.AgentCodex}}},
 	}
 
 	cfg := Merge(global, repo)
@@ -337,13 +337,13 @@ func TestMerge_StepAgentsOverrideGlobalAndFallBackToRunAgent(t *testing.T) {
 func TestEffectiveRepoConfig_StepAgentsAreTrustedCodeExecutingSelectors(t *testing.T) {
 	pushed := &RepoConfig{
 		Refresh: RefreshRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}, Strategy: types.RefreshStrategyMerge},
-		Review:  StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}},
+		Review:  ReviewRaw{StepAgentRaw: StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}}},
 		Test:    TestRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
 		Intent:  IntentRaw{Agent: types.AgentOpenCode, Agents: []types.AgentName{types.AgentOpenCode}},
 	}
 	trusted := &RepoConfig{
 		Refresh: RefreshRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}, Strategy: types.RefreshStrategyRebase},
-		Review:  StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}},
+		Review:  ReviewRaw{StepAgentRaw: StepAgentRaw{Agent: types.AgentCodex, Agents: []types.AgentName{types.AgentCodex}}},
 		Test:    TestRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude}},
 		Intent:  IntentRaw{Agent: types.AgentPi, Agents: []types.AgentName{types.AgentPi}},
 	}
