@@ -32,6 +32,33 @@ func TestUpdateRunConfigSourcesPersistsOrderedEvidence(t *testing.T) {
 	}
 }
 
+func TestUpdateRunResolvedAgentRoutingPersistsPrivateSnapshot(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/resolved-routing", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ResolvedAgentRouting == nil || *run.ResolvedAgentRouting != "" {
+		t.Fatalf("new run routing marker = %v, want explicit empty marker", run.ResolvedAgentRouting)
+	}
+
+	const snapshot = `{"version":1,"default_agents":["codex"]}`
+	if err := d.UpdateRunResolvedAgentRouting(run.ID, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResolvedAgentRouting == nil || *got.ResolvedAgentRouting != snapshot {
+		t.Fatalf("resolved routing = %v, want %s", got.ResolvedAgentRouting, snapshot)
+	}
+	if err := d.UpdateRunResolvedAgentRouting(run.ID, ""); err == nil {
+		t.Fatal("empty resolved routing snapshot was accepted")
+	}
+}
+
 func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

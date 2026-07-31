@@ -28,15 +28,20 @@ type ConfigSource struct {
 
 // Run represents a pipeline run.
 type Run struct {
-	ID               string
-	RepoID           string
-	Branch           string
-	HeadSHA          string
-	BaseSHA          string
-	RefreshStrategy  types.RefreshStrategy
-	StackedOn        string
-	ConfigSources    []ConfigSource
-	SubmittedHeadSHA *string
+	ID              string
+	RepoID          string
+	Branch          string
+	HeadSHA         string
+	BaseSHA         string
+	RefreshStrategy types.RefreshStrategy
+	StackedOn       string
+	ConfigSources   []ConfigSource
+	// ResolvedAgentRouting is a private run-scoped snapshot used only to restore
+	// launch-time concrete agent/model routes after daemon restart. NULL marks a
+	// pre-migration run; an empty string marks a new run whose launch did not
+	// finish persisting routing and must fail closed during recovery.
+	ResolvedAgentRouting *string
+	SubmittedHeadSHA     *string
 	// ReviewApprovedHeadSHA is the exact commit approved by the last
 	// successfully completed full review. It is nil for legacy runs and until
 	// review completes; mutable run/worktree heads never infer this authority.
@@ -79,14 +84,14 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	var configSourcesJSON string
 	if err := row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.ResolvedAgentRouting, &r.SubmittedHeadSHA, &r.ReviewApprovedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
@@ -126,18 +131,20 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	ts := now()
 	strategy := opts.RefreshStrategy.OrDefault()
 	stackedOn := strings.TrimSpace(opts.StackedOn)
+	routingMarker := ""
 	r := &Run{
-		ID:               newID(),
-		RepoID:           repoID,
-		Branch:           branch,
-		HeadSHA:          headSHA,
-		BaseSHA:          baseSHA,
-		RefreshStrategy:  strategy,
-		StackedOn:        stackedOn,
-		SubmittedHeadSHA: &headSHA,
-		Status:           types.RunPending,
-		CreatedAt:        ts,
-		UpdatedAt:        ts,
+		ID:                   newID(),
+		RepoID:               repoID,
+		Branch:               branch,
+		HeadSHA:              headSHA,
+		BaseSHA:              baseSHA,
+		RefreshStrategy:      strategy,
+		StackedOn:            stackedOn,
+		ResolvedAgentRouting: &routingMarker,
+		SubmittedHeadSHA:     &headSHA,
+		Status:               types.RunPending,
+		CreatedAt:            ts,
+		UpdatedAt:            ts,
 	}
 	var notePtr *string
 	if opts.PRNote != "" {
@@ -146,13 +153,26 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		notePtr = &note
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?)`,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'none', ?, ?, ?)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), headSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
 	return r, nil
+}
+
+// UpdateRunResolvedAgentRouting stores the resolved launch-time routing
+// identity before any hook or pipeline step executes. The snapshot is private
+// recovery state and is intentionally separate from public config provenance.
+func (d *DB) UpdateRunResolvedAgentRouting(id, snapshot string) error {
+	if strings.TrimSpace(snapshot) == "" {
+		return fmt.Errorf("resolved agent routing snapshot is empty")
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET resolved_agent_routing_json = ?, updated_at = ? WHERE id = ?`, snapshot, now(), id); err != nil {
+		return fmt.Errorf("update run resolved agent routing: %w", err)
+	}
+	return nil
 }
 
 // UpdateRunRefreshSelection persists the strategy resolved from trusted config

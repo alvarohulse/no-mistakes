@@ -146,6 +146,10 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+	if err := validateResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
+		_ = agents.Close()
+		return nil, err
+	}
 	if cfg.SessionReuse {
 		if err := validateRecoveredSessionProviders(m.db, run.ID, agents.AgentForStep(types.StepReview)); err != nil {
 			_ = agents.Close()
@@ -191,11 +195,19 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return nil, err
 	}
 	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceMachine) {
-		return loadRecordedRunConfig(ctx, run, workDir, machineRepoCfg)
+		cfg, err := loadRecordedRunConfig(ctx, run, workDir, machineRepoCfg)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
+			return nil, err
+		}
+		return cfg, nil
 	}
 
-	// Runs launched without NM_REPO_CONFIG retain the historical recovery path
-	// bit-for-bit: reload current global, branch, and trusted-default config.
+	// Runs launched without NM_REPO_CONFIG retain the historical reload of
+	// non-routing config. Their concrete launch-time agent/model routes are
+	// restored from private run state below before any agent is rebuilt.
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
@@ -223,7 +235,11 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	}
 	trustedRepoInput := loadTrustedRepoConfigInput(ctx, workDir, trustedSHA, run.ID)
 	effectiveRepoCfg := config.EffectiveRepoConfig(pushedRepoInput.Config, repoConfigFromInput(trustedRepoInput), trustedRepoInput != nil && trustedRepoInput.Config.AllowRepoCommands)
-	return config.Merge(globalCfg, effectiveRepoCfg), nil
+	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
@@ -980,6 +996,20 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trackStartFailure("resolve_agent")
 		return "", err
 	}
+	resolvedRouting, err := marshalResolvedAgentRouting(cfg, steps.IsDemoMode())
+	if err != nil {
+		_ = agents.Close()
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("resolve_agent_routing")
+		return "", err
+	}
+	if err := m.db.UpdateRunResolvedAgentRouting(run.ID, resolvedRouting); err != nil {
+		_ = agents.Close()
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_agent_routing")
+		return "", err
+	}
+	run.ResolvedAgentRouting = &resolvedRouting
 
 	execSteps := m.steps()
 	telemetry.Track("run", telemetry.Fields{

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS runs (
     refresh_strategy        TEXT NOT NULL DEFAULT 'rebase',
     stacked_on              TEXT,
     config_sources_json     TEXT NOT NULL DEFAULT '[]',
+    resolved_agent_routing_json TEXT,
     submitted_head_sha      TEXT,
     review_approved_head_sha TEXT,
     status                  TEXT NOT NULL DEFAULT 'pending',
@@ -146,6 +147,10 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN refresh_strategy TEXT NOT NULL DEFAULT 'rebase'`,
 	`ALTER TABLE runs ADD COLUMN stacked_on TEXT`,
 	`ALTER TABLE runs ADD COLUMN config_sources_json TEXT NOT NULL DEFAULT '[]'`,
+	// NULL marks a pre-migration run that retains legacy recovery behavior.
+	// New runs explicitly insert an empty marker until launch-time resolution
+	// persists the complete routing snapshot.
+	`ALTER TABLE runs ADD COLUMN resolved_agent_routing_json TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,

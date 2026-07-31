@@ -458,6 +458,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	persistResolvedRoutingForTest(t, d, run, types.AgentClaude)
 	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
@@ -584,6 +585,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
+			persistResolvedRoutingForTest(t, d, run, types.AgentClaude)
 			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}

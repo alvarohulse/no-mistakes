@@ -363,6 +363,7 @@ func TestLoadRecoveredConfigRefusesMachineConfigDigestDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	run.ConfigSources = sources
+	persistResolvedRoutingForTest(t, database, run)
 	manager := NewRunManager(database, p, nil)
 	t.Cleanup(manager.Shutdown)
 
@@ -407,6 +408,7 @@ func TestLoadRecoveredConfigRefusesGlobalConfigDigestDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	run.ConfigSources = sources
+	persistResolvedRoutingForTest(t, database, run)
 	manager := NewRunManager(database, p, nil)
 	t.Cleanup(manager.Shutdown)
 
@@ -458,6 +460,7 @@ func TestLoadRecoveredConfigUsesLaunchRefsAfterCommittedConfigAdvances(t *testin
 		t.Fatal(err)
 	}
 	run.ConfigSources = sources
+	persistResolvedRoutingForTest(t, database, run)
 
 	if err := os.WriteFile(configPath, []byte("commands:\n  lint: changed-lint\nignore_patterns: [changed/**]\n"), 0o644); err != nil {
 		t.Fatal(err)
