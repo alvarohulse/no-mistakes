@@ -1,14 +1,141 @@
 package daemon
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+func TestInstallWindowsTaskForwardsMachineRepoConfigWithoutProxy(t *testing.T) {
+	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm O'Brien & home"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := stubServiceRuntime(t)
+	defer cleanup()
+	runtimeGOOS = "windows"
+	exe := `C:\Program Files\O'Brien & Sons\no-mistakes.exe`
+	machinePath := filepath.Join(t.TempDir(), "Config O'Brien & 100%.yaml")
+	t.Setenv(machineRepoConfigEnv, machinePath)
+	t.Setenv("HTTPS_PROXY", "http://user:secret@proxy.example")
+
+	var taskCommand string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		if name == "schtasks" && len(args) > 0 && args[0] == "/Create" {
+			taskCommand = args[len(args)-1]
+		}
+		return nil, nil
+	}
+	if err := installWindowsTask(p, exe); err != nil {
+		t.Fatal(err)
+	}
+
+	const prefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	if !strings.HasPrefix(taskCommand, prefix) {
+		t.Fatalf("task command = %q, want encoded PowerShell action", taskCommand)
+	}
+	script := decodePowerShellTaskCommand(t, strings.TrimPrefix(taskCommand, prefix))
+	want := "$env:NM_REPO_CONFIG='" + strings.ReplaceAll(machinePath, "'", "''") + "'; & '" + strings.ReplaceAll(exe, "'", "''") + "' 'daemon' 'run' '--root' '" + strings.ReplaceAll(p.Root(), "'", "''") + "'; exit $LASTEXITCODE"
+	if script != want {
+		t.Fatalf("decoded task script = %q, want %q", script, want)
+	}
+	for _, forbidden := range []string{"HTTPS_PROXY", "user:secret"} {
+		if strings.Contains(taskCommand, forbidden) || strings.Contains(script, forbidden) {
+			t.Fatalf("Windows task leaked proxy value %q: command=%q script=%q", forbidden, taskCommand, script)
+		}
+	}
+}
+
+func TestInstallWindowsTaskRemovesMachineRepoConfigWhenUnset(t *testing.T) {
+	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm home"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := stubServiceRuntime(t)
+	defer cleanup()
+	runtimeGOOS = "windows"
+	exe := `C:\Program Files\no-mistakes\no-mistakes.exe`
+	t.Setenv(machineRepoConfigEnv, filepath.Join(t.TempDir(), "repo.yaml"))
+
+	var taskCommands []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		if name == "schtasks" && len(args) > 0 && args[0] == "/Create" {
+			taskCommands = append(taskCommands, args[len(args)-1])
+		}
+		return nil, nil
+	}
+	if err := installWindowsTask(p, exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv(machineRepoConfigEnv); err != nil {
+		t.Fatal(err)
+	}
+	if err := installWindowsTask(p, exe); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(taskCommands) != 2 {
+		t.Fatalf("task create commands = %v, want set and unset refreshes", taskCommands)
+	}
+	if !strings.Contains(taskCommands[0], "-EncodedCommand") {
+		t.Fatalf("set refresh did not carry machine config: %q", taskCommands[0])
+	}
+	wantUnset := strconv.Quote(exe) + " daemon run --root " + strconv.Quote(p.Root())
+	if taskCommands[1] != wantUnset {
+		t.Fatalf("unset refresh command = %q, want direct action %q", taskCommands[1], wantUnset)
+	}
+}
+
+func TestInstallWindowsTaskRejectsMachineConfigControlCharacters(t *testing.T) {
+	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := stubServiceRuntime(t)
+	defer cleanup()
+	runtimeGOOS = "windows"
+	t.Setenv(machineRepoConfigEnv, filepath.Join(t.TempDir(), "repo.yaml")+"\nWrite-Output injected")
+	called := false
+	serviceCommandRunner = func(string, ...string) ([]byte, error) {
+		called = true
+		return nil, nil
+	}
+
+	err := installWindowsTask(p, `C:\Program Files\no-mistakes\no-mistakes.exe`)
+	if err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("install error = %v, want control-character refusal", err)
+	}
+	if called {
+		t.Fatal("schtasks ran after unsafe machine config was rejected")
+	}
+}
+
+func decodePowerShellTaskCommand(t *testing.T, encoded string) string {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data)%2 != 0 {
+		t.Fatalf("encoded PowerShell command has odd byte length %d", len(data))
+	}
+	codeUnits := make([]uint16, len(data)/2)
+	for i := range codeUnits {
+		codeUnits[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	return string(utf16.Decode(codeUnits))
+}
 
 func TestStartInstallsWindowsTaskAndStartsManagedDaemon(t *testing.T) {
 	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm home"))

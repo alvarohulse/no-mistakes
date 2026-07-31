@@ -36,7 +36,7 @@ The file must declare `repo:` and its remote identity must match the registered 
 
 The machine-local file overlays only fields present in it, after the committed pushed/default config trust resolution. This includes `commands`, `hooks`, the run-wide `agent`, and per-step routes; explicitly present empty values clear committed values. Unset `NM_REPO_CONFIG` leaves established config and recovery behavior unchanged.
 
-launchd and systemd definitions forward the current value. Setting or unsetting it causes the next managed daemon start or restart to refresh the service definition; unlike proxy settings, an old machine-config path is not inherited after the variable is removed. Windows Task Scheduler inherits the interactive logon environment.
+launchd, systemd, and Windows Task Scheduler definitions forward the current value. Setting or unsetting it causes the next managed daemon start or restart to refresh the service definition; unlike proxy settings, an old machine-config path is not inherited after the variable is removed. The Windows task action sets only `NM_REPO_CONFIG` and never persists proxy variables or credentials.
 
 For enabled runs, no-mistakes stores full SHA-256 digests and private source paths or Git refs in the local database. The PR Pipeline section renders only source kinds and 12-character digest prefixes, never absolute paths. Recovery requires the same machine/global path and digest and reads committed configs from their launch-time Git refs, refusing drift instead of silently changing the run's config.
 

@@ -1,34 +1,81 @@
 package daemon
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
 // installWindowsTask registers the daemon as a per-user scheduled task.
 //
-// Unlike the launchd and systemd paths, it deliberately does not bake forwarded
-// environment variables into the task definition. A schtasks /SC ONLOGON task
-// runs in the user's interactive logon session and inherits its environment, so
-// proxy settings and NM_REPO_CONFIG are already present. That also means no
-// credential-bearing proxy URL is written to disk here.
+// Unlike the launchd and systemd paths, it never writes proxy settings into the
+// task definition. When NM_REPO_CONFIG is set, the task action sets only that
+// explicit opt-in before launching the daemon.
 func installWindowsTask(p *paths.Paths, exe string) error {
+	taskCommand, err := buildWindowsTaskCommandWithEnvironment(exe, p.Root())
+	if err != nil {
+		return err
+	}
 	args := []string{
 		"/Create",
 		"/TN", windowsTaskName(p),
 		"/SC", "ONLOGON",
 		"/RL", "LIMITED",
 		"/F",
-		"/TR", buildWindowsTaskCommand(exe, p.Root()),
+		"/TR", taskCommand,
 	}
 	if _, err := serviceCommandRunner("schtasks", args...); err != nil {
 		return fmt.Errorf("schtasks create: %w", err)
 	}
 	cleanupLegacyWindowsTask(p)
 	return nil
+}
+
+func buildWindowsTaskCommandWithEnvironment(exe, root string) (string, error) {
+	rawPath, set := os.LookupEnv(machineRepoConfigEnv)
+	if !set {
+		return buildWindowsTaskCommand(exe, root), nil
+	}
+	path, err := ValidateMachineRepoConfigPath(rawPath)
+	if err != nil {
+		return "", err
+	}
+	machineConfig, err := powershellSingleQuoted(path)
+	if err != nil {
+		return "", fmt.Errorf("encode %s path: %w", machineRepoConfigEnv, err)
+	}
+	executable, err := powershellSingleQuoted(exe)
+	if err != nil {
+		return "", fmt.Errorf("encode daemon executable: %w", err)
+	}
+	daemonRoot, err := powershellSingleQuoted(root)
+	if err != nil {
+		return "", fmt.Errorf("encode daemon root: %w", err)
+	}
+	script := "$env:" + machineRepoConfigEnv + "=" + machineConfig + "; & " + executable + " 'daemon' 'run' '--root' " + daemonRoot + "; exit $LASTEXITCODE"
+	return "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand " + encodePowerShellCommand(script), nil
+}
+
+func powershellSingleQuoted(value string) (string, error) {
+	if strings.ContainsAny(value, "\x00\r\n") {
+		return "", fmt.Errorf("value contains a control character")
+	}
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'", nil
+}
+
+func encodePowerShellCommand(script string) string {
+	codeUnits := utf16.Encode([]rune(script))
+	data := make([]byte, len(codeUnits)*2)
+	for i, codeUnit := range codeUnits {
+		binary.LittleEndian.PutUint16(data[i*2:], codeUnit)
+	}
+	return base64.StdEncoding.EncodeToString(data)
 }
 
 func cleanupLegacyWindowsTask(p *paths.Paths) {
