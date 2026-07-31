@@ -290,6 +290,63 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	}
 }
 
+func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutMachinePath(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.ConfigSources = []db.ConfigSource{
+		{Kind: db.ConfigSourceBranch, Digest: strings.Repeat("a", 64)},
+		{Kind: db.ConfigSourceDefault, Digest: strings.Repeat("b", 64)},
+		{Kind: db.ConfigSourceMachine, Digest: strings.Repeat("c", 64), Path: "/home/alvaro/private/repo.yaml"},
+	}
+
+	got := (&PRStep{}).buildPipelineSection(sctx)
+	want := "Config sources: `branch@sha256:" + strings.Repeat("a", 12) + "`, `default@sha256:" + strings.Repeat("b", 12) + "`, `machine-local@sha256:" + strings.Repeat("c", 12) + "`"
+	if !strings.Contains(got, want) {
+		t.Fatalf("pipeline config source summary missing:\n%s", got)
+	}
+	if strings.Contains(got, "/home/alvaro") || strings.Contains(got, "repo.yaml") {
+		t.Fatalf("pipeline leaked private machine path:\n%s", got)
+	}
+}
+
+func TestTruncatePipelineSectionKeepsConfigSourcesWhole(t *testing.T) {
+	t.Parallel()
+	configLine := configSourcesSummary([]db.ConfigSource{{
+		Kind:   db.ConfigSourceMachine,
+		Digest: strings.Repeat("d", 64),
+		Path:   "/private/repo.yaml",
+	}})
+	withoutSources := pipelineMarkdownForTest("review round 001 - newest update")
+	withSources := strings.Replace(withoutSources, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+configLine, 1)
+
+	got := truncatePipelineSection(withSources, len(withSources)-1)
+	if !strings.Contains(got, strings.TrimSpace(configLine)) {
+		t.Fatalf("one-byte clamp dropped config visibility:\n%s", got)
+	}
+	if strings.Contains(got, "/private/repo.yaml") {
+		t.Fatalf("clamped pipeline leaked private path:\n%s", got)
+	}
+
+	tiny := truncatePipelineSection(withSources, len("## Pipeline\n\n")+8)
+	if strings.Contains(tiny, "Config source") || strings.Contains(tiny, "sha256") {
+		t.Fatalf("extreme clamp retained a partial config summary:\n%s", tiny)
+	}
+}
+
+func TestConfigSourcesSummaryUnsetIsEmpty(t *testing.T) {
+	t.Parallel()
+	if got := configSourcesSummary(nil); got != "" {
+		t.Fatalf("unset config source summary = %q, want empty", got)
+	}
+}
+
 func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
