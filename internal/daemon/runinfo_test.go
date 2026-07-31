@@ -38,6 +38,9 @@ func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 	if info.SubmittedHeadSHA == nil || *info.SubmittedHeadSHA != "submitted-head" {
 		t.Fatalf("submitted head = %v, want submitted-head", info.SubmittedHeadSHA)
 	}
+	if info.RefreshStrategy != types.RefreshStrategyRebase || info.StackedOn != "" {
+		t.Fatalf("refresh selection = (%q, %q), want default rebase", info.RefreshStrategy, info.StackedOn)
+	}
 }
 
 func TestStepToInfoIncludesFixSummaries(t *testing.T) {

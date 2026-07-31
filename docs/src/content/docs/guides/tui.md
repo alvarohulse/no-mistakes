@@ -65,6 +65,8 @@ Shows the branch name and run status in the header, followed by each step:
   ○ CI
 ```
 
+The canonical `refresh` step displays as `Rebase` or `Merge` for the run's selected strategy.
+
 Step status icons:
 
 | Icon | Status |

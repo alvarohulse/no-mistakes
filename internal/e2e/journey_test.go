@@ -1185,7 +1185,7 @@ func assertNonEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 	if strings.TrimSpace(string(mergeBase)) != strings.TrimSpace(string(mainSHA)) {
 		t.Fatalf("non-empty-after-rebase merge-base = %s, want upstream main %s", strings.TrimSpace(string(mergeBase)), strings.TrimSpace(string(mainSHA)))
 	}
-	for _, stepName := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush} {
+	for _, stepName := range []types.StepName{types.StepRefresh, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush} {
 		step, ok := findStep(run.Steps, stepName)
 		if !ok {
 			t.Fatalf("expected %s step in non-empty-after-rebase run", stepName)
@@ -1239,8 +1239,8 @@ func assertRebaseConflictRun(t *testing.T, h *Harness) {
 		t.Fatalf("checkout rebase-conflict before gate push: %v\n%s", err, out)
 	}
 	h.PushToGate("rebase-conflict")
-	run := waitForStepStatus(t, h, "rebase-conflict", types.StepRebase, types.StepStatusAwaitingApproval, 60*time.Second)
-	rebaseStep, ok := findStep(run.Steps, types.StepRebase)
+	run := waitForStepStatus(t, h, "rebase-conflict", types.StepRefresh, types.StepStatusAwaitingApproval, 60*time.Second)
+	rebaseStep, ok := findStep(run.Steps, types.StepRefresh)
 	if !ok {
 		t.Fatal("expected rebase step in rebase-conflict run")
 	}
@@ -1263,7 +1263,7 @@ func assertRebaseConflictRun(t *testing.T, h *Harness) {
 	if sawPromptContaining(h.AgentInvocations(), "branch: rebase-conflict") {
 		t.Fatal("rebase conflict detection should not call the agent")
 	}
-	h.Respond(run.ID, types.StepRebase, types.ActionAbort)
+	h.Respond(run.ID, types.StepRefresh, types.ActionAbort)
 	completed := h.WaitForRun("rebase-conflict", 60*time.Second)
 	if completed.Status != types.RunFailed {
 		t.Fatalf("rebase-conflict run status after abort = %s, want failed", completed.Status)
@@ -2718,7 +2718,7 @@ func assertPushedHead(t *testing.T, runHeadSHA, upstreamHeadSHA string) {
 
 func assertPipelineStepsInOrder(t *testing.T, steps []ipc.StepResultInfo) {
 	t.Helper()
-	expected := []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
+	expected := []types.StepName{types.StepIntent, types.StepRefresh, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
 	if len(steps) != len(expected) {
 		t.Fatalf("pipeline recorded %d steps, want %d", len(steps), len(expected))
 	}

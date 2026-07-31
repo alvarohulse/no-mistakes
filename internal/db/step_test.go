@@ -36,6 +36,26 @@ func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 	}
 }
 
+func TestGetStepResult_LegacyRebaseStepName(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo-refresh-step", "git@github.com:test/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	_, err := d.sql.Exec(
+		`INSERT INTO step_results (id, run_id, step_name, step_order, status) VALUES (?, ?, ?, ?, ?)`,
+		"step-refresh", run.ID, "rebase", 2, types.StepStatusPending,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy step result: %v", err)
+	}
+	step, err := d.GetStepResult("step-refresh")
+	if err != nil {
+		t.Fatalf("get step result: %v", err)
+	}
+	if step.StepName != types.StepRefresh {
+		t.Fatalf("step name = %q, want %q", step.StepName, types.StepRefresh)
+	}
+}
+
 func TestStepInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

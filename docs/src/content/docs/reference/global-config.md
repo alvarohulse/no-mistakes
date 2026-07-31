@@ -48,7 +48,7 @@ log_level: info
 session_reuse: true
 
 auto_fix:
-  rebase: 3
+  refresh: 3
   review: 0
   test: 3
   document: 3
@@ -105,7 +105,7 @@ Structured findings and schema/output validation problems do not trigger fallbac
 
 ### Per-step agent routes
 
-Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `pr`, and `ci`.
+Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`.
 
 ```yaml
 agent: claude
@@ -116,6 +116,7 @@ test:
 ```
 
 An unconfigured step inherits the run-wide `agent`. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. Review session reuse stays scoped to the selected Review route.
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
 ACP targets and aliases are valid routes when they need no native CLI overrides. `agent_args_override` is native-only: an ACP key such as `cursor` or `acp:gemini` is rejected, and ACP construction fails rather than silently ignoring extra model or reasoning flags. Route that step to a native agent when it depends on those flags.
 
@@ -336,14 +337,14 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 
 | Field               | Type  | Default | Description                                                                                 |
 | ------------------- | ----- | ------- | ------------------------------------------------------------------------------------------- |
-| `auto_fix.rebase`   | `int` | `3`     | Rebase conflict auto-fix attempts                                                           |
+| `auto_fix.refresh`  | `int` | `3`     | Refresh conflict auto-fix attempts                                                          |
 | `auto_fix.review`   | `int` | `0`     | Review finding auto-fix attempts                                                            |
 | `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
 | `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
 | `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
 | `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus GitHub, GitLab, and Azure DevOps merge conflicts |
 
-Legacy alias: `auto_fix.babysit`.
+Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
 
 These are global defaults. Per-repo config can override individual steps.
 
@@ -371,13 +372,13 @@ Template functions, control actions, named templates, unknown placeholders, malf
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Rebase, CI, or Push steps.
+The setting does not change commit subjects created by the Refresh, CI, or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to rebase, review, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to refresh, review, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
 
 |      |          |
 | ---- | -------- |

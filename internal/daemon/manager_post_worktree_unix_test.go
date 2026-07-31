@@ -45,7 +45,7 @@ func TestRunStartPostWorktreeHookReapsLeakedGrandchild(t *testing.T) {
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 	t.Cleanup(manager.Shutdown)
 
-	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree process group", "")
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree process group", "", "", "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

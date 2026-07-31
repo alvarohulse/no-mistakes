@@ -2,6 +2,7 @@ package bitbucket
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -140,7 +141,7 @@ func TestFindOpenPRBySourceAndDestinationBranchFiltersSourceRepo(t *testing.T) {
 		}
 		gotQ = r.URL.Query().Get("q")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"values":[{"id":42,"links":{"html":{"href":"https://bitbucket.org/test/repo/pull-requests/42"}}}]}`))
+		_, _ = w.Write([]byte(`{"values":[{"id":42,"destination":{"branch":{"name":"main"}},"links":{"html":{"href":"https://bitbucket.org/test/repo/pull-requests/42"}}}]}`))
 	}))
 	defer server.Close()
 
@@ -160,8 +161,44 @@ func TestFindOpenPRBySourceAndDestinationBranchFiltersSourceRepo(t *testing.T) {
 	if pr == nil || pr.ID != 42 {
 		t.Fatalf("pr = %#v, want id 42", pr)
 	}
+	if pr.Base != "main" {
+		t.Fatalf("pr base = %q, want main", pr.Base)
+	}
 	if gotQ != `source.branch.name="feature" AND source.repository.full_name="test/repo" AND destination.branch.name="main" AND state="OPEN"` {
 		t.Fatalf("q = %q, want source repo and destination branch filters", gotQ)
+	}
+}
+
+func TestUpdatePRIncludesDestinationOnlyWhenRetargeting(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":42,"destination":{"branch":{"name":"dependency"}}}`))
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: &http.Client{Timeout: time.Second}}
+
+	if _, err := client.UpdatePR(context.Background(), repo, 42, "title", "body", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := requests[0]["destination"]; ok {
+		t.Fatalf("content-only update included destination: %#v", requests[0])
+	}
+	updated, err := client.UpdatePR(context.Background(), repo, 42, "title", "body", "dependency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := requests[1]["destination"]; !ok {
+		t.Fatalf("retarget update omitted destination: %#v", requests[1])
+	}
+	if updated.Base != "dependency" {
+		t.Fatalf("updated base = %q, want dependency", updated.Base)
 	}
 }
 

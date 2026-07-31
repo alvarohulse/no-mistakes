@@ -31,6 +31,7 @@ type PullRequest struct {
 	URL              string
 	State            string
 	SourceCommitHash string
+	Base             string
 }
 
 type CommitStatus struct {
@@ -155,10 +156,15 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 	return response.toPullRequest(), nil
 }
 
-func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, body string) (*PullRequest, error) {
+func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, body, destBranch string) (*PullRequest, error) {
 	requestBody := map[string]any{
 		"title":       title,
 		"description": body,
+	}
+	if strings.TrimSpace(destBranch) != "" {
+		requestBody["destination"] = map[string]any{
+			"branch": map[string]string{"name": strings.TrimSpace(destBranch)},
+		}
 	}
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("%s/%d", repoPRPath(repo), prID), nil, requestBody, &response); err != nil {
@@ -320,6 +326,11 @@ type bitbucketPullRequest struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
 	} `json:"source"`
+	Destination struct {
+		Branch struct {
+			Name string `json:"name"`
+		} `json:"branch"`
+	} `json:"destination"`
 	Links struct {
 		HTML struct {
 			Href string `json:"href"`
@@ -333,6 +344,7 @@ func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 		URL:              strings.TrimSpace(pr.Links.HTML.Href),
 		State:            strings.TrimSpace(pr.State),
 		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
+		Base:             strings.TrimSpace(pr.Destination.Branch.Name),
 	}
 }
 

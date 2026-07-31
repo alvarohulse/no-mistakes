@@ -314,9 +314,9 @@ func (m Model) terminalTitle() string {
 			if s.StepName == types.StepCI && ((m.run != nil && m.run.CIReady) || parseCIActivity(m.logs).Ready) {
 				return "✓ Checks passed" + suffix
 			}
-			return icon + " " + stepLabel(s.StepName) + suffix
+			return icon + " " + stepLabel(s.StepName, m.run.RefreshStrategy) + suffix
 		case types.StepStatusAwaitingApproval, types.StepStatusFixReview:
-			return icon + " " + stepLabel(s.StepName) + suffix
+			return icon + " " + stepLabel(s.StepName, m.run.RefreshStrategy) + suffix
 		}
 	}
 

@@ -64,7 +64,7 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 
 func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 	steps := []*db.StepResult{
-		{ID: "s1", StepName: types.StepRebase, Status: types.StepStatusCompleted},
+		{ID: "s1", StepName: types.StepRefresh, Status: types.StepStatusCompleted},
 		{ID: "s2", StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{ID: "s3", StepName: types.StepTest, Status: types.StepStatusCompleted},
 		{ID: "s4", StepName: types.StepDocument, Status: types.StepStatusCompleted},
@@ -169,7 +169,7 @@ func TestBuildPipelineSummary_RebaseWithConflicts(t *testing.T) {
 	t.Parallel()
 	findings := `{"findings":[{"id":"rebase-1","severity":"warning","file":"pkg/foo.go","description":"merge conflict resolved by agent"}],"summary":"1 conflict resolved"}`
 	steps := []*db.StepResult{
-		{ID: "s1", StepName: types.StepRebase, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+		{ID: "s1", StepName: types.StepRefresh, Status: types.StepStatusCompleted, FindingsJSON: &findings},
 	}
 	rounds := map[string][]*db.StepRound{
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 2000}},

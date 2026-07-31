@@ -71,13 +71,15 @@ func (e *RPCError) Error() string { return e.Message }
 // it to the PR summary prompt.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
-	Gate      string           `json:"gate"`
-	Ref       string           `json:"ref"`
-	Old       string           `json:"old"`
-	New       string           `json:"new"`
-	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
-	PRNote    string           `json:"pr_note,omitempty"`
+	Gate            string                `json:"gate"`
+	Ref             string                `json:"ref"`
+	Old             string                `json:"old"`
+	New             string                `json:"new"`
+	SkipSteps       []types.StepName      `json:"skip_steps,omitempty"`
+	RefreshStrategy types.RefreshStrategy `json:"refresh_strategy,omitempty"`
+	StackedOn       string                `json:"stacked_on,omitempty"`
+	Intent          string                `json:"intent,omitempty"`
+	PRNote          string                `json:"pr_note,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -111,11 +113,13 @@ type GetActiveRunParams struct {
 // Intent, when set, is stamped onto the new run like PushReceivedParams.Intent.
 // PRNote is stamped onto the new run like PushReceivedParams.PRNote.
 type RerunParams struct {
-	RepoID    string           `json:"repo_id"`
-	Branch    string           `json:"branch"`
-	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
-	Intent    string           `json:"intent,omitempty"`
-	PRNote    string           `json:"pr_note,omitempty"`
+	RepoID          string                `json:"repo_id"`
+	Branch          string                `json:"branch"`
+	SkipSteps       []types.StepName      `json:"skip_steps,omitempty"`
+	RefreshStrategy types.RefreshStrategy `json:"refresh_strategy,omitempty"`
+	StackedOn       string                `json:"stacked_on,omitempty"`
+	Intent          string                `json:"intent,omitempty"`
+	PRNote          string                `json:"pr_note,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.
@@ -230,16 +234,18 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	ID               string          `json:"id"`
-	RepoID           string          `json:"repo_id"`
-	Branch           string          `json:"branch"`
-	HeadSHA          string          `json:"head_sha"`
-	SubmittedHeadSHA *string         `json:"submitted_head_sha,omitempty"`
-	BaseSHA          string          `json:"base_sha"`
-	Status           types.RunStatus `json:"status"`
-	PRURL            *string         `json:"pr_url,omitempty"`
-	Error            *string         `json:"error,omitempty"`
-	CIReady          bool            `json:"ci_ready,omitempty"`
+	ID               string                `json:"id"`
+	RepoID           string                `json:"repo_id"`
+	Branch           string                `json:"branch"`
+	HeadSHA          string                `json:"head_sha"`
+	SubmittedHeadSHA *string               `json:"submitted_head_sha,omitempty"`
+	BaseSHA          string                `json:"base_sha"`
+	RefreshStrategy  types.RefreshStrategy `json:"refresh_strategy"`
+	StackedOn        string                `json:"stacked_on,omitempty"`
+	Status           types.RunStatus       `json:"status"`
+	PRURL            *string               `json:"pr_url,omitempty"`
+	Error            *string               `json:"error,omitempty"`
+	CIReady          bool                  `json:"ci_ready,omitempty"`
 	// AwaitingAgent is true while the run is parked awaiting the driving agent.
 	// Most parks are step approval gates; launch-time environmental failures can
 	// park before step records exist. AwaitingAgentSince lets a supervisor read

@@ -28,7 +28,7 @@ type StepName string
 
 const (
 	StepIntent   StepName = "intent"
-	StepRebase   StepName = "rebase"
+	StepRefresh  StepName = "refresh"
 	StepReview   StepName = "review"
 	StepTest     StepName = "test"
 	StepDocument StepName = "document"
@@ -38,11 +38,79 @@ const (
 	StepCI       StepName = "ci"
 )
 
-func normalizeStepName(s StepName) StepName {
-	if s == "babysit" {
-		return StepCI
+// RefreshStrategy controls how the refresh step incorporates its base branch.
+type RefreshStrategy string
+
+const (
+	RefreshStrategyRebase RefreshStrategy = "rebase"
+	RefreshStrategyMerge  RefreshStrategy = "merge"
+)
+
+// ParseRefreshStrategy validates a configured or command-line strategy. An
+// empty value means no explicit selection and is resolved by OrDefault.
+func ParseRefreshStrategy(value string) (RefreshStrategy, error) {
+	strategy := RefreshStrategy(strings.ToLower(strings.TrimSpace(value)))
+	switch strategy {
+	case "", RefreshStrategyRebase, RefreshStrategyMerge:
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("unsupported refresh strategy %q (expected rebase or merge)", value)
+	}
+}
+
+// OrDefault resolves an unset strategy to the safe historical behavior.
+func (s RefreshStrategy) OrDefault() RefreshStrategy {
+	if s == "" {
+		return RefreshStrategyRebase
 	}
 	return s
+}
+
+func normalizeStepName(s StepName) StepName {
+	switch s {
+	case "babysit":
+		return StepCI
+	case "rebase":
+		return StepRefresh
+	default:
+		return s
+	}
+}
+
+// Canonical returns the persisted machine identity for a step, including
+// historical aliases that older runs may still carry.
+func (s StepName) Canonical() StepName {
+	return normalizeStepName(s)
+}
+
+// DisplayName returns the human-facing step label. Refresh keeps one canonical
+// identity while its label reflects the strategy selected for the run.
+func (s StepName) DisplayName(strategy RefreshStrategy) string {
+	switch s.Canonical() {
+	case StepIntent:
+		return "Intent"
+	case StepRefresh:
+		if strategy.OrDefault() == RefreshStrategyMerge {
+			return "Merge"
+		}
+		return "Rebase"
+	case StepReview:
+		return "Review"
+	case StepTest:
+		return "Test"
+	case StepDocument:
+		return "Document"
+	case StepLint:
+		return "Lint"
+	case StepPush:
+		return "Push"
+	case StepPR:
+		return "PR"
+	case StepCI:
+		return "CI"
+	default:
+		return string(s)
+	}
 }
 
 func (s *StepName) UnmarshalJSON(data []byte) error {
@@ -71,7 +139,7 @@ func (s *StepName) Scan(src any) error {
 }
 
 func (s StepName) Value() (driver.Value, error) {
-	return string(s), nil
+	return string(normalizeStepName(s)), nil
 }
 
 // StepOrder returns the fixed execution order for a step (1-indexed).
@@ -79,7 +147,7 @@ func (s StepName) Order() int {
 	switch s {
 	case StepIntent:
 		return 1
-	case StepRebase:
+	case StepRefresh:
 		return 2
 	case StepReview:
 		return 3
@@ -102,7 +170,7 @@ func (s StepName) Order() int {
 
 // AllSteps returns all pipeline steps in execution order.
 func AllSteps() []StepName {
-	return []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	return []StepName{StepIntent, StepRefresh, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
 // StepStatus represents the lifecycle state of a pipeline step.

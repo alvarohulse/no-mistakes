@@ -225,7 +225,7 @@ func TestForcePushRun_RefusesToClobberOutOfBandBranchCommit(t *testing.T) {
 
 	// Rebase step runs first (force push detected). It must NOT refresh the
 	// origin/feature tracking ref, so the push step still anchors to H1.
-	rebaseOutcome, err := (&RebaseStep{}).Execute(sctx)
+	rebaseOutcome, err := (&RefreshStep{}).Execute(sctx)
 	if err != nil {
 		t.Fatalf("rebase step: %v", err)
 	}

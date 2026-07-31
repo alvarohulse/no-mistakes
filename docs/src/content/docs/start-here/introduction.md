@@ -47,14 +47,23 @@ is trying to make one deliberate path mean something consistent.
 
 ```mermaid
 flowchart LR
-  repo["Your repo"] -->|"git push no-mistakes"| gate["Local gate repo"]
-  gate --> admission["pre-receive admission"]
-  admission --> hook["post-receive notification"]
-  admission --> daemon["Daemon"]
+  repo["Your repo"]
+  gate["Local gate repo"]
+  admission["pre-receive admission"]
+  hook["post-receive notification"]
+  daemon["Daemon"]
+  worktree["Disposable worktree"]
+  pipeline["intent -> refresh -> review -> test -> document -> lint -> push -> pr -> ci"]
+  target["Push target"]
+
+  repo -->|"git push no-mistakes"| gate
+  gate --> admission
+  admission --> hook
+  admission --> daemon
   hook --> daemon
-  daemon --> worktree["Disposable worktree"]
-  worktree --> pipeline["intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci"]
-  pipeline --> target["Push target"]
+  daemon --> worktree
+  worktree --> pipeline
+  pipeline --> target
 ```
 
 `origin` is never hijacked. Regular `git push` still works normally. You opt
@@ -71,7 +80,7 @@ When a branch passes the gate, it means:
 
 ## What you get
 
-- A fixed, opinionated pipeline: `intent → rebase → review → test → document → lint → push → pr → ci`. Order is not configurable; what each step runs is.
+- A fixed, opinionated pipeline: `intent → refresh → review → test → document → lint → push → pr → ci`. Refresh displays as Rebase or Merge for the selected strategy. Order is not configurable; what each step runs is.
 - Choice of agent: `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, or `cursor` / `acp:<target>` via `acpx`, with per-repo override and ordered fallbacks; every gate requires a runnable configured pipeline agent.
 - A TUI to watch, approve, fix, skip, or abort any step.
 - A `/no-mistakes` agent skill so a coding agent can do a task and gate it, or gate existing committed work, backed by a non-interactive `no-mistakes axi` interface.

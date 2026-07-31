@@ -5,13 +5,71 @@ import (
 	"testing"
 )
 
+func TestParseRefreshStrategy(t *testing.T) {
+	tests := []struct {
+		value string
+		want  RefreshStrategy
+	}{
+		{value: "", want: ""},
+		{value: "rebase", want: RefreshStrategyRebase},
+		{value: " MERGE ", want: RefreshStrategyMerge},
+	}
+	for _, tt := range tests {
+		got, err := ParseRefreshStrategy(tt.value)
+		if err != nil {
+			t.Fatalf("ParseRefreshStrategy(%q) error = %v", tt.value, err)
+		}
+		if got != tt.want {
+			t.Fatalf("ParseRefreshStrategy(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+
+	if _, err := ParseRefreshStrategy("reset"); err == nil {
+		t.Fatal("ParseRefreshStrategy(reset) accepted an unsupported strategy")
+	}
+}
+
+func TestRefreshStrategyDefaultsToRebase(t *testing.T) {
+	if got := RefreshStrategy("").OrDefault(); got != RefreshStrategyRebase {
+		t.Fatalf("empty strategy defaults to %q, want %q", got, RefreshStrategyRebase)
+	}
+}
+
+func TestStepDisplayNameUsesRefreshStrategyWithoutChangingIdentity(t *testing.T) {
+	tests := []struct {
+		name     StepName
+		strategy RefreshStrategy
+		want     string
+	}{
+		{name: StepRefresh, strategy: RefreshStrategyRebase, want: "Rebase"},
+		{name: StepRefresh, strategy: RefreshStrategyMerge, want: "Merge"},
+		{name: StepRefresh, strategy: "", want: "Rebase"},
+		{name: StepName("rebase"), strategy: RefreshStrategyMerge, want: "Merge"},
+		{name: StepReview, strategy: RefreshStrategyMerge, want: "Review"},
+		{name: StepPR, strategy: RefreshStrategyMerge, want: "PR"},
+	}
+
+	for _, tt := range tests {
+		if got := tt.name.DisplayName(tt.strategy); got != tt.want {
+			t.Errorf("%q.DisplayName(%q) = %q, want %q", tt.name, tt.strategy, got, tt.want)
+		}
+	}
+
+	if got := StepName("rebase").Canonical(); got != StepRefresh {
+		t.Fatalf("legacy rebase canonical identity = %q, want refresh", got)
+	}
+	if got := StepRefresh.Canonical(); got != StepRefresh {
+		t.Fatalf("refresh canonical identity = %q, want refresh", got)
+	}
+}
+
 func TestAllStepsOrder(t *testing.T) {
 	steps := AllSteps()
 	if len(steps) != 9 {
 		t.Fatalf("expected 9 steps, got %d", len(steps))
 	}
 
-	expected := []StepName{StepIntent, StepRebase, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	expected := []StepName{StepIntent, StepRefresh, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 	for i, s := range steps {
 		if s != expected[i] {
 			t.Errorf("step[%d] = %q, want %q", i, s, expected[i])
@@ -25,7 +83,7 @@ func TestStepNameOrder(t *testing.T) {
 		want int
 	}{
 		{StepIntent, 1},
-		{StepRebase, 2},
+		{StepRefresh, 2},
 		{StepReview, 3},
 		{StepTest, 4},
 		{StepDocument, 5},
@@ -50,6 +108,36 @@ func TestStepNameUnmarshalJSON_LegacyBabysit(t *testing.T) {
 	}
 	if step != StepCI {
 		t.Fatalf("step = %q, want %q", step, StepCI)
+	}
+}
+
+func TestStepNameUnmarshalJSON_LegacyRebase(t *testing.T) {
+	var step StepName
+	if err := json.Unmarshal([]byte(`"rebase"`), &step); err != nil {
+		t.Fatalf("unmarshal step name: %v", err)
+	}
+	if step != StepRefresh {
+		t.Fatalf("step = %q, want refresh", step)
+	}
+}
+
+func TestStepNameScan_LegacyRebase(t *testing.T) {
+	var step StepName
+	if err := step.Scan("rebase"); err != nil {
+		t.Fatalf("scan step name: %v", err)
+	}
+	if step != StepRefresh {
+		t.Fatalf("step = %q, want refresh", step)
+	}
+}
+
+func TestStepNameValue_CanonicalizesLegacyRebase(t *testing.T) {
+	value, err := StepName("rebase").Value()
+	if err != nil {
+		t.Fatalf("Value() error = %v", err)
+	}
+	if value != "refresh" {
+		t.Fatalf("Value() = %q, want refresh", value)
 	}
 }
 

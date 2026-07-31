@@ -276,8 +276,8 @@ func TestModel_Update_RerunStartedBackfillsMissingPipelineSteps(t *testing.T) {
 			{
 				ID:        "s1",
 				RunID:     "run-002",
-				StepName:  types.StepRebase,
-				StepOrder: types.StepRebase.Order(),
+				StepName:  types.StepRefresh,
+				StepOrder: types.StepRefresh.Order(),
 				Status:    types.StepStatusRunning,
 			},
 		},
@@ -294,7 +294,7 @@ func TestModel_Update_RerunStartedBackfillsMissingPipelineSteps(t *testing.T) {
 			t.Fatalf("step %d = %s, want %s", i, model.steps[i].StepName, stepName)
 		}
 	}
-	rebaseIdx := types.StepRebase.Order() - 1
+	rebaseIdx := types.StepRefresh.Order() - 1
 	reviewIdx := types.StepReview.Order() - 1
 	if model.steps[rebaseIdx].Status != types.StepStatusRunning {
 		t.Fatalf("rebase status = %s, want %s", model.steps[rebaseIdx].Status, types.StepStatusRunning)

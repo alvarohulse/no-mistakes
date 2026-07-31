@@ -22,6 +22,16 @@ func reviewWorkload(ctx context.Context, workDir, base, head string) *agent.Invo
 	return &agent.InvocationWorkload{Files: files, Lines: lines}
 }
 
+func effectiveBaseBranch(sctx *pipeline.StepContext) string {
+	if stackedOn := strings.TrimSpace(sctx.Run.StackedOn); stackedOn != "" {
+		return stackedOn
+	}
+	if defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch); defaultBranch != "" {
+		return defaultBranch
+	}
+	return "main"
+}
+
 // resolveBaseSHA returns a usable base SHA for diff/log operations.
 // When baseSHA is the zero ref (new branch push), it tries git merge-base
 // against the default branch, falling back to the empty tree SHA.
@@ -127,8 +137,8 @@ func mergeBaseWithDefaultBranch(ctx context.Context, workDir, defaultBranch stri
 }
 
 // lastFetchedBranchTip returns the commit the push branch's remote-tracking ref
-// resolves to in the worktree - the exact remote head the rebase step last
-// fetched and rebased against. It is the safe anchor for a force-with-lease: if
+// resolves to in the worktree - the exact remote head the refresh step last
+// fetched and incorporated. It is the safe anchor for a force-with-lease: if
 // the live remote has moved past it, the push must be treated as potentially
 // discarding unseen work. Returns "" when no tracking ref exists (e.g. a brand
 // new branch or a failed fetch), which makes the caller fall back to the

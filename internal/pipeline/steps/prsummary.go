@@ -50,7 +50,7 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 			continue
 		}
 		stepRounds := rounds[sr.ID]
-		line, detail := buildStepEntry(sr, stepRounds)
+		line, detail := buildStepEntry(sr, stepRounds, types.RefreshStrategyRebase)
 		if line != "" && detail != "" {
 			detailBlocks = append(detailBlocks, detail)
 		}
@@ -76,10 +76,10 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 }
 
 func BuildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
-	return buildPipelineStatusSummary(steps, rounds, nil)
+	return buildPipelineStatusSummary(steps, rounds, nil, types.RefreshStrategyRebase)
 }
 
-func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation) string {
+func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, strategy types.RefreshStrategy) string {
 	var statusLines []string
 	for _, sr := range steps {
 		if shouldOmitPipelineStep(sr) {
@@ -89,7 +89,7 @@ func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.
 		if sr.StepName == types.StepReview && sr.Status == types.StepStatusCompleted {
 			line = "✅ **Review** - completed"
 		} else {
-			line, _ = buildStepEntry(sr, rounds[sr.ID])
+			line, _ = buildStepEntry(sr, rounds[sr.ID], strategy)
 		}
 		if line != "" {
 			statusLines = append(statusLines, line)
@@ -103,7 +103,7 @@ func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.
 	b.WriteString("## Pipeline\n\n")
 	b.WriteString(noMistakesPRSignature)
 	b.WriteString("\n\n")
-	b.WriteString(agentTelemetryTable(invocations))
+	b.WriteString(agentTelemetryTable(invocations, strategy))
 	for _, line := range statusLines {
 		b.WriteString("<details>\n<summary>")
 		b.WriteString(line)
@@ -112,7 +112,7 @@ func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.
 	return b.String()
 }
 
-func agentTelemetryTable(invocations []db.AgentInvocation) string {
+func agentTelemetryTable(invocations []db.AgentInvocation, strategy types.RefreshStrategy) string {
 	if len(invocations) == 0 {
 		return ""
 	}
@@ -120,7 +120,7 @@ func agentTelemetryTable(invocations []db.AgentInvocation) string {
 	var b strings.Builder
 	b.WriteString(pipelineAgentTelemetryTableHeader)
 	for _, invocation := range invocations {
-		step := stepDisplayName(types.StepName(invocation.StepName))
+		step := types.StepName(invocation.StepName).DisplayName(strategy)
 		if invocation.Round > 0 {
 			step += fmt.Sprintf(" r%d", invocation.Round)
 		}
@@ -189,7 +189,7 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 
 		stepRounds := rounds[sr.ID]
-		line, _ := buildStepEntry(sr, stepRounds)
+		line, _ := buildStepEntry(sr, stepRounds, types.RefreshStrategyRebase)
 		if line == "" {
 			return ""
 		}
@@ -887,8 +887,8 @@ func formatTestingDuration(ms int64) string {
 	return d.Round(time.Second).String()
 }
 
-func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound) (statusLine, detailBlock string) {
-	name := stepDisplayName(sr.StepName)
+func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, strategy types.RefreshStrategy) (statusLine, detailBlock string) {
+	name := sr.StepName.DisplayName(strategy)
 	buildDetail := func(line string) (string, string) {
 		return line, buildStepDetails(line, sr, rounds)
 	}
@@ -1307,28 +1307,5 @@ func severityEmoji(severity string) string {
 		return "ℹ️"
 	default:
 		return "-"
-	}
-}
-
-func stepDisplayName(name types.StepName) string {
-	switch name {
-	case types.StepRebase:
-		return "Rebase"
-	case types.StepReview:
-		return "Review"
-	case types.StepTest:
-		return "Test"
-	case types.StepDocument:
-		return "Document"
-	case types.StepLint:
-		return "Lint"
-	case types.StepPush:
-		return "Push"
-	case types.StepPR:
-		return "PR"
-	case types.StepCI:
-		return "CI"
-	default:
-		return string(name)
 	}
 }

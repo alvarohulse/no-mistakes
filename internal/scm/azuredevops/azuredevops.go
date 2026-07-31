@@ -199,13 +199,22 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	if err := json.Unmarshal(out, &pr); err != nil {
 		return nil, fmt.Errorf("az repos pr create: parse response: %w", err)
 	}
-	return h.toPR(&pr), nil
+	created := h.toPR(&pr)
+	if created != nil && created.Base == "" {
+		created.Base = strings.TrimSpace(base)
+	}
+	return created, nil
 }
 
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	id := h.prID(pr)
 	if id == "" {
 		return nil, errors.New("az repos pr update: missing PR id")
+	}
+	if base := strings.TrimSpace(content.Base); base != "" {
+		if err := h.retargetPR(ctx, id, base); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
 		args := []string{"repos", "pr", "update", "--id", id,
@@ -217,7 +226,50 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	}); err != nil {
 		return nil, fmt.Errorf("az repos pr update: %w", err)
 	}
+	if strings.TrimSpace(content.Base) != "" {
+		pr.Base = strings.TrimSpace(content.Base)
+	}
 	return pr, nil
+}
+
+func (h *Host) retargetPR(ctx context.Context, id, base string) error {
+	payload, err := json.Marshal(struct {
+		TargetRefName string `json:"targetRefName"`
+	}{TargetRefName: "refs/heads/" + base})
+	if err != nil {
+		return fmt.Errorf("marshal Azure DevOps PR retarget payload: %w", err)
+	}
+	f, err := os.CreateTemp("", "nm-pr-retarget-*.json")
+	if err != nil {
+		return fmt.Errorf("create Azure DevOps PR retarget payload: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		return fmt.Errorf("write Azure DevOps PR retarget payload: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close Azure DevOps PR retarget payload: %w", err)
+	}
+
+	args := []string{
+		"devops", "invoke",
+		"--area", "git",
+		"--resource", "pullrequests",
+		"--route-parameters",
+		"project=" + h.project,
+		"repositoryId=" + h.repo,
+		"pullRequestId=" + id,
+		"--http-method", "PATCH",
+		"--in-file", path,
+	}
+	args = append(args, h.orgArgs()...)
+	args = append(args, "--output", "json")
+	if out, err := h.cmd(ctx, "az", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("az devops invoke retarget PR: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
@@ -317,5 +369,6 @@ func (h *Host) toPR(raw *azPR) *scm.PR {
 	return &scm.PR{
 		Number: id,
 		URL:    webPRURL(h.org, h.project, h.repo, raw.Repository.WebURL, id),
+		Base:   strings.TrimPrefix(strings.TrimSpace(raw.TargetRefName), "refs/heads/"),
 	}
 }

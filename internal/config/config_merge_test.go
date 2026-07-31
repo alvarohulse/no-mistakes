@@ -26,6 +26,16 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	if cfg.ProcessTerminationGrace != 750*time.Millisecond {
 		t.Errorf("process_termination_grace = %v", cfg.ProcessTerminationGrace)
 	}
+	if cfg.RefreshStrategy != types.RefreshStrategyRebase {
+		t.Errorf("refresh strategy = %q, want rebase", cfg.RefreshStrategy)
+	}
+}
+
+func TestMerge_UsesRepoRefreshStrategy(t *testing.T) {
+	cfg := Merge(DefaultGlobalConfig(), &RepoConfig{Refresh: RefreshRaw{Strategy: types.RefreshStrategyMerge}})
+	if cfg.RefreshStrategy != types.RefreshStrategyMerge {
+		t.Fatalf("refresh strategy = %q, want merge", cfg.RefreshStrategy)
+	}
 }
 
 func TestMerge_RepoOverridesAgent(t *testing.T) {
@@ -103,8 +113,8 @@ func TestMerge_AutoFixDefaults(t *testing.T) {
 	if cfg.AutoFix.CI != 3 {
 		t.Errorf("ci = %d, want 3", cfg.AutoFix.CI)
 	}
-	if cfg.AutoFix.Rebase != 3 {
-		t.Errorf("rebase = %d, want 3", cfg.AutoFix.Rebase)
+	if cfg.AutoFix.Refresh != 3 {
+		t.Errorf("refresh = %d, want 3", cfg.AutoFix.Refresh)
 	}
 }
 
@@ -129,8 +139,8 @@ func TestMerge_AutoFixGlobalOverridesDefaults(t *testing.T) {
 	if cfg.AutoFix.CI != 0 {
 		t.Errorf("ci =%d, want 0 (global override)", cfg.AutoFix.CI)
 	}
-	if cfg.AutoFix.Rebase != 3 {
-		t.Errorf("rebase = %d, want 3 (default, no override)", cfg.AutoFix.Rebase)
+	if cfg.AutoFix.Refresh != 3 {
+		t.Errorf("refresh = %d, want 3 (default, no override)", cfg.AutoFix.Refresh)
 	}
 }
 
@@ -162,7 +172,7 @@ func TestMerge_AutoFixRepoOverridesGlobal(t *testing.T) {
 
 func TestAutoFixLimit(t *testing.T) {
 	cfg := &Config{
-		AutoFix: AutoFix{Lint: 5, Test: 2, Review: 0, Document: 1, CI: 3, Rebase: 4},
+		AutoFix: AutoFix{Lint: 5, Test: 2, Review: 0, Document: 1, CI: 3, Refresh: 4},
 	}
 	tests := []struct {
 		step types.StepName
@@ -173,7 +183,7 @@ func TestAutoFixLimit(t *testing.T) {
 		{types.StepReview, 0},
 		{types.StepDocument, 1},
 		{types.StepCI, 3},
-		{types.StepRebase, 4},
+		{types.StepRefresh, 4},
 		{types.StepPush, 0},
 		{types.StepPR, 0},
 	}

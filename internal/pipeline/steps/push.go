@@ -84,8 +84,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
-	// The lease is anchored to the remote-tracking ref the rebase step freshly
-	// fetched (the exact commit this branch was rebased against), so a push that
+	// The lease is anchored to the remote-tracking ref the refresh step freshly
+	// fetched (the exact commit this branch incorporated), so a push that
 	// would clobber an out-of-band or stale-mirror commit fails loudly instead
 	// of silently dropping it. A bare --force-with-lease offers no protection
 	// when pushing to a URL (no remote-tracking refs), so the anchor is explicit.

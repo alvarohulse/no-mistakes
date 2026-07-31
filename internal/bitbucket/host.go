@@ -53,7 +53,11 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	if err != nil {
 		return nil, err
 	}
-	return h.toPR(pr), nil
+	created := h.toPR(pr)
+	if created != nil && created.Base == "" {
+		created.Base = strings.TrimSpace(base)
+	}
+	return created, nil
 }
 
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
@@ -61,11 +65,19 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	if err != nil {
 		return nil, fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
 	}
-	updated, err := h.client.UpdatePR(ctx, h.repo, id, content.Title, content.Body)
+	updated, err := h.client.UpdatePR(ctx, h.repo, id, content.Title, content.Body, content.Base)
 	if err != nil {
 		return nil, err
 	}
-	return h.toPR(updated), nil
+	result := h.toPR(updated)
+	if result != nil && result.Base == "" {
+		if strings.TrimSpace(content.Base) != "" {
+			result.Base = strings.TrimSpace(content.Base)
+		} else {
+			result.Base = pr.Base
+		}
+	}
+	return result, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
@@ -161,6 +173,7 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 	return &scm.PR{
 		Number: strconv.Itoa(pr.ID),
 		URL:    prURL(h.repo, pr.ID, pr.URL),
+		Base:   pr.Base,
 	}
 }
 

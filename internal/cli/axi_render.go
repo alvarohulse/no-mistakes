@@ -30,6 +30,7 @@ const (
 // tabular array (name[N]{cols}:) with one comma-delimited line per element.
 type stepRow struct {
 	Step       string `toon:"step"`
+	Label      string `toon:"label"`
 	Status     string `toon:"status"`
 	Findings   int    `toon:"findings"`
 	DurationMS int64  `toon:"duration_ms"`
@@ -37,6 +38,7 @@ type stepRow struct {
 
 type activeStepRow struct {
 	Step         string `toon:"step"`
+	Label        string `toon:"label"`
 	Status       string `toon:"status"`
 	ActiveFor    string `toon:"active_for"`
 	LastActivity string `toon:"last_activity"`
@@ -78,6 +80,7 @@ type fixRow struct {
 type stepView struct {
 	ID               string
 	Name             string
+	Label            string
 	Status           string
 	DurationMS       int64
 	FindingsJSON     string
@@ -95,12 +98,13 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
-	ID      string
-	Branch  string
-	Status  string
-	HeadSHA string
-	PRURL   string
-	Error   string
+	ID              string
+	Branch          string
+	Status          string
+	HeadSHA         string
+	RefreshStrategy types.RefreshStrategy
+	PRURL           string
+	Error           string
 	// AwaitingAgentSince is the unix-seconds time the run parked awaiting the
 	// driving agent, or nil when the run is not parked. It powers the top-level
 	// parked signal in the run object.
@@ -114,6 +118,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Branch:             r.Branch,
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
+		RefreshStrategy:    r.RefreshStrategy.OrDefault(),
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
@@ -123,9 +128,11 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		rv.Error = *r.Error
 	}
 	for _, s := range r.Steps {
+		stepName := s.StepName.Canonical()
 		sv := stepView{
 			ID:               s.ID,
-			Name:             string(s.StepName),
+			Name:             string(stepName),
+			Label:            stepName.DisplayName(r.RefreshStrategy),
 			Status:           string(s.Status),
 			FixSummaries:     s.FixSummaries,
 			StartedAt:        s.StartedAt,
@@ -156,6 +163,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		Branch:             r.Branch,
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
+		RefreshStrategy:    r.RefreshStrategy.OrDefault(),
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
@@ -165,9 +173,11 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		rv.Error = *r.Error
 	}
 	for _, s := range steps {
+		stepName := s.StepName.Canonical()
 		sv := stepView{
 			ID:             s.ID,
-			Name:           string(s.StepName),
+			Name:           string(stepName),
+			Label:          stepName.DisplayName(r.RefreshStrategy),
 			Status:         string(s.Status),
 			StartedAt:      s.StartedAt,
 			LastActivityAt: s.LastActivityAt,
@@ -188,6 +198,13 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		rv.Steps = append(rv.Steps, sv)
 	}
 	return rv
+}
+
+func (s stepView) displayName(strategy types.RefreshStrategy) string {
+	if s.Label != "" {
+		return s.Label
+	}
+	return types.StepName(s.Name).DisplayName(strategy)
 }
 
 // awaitingStep returns the step currently blocking on a human decision, if any.
@@ -318,6 +335,7 @@ func (rv runView) activeRows() []activeStepRow {
 		}
 		rows = append(rows, activeStepRow{
 			Step:         s.Name,
+			Label:        s.displayName(rv.RefreshStrategy),
 			Status:       s.Status,
 			ActiveFor:    s.activeFor(),
 			LastActivity: s.lastActivitySummary(),
@@ -442,7 +460,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 
 	rows := make([]stepRow, 0, len(rv.Steps))
 	for _, s := range rv.Steps {
-		rows = append(rows, stepRow{Step: s.Name, Status: s.Status, Findings: s.findingCount(), DurationMS: s.DurationMS})
+		rows = append(rows, stepRow{Step: s.Name, Label: s.displayName(rv.RefreshStrategy), Status: s.Status, Findings: s.findingCount(), DurationMS: s.DurationMS})
 	}
 	fields = append(fields, toon.Field{Key: "steps", Value: rows})
 	if activeRows := rv.activeRows(); len(activeRows) > 0 {
@@ -457,6 +475,7 @@ func gateFields(gate stepView) []toon.Field {
 	parsed, _ := types.ParseFindingsJSON(gate.FindingsJSON)
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
+		{Key: "label", Value: gate.displayName("")},
 		{Key: "status", Value: gate.Status},
 	}
 	if parsed.Summary != "" {

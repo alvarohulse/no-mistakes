@@ -79,29 +79,8 @@ func runStatusStyled(status types.RunStatus) string {
 }
 
 // stepLabel returns the human-readable label for a step name.
-func stepLabel(name types.StepName) string {
-	switch name {
-	case types.StepIntent:
-		return "Intent"
-	case types.StepRebase:
-		return "Rebase"
-	case types.StepReview:
-		return "Review"
-	case types.StepTest:
-		return "Test"
-	case types.StepLint:
-		return "Lint"
-	case types.StepDocument:
-		return "Document"
-	case types.StepPush:
-		return "Push"
-	case types.StepPR:
-		return "PR"
-	case types.StepCI:
-		return "CI"
-	default:
-		return string(name)
-	}
+func stepLabel(name types.StepName, strategy types.RefreshStrategy) string {
+	return name.DisplayName(strategy)
 }
 
 // formatDuration formats milliseconds into a human-readable duration.
@@ -148,7 +127,7 @@ func renderPipelineView(run *ipc.RunInfo, steps []ipc.StepResultInfo, width int,
 	for i, step := range steps {
 		icon := stepStatusIndicator(step.Status, spinnerFrame)
 		style := stepStatusStyle(step.Status)
-		label := stepLabel(step.StepName)
+		label := stepLabel(step.StepName, run.RefreshStrategy)
 
 		line := style.Render(icon) + " " + label
 
@@ -208,7 +187,7 @@ func appendRightLabel(line, label string, width int) string {
 // Per DESIGN.md: "Sits below the pipeline box, above findings/diff"
 // showDiff controls whether the 'd' key label says "findings" (to toggle back) or "diff".
 // Selection actions are hidden in diff mode since they don't apply.
-func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
+func renderActionBar(steps []ipc.StepResultInfo, strategy types.RefreshStrategy, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
 	step := awaitingStep(steps)
 	if step == nil {
 		return ""
@@ -216,9 +195,9 @@ func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allo
 
 	var b strings.Builder
 	promptStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
-	prompt := fmt.Sprintf("%s awaiting action:", stepLabel(step.StepName))
+	prompt := fmt.Sprintf("%s awaiting action:", stepLabel(step.StepName, strategy))
 	if step.Status == types.StepStatusFixReview {
-		prompt = fmt.Sprintf("%s - review fix:", stepLabel(step.StepName))
+		prompt = fmt.Sprintf("%s - review fix:", stepLabel(step.StepName, strategy))
 	}
 	b.WriteString(promptStyle.Render(prompt))
 	b.WriteString("\n")
@@ -300,7 +279,7 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 		failedLabel := ""
 		for _, s := range steps {
 			if s.Status == types.StepStatusFailed {
-				failedLabel = stepLabel(s.StepName)
+				failedLabel = stepLabel(s.StepName, run.RefreshStrategy)
 				break
 			}
 		}

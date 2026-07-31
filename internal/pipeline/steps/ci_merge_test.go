@@ -303,3 +303,57 @@ func TestCIStep_MergeConflictAutoFixPromptUsesBaseBranchTip(t *testing.T) {
 		t.Fatalf("expected prompt to avoid merge-base %s, got:\n%s", baseSHA, capturedPrompt)
 	}
 }
+
+func TestCIStep_MergeConflictAutoFixPromptUsesStackedBaseTip(t *testing.T) {
+	t.Parallel()
+	dir, upstream, featureHead := setupStackedRefreshRepo(t)
+	mainTip := gitCmd(t, dir, "rev-parse", "origin/main")
+
+	publisher := t.TempDir()
+	gitCmd(t, publisher, "clone", upstream, ".")
+	gitCmd(t, publisher, "config", "user.name", "test")
+	gitCmd(t, publisher, "config", "user.email", "test@test.com")
+	gitCmd(t, publisher, "checkout", "dependency")
+	if err := os.WriteFile(filepath.Join(publisher, "dependency-next.txt"), []byte("dependency next\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, publisher, "add", "-A")
+	gitCmd(t, publisher, "commit", "-m", "dependency next")
+	stackedTip := gitCmd(t, publisher, "rev-parse", "HEAD")
+	gitCmd(t, publisher, "push", "origin", "dependency")
+
+	env := fakeCIGHMergeable(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`, "CONFLICTING")
+	var capturedPrompt string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			capturedPrompt = opts.Prompt
+			if err := os.WriteFile(filepath.Join(opts.CWD, "conflict-fix.txt"), []byte("resolved\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{}, nil
+		},
+	}
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContext(t, ag, dir, featureHead, featureHead, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+
+	host, skip := buildHost(sctx, scm.ProviderGitHub)
+	if host == nil {
+		t.Fatalf("buildHost returned nil: %s", skip)
+	}
+	if _, err := (&CIStep{}).autoFixCI(sctx, host, &scm.PR{Number: "42", URL: prURL}, nil, true); err != nil {
+		t.Fatalf("auto-fix CI: %v", err)
+	}
+	if !strings.Contains(capturedPrompt, "base commit: "+stackedTip) {
+		t.Fatalf("expected prompt to use stacked base tip %s, got:\n%s", stackedTip, capturedPrompt)
+	}
+	if strings.Contains(capturedPrompt, "base commit: "+mainTip) {
+		t.Fatalf("expected prompt to avoid default branch tip %s, got:\n%s", mainTip, capturedPrompt)
+	}
+}

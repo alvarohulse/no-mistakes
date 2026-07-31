@@ -136,8 +136,7 @@ func annotateRunView(env *axiEnv, rv *runView) {
 			}
 		}
 		if step.LastActivityAt == nil {
-			logPath := filepath.Join(env.p.RunLogDir(rv.ID), step.Name+".log")
-			if info, err := os.Stat(logPath); err == nil {
+			if info, err := statStepLog(env.p.RunLogDir(rv.ID), types.StepName(step.Name)); err == nil {
 				ts := info.ModTime().Unix()
 				step.LastActivityAt = &ts
 				step.LastActivity = "step log updated"
@@ -181,7 +180,7 @@ func newAxiLogsCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&step, "step", "", "step name: intent, rebase, review, test, document, lint, push, pr, ci (required)")
+	cmd.Flags().StringVar(&step, "step", "", "step name: intent, refresh, review, test, document, lint, push, pr, ci (required)")
 	cmd.Flags().StringVar(&runID, "run", "", "run ID (default: active or most recent)")
 	cmd.Flags().BoolVar(&full, "full", false, "show the entire log instead of the tail")
 	return cmd
@@ -194,11 +193,11 @@ func runAxiLogs(cmd *cobra.Command, step, runID string, full bool) (string, erro
 	step = strings.TrimSpace(step)
 	if step == "" {
 		return "", emitError(cmd, 2, "--step is required",
-			"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
+			"Valid steps: intent, refresh, review, test, document, lint, push, pr, ci")
 	}
 	if !validStep(types.StepName(step)) {
 		return "", emitError(cmd, 2, fmt.Sprintf("unknown step %q", step),
-			"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
+			"Valid steps: intent, refresh, review, test, document, lint, push, pr, ci")
 	}
 
 	env, err := openAxiQueryEnv(runID)
@@ -221,8 +220,7 @@ func runAxiLogs(cmd *cobra.Command, step, runID string, full bool) (string, erro
 	}
 	fingerprint := runStateFingerprint(runViewFromDB(run, steps)) + "|log:" + step
 
-	path := filepath.Join(env.p.RunLogDir(run.ID), step+".log")
-	data, err := os.ReadFile(path)
+	data, err := readStepLog(env.p.RunLogDir(run.ID), types.StepName(step))
 	fields := []toon.Field{
 		{Key: "step", Value: step},
 		{Key: "run", Value: run.ID},
@@ -254,6 +252,41 @@ func runAxiLogs(cmd *cobra.Command, step, runID string, full bool) (string, erro
 	)
 	emitDoc(cmd, fields...)
 	return fingerprint, nil
+}
+
+func readStepLog(logDir string, step types.StepName) ([]byte, error) {
+	paths := stepLogPaths(logDir, step)
+	var err error
+	for _, path := range paths {
+		var data []byte
+		data, err = os.ReadFile(path)
+		if err == nil || !os.IsNotExist(err) {
+			return data, err
+		}
+	}
+	return nil, err
+}
+
+func statStepLog(logDir string, step types.StepName) (os.FileInfo, error) {
+	paths := stepLogPaths(logDir, step)
+	var err error
+	for _, path := range paths {
+		var info os.FileInfo
+		info, err = os.Stat(path)
+		if err == nil || !os.IsNotExist(err) {
+			return info, err
+		}
+	}
+	return nil, err
+}
+
+func stepLogPaths(logDir string, step types.StepName) []string {
+	canonical := step.Canonical()
+	paths := []string{filepath.Join(logDir, string(canonical)+".log")}
+	if canonical == types.StepRefresh {
+		paths = append(paths, filepath.Join(logDir, "rebase.log"))
+	}
+	return paths
 }
 
 // logRows wraps log lines as single-column rows so the encoder renders them as
@@ -363,7 +396,7 @@ func (p *progressPrinter) update(run *ipc.RunInfo) {
 		}
 		if p.seen[name] != status {
 			p.seen[name] = status
-			fmt.Fprintf(p.w, "  %s: %s\n", name, status)
+			fmt.Fprintf(p.w, "  %s: %s\n", s.StepName.DisplayName(run.RefreshStrategy), status)
 		}
 	}
 }

@@ -259,7 +259,7 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 
 	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
 		"glab mr list --source-branch feature/refactor --target-branch release/1.0 --output json": {
-			stdout: `[{"iid":42,"web_url":"https://gitlab.example.com/group/project/-/merge_requests/42"}]` + "\n",
+			stdout: `[{"iid":42,"web_url":"https://gitlab.example.com/group/project/-/merge_requests/42","target_branch":"release/1.0"}]` + "\n",
 		},
 	}), nil, "", "")
 
@@ -275,6 +275,24 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	}
 	if pr.URL != "https://gitlab.example.com/group/project/-/merge_requests/42" {
 		t.Fatalf("FindPR() URL = %q, want matching base MR", pr.URL)
+	}
+	if pr.Base != "release/1.0" {
+		t.Fatalf("FindPR() base = %q, want release/1.0", pr.Base)
+	}
+}
+
+func TestUpdatePRRetargetsBaseWhenRequested(t *testing.T) {
+	t.Parallel()
+	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
+		"glab mr update 42 --title updated --description body --yes --target-branch dependency": {},
+	}), nil, "", "")
+	pr := &scm.PR{Number: "42", Base: "main"}
+	updated, err := host.UpdatePR(context.Background(), pr, scm.PRContent{Title: "updated", Body: "body", Base: "dependency"})
+	if err != nil {
+		t.Fatalf("UpdatePR() error = %v", err)
+	}
+	if updated.Base != "dependency" {
+		t.Fatalf("UpdatePR() base = %q, want dependency", updated.Base)
 	}
 }
 

@@ -37,7 +37,7 @@ func IsDemoMode() bool {
 func DemoSteps() []pipeline.Step {
 	return []pipeline.Step{
 		&demoStep{
-			name:       types.StepRebase,
+			name:       types.StepRefresh,
 			delay:      6 * time.Second,
 			displayDur: 8 * time.Second,
 			log:        "Fetching origin...\nChecking default branch...\nRebasing onto origin/main...\nAlready up to date.",

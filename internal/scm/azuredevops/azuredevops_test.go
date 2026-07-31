@@ -67,7 +67,7 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 
 	h := newTestHost(map[string]azdoTestResponse{
 		"az repos pr list --source-branch feature --status active --target-branch main --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
-			stdout: `[{"pullRequestId":42,"status":"active","repository":{"webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo"}}]` + "\n",
+			stdout: `[{"pullRequestId":42,"status":"active","targetRefName":"refs/heads/main","repository":{"webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo"}}]` + "\n",
 		},
 	})
 
@@ -83,6 +83,9 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 	}
 	if pr.URL != "https://dev.azure.com/myorg/myproject/_git/myrepo/pullrequest/42" {
 		t.Fatalf("FindPR() URL = %q, want browsable pullrequest URL", pr.URL)
+	}
+	if pr.Base != "main" {
+		t.Fatalf("FindPR() base = %q, want main", pr.Base)
 	}
 }
 
@@ -246,6 +249,33 @@ func TestUpdatePRWritesMultilineDescriptionToFile(t *testing.T) {
 		t.Fatalf("UpdatePR() error = %v", err)
 	}
 	assertDescriptionRoundTrips(t, rec, multilineDescriptionBody)
+}
+
+func TestUpdatePRRetargetsBaseViaREST(t *testing.T) {
+	t.Parallel()
+	var rec []capturedCmd
+	h := newCapturingHost(&rec, azdoTestResponse{stdout: `{"pullRequestId":42}` + "\n"})
+	pr := &scm.PR{Number: "42", Base: "main"}
+	updated, err := h.UpdatePR(context.Background(), pr, scm.PRContent{Title: "T", Body: "B", Base: "dependency"})
+	if err != nil {
+		t.Fatalf("UpdatePR() error = %v", err)
+	}
+	if len(rec) != 2 {
+		t.Fatalf("recorded %d commands, want REST retarget plus content update", len(rec))
+	}
+	retarget := rec[0]
+	if got := strings.Join(retarget.args, " "); !strings.Contains(got, "devops invoke --area git --resource pullrequests") || !strings.Contains(got, "pullRequestId=42") || !strings.Contains(got, "--http-method PATCH") {
+		t.Fatalf("unexpected retarget argv: %v", retarget.args)
+	}
+	if !retarget.inFileExists || retarget.inFileContent != `{"targetRefName":"refs/heads/dependency"}` {
+		t.Fatalf("retarget payload = %q (exists=%v)", retarget.inFileContent, retarget.inFileExists)
+	}
+	if _, err := os.Stat(retarget.inFilePath); !os.IsNotExist(err) {
+		t.Fatalf("retarget payload was not cleaned up: %v", err)
+	}
+	if updated.Base != "dependency" {
+		t.Fatalf("updated base = %q, want dependency", updated.Base)
+	}
 }
 
 // assertDescriptionRoundTrips verifies the recorded az command passed its PR
@@ -462,11 +492,14 @@ type azdoTestResponse struct {
 // invocation time, while the temp file still exists (it is removed once the call
 // returns), so tests can assert the body round-tripped exactly.
 type capturedCmd struct {
-	name        string
-	args        []string
-	descPath    string // the value following --description, including the leading "@"
-	descContent string // contents of the temp file the description referenced
-	descExists  bool   // whether that file existed and was readable during the run
+	name          string
+	args          []string
+	descPath      string // the value following --description, including the leading "@"
+	descContent   string // contents of the temp file the description referenced
+	descExists    bool   // whether that file existed and was readable during the run
+	inFilePath    string
+	inFileContent string
+	inFileExists  bool
 }
 
 func newCapturingHost(rec *[]capturedCmd, response azdoTestResponse) *Host {
@@ -486,6 +519,13 @@ func capturingCmdFactory(rec *[]capturedCmd, response azdoTestResponse) CmdFacto
 						c.descContent = string(data)
 						c.descExists = true
 					}
+				}
+			}
+			if a == "--in-file" && i+1 < len(args) {
+				c.inFilePath = args[i+1]
+				if data, err := os.ReadFile(c.inFilePath); err == nil {
+					c.inFileContent = string(data)
+					c.inFileExists = true
 				}
 			}
 		}

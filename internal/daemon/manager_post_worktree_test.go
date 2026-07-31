@@ -36,7 +36,7 @@ func TestRunStartExecutesPostWorktreeHookBeforeFirstStep(t *testing.T) {
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 	t.Cleanup(manager.Shutdown)
 
-	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree hook", "")
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree hook", "", "", "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestRunStartParksPostWorktreeHookFailureBeforeStepRecords(t *testing.T) {
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 	t.Cleanup(manager.Shutdown)
 
-	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree hook", "")
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree hook", "", "", "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

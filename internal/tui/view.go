@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func (m Model) View() string {
@@ -14,6 +15,10 @@ func (m Model) View() string {
 	}
 
 	showSelectionActions, allowFix, selectedCount, totalCount := m.awaitingActionState()
+	var refreshStrategy types.RefreshStrategy
+	if m.run != nil {
+		refreshStrategy = m.run.RefreshStrategy
+	}
 	hasCI := isCIActive(m.steps)
 	compact := m.height > 0 && m.height < 24
 	sectionGap := "\n\n"
@@ -47,7 +52,7 @@ func (m Model) View() string {
 		raw, ok := m.stepDiffs[step.StepName]
 		hasDiff = ok && raw != ""
 	}
-	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff)
+	actionBar := renderActionBar(m.steps, refreshStrategy, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff)
 
 	footer := renderFooter(m.done, m.showHelp, m.confirmAbort, m.yoloMode, m.run, m.latestVersion, m.width)
 	contentBudget := -1
@@ -152,7 +157,7 @@ func (m Model) View() string {
 	} else if !m.showHelp && !m.editorActive() {
 		if step := awaitingStep(m.steps); step != nil {
 			// Generic findings or diff for non-CI steps awaiting approval.
-			label := stepLabel(step.StepName)
+			label := stepLabel(step.StepName, refreshStrategy)
 			if m.showDiff {
 				if raw, ok := m.stepDiffs[step.StepName]; ok && raw != "" {
 					// Build finding context for diff view header.

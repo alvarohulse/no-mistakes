@@ -146,6 +146,7 @@ type mrPayload struct {
 	HasConflicts        bool   `json:"has_conflicts"`
 	DetailedMergeStatus string `json:"detailed_merge_status"`
 	MergeStatus         string `json:"merge_status"`
+	TargetBranch        string `json:"target_branch"`
 }
 
 func (p mrPayload) toPR() *scm.PR {
@@ -153,7 +154,7 @@ func (p mrPayload) toPR() *scm.PR {
 	if url == "" {
 		url = strings.TrimSpace(p.URL)
 	}
-	pr := &scm.PR{URL: url}
+	pr := &scm.PR{URL: url, Base: strings.TrimSpace(p.TargetBranch)}
 	if p.IID > 0 {
 		pr.Number = fmt.Sprintf("%d", p.IID)
 	}
@@ -203,7 +204,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		return nil, fmt.Errorf("glab mr create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	url := extractMRURL(out)
-	pr := &scm.PR{URL: url}
+	pr := &scm.PR{URL: url, Base: base}
 	if num, nerr := scm.ExtractPRNumber(url); nerr == nil {
 		pr.Number = num
 	}
@@ -220,13 +221,19 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	if id == "" && pr != nil {
 		id = pr.URL
 	}
-	cmd := h.cmd(ctx, "glab", "mr", "update", id,
+	args := []string{"mr", "update", id,
 		"--title", content.Title,
 		"--description", content.Body,
-		"--yes",
-	)
+		"--yes"}
+	if strings.TrimSpace(content.Base) != "" {
+		args = append(args, "--target-branch", content.Base)
+	}
+	cmd := h.cmd(ctx, "glab", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("glab mr update: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	if strings.TrimSpace(content.Base) != "" {
+		pr.Base = strings.TrimSpace(content.Base)
 	}
 	return pr, nil
 }

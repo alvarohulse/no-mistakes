@@ -841,6 +841,51 @@ func TestCIStep_BaseBranchAdvanceRearmsTimeout(t *testing.T) {
 	}
 }
 
+func TestCIStep_StackedBaseTipTrackingFetchesStackedBranch(t *testing.T) {
+	t.Parallel()
+	dir, upstream, featureHead := setupStackedRefreshRepo(t)
+	staleStackedTip := gitCmd(t, dir, "rev-parse", "origin/dependency")
+
+	publisher := t.TempDir()
+	gitCmd(t, publisher, "clone", upstream, ".")
+	gitCmd(t, publisher, "config", "user.name", "test")
+	gitCmd(t, publisher, "config", "user.email", "test@test.com")
+	gitCmd(t, publisher, "checkout", "dependency")
+	if err := os.WriteFile(filepath.Join(publisher, "dependency-timeout.txt"), []byte("advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, publisher, "add", "-A")
+	gitCmd(t, publisher, "commit", "-m", "advance dependency")
+	stackedTip := gitCmd(t, publisher, "rev-parse", "HEAD")
+	gitCmd(t, publisher, "push", "origin", "dependency")
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+	sctx.Run.PRURL = &prURL
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Config.CITimeout = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	step := &CIStep{
+		waitForNextPoll: func(context.Context, time.Duration) error {
+			cancel()
+			return context.Canceled
+		},
+	}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after first poll, got %v", err)
+	}
+
+	got := gitCmd(t, dir, "rev-parse", "origin/dependency")
+	if got != stackedTip {
+		t.Fatalf("tracked stacked tip = %s, want freshly fetched %s (stale %s)", got, stackedTip, staleStackedTip)
+	}
+}
+
 // TestCIStep_StableBaseStillTimesOut verifies the timeout still fires normally
 // for a PR whose base branch never moves, preserving the bounded-monitoring
 // behavior for genuinely idle/abandoned PRs.

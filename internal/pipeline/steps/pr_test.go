@@ -98,6 +98,155 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_RetargetsExistingPRToStackedBase(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_BASE=old-base")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logData)
+	if strings.Contains(logText, "pr list --head feature --base") {
+		t.Fatalf("existing PR lookup filtered out old base:\n%s", logText)
+	}
+	if !strings.Contains(logText, "pr edit 42") || !strings.Contains(logText, "--base dependency") {
+		t.Fatalf("existing PR was not retargeted to dependency:\n%s", logText)
+	}
+}
+
+func TestPRStep_DoesNotRetargetMatchingStackedBase(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_BASE=dependency")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, _ := os.ReadFile(logFile)
+	editLine := lineContaining(string(logData), "pr edit")
+	if strings.Contains(editLine, "--base") {
+		t.Fatalf("matching PR base was redundantly retargeted: %s", editLine)
+	}
+}
+
+func TestPRStep_RetargetsStackedBaseOnceAcrossReruns(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	baseFile := filepath.Join(t.TempDir(), "pr-base")
+	if err := os.WriteFile(baseFile, []byte("old-base"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env = append(env, "FAKE_CLI_PR_BASE_FILE="+baseFile)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("first PR update: %v", err)
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("rerun PR update: %v", err)
+	}
+
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(logData), "--base dependency"); got != 1 {
+		t.Fatalf("retarget calls = %d, want one across initial update and rerun:\n%s", got, logData)
+	}
+	baseData, err := os.ReadFile(baseFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(baseData) != "dependency" {
+		t.Fatalf("persisted fake PR base = %q, want dependency", baseData)
+	}
+}
+
+func TestPRStep_RetargetFailureStopsRun(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_BASE=old-base", "FAKE_CLI_FAIL_EDIT=1")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	if _, err := (&PRStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "retarget pull request to dependency") {
+		t.Fatalf("Execute() error = %v, want retarget failure", err)
+	}
+}
+
+func TestPRStep_CreatesPRAgainstStackedBase(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, _ := os.ReadFile(logFile)
+	if !strings.Contains(string(logData), "pr create --head feature --base dependency") {
+		t.Fatalf("stacked PR did not use dependency base:\n%s", logData)
+	}
+}
+
+func TestPRStep_StackedSummaryUsesStackedDiff(t *testing.T) {
+	t.Parallel()
+	dir, upstream, featureHead := setupStackedRefreshRepo(t)
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, featureHead, featureHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.RefreshStrategy = types.RefreshStrategyRebase
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	env, _ := fakeGH(t, "")
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo.git"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("PR: %v", err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("agent calls = %d, want one PR drafting call", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+	if !strings.Contains(prompt, "base branch: dependency") || !strings.Contains(prompt, "A\tfeature.txt") {
+		t.Fatalf("stacked PR prompt missing base or feature diff:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "A\tdependency.txt") {
+		t.Fatalf("stacked PR prompt included dependency branch change:\n%s", prompt)
+	}
+}
+
+func lineContaining(text, fragment string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, fragment) {
+			return line
+		}
+	}
+	return ""
+}
+
 func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
@@ -141,6 +290,52 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	}
 }
 
+func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
+	t.Parallel()
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	sctx.Run.RefreshStrategy = types.RefreshStrategyMerge
+	refreshStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(refreshStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	cleanFindings := `{"findings":[],"summary":"clean"}`
+	if err := sctx.DB.SetStepFindings(refreshStep.ID, cleanFindings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(refreshStep.ID, 1, "initial", &cleanFindings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+		RunID:          sctx.Run.ID,
+		StepName:       "rebase",
+		Round:          1,
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		StartedAt:      1,
+		CompletedAt:    2,
+		DurationMS:     1,
+		ExitStatus:     "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := (&PRStep{}).buildPipelineSection(sctx)
+	for _, want := range []string{
+		"| Merge r1 | codex (harness_cli) | - |",
+		"<summary>✅ **Merge** - passed</summary>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("merge pipeline summary missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "**Refresh**") {
+		t.Fatalf("pipeline displayed canonical identity instead of strategy label:\n%s", got)
+	}
+}
+
 func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 	t.Parallel()
 	got := agentTelemetryTable([]db.AgentInvocation{
@@ -157,7 +352,7 @@ func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 			InvocationMode:            types.AgentInvocationModeHarnessCLI,
 			AgentObservationsReported: true,
 		},
-	})
+	}, types.RefreshStrategyRebase)
 
 	for _, want := range []string{
 		"| Test r1 | claude (harness_cli) | - |",
@@ -166,6 +361,20 @@ func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agent telemetry table missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestAgentTelemetryTableNormalizesHistoricalRefreshInvocationForDisplay(t *testing.T) {
+	t.Parallel()
+	got := agentTelemetryTable([]db.AgentInvocation{{
+		StepName:       "rebase",
+		Round:          1,
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+	}}, types.RefreshStrategyMerge)
+
+	if !strings.Contains(got, "| Merge r1 | codex (harness_cli) | - |") {
+		t.Fatalf("historical rebase invocation did not use merge display label:\n%s", got)
 	}
 }
 
@@ -181,7 +390,7 @@ func TestTruncatePipelineSectionTreatsAgentTelemetryTableAsAtomic(t *testing.T) 
 		Agent:                     "codex",
 		InvocationMode:            types.AgentInvocationModeHarnessCLI,
 		AgentObservationsReported: true,
-	}})
+	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
 		noMistakesPRSignature+"\n\n",
@@ -220,7 +429,7 @@ func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing
 		Agent:                     "codex",
 		InvocationMode:            types.AgentInvocationModeHarnessCLI,
 		AgentObservationsReported: true,
-	}})
+	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
 		noMistakesPRSignature+"\n\n",
@@ -483,7 +692,7 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr list --head feature --base main --repo parent-owner/no-mistakes --state open --json number,url,headRefName,headRepositoryOwner") {
+	if !strings.Contains(ghLog, "pr list --head feature --repo parent-owner/no-mistakes --state open --json number,url,baseRefName,headRefName,headRepositoryOwner") {
 		t.Fatalf("expected PR lookup to use parent repo and bare head branch, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "pr list --head fork-owner:feature") {
@@ -1473,7 +1682,7 @@ func TestPRStep_BuildPRContentUsesStepStatusWithoutEarlierReviewEvidence(t *test
 		}
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", baseSHA, 0)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2286,7 +2495,7 @@ func TestPRStep_PromptRequiresReleaseTypesForProductImpact(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	step := &PRStep{}
-	if _, err := step.buildPRContent(sctx, "feature", baseSHA, 0); err != nil {
+	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {

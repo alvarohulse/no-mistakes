@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -142,3 +143,43 @@ func TestStatsRendersPopulatedFidelityMetrics(t *testing.T) {
 }
 
 func strPtrCLI(s string) *string { return &s }
+
+func TestStatsRunLabelsHistoricalRefreshInvocationFromRunStrategy(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, err := d.InsertRepoWithID("repo-refresh", "/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRunWithOptions(repo.ID, "feature/stack", "abc", "def", db.RunOptions{RefreshStrategy: types.RefreshStrategyMerge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertAgentInvocation(db.AgentInvocation{
+		RunID:          run.ID,
+		StepName:       "rebase",
+		Round:          1,
+		Purpose:        "refresh",
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		SessionMode:    db.InvocationModeCold,
+		StartedAt:      1,
+		CompletedAt:    2,
+		DurationMS:     1,
+		ExitStatus:     "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := renderRunAgentPerf(&out, d, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Merge") || strings.Contains(out.String(), "rebase") {
+		t.Fatalf("historical invocation did not use strategy-aware display label:\n%s", out.String())
+	}
+}

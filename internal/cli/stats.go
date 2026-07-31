@@ -138,7 +138,7 @@ func renderRunAgentPerf(w io.Writer, database *db.DB, runID string) error {
 			exit += "/" + inv.FailureCategory
 		}
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			inv.StepName, inv.Round, inv.Purpose, inv.Agent, orUnknown(string(inv.InvocationMode)), formatAgentObservations(inv), orUnknown(inv.Model),
+			types.StepName(inv.StepName).DisplayName(run.RefreshStrategy), inv.Round, inv.Purpose, inv.Agent, orUnknown(string(inv.InvocationMode)), formatAgentObservations(inv), orUnknown(inv.Model),
 			inv.SessionMode, inv.SessionKey,
 			formatMS(inv.DurationMS), formatModelTime(inv), optMS(inv.SubprocessWaitMS),
 			optInt(inv.ModelRoundtrips), formatToolHistogram(inv), optInt(inv.FindingCount),
@@ -156,7 +156,7 @@ func renderRunAgentPerf(w io.Writer, database *db.DB, runID string) error {
 	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tSESSION\tΔ IN (round)\tΔ OUT\tΔ CACHE RD\tIN (raw)\tOUT (raw)\tCACHE RD (raw)\tCACHE WR\tFRESH IN\tREASON")
 	for _, inv := range invocations {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
-			inv.StepName, inv.Round, inv.Purpose, inv.SessionMode,
+			types.StepName(inv.StepName).DisplayName(run.RefreshStrategy), inv.Round, inv.Purpose, inv.SessionMode,
 			optInt(inv.DeltaInputTokens), optInt(inv.DeltaOutputTokens), optInt(inv.DeltaCacheReadTokens),
 			inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens,
 			optInt(inv.CacheCreationTokens), optInt(inv.FreshInputTokens), optInt(inv.ReasoningTokens),

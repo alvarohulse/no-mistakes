@@ -138,13 +138,70 @@ func TestWriteRunObjectShape(t *testing.T) {
 		"  status: running\n",
 		"  head: abcdef12\n",
 		"  findings: 1 info\n",
-		"  steps[2]{step,status,findings,duration_ms}:\n",
-		"    review,completed,1,1200\n",
-		"    test,awaiting_approval,0,0\n",
+		"  steps[2]{step,label,status,findings,duration_ms}:\n",
+		"    review,Review,completed,1,1200\n",
+		"    test,Test,awaiting_approval,0,0\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("run object missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestRunObjectKeepsCanonicalRefreshIdentityAndDisplaysStrategyLabel(t *testing.T) {
+	rv := runView{
+		ID:              "run-merge",
+		Branch:          "feature/stack",
+		Status:          string(types.RunRunning),
+		HeadSHA:         "abcdef1234567890",
+		RefreshStrategy: types.RefreshStrategyMerge,
+		Steps: []stepView{
+			{Name: string(types.StepRefresh), Status: string(types.StepStatusRunning)},
+		},
+	}
+
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, "steps[1]{step,label,status,findings,duration_ms}:\n") {
+		t.Fatalf("steps table missing canonical/display columns:\n%s", out)
+	}
+	if !strings.Contains(out, "refresh,Merge,running,0,0") {
+		t.Fatalf("refresh row did not preserve identity and display merge label:\n%s", out)
+	}
+}
+
+func TestMergeRefreshGateKeepsCanonicalResponseStep(t *testing.T) {
+	rv := runViewFromIPC(&ipc.RunInfo{
+		ID:              "run-merge",
+		RefreshStrategy: types.RefreshStrategyMerge,
+		Steps: []ipc.StepResultInfo{{
+			StepName:     types.StepRefresh,
+			Status:       types.StepStatusAwaitingApproval,
+			FindingsJSON: strptr(`{"findings":[],"summary":"resolve conflict"}`),
+		}},
+	})
+	gate, ok := rv.awaitingStep()
+	if !ok {
+		t.Fatal("expected refresh gate")
+	}
+	out := axiDoc(gateFields(gate)...)
+	if !strings.Contains(out, "step: refresh\n") || !strings.Contains(out, "label: Merge\n") {
+		t.Fatalf("merge gate did not separate canonical identity from display label:\n%s", out)
+	}
+}
+
+func TestProgressPrinterUsesRefreshStrategyLabel(t *testing.T) {
+	var out bytes.Buffer
+	printer := progressPrinter{w: &out, seen: map[string]string{}}
+	printer.update(&ipc.RunInfo{
+		Status:          types.RunRunning,
+		RefreshStrategy: types.RefreshStrategyMerge,
+		Steps: []ipc.StepResultInfo{
+			{StepName: types.StepRefresh, Status: types.StepStatusRunning},
+		},
+	})
+
+	if !strings.Contains(out.String(), "  Merge: running\n") {
+		t.Fatalf("progress output missing merge label:\n%s", out.String())
 	}
 }
 
@@ -219,8 +276,8 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 	out := axiDoc(runObjectField(rv))
 
 	for _, want := range []string{
-		"active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n",
-		"review,fixing,20m0s",
+		"active_steps[1]{step,label,status,active_for,last_activity,agent_pid,round}:\n",
+		"review,Review,fixing,20m0s",
 		"quiet 11m0s ago: codex started pid=4242",
 		`,"4242",auto-fix 1/3`,
 	} {
@@ -277,7 +334,7 @@ func TestStatusRendersCurrentAutoFixAttemptWithPersistedLimit(t *testing.T) {
 		},
 	}, &rv)
 	out := axiDoc(runObjectField(rv))
-	if !strings.Contains(out, `review,fixing`) || !strings.Contains(out, `auto-fix 1/2`) {
+	if !strings.Contains(out, `review,Review,fixing`) || !strings.Contains(out, `auto-fix 1/2`) {
 		t.Fatalf("status should render the in-flight first auto-fix attempt with persisted limit, got:\n%s", out)
 	}
 	if strings.Contains(out, `auto-fix 1/9`) {
@@ -532,7 +589,10 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note")
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", refreshSelection{
+		Strategy:  types.RefreshStrategyMerge,
+		StackedOn: "feature/dependency",
+	})
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
 	}
@@ -541,6 +601,22 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
+	}
+	if params.RefreshStrategy != types.RefreshStrategyMerge || params.StackedOn != "feature/dependency" {
+		t.Fatalf("refresh selection = (%q, %q), want (merge, feature/dependency)", params.RefreshStrategy, params.StackedOn)
+	}
+}
+
+func TestRunCommandsExposeRefreshSelectionFlags(t *testing.T) {
+	for name, cmd := range map[string]*cobra.Command{
+		"axi run": newAxiRunCmd(),
+		"rerun":   newRerunCmd(),
+	} {
+		for _, flag := range []string{"refresh-strategy", "stacked-on"} {
+			if cmd.Flags().Lookup(flag) == nil {
+				t.Errorf("%s is missing --%s", name, flag)
+			}
+		}
 	}
 }
 
@@ -772,6 +848,34 @@ func TestAxiLogsFullEscapesControlByteOutsideTailWithoutRewritingLog(t *testing.
 	}
 }
 
+func TestAxiLogsRefreshReadsHistoricalRebaseLog(t *testing.T) {
+	repoDir, p, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+
+	dbRun, err := database.InsertRun(repo.ID, "feature/legacy-log", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	logDir := p.RunLogDir(dbRun.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "rebase.log"), []byte("historical refresh output\n"), 0o644); err != nil {
+		t.Fatalf("write historical log: %v", err)
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	if _, err := runAxiLogs(cmd, "refresh", dbRun.ID, true); err != nil {
+		t.Fatalf("axi logs --step refresh: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "step: refresh") || !strings.Contains(out.String(), "historical refresh output") {
+		t.Fatalf("refresh logs did not read historical rebase.log under canonical identity:\n%s", out.String())
+	}
+}
+
 func TestAxiStatusIgnoresInvalidGlobalConfig(t *testing.T) {
 	repoDir := t.TempDir()
 	nmHome := t.TempDir()
@@ -869,7 +973,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, refreshSelection{}, false); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()

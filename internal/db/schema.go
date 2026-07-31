@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS runs (
     branch               TEXT NOT NULL,
     head_sha                TEXT NOT NULL,
     base_sha                TEXT NOT NULL,
+    refresh_strategy        TEXT NOT NULL DEFAULT 'rebase',
+    stacked_on              TEXT,
     submitted_head_sha      TEXT,
     review_approved_head_sha TEXT,
     status                  TEXT NOT NULL DEFAULT 'pending',
@@ -140,6 +142,8 @@ CREATE TABLE IF NOT EXISTS intent_cache (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	`ALTER TABLE runs ADD COLUMN refresh_strategy TEXT NOT NULL DEFAULT 'rebase'`,
+	`ALTER TABLE runs ADD COLUMN stacked_on TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,

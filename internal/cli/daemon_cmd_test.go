@@ -30,6 +30,17 @@ func TestParseSkipPushOptionsRejectsUnknownStep(t *testing.T) {
 	}
 }
 
+func TestParseSkipStepsCanonicalizesLegacyAliases(t *testing.T) {
+	got, err := parseSkipSteps("rebase,babysit")
+	if err != nil {
+		t.Fatalf("parseSkipSteps() error = %v", err)
+	}
+	want := []types.StepName{types.StepRefresh, types.StepCI}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseSkipSteps() = %v, want %v", got, want)
+	}
+}
+
 func TestNormalizeNotifyGatePathResolvesLegacyDotGate(t *testing.T) {
 	bare := filepath.Join(t.TempDir(), "repo123.git")
 	if err := os.MkdirAll(bare, 0o755); err != nil {
@@ -74,6 +85,24 @@ func TestFormatSkipPushOptions(t *testing.T) {
 	want := []string{"no-mistakes.skip=test,lint"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSkipPushOptions() = %v, want %v", got, want)
+	}
+}
+
+func TestRefreshSelectionPushOptionsRoundTrip(t *testing.T) {
+	options := formatRefreshSelectionPushOptions(types.RefreshStrategyMerge, "feature/dependency")
+	strategy, stackedOn, err := parseRefreshSelectionPushOptions(append([]string{"no-mistakes.skip=test"}, options...))
+	if err != nil {
+		t.Fatalf("parseRefreshSelectionPushOptions() error = %v", err)
+	}
+	if strategy != types.RefreshStrategyMerge || stackedOn != "feature/dependency" {
+		t.Fatalf("refresh selection = (%q, %q), want (merge, feature/dependency)", strategy, stackedOn)
+	}
+}
+
+func TestParseRefreshSelectionPushOptionsRejectsInvalidStrategy(t *testing.T) {
+	_, _, err := parseRefreshSelectionPushOptions([]string{"no-mistakes.refresh-strategy=reset"})
+	if err == nil {
+		t.Fatal("expected invalid refresh strategy to fail")
 	}
 }
 
