@@ -9,9 +9,10 @@ import (
 
 func TestMerge_GlobalOnly(t *testing.T) {
 	global := &GlobalConfig{
-		Agent:     types.AgentClaude,
-		CITimeout: 4 * time.Hour,
-		LogLevel:  "info",
+		Agent:                   types.AgentClaude,
+		CITimeout:               4 * time.Hour,
+		ProcessTerminationGrace: 750 * time.Millisecond,
+		LogLevel:                "info",
 	}
 	repo := &RepoConfig{}
 
@@ -21,6 +22,9 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 	if cfg.CITimeout != 4*time.Hour {
 		t.Errorf("ci_timeout = %v", cfg.CITimeout)
+	}
+	if cfg.ProcessTerminationGrace != 750*time.Millisecond {
+		t.Errorf("process_termination_grace = %v", cfg.ProcessTerminationGrace)
 	}
 }
 

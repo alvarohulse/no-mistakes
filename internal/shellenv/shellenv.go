@@ -321,7 +321,7 @@ func defaultShellCommandOutput(name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), shellCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	cmd.WaitDelay = 100 * time.Millisecond
 	return OutputShellCommand(cmd)
 }

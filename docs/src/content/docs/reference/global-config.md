@@ -41,6 +41,8 @@ step_quiet_warning: "10m"
 
 daemon_connect_timeout: "3s"
 
+process_termination_grace: "10s"
+
 log_level: info
 
 session_reuse: true
@@ -281,6 +283,19 @@ Maximum time a CLI client waits for an existing daemon socket to accept a connec
 | Default | `3s`                   |
 
 Accepts any positive Go `time.ParseDuration` string. Overridable per-invocation with the `NM_DAEMON_CONNECT_TIMEOUT` environment variable; see [Environment Variables](/no-mistakes/reference/environment/#nm_daemon_connect_timeout).
+
+### process_termination_grace
+
+Maximum time a Unix process group gets to exit after no-mistakes sends `SIGTERM`. If any processes remain when the ceiling expires, cleanup escalates to `SIGKILL`.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10s`                  |
+
+Accepts any positive Go `time.ParseDuration` string. Invalid, zero, and negative values are rejected when the global config is loaded.
+
+This is a ceiling, not an unconditional delay. When the agent, test runner, build watcher, or other descendant exits promptly after `SIGTERM`, no-mistakes continues immediately. Windows process trees use job-object termination and do not wait on this Unix signal window.
 
 ### log_level
 

@@ -19,11 +19,6 @@ import (
 // the pipes close immediately and Wait returns without waiting.
 const defaultWaitDelay = 5 * time.Second
 
-// processGroupTerminationGrace gives subprocesses a short opportunity to
-// flush state and remove temporary resources without making daemon shutdown
-// wait indefinitely on commands that ignore SIGTERM.
-const processGroupTerminationGrace = 500 * time.Millisecond
-
 const processGroupTerminationPollInterval = 10 * time.Millisecond
 
 // ConfigureShellCommand isolates cmd in its own process group (Setpgid) and
@@ -44,7 +39,10 @@ const processGroupTerminationPollInterval = 10 * time.Millisecond
 //
 // Apply this to every long-lived subprocess no-mistakes spawns on behalf of a
 // cancellable step/agent invocation.
-func ConfigureShellCommand(cmd *exec.Cmd) {
+func ConfigureShellCommand(cmd *exec.Cmd, processTerminationGrace time.Duration) {
+	if processTerminationGrace <= 0 {
+		processTerminationGrace = DefaultProcessTerminationGrace
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Install the WaitDelay backstop unless the caller picked one explicitly
 	// (the short login-shell probe uses a tighter bound of its own).
@@ -52,7 +50,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		cmd.WaitDelay = defaultWaitDelay
 	}
 	cmd.Cancel = func() error {
-		return terminateShellCommandGroup(cmd)
+		return terminateShellCommandGroup(cmd, processTerminationGrace)
 	}
 }
 
@@ -85,18 +83,21 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // termination is a harmless no-op (ESRCH). A nil or never-started command is a
 // no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
-	_ = terminateShellCommandGroup(cmd)
+	if cmd == nil || cmd.Cancel == nil {
+		return
+	}
+	_ = cmd.Cancel()
 }
 
 // The first successful SIGTERM owns the grace window. Concurrent cancellation
 // and Wait cleanup may repeat these idempotent group signals, but neither path
 // can force-kill survivors before that first window expires.
-func terminateShellCommandGroup(cmd *exec.Cmd) error {
+func terminateShellCommandGroup(cmd *exec.Cmd, processTerminationGrace time.Duration) error {
 	if err := signalShellCommandGroup(cmd, syscall.SIGTERM); err != nil {
 		return err
 	}
 
-	deadline := time.Now().Add(processGroupTerminationGrace)
+	deadline := time.Now().Add(processTerminationGrace)
 	for {
 		if err := signalShellCommandGroup(cmd, 0); errors.Is(err, os.ErrProcessDone) {
 			return nil

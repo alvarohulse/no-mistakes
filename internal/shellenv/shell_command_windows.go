@@ -54,7 +54,7 @@ var resumeProcessThreadsFunc = resumeProcessThreads
 // caller needs manual pipe handling. If a parser reads stdout/stderr until EOF,
 // the goroutine that owns Wait should terminate the group when the leader exits
 // so inherited pipe holders cannot wedge the parser.
-func ConfigureShellCommand(cmd *exec.Cmd) {
+func ConfigureShellCommand(cmd *exec.Cmd, _ time.Duration) {
 	// Suppress the visible console window Windows would otherwise allocate for
 	// this console child (agents, cmd.exe shell steps) when spawned from the
 	// console-less daemon. See issue #287. Harden allocates SysProcAttr if

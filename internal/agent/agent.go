@@ -253,6 +253,9 @@ type InvocationWorkload struct {
 // targets, to raw ACP agent commands.
 type Options struct {
 	ACPRegistryOverrides map[string]string
+	// ProcessTerminationGrace is the maximum time a process group gets to exit
+	// after SIGTERM before cleanup escalates to SIGKILL.
+	ProcessTerminationGrace time.Duration
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
 	// claude, pi) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
@@ -802,21 +805,21 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 			return nil, fmt.Errorf("agent_args_override is not supported for ACP agent %q; route the step to a native agent for model or reasoning overrides", name)
 		}
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
-		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand}, nil
+		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	}
 	switch name {
 	case types.AgentClaude:
-		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}, nil
+		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	case types.AgentCodex:
-		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}, nil
+		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	case types.AgentRovoDev:
 		return &rovodevAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentOpenCode:
 		return &opencodeAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentPi:
-		return &piAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}, nil
+		return &piAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	case types.AgentCopilot:
-		return &copilotAgent{bin: bin, extraArgs: extraArgs}, nil
+		return &copilotAgent{bin: bin, extraArgs: extraArgs, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}

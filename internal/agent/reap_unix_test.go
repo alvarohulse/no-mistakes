@@ -30,7 +30,7 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 		"NM_AGENT_NATIVE_PIPE_READY="+readyFile,
 		"NM_AGENT_NATIVE_PIPE_PID="+pidFile,
 	)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommand(cmd, shellenv.DefaultProcessTerminationGrace)
 	cmd.WaitDelay = 100 * time.Millisecond
 
 	started, err := startNativeAgentCommand(cmd)

@@ -50,7 +50,7 @@ func TestStartShellCommandFailsWhenJobSetupFails(t *testing.T) {
 	})
 
 	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "exit", "0")
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	if _, ok := shellCommandJob(cmd); ok {
 		t.Fatal("expected no job state when job setup fails")
 	}
@@ -74,7 +74,7 @@ func TestStartShellCommandFailsWhenJobAssignmentFails(t *testing.T) {
 	})
 
 	cmd := exec.CommandContext(context.Background(), "cmd", "/c", "exit", "0")
-	ConfigureShellCommand(cmd)
+	ConfigureShellCommand(cmd, DefaultProcessTerminationGrace)
 	if _, ok := shellCommandJob(cmd); !ok {
 		t.Skip("job object setup unavailable")
 	}

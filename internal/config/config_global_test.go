@@ -29,6 +29,9 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
 		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
 	}
+	if cfg.ProcessTerminationGrace != DefaultProcessTerminationGrace {
+		t.Errorf("process_termination_grace = %v, want %v", cfg.ProcessTerminationGrace, DefaultProcessTerminationGrace)
+	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "info")
 	}
@@ -53,6 +56,7 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"ci_timeout:",
 		"step_quiet_warning:",
 		"daemon_connect_timeout:",
+		"process_termination_grace:",
 		"log_level: info",
 		"# agent_path_override:",
 		"# commit:",
@@ -85,6 +89,9 @@ func TestEnsureDefaultGlobalConfig_CreatedConfigIsLoadable(t *testing.T) {
 	}
 	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
 		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
+	}
+	if cfg.ProcessTerminationGrace != DefaultProcessTerminationGrace {
+		t.Errorf("process_termination_grace = %v, want %v", cfg.ProcessTerminationGrace, DefaultProcessTerminationGrace)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "info")
@@ -183,6 +190,7 @@ agent_path_override:
   codex: /opt/codex
 ci_timeout: "2h30m"
 daemon_connect_timeout: "4s"
+process_termination_grace: "750ms"
 log_level: "debug"
 `
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -201,6 +209,9 @@ log_level: "debug"
 	}
 	if cfg.DaemonConnectTimeout != 4*time.Second {
 		t.Errorf("daemon_connect_timeout = %v, want 4s", cfg.DaemonConnectTimeout)
+	}
+	if cfg.ProcessTerminationGrace != 750*time.Millisecond {
+		t.Errorf("process_termination_grace = %v, want 750ms", cfg.ProcessTerminationGrace)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "debug")
@@ -337,6 +348,28 @@ func TestLoadGlobal_InvalidDaemonConnectTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_InvalidProcessTerminationGrace(t *testing.T) {
+	cases := []string{
+		`process_termination_grace: "not-a-duration"`,
+		`process_termination_grace: "0s"`,
+		`process_termination_grace: "-1s"`,
+	}
+	for _, data := range cases {
+		t.Run(data, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := LoadGlobal(path)
+			if err == nil {
+				t.Fatal("expected error for invalid process_termination_grace")
+			}
+		})
+	}
+}
+
 func TestLoadGlobal_CITimeoutUnlimited(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -424,6 +457,13 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	}
 	if d != DefaultDaemonConnectTimeout {
 		t.Errorf("YAML daemon_connect_timeout = %v, Go default = %v", d, DefaultDaemonConnectTimeout)
+	}
+	d, err = time.ParseDuration(raw.ProcessTerminationGrace)
+	if err != nil {
+		t.Fatalf("YAML process_termination_grace %q is not a valid duration: %v", raw.ProcessTerminationGrace, err)
+	}
+	if d != DefaultProcessTerminationGrace {
+		t.Errorf("YAML process_termination_grace = %v, Go default = %v", d, DefaultProcessTerminationGrace)
 	}
 	if raw.LogLevel != "info" {
 		t.Errorf("YAML log_level = %q, Go default = %q", raw.LogLevel, "info")

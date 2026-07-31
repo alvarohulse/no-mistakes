@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -39,6 +40,9 @@ const (
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
+	// DefaultProcessTerminationGrace is the maximum time a process group gets
+	// to exit after SIGTERM before cleanup escalates to SIGKILL.
+	DefaultProcessTerminationGrace = shellenv.DefaultProcessTerminationGrace
 	// CITimeoutUnlimited is the sentinel meaning "monitor until the PR is
 	// merged, closed, or the run is aborted - never self-terminate".
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
@@ -48,16 +52,17 @@ const (
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
-	Agent                types.AgentName     `yaml:"agent"`
-	Agents               []types.AgentName   `yaml:"-"`
-	ACPXPath             string              `yaml:"acpx_path"`
-	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
-	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
-	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
-	CITimeout            time.Duration       `yaml:"-"`
-	StepQuietWarning     time.Duration       `yaml:"-"`
-	DaemonConnectTimeout time.Duration       `yaml:"-"`
-	LogLevel             string              `yaml:"log_level"`
+	Agent                   types.AgentName     `yaml:"agent"`
+	Agents                  []types.AgentName   `yaml:"-"`
+	ACPXPath                string              `yaml:"acpx_path"`
+	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
+	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
+	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
+	CITimeout               time.Duration       `yaml:"-"`
+	StepQuietWarning        time.Duration       `yaml:"-"`
+	DaemonConnectTimeout    time.Duration       `yaml:"-"`
+	ProcessTerminationGrace time.Duration       `yaml:"-"`
+	LogLevel                string              `yaml:"log_level"`
 	// SessionReuse controls per-run, per-role agent session reuse in the
 	// review loop (one durable reviewer session across full reviews, a
 	// separate durable fixer session across fix turns). Default true; set
@@ -77,27 +82,28 @@ type GlobalConfig struct {
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
-	Agent                agentList           `yaml:"agent"`
-	ACPXPath             string              `yaml:"acpx_path"`
-	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
-	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
-	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
-	CITimeout            string              `yaml:"ci_timeout"`
-	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
-	BabysitTimeout       string              `yaml:"babysit_timeout"`
-	StepQuietWarning     string              `yaml:"step_quiet_warning"`
-	LogLevel             string              `yaml:"log_level"`
-	SessionReuse         *bool               `yaml:"session_reuse"`
-	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
-	Commit               CommitRaw           `yaml:"commit"`
-	Intent               IntentRaw           `yaml:"intent"`
-	Rebase               StepAgentRaw        `yaml:"rebase"`
-	Review               StepAgentRaw        `yaml:"review"`
-	Test                 TestRaw             `yaml:"test"`
-	Document             DocumentRaw         `yaml:"document"`
-	Lint                 StepAgentRaw        `yaml:"lint"`
-	PR                   StepAgentRaw        `yaml:"pr"`
-	CI                   StepAgentRaw        `yaml:"ci"`
+	Agent                   agentList           `yaml:"agent"`
+	ACPXPath                string              `yaml:"acpx_path"`
+	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
+	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
+	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
+	CITimeout               string              `yaml:"ci_timeout"`
+	DaemonConnectTimeout    string              `yaml:"daemon_connect_timeout"`
+	ProcessTerminationGrace string              `yaml:"process_termination_grace"`
+	BabysitTimeout          string              `yaml:"babysit_timeout"`
+	StepQuietWarning        string              `yaml:"step_quiet_warning"`
+	LogLevel                string              `yaml:"log_level"`
+	SessionReuse            *bool               `yaml:"session_reuse"`
+	AutoFix                 AutoFixRaw          `yaml:"auto_fix"`
+	Commit                  CommitRaw           `yaml:"commit"`
+	Intent                  IntentRaw           `yaml:"intent"`
+	Rebase                  StepAgentRaw        `yaml:"rebase"`
+	Review                  StepAgentRaw        `yaml:"review"`
+	Test                    TestRaw             `yaml:"test"`
+	Document                DocumentRaw         `yaml:"document"`
+	Lint                    StepAgentRaw        `yaml:"lint"`
+	PR                      StepAgentRaw        `yaml:"pr"`
+	CI                      StepAgentRaw        `yaml:"ci"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -257,24 +263,25 @@ type AutoFix struct {
 
 // Config is the merged result of global + per-repo configuration.
 type Config struct {
-	Agent                types.AgentName
-	Agents               []types.AgentName
-	StepAgents           map[types.StepName][]types.AgentName
-	ACPXPath             string
-	ACPRegistryOverrides map[string]string
-	AgentPathOverride    map[string]string
-	AgentArgsOverride    map[string][]string
-	CITimeout            time.Duration
-	StepQuietWarning     time.Duration
-	LogLevel             string
-	SessionReuse         bool
-	Commands             Commands
-	IgnorePatterns       []string
-	AutoFix              AutoFix
-	Commit               Commit
-	Intent               Intent
-	Test                 Test
-	Document             Document
+	Agent                   types.AgentName
+	Agents                  []types.AgentName
+	StepAgents              map[types.StepName][]types.AgentName
+	ACPXPath                string
+	ACPRegistryOverrides    map[string]string
+	AgentPathOverride       map[string]string
+	AgentArgsOverride       map[string][]string
+	CITimeout               time.Duration
+	StepQuietWarning        time.Duration
+	ProcessTerminationGrace time.Duration
+	LogLevel                string
+	SessionReuse            bool
+	Commands                Commands
+	IgnorePatterns          []string
+	AutoFix                 AutoFix
+	Commit                  Commit
+	Intent                  Intent
+	Test                    Test
+	Document                Document
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
 	// project-level settings/instructions suppressed; the daemon fails the run
@@ -595,6 +602,10 @@ step_quiet_warning: "10m"
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
+
+# Maximum time a Unix process group gets to exit after SIGTERM before cleanup
+# escalates to SIGKILL. Processes that exit promptly do not wait out the window.
+process_termination_grace: "10s"
 
 # Reuse one durable agent session per run for the review loop: the reviewer
 # keeps a single session across the initial review and every full rereview,
@@ -1150,13 +1161,14 @@ func EnsureDefaultGlobalConfig(path string) {
 // DefaultGlobalConfig returns the built-in global defaults.
 func DefaultGlobalConfig() *GlobalConfig {
 	return &GlobalConfig{
-		Agent:                types.AgentAuto,
-		Agents:               []types.AgentName{types.AgentAuto},
-		CITimeout:            DefaultCITimeout,
-		StepQuietWarning:     DefaultStepQuietWarning,
-		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
-		LogLevel:             "info",
-		SessionReuse:         true,
+		Agent:                   types.AgentAuto,
+		Agents:                  []types.AgentName{types.AgentAuto},
+		CITimeout:               DefaultCITimeout,
+		StepQuietWarning:        DefaultStepQuietWarning,
+		DaemonConnectTimeout:    DefaultDaemonConnectTimeout,
+		ProcessTerminationGrace: DefaultProcessTerminationGrace,
+		LogLevel:                "info",
+		SessionReuse:            true,
 	}
 }
 
@@ -1230,6 +1242,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.DaemonConnectTimeout = d
+	}
+	if raw.ProcessTerminationGrace != "" {
+		d, err := parsePositiveDuration("process_termination_grace", raw.ProcessTerminationGrace)
+		if err != nil {
+			return nil, err
+		}
+		cfg.ProcessTerminationGrace = d
 	}
 	if raw.LogLevel != "" {
 		cfg.LogLevel = raw.LogLevel
@@ -1561,24 +1580,25 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 
 	cfg := &Config{
-		Agent:                global.Agent,
-		Agents:               copyAgents(global.Agents),
-		StepAgents:           global.configuredStepAgents(),
-		ACPXPath:             global.ACPXPath,
-		ACPRegistryOverrides: global.ACPRegistryOverrides,
-		AgentPathOverride:    global.AgentPathOverride,
-		AgentArgsOverride:    global.AgentArgsOverride,
-		CITimeout:            global.CITimeout,
-		StepQuietWarning:     global.StepQuietWarning,
-		LogLevel:             global.LogLevel,
-		SessionReuse:         global.SessionReuse,
-		Commands:             repo.Commands,
-		IgnorePatterns:       repo.IgnorePatterns,
-		AutoFix:              af,
-		Commit:               commit,
-		Intent:               intent,
-		Test:                 test,
-		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Agent:                   global.Agent,
+		Agents:                  copyAgents(global.Agents),
+		StepAgents:              global.configuredStepAgents(),
+		ACPXPath:                global.ACPXPath,
+		ACPRegistryOverrides:    global.ACPRegistryOverrides,
+		AgentPathOverride:       global.AgentPathOverride,
+		AgentArgsOverride:       global.AgentArgsOverride,
+		CITimeout:               global.CITimeout,
+		StepQuietWarning:        global.StepQuietWarning,
+		ProcessTerminationGrace: global.ProcessTerminationGrace,
+		LogLevel:                global.LogLevel,
+		SessionReuse:            global.SessionReuse,
+		Commands:                repo.Commands,
+		IgnorePatterns:          repo.IgnorePatterns,
+		AutoFix:                 af,
+		Commit:                  commit,
+		Intent:                  intent,
+		Test:                    test,
+		Document:                Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,

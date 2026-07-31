@@ -74,7 +74,8 @@ func (s *wizardAgentSuggester) ensure(ctx context.Context) error {
 			return
 		}
 		ag, err := s.new(s.cfg.Agent, s.cfg.AgentPath(), s.cfg.AgentArgs(), agent.Options{
-			ACPRegistryOverrides: s.cfg.ACPRegistryOverrides,
+			ACPRegistryOverrides:    s.cfg.ACPRegistryOverrides,
+			ProcessTerminationGrace: s.cfg.ProcessTerminationGrace,
 		})
 		if err != nil {
 			s.err = fmt.Errorf("create agent: %w", err)

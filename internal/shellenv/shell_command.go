@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// DefaultProcessTerminationGrace is the maximum time a Unix process group gets
+// to exit after SIGTERM before cleanup escalates to SIGKILL.
+const DefaultProcessTerminationGrace = 10 * time.Second
+
 type shellOutputPipe struct {
 	reader *os.File
 	writer *os.File

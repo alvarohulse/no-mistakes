@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -36,6 +37,43 @@ func TestNew_KnownAgents(t *testing.T) {
 			}
 			if a.Name() != tt.wantName {
 				t.Errorf("expected name %q, got %q", tt.wantName, a.Name())
+			}
+		})
+	}
+}
+
+func TestNewWithOptions_ThreadsProcessTerminationGraceToNativeCommands(t *testing.T) {
+	const grace = 750 * time.Millisecond
+	for _, name := range []types.AgentName{
+		types.AgentClaude,
+		types.AgentCodex,
+		types.AgentPi,
+		types.AgentCopilot,
+		types.AgentCursor,
+	} {
+		t.Run(string(name), func(t *testing.T) {
+			a, err := NewWithOptions(name, string(name), nil, Options{ProcessTerminationGrace: grace})
+			if err != nil {
+				t.Fatalf("NewWithOptions: %v", err)
+			}
+
+			var got time.Duration
+			switch a := a.(type) {
+			case *claudeAgent:
+				got = a.processTerminationGrace
+			case *codexAgent:
+				got = a.processTerminationGrace
+			case *piAgent:
+				got = a.processTerminationGrace
+			case *copilotAgent:
+				got = a.processTerminationGrace
+			case *acpxAgent:
+				got = a.processTerminationGrace
+			default:
+				t.Fatalf("agent type = %T, want native command agent", a)
+			}
+			if got != grace {
+				t.Fatalf("process termination grace = %v, want %v", got, grace)
 			}
 		})
 	}

@@ -11,6 +11,10 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // TestRunShellCommandWithEnv_KillsGrandchildOnCancel is a regression test for
@@ -42,7 +46,7 @@ func TestRunShellCommandWithEnv_KillsGrandchildOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _, _ = runShellCommandWithEnv(ctx, dir, nil, script)
+		_, _, _ = runShellCommandWithEnv(ctx, dir, nil, script, shellenv.DefaultProcessTerminationGrace)
 	}()
 
 	grandchild := waitForIntFile(t, pidFile, 5*time.Second)
@@ -93,7 +97,7 @@ func TestRunShellCommandWithEnv_ReapsGrandchildOnCleanExit(t *testing.T) {
 		"; sleep 0.1; i=$((i+1)); done ) >/dev/null 2>&1 & echo $! > " + pidFile + "; exit 0"
 
 	ctx := context.Background()
-	if _, _, err := runShellCommandWithEnv(ctx, dir, nil, script); err != nil {
+	if _, _, err := runShellCommandWithEnv(ctx, dir, nil, script, shellenv.DefaultProcessTerminationGrace); err != nil {
 		t.Fatalf("runShellCommandWithEnv: %v", err)
 	}
 
@@ -108,6 +112,50 @@ func TestRunShellCommandWithEnv_ReapsGrandchildOnCleanExit(t *testing.T) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL)
 		t.Fatalf("grandchild pid %d not reaped after clean exit (kill -0: %v); want ESRCH", grandchild, err)
 	}
+}
+
+func TestRunStepShellCommand_UsesConfiguredProcessTerminationGrace(t *testing.T) {
+	dir := t.TempDir()
+	readyFile := filepath.Join(dir, "grandchild.ready")
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := "( trap '' TERM; printf ready > " + readyFile + "; while :; do sleep 1; done ) >/dev/null 2>&1 & " +
+		"echo $! > " + pidFile + "; while [ ! -f " + readyFile + " ]; do sleep 0.01; done; exit 0"
+	sctx := &pipeline.StepContext{
+		Ctx:     context.Background(),
+		WorkDir: dir,
+		Config:  &config.Config{ProcessTerminationGrace: 250 * time.Millisecond},
+	}
+
+	started := time.Now()
+	if _, _, err := runStepShellCommand(sctx, script); err != nil {
+		t.Fatalf("runStepShellCommand: %v", err)
+	}
+	elapsed := time.Since(started)
+	if elapsed < 150*time.Millisecond {
+		t.Fatalf("step-shell cleanup returned after %s; configured grace was not honored", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("step-shell cleanup took %s; want bounded escalation", elapsed)
+	}
+
+	grandchild := waitForIntFile(t, pidFile, 5*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+	})
+	if !pidGoneWithinStepShellTest(grandchild, 5*time.Second) {
+		t.Fatalf("grandchild pid %d survived configured cleanup", grandchild)
+	}
+}
+
+func pidGoneWithinStepShellTest(pid int, window time.Duration) bool {
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return syscall.Kill(pid, 0) == syscall.ESRCH
 }
 
 func waitForIntFile(t *testing.T, path string, timeout time.Duration) int {
