@@ -61,6 +61,12 @@ func DemoSteps() []pipeline.Step {
 			},
 		},
 		&demoStep{
+			name:       types.StepBuild,
+			delay:      3 * time.Second,
+			displayDur: 24 * time.Second,
+			log:        "Running: go build ./...\nCompiling changed packages...\nBuild completed successfully.",
+		},
+		&demoStep{
 			name:       types.StepTest,
 			delay:      4 * time.Second,
 			displayDur: 32 * time.Second,

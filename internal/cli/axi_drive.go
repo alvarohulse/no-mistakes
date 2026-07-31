@@ -131,7 +131,7 @@ func newAxiRunCmd() *cobra.Command {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(),
-						"Valid steps: intent, refresh, review, test, document, lint, push, pr, ci")
+						"Valid steps: intent, refresh, review, build, test, document, lint, push, pr, ci")
 				}
 				noteProvided := cmd.Flags().Changed("pr-note") || cmd.Flags().Changed("pr-note-file")
 				if cmd.Flags().Changed("pr-note") && cmd.Flags().Changed("pr-note-file") {

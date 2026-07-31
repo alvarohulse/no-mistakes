@@ -135,6 +135,18 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	}
 
 	execSteps := m.steps()
+	recordedSteps, err := m.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get recovered step plan: %w", err)
+	}
+	recordedNames := make([]types.StepName, len(recordedSteps))
+	for index, step := range recordedSteps {
+		recordedNames[index] = step.StepName
+	}
+	execSteps, err = pipeline.MatchRecoveredSteps(recordedNames, execSteps)
+	if err != nil {
+		return nil, err
+	}
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
@@ -345,6 +357,7 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		types.StepIntent,
 		types.StepRefresh,
 		types.StepReview,
+		types.StepBuild,
 		types.StepTest,
 		types.StepDocument,
 		types.StepLint,
