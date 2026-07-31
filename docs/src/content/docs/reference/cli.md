@@ -94,7 +94,7 @@ no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 | Flag          | Type     | Default | Description                                                      |
 | ------------- | -------- | ------- | ---------------------------------------------------------------- |
 | `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
-| `-y`, `--yes` | `bool`   | `false` | Auto-resolve every gate until a decision point or outcome        |
+| `-y`, `--yes` | `bool`   | `false` | Auto-resolve every eligible gate until a decision point or outcome. A Test gate created because the agent changed a test file requires explicit approval and stays parked |
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 | `--pr-note`   | `string` | (none)  | Trusted author text for the generated PR's Notes section         |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
@@ -113,6 +113,7 @@ Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
+A Test gate created because the pipeline agent changed a test file is the one exception: it requires an explicit response and stays parked even under `--yes`.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.

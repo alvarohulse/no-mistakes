@@ -148,6 +148,27 @@ func TestModel_Yolo_FixesActionableFindings(t *testing.T) {
 	}
 }
 
+func TestModel_Yolo_LeavesExplicitApprovalGateParked(t *testing.T) {
+	sock, client, snapshot := captureRespond(t)
+
+	run := testRun()
+	run.Steps[1].Status = types.StepStatusAwaitingApproval
+	fj := `{"findings":[{"id":"test-file-1","severity":"warning","description":"agent changed a test file","action":"ask-user","requires_explicit_approval":true}],"summary":"1 issue"}`
+	run.Steps[1].FindingsJSON = &fj
+	m := NewModel(sock, client, run)
+	m.yoloMode = true
+
+	if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+		if msg := cmd(); msg != nil {
+			t.Fatalf("expected nil msg, got %#v", msg)
+		}
+	}
+
+	if calls := snapshot(); len(calls) != 0 {
+		t.Fatalf("expected no respond call for an explicit-approval gate under yolo, got %d: %+v", len(calls), calls)
+	}
+}
+
 func TestModel_Yolo_FixesAllActionableFindingsDespiteManualDeselection(t *testing.T) {
 	sock, client, snapshot := captureRespond(t)
 

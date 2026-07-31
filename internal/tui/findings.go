@@ -12,6 +12,14 @@ func (m Model) stepHasActionableFindings(step types.StepName) bool {
 	return types.HasActionableFindings(types.Findings{Items: m.findingItems(step)})
 }
 
+// stepRequiresExplicitApproval reports whether any of the step's findings must
+// receive an explicit human response (e.g. the Test-step test-file safety gate).
+// Yolo mode uses this to leave such a gate parked instead of auto-resolving it,
+// mirroring the AXI --yes drive-loop guard.
+func (m Model) stepRequiresExplicitApproval(step types.StepName) bool {
+	return types.HasExplicitApprovalFindings(types.Findings{Items: m.findingItems(step)})
+}
+
 func (m Model) awaitingActionState() (showSelectionActions bool, allowFix bool, selectedCount int, totalCount int) {
 	step := awaitingStep(m.steps)
 	if step == nil {
