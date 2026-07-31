@@ -73,15 +73,12 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 		}
 	}
 
-	// Stop before rebasing when the gated branch carries commits that live on
+	// Stop before refreshing when the gated branch carries commits that live on
 	// the contributor's local default branch but were never pushed to
-	// origin/<default>. Rebasing onto the fresh remote default keeps those
-	// commits in the branch's history, so the PR would silently bundle another
-	// workstream's unpushed work. Surface it for a human decision instead.
-	if baseBranch == defaultBranch {
-		if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
-			return outcome, nil
-		}
+	// origin/<default>. The check also applies to stacked branches unless their
+	// effective base already carries those commits.
+	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, baseBranch); outcome != nil {
+		return outcome, nil
 	}
 	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
 		findingsJSON, _ := json.Marshal(Findings{
@@ -192,7 +189,7 @@ func forcePushRefreshTargets(branch, baseBranch string) []string {
 // is an ancestor of the branch HEAD, then enumerates the unpushed commits.
 // Detection is best-effort - if the local default tip advanced past the branch
 // point, or the working repo cannot be read, it returns nil rather than guess.
-func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch string) *pipeline.StepOutcome {
+func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch, baseBranch string) *pipeline.StepOutcome {
 	if branch == "" || branch == defaultBranch {
 		return nil
 	}
@@ -212,6 +209,10 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}
+	baseRef := "origin/" + baseBranch
+	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", baseRef+"^{commit}"); err != nil {
+		return nil
+	}
 	// The local default tip must be present in the gate's object store (it is
 	// when the branch carries it as an ancestor) for the reachability checks.
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", localTip+"^{commit}"); err != nil {
@@ -226,12 +227,21 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		return nil
 	}
 
-	subjects, err := git.Run(ctx, sctx.WorkDir, "log", "--oneline", "--no-decorate", remoteRef+".."+localTip)
+	logArgs := []string{"log", "--oneline", "--no-decorate", remoteRef + ".." + localTip}
+	if baseRef != remoteRef {
+		logArgs = append(logArgs, "^"+baseRef)
+	}
+	subjects, err := git.Run(ctx, sctx.WorkDir, logArgs...)
 	if err != nil || strings.TrimSpace(subjects) == "" {
 		return nil
 	}
 	commits := strings.Split(strings.TrimSpace(subjects), "\n")
 	files, _ := git.DiffNameOnly(ctx, sctx.WorkDir, remoteRef, localTip)
+	if baseRef != remoteRef {
+		if mergeBase, err := git.Run(ctx, sctx.WorkDir, "merge-base", baseRef, localTip); err == nil {
+			files, _ = git.DiffNameOnly(ctx, sctx.WorkDir, strings.TrimSpace(mergeBase), localTip)
+		}
+	}
 	firstFile := ""
 	if len(files) > 0 {
 		firstFile = files[0]
@@ -241,6 +251,12 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; rebasing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, or rebase your branch onto origin/%s, before gating.",
 		len(commits), defaultBranch, defaultBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, defaultBranch,
 	)
+	if baseBranch != defaultBranch {
+		description = fmt.Sprintf(
+			"branch carries %d commit(s) that exist on your local %s branch, were never pushed to origin/%s, and are absent from origin/%s; refreshing would bundle this unrelated work (%d file(s)) into the PR:\n- %s\n\nPush %s to origin, add the commits to %s, or rebase your branch onto origin/%s, before gating.",
+			len(commits), defaultBranch, defaultBranch, baseBranch, len(files), strings.Join(commits, "\n- "), defaultBranch, baseBranch, baseBranch,
+		)
+	}
 	findingsJSON, _ := json.Marshal(Findings{
 		Items: []Finding{{
 			Severity:    "warning",

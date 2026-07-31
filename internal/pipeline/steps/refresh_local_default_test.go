@@ -91,6 +91,69 @@ func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	}
 }
 
+func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsWhenStacked(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	working := t.TempDir()
+	gitCmd(t, working, "init")
+	gitCmd(t, working, "config", "user.name", "test")
+	gitCmd(t, working, "config", "user.email", "test@test.com")
+	gitCmd(t, working, "checkout", "-b", "main")
+	os.WriteFile(filepath.Join(working, "base.txt"), []byte("base"), 0o644)
+	gitCmd(t, working, "add", "-A")
+	gitCmd(t, working, "commit", "-m", "base")
+	baseSHA := gitCmd(t, working, "rev-parse", "HEAD")
+	gitCmd(t, working, "remote", "add", "origin", upstream)
+	gitCmd(t, working, "push", "origin", "main")
+
+	gitCmd(t, working, "checkout", "-b", "dependency")
+	os.WriteFile(filepath.Join(working, "dependency.txt"), []byte("dependency"), 0o644)
+	gitCmd(t, working, "add", "-A")
+	gitCmd(t, working, "commit", "-m", "dependency")
+	gitCmd(t, working, "push", "origin", "dependency")
+
+	gitCmd(t, working, "checkout", "main")
+	os.WriteFile(filepath.Join(working, "unrelated_stacked.txt"), []byte("local main work"), 0o644)
+	gitCmd(t, working, "add", "-A")
+	gitCmd(t, working, "commit", "-m", "unrelated stacked local main work")
+	localMainTip := gitCmd(t, working, "rev-parse", "HEAD")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "clone", upstream, ".")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "fetch", working, "main")
+	gitCmd(t, dir, "checkout", "--detach", localMainTip)
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Repo.WorkingPath = working
+
+	outcome, err := (&RefreshStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected stacked refresh to stop for bundled local default commits, got outcome=%#v", outcome)
+	}
+	if outcome.AutoFixable {
+		t.Fatal("bundled local default commits on a stacked branch are not safely auto-fixable")
+	}
+	if !strings.Contains(outcome.Findings, "unrelated stacked local main work") {
+		t.Fatalf("expected findings to mention the bundled local main commit, got: %s", outcome.Findings)
+	}
+}
+
 func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
