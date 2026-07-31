@@ -428,6 +428,9 @@ func TestTestStep_EvidenceAgentModifiesExistingTest_NeedsApproval(t *testing.T) 
 			if !strings.Contains(finding.Description, "existing test file modified by agent") {
 				t.Fatalf("modified-test-file finding description = %q", finding.Description)
 			}
+			if !finding.RequiresExplicitApproval {
+				t.Fatal("modified-test-file finding must require explicit approval")
+			}
 		})
 	}
 }
