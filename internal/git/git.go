@@ -40,6 +40,16 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	return runInDir(ctx, dir, args...)
 }
 
+// RunWithIndex executes Git with indexFile as its index without changing the
+// repository's real index. Callers use this for read-only working-tree
+// snapshots that need Git's normal staging and rename semantics.
+func RunWithIndex(ctx context.Context, dir, indexFile string, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnv(ctx, dir, []string{"GIT_INDEX_FILE=" + indexFile}, args...)
+}
+
 // RunBare executes Git against exactly bareDir. Unlike Run, it never falls
 // back to cwd-based repository discovery when bareDir is malformed. Gate
 // recovery uses this after structural validation so an invalid directory under

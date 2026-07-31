@@ -76,6 +76,35 @@ func TestRun(t *testing.T) {
 	}
 }
 
+func TestRunWithIndexDoesNotModifyRepositoryIndex(t *testing.T) {
+	dir := initTestRepo(t)
+	ctx := context.Background()
+	writeFile(t, filepath.Join(dir, "README.md"), "# changed\n")
+
+	indexFile := filepath.Join(t.TempDir(), "index")
+	if _, err := RunWithIndex(ctx, dir, indexFile, "read-tree", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunWithIndex(ctx, dir, indexFile, "add", "--all"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RunWithIndex(ctx, dir, indexFile, "diff", "--cached", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "README.md" {
+		t.Fatalf("temporary index diff = %q, want README.md", got)
+	}
+
+	got, err = Run(ctx, dir, "diff", "--cached", "--name-only", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("repository index changed: %q", got)
+	}
+}
+
 func TestRunError(t *testing.T) {
 	ctx := context.Background()
 	_, err := Run(ctx, t.TempDir(), "log")
