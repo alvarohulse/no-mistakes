@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ type cursorInvocation struct {
 	Model     string
 	ResumeID  string
 }
+
+const cursorStructuredOutputMarker = "## no-mistakes final output contract"
 
 func validateCursorContainment(invocation cursorInvocation, cwd, pwd string) error {
 	workspace, err := filepath.Abs(invocation.Workspace)
@@ -99,6 +102,22 @@ func runCursor(args []string, promptReader io.Reader, scenario *Scenario) int {
 	if sessionID == "" {
 		sessionID = "fake-cursor-session"
 	}
+	flavour := "plain"
+	if strings.Contains(invocation.Prompt, cursorStructuredOutputMarker) {
+		flavour = "structured"
+	}
+	if data, err := readFixtureFile(fixtureDir("cursor"), flavour, ".jsonl"); err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent: cursor fixture: %v\n", err)
+		return 1
+	} else if data != nil {
+		patched, err := patchCursorFixture(data, body, sessionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent: cursor patch: %v\n", err)
+			return 1
+		}
+		_, _ = os.Stdout.Write(patched)
+		return 0
+	}
 	enc := json.NewEncoder(os.Stdout)
 	_ = enc.Encode(map[string]any{
 		"type":       "system",
@@ -161,8 +180,7 @@ func validateCursorInstructionMarkers(repo string) error {
 }
 
 func cursorResponseBody(action Action, prompt string) (string, error) {
-	const marker = "## no-mistakes final output contract"
-	markerAt := strings.LastIndex(prompt, marker)
+	markerAt := strings.LastIndex(prompt, cursorStructuredOutputMarker)
 	if markerAt < 0 {
 		return action.textOrDefault(), nil
 	}
@@ -190,6 +208,38 @@ func cursorResponseBody(action Action, prompt string) (string, error) {
 		return "", fmt.Errorf("marshal structured output: %w", err)
 	}
 	return string(body), nil
+}
+
+func patchCursorFixture(raw []byte, body, sessionID string) ([]byte, error) {
+	var out bytes.Buffer
+	resultSeen := false
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) == 0 {
+			out.WriteByte('\n')
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil || event["type"] != "result" {
+			out.Write(line)
+			out.WriteByte('\n')
+			continue
+		}
+		event["subtype"] = "success"
+		event["is_error"] = false
+		event["result"] = body
+		event["session_id"] = sessionID
+		patched, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("marshal result event: %w", err)
+		}
+		out.Write(patched)
+		out.WriteByte('\n')
+		resultSeen = true
+	}
+	if !resultSeen {
+		return nil, fmt.Errorf("fixture has no result event")
+	}
+	return out.Bytes(), nil
 }
 
 func extractCursorInvocation(args []string, promptReader io.Reader) (cursorInvocation, error) {

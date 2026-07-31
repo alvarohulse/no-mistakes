@@ -19,6 +19,16 @@ func TestScrubClaudeHookEvents_RemovesInitEvent(t *testing.T) {
 	}
 }
 
+func TestScrubCursorBytesPreservesInitEvent(t *testing.T) {
+	input := []byte("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/tmp/recordcursor-123/workspace\"}\n")
+
+	scrubbed := scrubCursorBytes(input)
+
+	if !bytes.Contains(scrubbed, []byte(`"subtype":"init"`)) {
+		t.Fatalf("Cursor init event was removed: %q", scrubbed)
+	}
+}
+
 func TestReplacePathForms_ReplacesEscapedWindowsPaths(t *testing.T) {
 	input := []byte(`{"cwd":"C:\\Users\\kun\\project","tmp":"C:\\Users\\kun\\AppData\\Local\\Temp\\recordfixture-123"}`)
 

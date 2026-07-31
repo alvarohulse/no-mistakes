@@ -65,13 +65,14 @@ test:
 e2e:
 	@bash scripts/e2e.sh
 
-# Re-record fixtures from the real claude/codex/opencode CLIs and overwrite
+# Re-record fixtures from the real claude/codex/cursor/opencode CLIs and overwrite
 # internal/e2e/fixtures/. Spends real API quota — run only when the upstream
 # wire format changes or when adding a new flavour. Personal paths are
 # scrubbed automatically; review the diff before committing.
 e2e-record:
 	go run ./cmd/recordfixture claude   --out internal/e2e/fixtures/claude
 	go run ./cmd/recordfixture codex    --out internal/e2e/fixtures/codex
+	go run ./cmd/recordfixture cursor   --out internal/e2e/fixtures/cursor
 	go run ./cmd/recordfixture opencode --out internal/e2e/fixtures/opencode
 
 # Regenerate the committed agent skill (skills/no-mistakes/SKILL.md) from the

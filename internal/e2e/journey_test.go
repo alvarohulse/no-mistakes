@@ -45,7 +45,7 @@ import (
 func TestUserJourney(t *testing.T) {
 	// Subtests run sequentially: each one calls t.Setenv to point env
 	// vars at its own temp dirs, and t.Setenv is incompatible with
-	// t.Parallel. Three serial runs cost ~30s total on a warm cache.
+	// t.Parallel. Four serial runs cost ~50s total on a warm cache.
 	for _, agentName := range []string{"claude", "codex", "opencode", "cursor"} {
 		agentName := agentName
 		t.Run(agentName, func(t *testing.T) {
