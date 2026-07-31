@@ -1052,10 +1052,17 @@ const defaultConfigYAML = `# no-mistakes global configuration
 agent: auto
 
 # Optional per-step routes. Each agent accepts the same scalar or ordered
-# fallback-list form as the run-wide agent. Unconfigured steps inherit it.
+# fallback-list form as the run-wide agent. A model is a typed name plus an
+# explicit lowercase vendor; adapters translate it through their verified
+# native interface. OpenCode names use provider/model. Rovo Dev and ACP reject
+# model routes because neither exposes verified C1 model plumbing.
+# Unconfigured steps inherit the run-wide agent and its default model.
 # Supported sections: intent, refresh, review, test, document, lint, pr, ci.
 # review:
-#   agent: [codex, claude]
+#   agent: claude
+#   model: {name: claude-opus-5, vendor: anthropic}
+#   adversary_agent: codex
+#   adversary_model: {name: gpt-5.6-sol, vendor: openai}
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
@@ -1421,6 +1428,12 @@ func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) err
 	if isACPAgent(name) {
 		return fmt.Errorf("model %q cannot be routed through ACP agent %q in C1; C2 must add model spawn plumbing before ACP model routing is supported", model.Name, name)
 	}
+	if name == types.AgentOpenCode && !validOpenCodeModelName(model.Name) {
+		return fmt.Errorf("agent %q requires model %q to use provider/model form", name, model.Name)
+	}
+	if name == types.AgentRovoDev {
+		return fmt.Errorf("model %q is not supported for agent %q because Rovo Dev exposes no verified model-selection interface", model.Name, name)
+	}
 	if !agentCanServeModel(name, model) {
 		return fmt.Errorf("agent %q cannot serve model %q from declared vendor %q", name, model.Name, model.Vendor)
 	}
@@ -1433,16 +1446,23 @@ func agentCanServeModel(name types.AgentName, model ModelRoute) bool {
 	}
 	switch name {
 	case types.AgentClaude:
-		return model.Vendor == "anthropic"
+		return model.Vendor == "anthropic" && !strings.Contains(model.Name, "/")
 	case types.AgentCodex:
-		return model.Vendor == "openai"
+		return model.Vendor == "openai" && !strings.Contains(model.Name, "/")
 	case types.AgentRovoDev:
-		return model.Vendor == "anthropic"
-	case types.AgentOpenCode, types.AgentPi, types.AgentCopilot:
+		return false
+	case types.AgentOpenCode:
+		return validOpenCodeModelName(model.Name)
+	case types.AgentPi, types.AgentCopilot:
 		return true
 	default:
 		return false
 	}
+}
+
+func validOpenCodeModelName(name string) bool {
+	providerID, modelID, ok := strings.Cut(name, "/")
+	return ok && providerID != "" && modelID != ""
 }
 
 func resolvedAgentIdentity(name types.AgentName) string {
@@ -1675,6 +1695,7 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--hostname":   true,
 		"--port":       true,
 		"--print-logs": true,
+		"--model":      true,
 	},
 	string(types.AgentPi): {
 		"--mode":       true,
@@ -2232,6 +2253,8 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 	if len(repo.Review.AdversaryAgents) > 0 {
 		cfg.ReviewAdversaryAgents = copyAgents(repo.Review.AdversaryAgents)
+	}
+	if repo.Review.AdversaryModel.Name != "" {
 		cfg.ReviewAdversaryModel = repo.Review.AdversaryModel
 	}
 

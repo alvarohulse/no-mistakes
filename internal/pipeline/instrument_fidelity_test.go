@@ -136,6 +136,42 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	}
 }
 
+type configuredModelFailureAgent struct{}
+
+func (*configuredModelFailureAgent) Name() string { return "codex" }
+func (*configuredModelFailureAgent) Close() error { return nil }
+func (*configuredModelFailureAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return nil, errors.New("codex start: unavailable")
+}
+func (*configuredModelFailureAgent) ConfiguredModel() agent.ModelIdentity {
+	return agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}
+}
+
+func TestPerfRecording_FailedInvocationRetainsConfiguredModelIdentity(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	wrapped := &perfRecordingAgent{
+		inner:    &configuredModelFailureAgent{},
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepReview,
+		round:    func() int { return 1 },
+	}
+
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err == nil {
+		t.Fatal("Run() succeeded, want configured-model failure")
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("invocations = %d, want 1", len(invs))
+	}
+	if invs[0].Model != "gpt-5.6-sol" || invs[0].ModelProvider == nil || *invs[0].ModelProvider != "openai" {
+		t.Fatalf("failed invocation model/provider = %q/%v", invs[0].Model, invs[0].ModelProvider)
+	}
+}
+
 // resumeFailingAgent starts a session cold, then fails any resume with an
 // exit-shaped error, then succeeds on the fresh fallback session.
 type resumeFailingAgent struct{ calls int }

@@ -23,7 +23,7 @@ type Agent interface {
 // ModelIdentity is the controller-declared model identity for a routed agent.
 // It is distinct from wire-observed Result.Model: adapters do not all expose
 // the served model, but the controller must still retain the exact model and
-// explicit vendor it placed on the backend command line.
+// explicit vendor it routed through the backend's verified interface.
 type ModelIdentity struct {
 	Name   string
 	Vendor string
@@ -276,8 +276,8 @@ type InvocationWorkload struct {
 type Options struct {
 	ACPRegistryOverrides map[string]string
 	// Model and Vendor are the typed per-step model route. Model is translated
-	// to the backend's managed model flag; Vendor is controller identity and is
-	// never inferred from Model naming.
+	// through the backend's verified selection interface; Vendor is controller
+	// identity and is never inferred from Model naming.
 	Model  string
 	Vendor string
 	// ProcessTerminationGrace is the maximum time a process group gets to exit
@@ -837,6 +837,9 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		return &acpxAgent{bin: bin, target: target, rawCommand: rawCommand, processTerminationGrace: opts.ProcessTerminationGrace}, nil
 	}
+	if name == types.AgentRovoDev && opts.Model != "" {
+		return nil, fmt.Errorf("model %q is not supported for agent %q because Rovo Dev exposes no verified model-selection interface", opts.Model, name)
+	}
 	var created Agent
 	switch name {
 	case types.AgentClaude:
@@ -844,7 +847,7 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentCodex:
 		created = &codexAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 	case types.AgentRovoDev:
-		created = &rovodevAgent{bin: bin, extraArgs: extraArgs, model: opts.Model}
+		created = &rovodevAgent{bin: bin, extraArgs: extraArgs}
 	case types.AgentOpenCode:
 		created = &opencodeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model}
 	case types.AgentPi:

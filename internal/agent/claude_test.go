@@ -87,8 +87,8 @@ func TestClaudeAgent_BuildArgs_FirstClassModelWinsAndResumes(t *testing.T) {
 	ca := &claudeAgent{bin: "claude", extraArgs: []string{"--model", "sonnet"}, model: "claude-opus-5"}
 	args := ca.buildArgs(nil, "session-1")
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--model sonnet --model claude-opus-5") {
-		t.Fatalf("buildArgs = %v, want first-class model after operator default", args)
+	if strings.Contains(joined, "--model sonnet") || !strings.Contains(joined, "--model claude-opus-5") {
+		t.Fatalf("buildArgs = %v, want only first-class model", args)
 	}
 	if !strings.Contains(joined, "--resume session-1") {
 		t.Fatalf("buildArgs = %v, want resumed session", args)

@@ -20,7 +20,7 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string) (string, e
 	if err != nil {
 		return "", fmt.Errorf("opencode port: %w", err)
 	}
-	args := buildOpencodeServeArgs(a.extraArgs, a.model, port)
+	args := buildOpencodeServeArgs(a.extraArgs, port)
 	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, "/global/health", port)
 	if err != nil {
 		return "", fmt.Errorf("opencode server: %w", err)
@@ -31,13 +31,10 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string) (string, e
 
 // buildOpencodeServeArgs builds `opencode serve`'s argv with user-supplied
 // extras inserted after the "serve" subcommand and before the managed flags.
-func buildOpencodeServeArgs(extraArgs []string, model string, port int) []string {
+func buildOpencodeServeArgs(extraArgs []string, port int) []string {
 	args := make([]string, 0, len(extraArgs)+8)
 	args = append(args, "serve")
 	args = append(args, extraArgs...)
-	if model != "" {
-		args = append(args, "--model", model)
-	}
 	args = append(args, "--hostname", "127.0.0.1", "--port", fmt.Sprintf("%d", port), "--print-logs")
 	return args
 }
@@ -88,6 +85,16 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 	body := map[string]any{
 		"role":  "user",
 		"parts": []map[string]string{{"type": "text", "text": prompt}},
+	}
+	if a.model != "" {
+		providerID, modelID, ok := strings.Cut(a.model, "/")
+		if !ok || providerID == "" || modelID == "" {
+			return nil, fmt.Errorf("opencode model %q must use provider/model form", a.model)
+		}
+		body["model"] = map[string]string{
+			"providerID": providerID,
+			"modelID":    modelID,
+		}
 	}
 	if len(schema) > 0 {
 		body["format"] = map[string]any{

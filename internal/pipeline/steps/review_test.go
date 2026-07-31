@@ -492,7 +492,7 @@ func TestReviewStep_AdversaryRunsOnlyForHighRiskAndMergesFindings(t *testing.T) 
 	t.Run("high risk triggers independent review", func(t *testing.T) {
 		dir, baseSHA, headSHA := setupGitRepo(t)
 		primary := &mockAgent{name: "primary", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"primary-1","severity":"error","file":"feature.txt","line":1,"description":"primary bug","action":"auto-fix","review_scope":"source"}],"summary":"primary found a bug","risk_level":"high","risk_rationale":"fundamental change","risk_scope":"source-or-external"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"review-adversary-1","severity":"error","file":"feature.txt","line":1,"description":"primary bug","action":"auto-fix","review_scope":"source"}],"summary":"primary found a bug","risk_level":"high","risk_rationale":"fundamental change","risk_scope":"source-or-external"}`)}, nil
 		}}
 		adversary := &mockAgent{name: "adversary", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			if opts.Session != nil {
@@ -528,6 +528,9 @@ func TestReviewStep_AdversaryRunsOnlyForHighRiskAndMergesFindings(t *testing.T) 
 		}
 		if !strings.HasPrefix(findings.Items[1].ID, "review-adversary-") {
 			t.Fatalf("adversary finding ID = %q, want namespaced identity", findings.Items[1].ID)
+		}
+		if findings.Items[0].ID == findings.Items[1].ID {
+			t.Fatalf("merged finding IDs collide: %q", findings.Items[0].ID)
 		}
 		if findings.RiskLevel != "high" || !outcome.NeedsApproval || !outcome.AutoFixable {
 			t.Fatalf("outcome = %+v, findings = %+v", outcome, findings)

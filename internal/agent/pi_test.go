@@ -47,8 +47,8 @@ func TestPiAgent_BuildArgs_FirstClassModelWins(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--model", "old"}, model: "gemini-3.1-pro"}
 	args := pa.buildArgs()
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--model old --model gemini-3.1-pro") {
-		t.Fatalf("buildArgs = %v, want first-class model after operator default", args)
+	if strings.Contains(joined, "--model old") || !strings.Contains(joined, "--model gemini-3.1-pro") {
+		t.Fatalf("buildArgs = %v, want only first-class model", args)
 	}
 }
 

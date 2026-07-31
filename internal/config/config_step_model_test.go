@@ -110,6 +110,52 @@ review:
 	}
 }
 
+func TestMerge_ReviewAdversaryOverridesGlobalFieldByField(t *testing.T) {
+	global, err := LoadGlobalFromBytes([]byte(`
+review:
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: codex
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("model inherits agent", func(t *testing.T) {
+		repo, err := LoadRepoFromBytes([]byte(`
+review:
+  adversary_model: {name: gemini-3.5-pro, vendor: google}
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Merge(global, repo)
+		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentCodex}) {
+			t.Fatalf("adversary agents = %v, want [codex]", got)
+		}
+		if got := cfg.ReviewAdversaryModel; got != (ModelRoute{Name: "gemini-3.5-pro", Vendor: "google"}) {
+			t.Fatalf("adversary model = %#v", got)
+		}
+	})
+
+	t.Run("agent inherits model", func(t *testing.T) {
+		repo, err := LoadRepoFromBytes([]byte(`
+review:
+  adversary_agent: pi
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Merge(global, repo)
+		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentPi}) {
+			t.Fatalf("adversary agents = %v, want [pi]", got)
+		}
+		if got := cfg.ReviewAdversaryModel; got != (ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}) {
+			t.Fatalf("adversary model = %#v", got)
+		}
+	})
+}
+
 func TestOverlayRepoConfig_ModelOverridePreservesSiblingRouteFields(t *testing.T) {
 	committed, err := LoadRepoFromBytes([]byte(`
 review:
@@ -241,6 +287,114 @@ func TestResolveAgent_ModelNarrowsAutoAndRefusesACP(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "gemini-3.5-pro") || !strings.Contains(err.Error(), "google") {
 			t.Fatalf("ResolveAgent() error = %v, want named-model failure", err)
+		}
+	})
+
+	t.Run("explicit opencode requires provider-qualified model", func(t *testing.T) {
+		cfg := &Config{
+			Agent:  types.AgentCodex,
+			Agents: []types.AgentName{types.AgentCodex},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentOpenCode},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"},
+			},
+		}
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			return "/fake/bin/" + bin, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "provider/model") {
+			t.Fatalf("ResolveAgent() error = %v, want provider/model refusal", err)
+		}
+	})
+
+	t.Run("auto skips opencode for unqualified model", func(t *testing.T) {
+		var probed []string
+		cfg := &Config{
+			Agent:  types.AgentPi,
+			Agents: []types.AgentName{types.AgentPi},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentAuto},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "gemini-3.5-pro", Vendor: "google"},
+			},
+		}
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			probed = append(probed, bin)
+			if bin == "opencode" || bin == "pi" {
+				return "/usr/bin/" + bin, nil
+			}
+			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+		})
+		if err != nil {
+			t.Fatalf("ResolveAgent() error = %v", err)
+		}
+		if got := cfg.StepAgents[types.StepReview]; !reflect.DeepEqual(got, []types.AgentName{types.AgentPi}) {
+			t.Fatalf("review agents = %v, want [pi]", got)
+		}
+		for _, bin := range probed {
+			if bin == "opencode" {
+				t.Fatalf("auto probed incompatible opencode backend: %v", probed)
+			}
+		}
+	})
+
+	t.Run("auto routes provider-qualified models to opencode", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			model       ModelRoute
+			nativeAgent types.AgentName
+			nativeBin   string
+		}{
+			{name: "anthropic", model: ModelRoute{Name: "anthropic/claude-opus-5", Vendor: "anthropic"}, nativeAgent: types.AgentClaude, nativeBin: "claude"},
+			{name: "openai", model: ModelRoute{Name: "openai/gpt-5.6-sol", Vendor: "openai"}, nativeAgent: types.AgentCodex, nativeBin: "codex"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := &Config{
+					Agent:  tt.nativeAgent,
+					Agents: []types.AgentName{tt.nativeAgent},
+					StepAgents: map[types.StepName][]types.AgentName{
+						types.StepReview: {types.AgentAuto},
+					},
+					StepModels: map[types.StepName]ModelRoute{
+						types.StepReview: tt.model,
+					},
+				}
+				err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+					if bin == tt.nativeBin || bin == "opencode" {
+						return "/usr/bin/" + bin, nil
+					}
+					return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+				})
+				if err != nil {
+					t.Fatalf("ResolveAgent() error = %v", err)
+				}
+				if got := cfg.StepAgents[types.StepReview]; !reflect.DeepEqual(got, []types.AgentName{types.AgentOpenCode}) {
+					t.Fatalf("review agents = %v, want [opencode]", got)
+				}
+			})
+		}
+	})
+
+	t.Run("explicit rovodev model fails before launch", func(t *testing.T) {
+		cfg := &Config{
+			Agent:  types.AgentCodex,
+			Agents: []types.AgentName{types.AgentCodex},
+			StepAgents: map[types.StepName][]types.AgentName{
+				types.StepReview: {types.AgentRovoDev},
+			},
+			StepModels: map[types.StepName]ModelRoute{
+				types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"},
+			},
+		}
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+			return "/fake/bin/" + bin, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "not supported") {
+			t.Fatalf("ResolveAgent() error = %v, want unsupported Rovo Dev model refusal", err)
 		}
 	})
 }

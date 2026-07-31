@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildRovodevServeArgs_Default(t *testing.T) {
-	got := buildRovodevServeArgs(nil, "", 51234)
+	got := buildRovodevServeArgs(nil, 51234)
 	want := []string{"rovodev", "serve", "--disable-session-token", "51234"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildRovodevServeArgs(nil) = %v, want %v", got, want)
@@ -14,7 +14,7 @@ func TestBuildRovodevServeArgs_Default(t *testing.T) {
 }
 
 func TestBuildRovodevServeArgs_ExtraArgsInserted(t *testing.T) {
-	got := buildRovodevServeArgs([]string{"--profile", "work"}, "", 51234)
+	got := buildRovodevServeArgs([]string{"--profile", "work"}, 51234)
 	want := []string{
 		"rovodev", "serve",
 		"--profile", "work",
@@ -25,16 +25,8 @@ func TestBuildRovodevServeArgs_ExtraArgsInserted(t *testing.T) {
 	}
 }
 
-func TestBuildRovodevServeArgs_FirstClassModelWins(t *testing.T) {
-	got := buildRovodevServeArgs([]string{"--model", "old"}, "claude-opus-5", 51234)
-	want := []string{"rovodev", "serve", "--model", "old", "--model", "claude-opus-5", "--disable-session-token", "51234"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildRovodevServeArgs = %v, want %v", got, want)
-	}
-}
-
 func TestBuildOpencodeServeArgs_Default(t *testing.T) {
-	got := buildOpencodeServeArgs(nil, "", 9999)
+	got := buildOpencodeServeArgs(nil, 9999)
 	want := []string{
 		"serve",
 		"--hostname", "127.0.0.1",
@@ -47,23 +39,15 @@ func TestBuildOpencodeServeArgs_Default(t *testing.T) {
 }
 
 func TestBuildOpencodeServeArgs_ExtraArgsInserted(t *testing.T) {
-	got := buildOpencodeServeArgs([]string{"--model", "gpt-5"}, "", 9999)
+	got := buildOpencodeServeArgs([]string{"--log-level", "DEBUG"}, 9999)
 	want := []string{
 		"serve",
-		"--model", "gpt-5",
+		"--log-level", "DEBUG",
 		"--hostname", "127.0.0.1",
 		"--port", "9999",
 		"--print-logs",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("buildOpencodeServeArgs = %v, want %v", got, want)
-	}
-}
-
-func TestBuildOpencodeServeArgs_FirstClassModelWins(t *testing.T) {
-	got := buildOpencodeServeArgs([]string{"--model", "old"}, "anthropic/claude-opus-5", 9999)
-	want := []string{"serve", "--model", "old", "--model", "anthropic/claude-opus-5", "--hostname", "127.0.0.1", "--port", "9999", "--print-logs"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildOpencodeServeArgs = %v, want %v", got, want)
 	}
 }

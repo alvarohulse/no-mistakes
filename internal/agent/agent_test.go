@@ -102,6 +102,18 @@ func TestNewWithOptions_CarriesConfiguredModelIdentity(t *testing.T) {
 	}
 }
 
+func TestNewWithOptions_RovoDevRejectsUnverifiedModelRouting(t *testing.T) {
+	_, err := NewWithOptions(types.AgentRovoDev, "acli", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
+	if err == nil {
+		t.Fatal("NewWithOptions() accepted an unverified Rovo Dev model route")
+	}
+	for _, want := range []string{"rovodev", "model", "not supported"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got %v", want, err)
+		}
+	}
+}
+
 func TestModelIdentityAgent_StampsConcreteAttempts(t *testing.T) {
 	inner := &modelAttemptAgent{}
 	a := &modelIdentityAgent{inner: inner, identity: ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}}

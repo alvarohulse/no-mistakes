@@ -59,11 +59,11 @@ func TestCodexAgent_BuildArgs_ExtraArgsAfterExec(t *testing.T) {
 }
 
 func TestCodexAgent_BuildArgs_FirstClassModelWinsAndResumes(t *testing.T) {
-	ca := &codexAgent{bin: "codex", extraArgs: []string{"-m", "gpt-5.4"}, model: "gpt-5.6-sol"}
+	ca := &codexAgent{bin: "codex", extraArgs: []string{"-m", "gpt-5.4", "-mgpt-5.5"}, model: "gpt-5.6-sol"}
 	args := ca.buildArgs("", "thread-1")
 	joined := strings.Join(args, " ")
-	if !strings.HasPrefix(joined, "exec resume -m gpt-5.4 --model gpt-5.6-sol thread-1 -") {
-		t.Fatalf("buildArgs = %v, want first-class model on resumed invocation", args)
+	if strings.Contains(joined, "-m gpt-5.4") || strings.Contains(joined, "-mgpt-5.5") || !strings.HasPrefix(joined, "exec resume --model gpt-5.6-sol thread-1 -") {
+		t.Fatalf("buildArgs = %v, want only first-class model on resumed invocation", args)
 	}
 }
 

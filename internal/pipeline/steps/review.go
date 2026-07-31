@@ -308,8 +308,20 @@ Risk assessment (after listing all findings):
 
 func mergeAdversarialReviewFindings(primary, adversary Findings) Findings {
 	merged := primary
-	for i, finding := range adversary.Items {
-		finding.ID = fmt.Sprintf("review-adversary-%d", i+1)
+	usedIDs := make(map[string]bool, len(primary.Items)+len(adversary.Items))
+	for _, finding := range primary.Items {
+		usedIDs[finding.ID] = true
+	}
+	nextID := 1
+	for _, finding := range adversary.Items {
+		for {
+			finding.ID = fmt.Sprintf("review-adversary-%d", nextID)
+			nextID++
+			if !usedIDs[finding.ID] {
+				break
+			}
+		}
+		usedIDs[finding.ID] = true
 		merged.Items = append(merged.Items, finding)
 	}
 	if adversary.Summary != "" {

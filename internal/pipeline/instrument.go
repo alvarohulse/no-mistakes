@@ -92,6 +92,12 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 		DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
 		ExitStatus:     "ok",
 	}
+	configuredModel := agent.ConfiguredModel(a.inner)
+	inv.Model = configuredModel.Name
+	if configuredModel.Vendor != "" {
+		vendor := configuredModel.Vendor
+		inv.ModelProvider = &vendor
+	}
 	if opts.SessionFallback && opts.SessionFallbackReason != "" {
 		reason := opts.SessionFallbackReason
 		inv.FallbackReason = &reason
@@ -125,7 +131,9 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 	if result == nil {
 		return
 	}
-	inv.Model = result.Model
+	if result.Model != "" {
+		inv.Model = result.Model
+	}
 	inv.AgentObservationsReported = result.AgentObservationsReported
 	inv.AgentObservations = append([]types.AgentObservation(nil), result.AgentObservations...)
 	if result.ModelProvider != "" {

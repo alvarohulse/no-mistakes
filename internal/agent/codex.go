@@ -176,7 +176,11 @@ func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	if resumeID != "" {
 		args = append(args, "resume")
 	}
-	args = append(args, a.extraArgs...)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "-m", "--model")
+	}
+	args = append(args, extraArgs...)
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}

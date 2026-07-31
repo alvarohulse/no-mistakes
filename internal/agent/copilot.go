@@ -148,7 +148,11 @@ func copilotErrorDetail(copilotErr, stderr string) string {
 // interactive input.
 func (a *copilotAgent) buildArgs(prompt string) []string {
 	args := make([]string, 0, len(a.extraArgs)+10)
-	args = append(args, a.extraArgs...)
+	extraArgs := a.extraArgs
+	if a.model != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--model")
+	}
+	args = append(args, extraArgs...)
 	if a.model != "" {
 		args = append(args, "--model", a.model)
 	}
