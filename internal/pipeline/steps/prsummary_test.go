@@ -28,13 +28,15 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted},
-		{ID: "s2", StepName: types.StepTest, Status: types.StepStatusCompleted},
-		{ID: "s3", StepName: types.StepLint, Status: types.StepStatusCompleted},
+		{ID: "s2", StepName: types.StepBuild, Status: types.StepStatusCompleted},
+		{ID: "s3", StepName: types.StepTest, Status: types.StepStatusCompleted},
+		{ID: "s4", StepName: types.StepLint, Status: types.StepStatusCompleted},
 	}
 	rounds := map[string][]*db.StepRound{
 		"s1": {{Round: 1, Trigger: "initial", DurationMS: 500}},
 		"s2": {{Round: 1, Trigger: "initial", DurationMS: 300}},
 		"s3": {{Round: 1, Trigger: "initial", DurationMS: 200}},
+		"s4": {{Round: 1, Trigger: "initial", DurationMS: 200}},
 	}
 	md, risk := BuildPipelineSummary(steps, rounds)
 
@@ -49,6 +51,7 @@ func TestBuildPipelineSummary_AllClean(t *testing.T) {
 	}
 	for _, want := range []string{
 		"<summary>✅ **Review** - passed</summary>",
+		"<summary>✅ **Build** - passed</summary>",
 		"<summary>✅ **Test** - passed</summary>",
 		"<summary>✅ **Lint** - passed</summary>",
 		"✅ No issues found.",
@@ -66,12 +69,13 @@ func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepRefresh, Status: types.StepStatusCompleted},
 		{ID: "s2", StepName: types.StepReview, Status: types.StepStatusCompleted},
-		{ID: "s3", StepName: types.StepTest, Status: types.StepStatusCompleted},
-		{ID: "s4", StepName: types.StepDocument, Status: types.StepStatusCompleted},
-		{ID: "s5", StepName: types.StepLint, Status: types.StepStatusCompleted},
-		{ID: "s6", StepName: types.StepPush, Status: types.StepStatusCompleted},
-		{ID: "s7", StepName: types.StepPR, Status: types.StepStatusRunning},
-		{ID: "s8", StepName: types.StepCI, Status: types.StepStatusPending},
+		{ID: "s3", StepName: types.StepBuild, Status: types.StepStatusCompleted},
+		{ID: "s4", StepName: types.StepTest, Status: types.StepStatusCompleted},
+		{ID: "s5", StepName: types.StepDocument, Status: types.StepStatusCompleted},
+		{ID: "s6", StepName: types.StepLint, Status: types.StepStatusCompleted},
+		{ID: "s7", StepName: types.StepPush, Status: types.StepStatusCompleted},
+		{ID: "s8", StepName: types.StepPR, Status: types.StepStatusRunning},
+		{ID: "s9", StepName: types.StepCI, Status: types.StepStatusPending},
 	}
 	rounds := map[string][]*db.StepRound{
 		"s1": {{Round: 1, Trigger: "initial", DurationMS: 200}},
@@ -80,6 +84,7 @@ func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 		"s4": {{Round: 1, Trigger: "initial", DurationMS: 500}},
 		"s5": {{Round: 1, Trigger: "initial", DurationMS: 600}},
 		"s6": {{Round: 1, Trigger: "initial", DurationMS: 700}},
+		"s7": {{Round: 1, Trigger: "initial", DurationMS: 700}},
 	}
 
 	md, _ := BuildPipelineSummary(steps, rounds)
@@ -87,6 +92,7 @@ func TestBuildPipelineSummary_IncludesAllPipelineSteps(t *testing.T) {
 	for _, want := range []string{
 		"<summary>✅ **Rebase** - passed</summary>",
 		"<summary>✅ **Review** - passed</summary>",
+		"<summary>✅ **Build** - passed</summary>",
 		"<summary>✅ **Test** - passed</summary>",
 		"<summary>✅ **Document** - passed</summary>",
 		"<summary>✅ **Lint** - passed</summary>",

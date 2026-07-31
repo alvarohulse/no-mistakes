@@ -119,7 +119,7 @@ type RepoConfig struct {
 	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
+	// fields (commands.{build,test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -1180,7 +1180,7 @@ auto_fix:
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
-# intent, and feed it to review, test, document, lint, and PR agents so they
+# intent, and feed it to review, build, test, document, lint, and PR agents so they
 # understand what you were trying to do - not just the diff.
 intent:
   enabled: true

@@ -21,7 +21,7 @@ flowchart TD
 
 ## How it works
 
-1. A step executes and returns findings (e.g., test failures, lint warnings, review issues)
+1. A step executes and returns findings (e.g., build failures, test failures, lint warnings, review issues)
 2. If `auto_fix` is enabled for that step (limit > 0) and the attempt count is below the limit, the executor re-runs the step with `fixing=true`
 3. The agent receives the previous findings and applies fixes
 4. The step re-runs to verify the fixes
@@ -57,7 +57,7 @@ In the TUI, yolo mode is an explicit override that auto-resolves paused steps by
 Steps with only `no-op` findings are approved as-is.
 The one exception is the Test step's [test-file safety gate](/no-mistakes/reference/pipeline-steps/#test): a finding raised because the agent changed a test file requires an explicit response, so neither yolo mode nor AXI `--yes` auto-resolves it and the run stays parked until answered directly.
 
-The `review`, `test`, and configured-command `lint` steps use this shared model directly. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
+The `review`, `build`, `test`, and configured-command `lint` steps use this shared model directly. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
 When `commands.lint` is empty, the combined housekeeping pass routes documentation and lint findings to their owning gates. Its unresolved lint findings describe issues left after safe fixes, so blocking findings pause for approval instead of remaining eligible for another automatic fix loop.
 
 Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
@@ -80,7 +80,7 @@ Yolo and AXI `--yes` approve that fix review automatically after their one fix r
 
 ## Fix commits
 
-When the Review, Test, Document, or Lint step commits auto-fix changes, its subject comes from `commit.fix_message`.
+When the Review, Build, Test, Document, or Lint step commits auto-fix changes, its subject comes from `commit.fix_message`.
 The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
 The pipeline validates the template, agent summary, predicted output size, and final rendered subject before `git add -A`, so a rejected value does not leave changes staged.
 The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document value for `{{.Step}}`; configured-command lint fixes use the Lint value.

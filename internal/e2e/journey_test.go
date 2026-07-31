@@ -35,7 +35,7 @@ import (
 //   - SQLite persistence and IPC retrieval of run state
 //
 // PR and CI steps gracefully skip because the upstream is a local file://
-// path with no SCM provider. Test/Lint steps don't run real commands
+// path with no SCM provider. Build, Test, and Lint don't run real commands
 // because no commands are configured; they delegate to the agent which
 // returns the canned "no findings" response.
 //
@@ -253,7 +253,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertNoPRCreated(t, run)
 
 	// The agent must have been called at least for review and document.
-	// Test and lint also call the agent because no commands are
+	// Build, test, and lint also call the agent because no commands are
 	// configured - the steps delegate detection to the agent.
 	invs := h.AgentInvocations()
 	if len(invs) == 0 {
@@ -411,6 +411,13 @@ func cleanReviewScenario(t *testing.T) string {
         new: "fixed"
     structured:
       summary: "fix build input"
+  - match: "Verify that this repository builds or compiles successfully."
+    text: "build passed"
+    structured:
+      findings: []
+      summary: "build passed"
+      tested:
+        - "fakeagent: simulated build"
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:

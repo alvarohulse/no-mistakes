@@ -46,6 +46,7 @@ func TestStepDisplayNameUsesRefreshStrategyWithoutChangingIdentity(t *testing.T)
 		{name: StepRefresh, strategy: "", want: "Rebase"},
 		{name: StepName("rebase"), strategy: RefreshStrategyMerge, want: "Merge"},
 		{name: StepReview, strategy: RefreshStrategyMerge, want: "Review"},
+		{name: StepBuild, strategy: RefreshStrategyMerge, want: "Build"},
 		{name: StepPR, strategy: RefreshStrategyMerge, want: "PR"},
 	}
 

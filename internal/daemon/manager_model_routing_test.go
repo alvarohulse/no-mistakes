@@ -16,9 +16,11 @@ func TestNewPipelineAgents_CarriesPrimaryAndAdversaryModelIdentity(t *testing.T)
 		Agent:  types.AgentClaude,
 		Agents: []types.AgentName{types.AgentClaude},
 		StepAgents: map[types.StepName][]types.AgentName{
+			types.StepBuild:  {types.AgentCodex},
 			types.StepReview: {types.AgentCodex},
 		},
 		StepModels: map[types.StepName]config.ModelRoute{
+			types.StepBuild:  {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 		},
 		ReviewAdversaryAgents: []types.AgentName{types.AgentClaude},
@@ -30,8 +32,8 @@ func TestNewPipelineAgents_CarriesPrimaryAndAdversaryModelIdentity(t *testing.T)
 	}
 	defer routes.Close()
 
-	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepReview)); got != (agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}) {
-		t.Fatalf("primary review model = %#v", got)
+	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepBuild)); got != (agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}) {
+		t.Fatalf("build model = %#v", got)
 	}
 	if got := agent.ConfiguredModel(routes.routes.AdversaryForReview()); got != (agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}) {
 		t.Fatalf("adversary review model = %#v", got)

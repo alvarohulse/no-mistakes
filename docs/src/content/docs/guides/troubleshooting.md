@@ -104,7 +104,7 @@ no-mistakes update
 Symptom: `doctor` reports that gate validation is unavailable, or a run fails before its first pipeline step because no runnable agent was found.
 
 This is a hard failure, not a degraded validation mode.
-`no-mistakes` will not silently skip review, test evidence, documentation, or agent-assisted lint and report the remaining work as a passed gate.
+`no-mistakes` will not silently skip review, build verification, test evidence, documentation, or agent-assisted lint and report the remaining work as a passed gate.
 
 ### Check PATH
 
@@ -247,7 +247,7 @@ Use `no-mistakes axi abort` only when you mean to cancel the whole active run.
 
 ## Step looks quiet or wedged
 
-Symptom: `no-mistakes axi status` shows an active step with `last_activity` prefixed by `quiet`, or a review/test/lint step appears to run for longer than expected.
+Symptom: `no-mistakes axi status` shows an active step with `last_activity` prefixed by `quiet`, or a review/build/test/lint step appears to run for longer than expected.
 
 `quiet` means the step has not recorded a step-log line or native-agent lifecycle event for longer than [`step_quiet_warning`](/no-mistakes/reference/global-config/#step_quiet_warning).
 It is only a liveness signal.

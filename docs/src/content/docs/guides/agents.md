@@ -8,13 +8,13 @@ It is not runner-free.
 Every validation run requires a supported native agent binary (including `agent: cursor`) or an explicit `acp:<target>` through `acpx`.
 The default `agent: auto` setting picks the first supported native agent and selects the registered `acp:cursor` target only when no native agent is runnable.
 
-The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
+The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, build detection, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
 A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
 If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
-code review, evidence-oriented test validation, test or lint detection when you
+code review, build detection, evidence-oriented test validation, test or lint detection when you
 have not configured explicit commands, auto-fixing, and setup-wizard suggestions
 when you leave prompts blank.
 
@@ -30,7 +30,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
 - Set a typed per-step `model` when a phase needs a specific model rather than the selected backend's default; always declare its vendor explicitly.
-- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice; leave `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
+- Set explicit `commands.build`, `commands.lint`, and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Leave `commands.build` empty for agent-selected compilation and `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
 commands are still the strongest way to make the baseline gate predictable.
@@ -55,7 +55,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 
 A complete gate never degrades silently when its configured pipeline agent is unavailable.
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
-This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while refresh, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+This refusal also applies when deterministic build, test, or lint commands are configured because review and documentation always require agent judgment, while refresh, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 The canonical step name is `refresh`; its human-facing label is `Rebase` or `Merge` according to the run's selected strategy.
 
 The optional trusted `hooks.post_worktree` post-worktree hook is different: it is deterministic controller preparation in the disposable run worktree, not a pipeline step or agent invocation. It runs once before `intent`, in its own process group, so package installation, environment symlinks, and cache warming can affect every later phase without creating a verification record. If it fails, the run parks at `gate.kind: environment` with no step auto-fix loop. Correct the environment outside no-mistakes, run `no-mistakes axi abort`, then start a fresh run; `--yes` never resolves this controller gate.
@@ -65,6 +65,8 @@ The optional trusted `hooks.post_worktree` post-worktree hook is different: it i
 | Install, `init`, daemon lifecycle, `status`, `runs`, and `doctor` | Yes | Local setup and diagnostics remain available. `doctor` reports that gate validation is unavailable. |
 | Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
 | Review | No | Requires agent judgment and structured findings. |
+| Build with `commands.build` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
+| Build without `commands.build` | No | Requires the agent to detect and run a meaningful build or compile command. |
 | Test with `commands.test` | No, as part of a full gate | The command is deterministic, but the gate refuses before steps start rather than presenting command-only validation as a complete pass. |
 | Test without `commands.test`, or evidence validation with user intent | No | Requires the agent to discover checks and gather end-to-end evidence. |
 | Document | No | Requires the agent to discover and update documentation gaps. |
@@ -143,7 +145,7 @@ The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns 
 Changing agents most directly affects:
 
 - review quality and tone
-- test evidence collection, plus test and lint detection when commands are not configured
+- build detection, test evidence collection, plus test and lint detection when commands are not configured
 - how good auto-fix attempts are for your stack
 - branch name and commit subject suggestions in the setup wizard
 
@@ -258,7 +260,7 @@ When an agent starts a run through `no-mistakes axi run --intent`, no-mistakes u
 Review checks the diff against those criteria, and a change that removes required behavior or adds forbidden behavior becomes an `ask-user` finding instead of being resolved automatically.
 Optional `--pr-note` or `--pr-note-file <path>` adds trusted author text to a `## Notes` section of the generated pull request and gives the same guidance to the PR-summary agent. The flags are mutually exclusive, limited to 16 KiB, and apply only when starting a new run; do not include secrets.
 Otherwise, when `intent.enabled` is true, no-mistakes reads recent local transcripts from Claude Code, Codex, OpenCode, Rovo Dev, Pi, and the GitHub Copilot CLI during the `intent` pipeline step.
-It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in refresh fixes, review checks and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
+It matches sessions against non-deleted changed files when present, falls back to all changed files for all-deletion diffs, summarizes the likely author intent with the configured pipeline agent, includes that summary as an untrusted, low-confidence hint in refresh fixes, review checks and fixes, build detection and fixes, test detection, evidence validation, and fixes, lint detection and fixes, documentation checks and fixes, CI auto-fixes, and PR prompts, and renders it in generated PR descriptions.
 
 Transcript readers collect user and assistant text messages but exclude tool call output.
 They read Claude Code transcripts from `~/.claude/projects`, Codex metadata from `~/.codex/state_*.sqlite` plus referenced rollout files, OpenCode messages from `$XDG_DATA_HOME/opencode/opencode.db` or `~/.local/share/opencode/opencode.db`, Rovo Dev sessions from `~/.rovodev/sessions`, Pi transcripts from `~/.pi/agent/sessions`, and GitHub Copilot CLI sessions from `~/.copilot/session-state`.

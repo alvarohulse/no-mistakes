@@ -113,7 +113,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Repo Config Trust Boundary (security)**
 
-- The daemon runs `commands.*` and `hooks.post_worktree` from `.no-mistakes.yaml` verbatim via `sh -c`, while the run-wide `agent`, every `<step>.agent`/`<step>.model` route, and the Review adversary route (`review.adversary_agent`/`review.adversary_model`) select which processes and models launch with the maintainer's credentials. These code-executing selection fields are loaded from the trusted default branch at a **pinned SHA** resolved by a fresh fetch, never from the pushed SHA. The run aborts when the trusted commit or its present config cannot be read and parsed; a readable tree with no config is valid. See `internal/daemon/manager.go` `startRun`, `loadTrustedRepoConfig`, and `assertGateTrustedConfigReadable`.
+- The daemon runs `commands.*` (including `commands.build`) and `hooks.post_worktree` from `.no-mistakes.yaml` verbatim via `sh -c`, while the run-wide `agent`, every `<step>.agent`/`<step>.model` route, and the Review adversary route (`review.adversary_agent`/`review.adversary_model`) select which processes and models launch with the maintainer's credentials. These code-executing selection fields are loaded from the trusted default branch at a **pinned SHA** resolved by a fresh fetch, never from the pushed SHA. The run aborts when the trusted commit or its present config cannot be read and parsed; a readable tree with no config is valid. See `internal/daemon/manager.go` `startRun`, `loadTrustedRepoConfig`, and `assertGateTrustedConfigReadable`.
 - `document.instructions` (the repo's documentation placement policy) and `disable_project_settings` (the gate-agent project-instruction opt-out) are also trusted-only: a pushed branch must not weaken either boundary. When the opt-out is enabled, only adapters with verified effective suppression may launch. Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and `test.evidence`) are still read from the pushed branch.
 - `allow_repo_commands` is per-repo, read only from the trusted default-branch copy, and defaults `false`; a contributor cannot self-enable it from a pushed branch. The e2e harness models a trusted single-developer environment and commits `allow_repo_commands: true` via `SetupOpts.AllowRepoCommands`; security tests pass `false`.
 - `NM_REPO_CONFIG` is an explicit machine-owner override applied after committed trust resolution, including code-executing fields. It must be an absolute path outside the repo with a matching `repo:` binding. Enabled runs persist contributing source digests and private paths/refs locally, publish only generic labels plus digest prefixes in the PR Pipeline section, and refuse recovery when launch-time machine/global inputs drift. Managed launchd/systemd definitions and the Windows scheduled-task action forward only the current opt-in; unlike proxies, a stale machine-config entry is removed when the variable is unset. The Windows action must point to an atomically written, per-`NM_HOME` launcher rather than carrying inline config, must never persist proxy values or credentials, and must remove stale launchers only after successful task replacement.
@@ -140,9 +140,13 @@ Safest local verification sequence after non-trivial changes:
 **Review Fixer Verification Discipline (`internal/pipeline/steps/review.go`)**
 
 - The review-fix prompt requires all fixes before one focused verification limited to the changed area and forbids the whole repository test/lint suite during the fix round.
-  The dedicated Test and Lint steps are the authoritative gates, although their coverage may be focused when commands are unconfigured.
+  The dedicated Build, Test, and Lint steps are the authoritative gates, although their coverage may be focused when commands are unconfigured.
   This is a prompt contract, not an enforced sandbox.
   Regression: `TestReviewStep_FixMode_FocusedVerificationContract`.
+
+**Build Verification (`internal/pipeline/steps/build.go`)**
+
+- Build is a first-class post-Review gate before Test. `commands.build` is trusted code-executing config; when empty, the routed Build agent must run and report a meaningful compile command. Build repair rounds make the smallest root-cause fix, commit through the shared fix path, and never take over tests, lint, or documentation. Regression: `internal/pipeline/steps/build_test.go`; E2E coverage lives in `TestUserJourney`.
 
 **Local Test Is Targeted Validation (`internal/pipeline/steps/test.go`)**
 
@@ -185,7 +189,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Post-Review Head Continuity and Push Binding**
 
-- Every step after Review in the fixed pipeline order (Test, Document, Lint, Push, PR, CI) calls `assertPipelineHeadContinuity` at entry. The helper is the single semantic owner: equal or descendant live heads continue; backward, sibling, and unverifiable heads fail before the step performs work. Regression: `TestPostReviewStepsRefuseHeadClobberAtEntry`.
+- Every step after Review in the fixed pipeline order (Build, Test, Document, Lint, Push, PR, CI) calls `assertPipelineHeadContinuity` at entry. The helper is the single semantic owner: equal or descendant live heads continue; backward, sibling, and unverifiable heads fail before the step performs work. Regression: `TestPostReviewStepsRefuseHeadClobberAtEntry`.
 - A successfully completed full review atomically records `runs.review_approved_head_sha`; parked, failed, skipped, and legacy reviews carry no inferred authority. Push reads that durable binding, permits only the exact commit or a descendant, and pushes the verified immutable SHA rather than mutable `HEAD`. Never infer approval from `runs.head_sha`, a worktree, gate ref, or remote branch. Regressions: `TestPushStep_RefusesPostReviewClobberWithoutLaterPipelineCommit`, `TestPushStep_BindsRemoteAndDatabaseToVerifiedCommitWhenHEADMovesDuringPush`, `TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound`.
 
 **Refresh Base & Force-Push Safety (data-loss prevention)**

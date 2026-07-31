@@ -28,6 +28,7 @@ repo: https://github.com/example/project
 
 agent: codex
 commands:
+  build: "go build ./..."
   test: "go test ./internal/cli"
   lint: "make lint"
 ```
@@ -55,6 +56,7 @@ refresh:
   strategy: merge
 
 commands:
+  build: "go build ./..."
   lint: "golangci-lint run ./..."
   # Targeted local validation only - not a full-repo CI-parity suite.
   test: "go test ./internal/cli -run '^TestDoctor' -count=1"
@@ -79,6 +81,7 @@ disable_project_settings: true
 auto_fix:
   refresh: 3
   review: 3
+  build: 3
   test: 3
   document: 3
   lint: 5
@@ -145,7 +148,7 @@ This per-repo `agent` value, including every fallback entry, is still read from 
 
 ### Per-step agent and model routes
 
-Set `<step>.agent` to route `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
+Set `<step>.agent` to route `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
 
 ```yaml
 agent: claude
@@ -167,7 +170,7 @@ review:
     vendor: openai
 ```
 
-Supported steps are `intent`, `refresh`, `review`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
+Supported steps are `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
 
 Each supported backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex/Cursor resumed Review sessions. Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameters. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible routes also fail.
 
@@ -209,7 +212,7 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{test,lint,format}`, `hooks.post_worktree`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{build,test,lint,format}`, `hooks.post_worktree`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
@@ -254,6 +257,19 @@ When this option is `false`, missing, or `null`, other agents retain their exist
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 A pushed branch cannot enable it or disable a trusted opt-in.
 If the trusted commit or its present config file cannot be read and parsed, the run aborts rather than guessing that the option is disabled.
+
+### commands.build
+
+Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (agent detects the appropriate build) |
+
+When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding and kept in full in the Build step log.
+When empty, the routed Build agent examines the repository, runs the smallest meaningful build or compile command for the changed production code, and must report which command it ran. If it cannot establish a build, the step parks instead of silently passing.
+Build is separate from Test: do not put test, lint, or documentation work in `commands.build` unless that work is inseparable from the repository's canonical build command.
 
 ### commands.test
 
@@ -346,6 +362,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 | --- | --- | --- |
 | `auto_fix.refresh` | `int` | Inherits from global (default `3`) |
 | `auto_fix.review` | `int` | Inherits from global (default `0`) |
+| `auto_fix.build` | `int` | Inherits from global (default `3`) |
 | `auto_fix.test` | `int` | Inherits from global (default `3`) |
 | `auto_fix.document` | `int` | Inherits from global (default `3`) |
 | `auto_fix.lint` | `int` | Inherits from global (default `3`) |
@@ -370,7 +387,7 @@ Override the auto-fix commit subject template for this repository.
 
 The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
 That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
-The setting applies to the Review, Test, Document, and Lint fix path, not commits created by the Refresh, CI, or Push steps.
+The setting applies to the Review, Build, Test, Document, and Lint fix path, not commits created by the Refresh, CI, or Push steps.
 
 This non-executing field is read from the pushed branch, so a branch can adopt its own commit convention without enabling `allow_repo_commands`.
 

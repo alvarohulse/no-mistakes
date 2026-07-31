@@ -1,12 +1,12 @@
 ---
 title: Pipeline
-description: The nine steps that run on every gated push.
+description: The ten steps that run on every gated push.
 ---
 
 The pipeline runs a fixed, opinionated sequence of steps. Order is not configurable. What each step runs *is*.
 
 ```
-intent → refresh → review → test → document → lint → push → pr → ci
+intent → refresh → review → build → test → document → lint → push → pr → ci
 ```
 
 ```mermaid
@@ -14,6 +14,7 @@ flowchart LR
   intent["Intent"]
   refresh["Refresh (Rebase or Merge)"]
   review["Review"]
+  build["Build"]
   test["Test"]
   document["Document"]
   lint["Lint"]
@@ -22,8 +23,9 @@ flowchart LR
   ci["CI"]
   action["Approve / fix / skip / abort"]
 
-  intent --> refresh --> review --> test --> document --> lint --> push --> pr --> ci
+  intent --> refresh --> review --> build --> test --> document --> lint --> push --> pr --> ci
   review -. findings .-> action
+  build -. findings .-> action
   test -. findings .-> action
   document -. findings .-> action
   lint -. findings .-> action
@@ -37,24 +39,25 @@ This page is the overview. For each step's exact behavior, defaults, skip rules,
 The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
-- review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
+- review, build, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
 - the human stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
-## The nine steps
+## The ten steps
 
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
 | 2 | **Refresh** (`Rebase` or `Merge`) | Fetch fresh remote upstream and the configured branch target, then incorporate them with the selected strategy | `3` |
 | 3 | **Review** | AI code review of your diff | `0` (requires approval) |
-| 4 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
-| 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
-| 6 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
-| 7 | **Push** | Safely push the validated branch to the configured target | n/a |
-| 8 | **PR** | Create or update the pull request | n/a |
-| 9 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
+| 4 | **Build** | Compile the changed production code with a configured command or agent-selected build | `3` |
+| 5 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
+| 6 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
+| 7 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
+| 8 | **Push** | Safely push the validated branch to the configured target | n/a |
+| 9 | **PR** | Create or update the pull request | n/a |
+| 10 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
 
 ## Why these steps, in this order
 
@@ -62,7 +65,8 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Refresh next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after refresh, the pipeline skips the rest.
-- **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
+- **Review before build and test** so semantic review happens before deterministic verification and any repair commits.
+- **Build before test** so compile failures are isolated from behavioral test failures.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.
