@@ -46,7 +46,7 @@ func TestUserJourney(t *testing.T) {
 	// Subtests run sequentially: each one calls t.Setenv to point env
 	// vars at its own temp dirs, and t.Setenv is incompatible with
 	// t.Parallel. Three serial runs cost ~30s total on a warm cache.
-	for _, agentName := range []string{"claude", "codex", "opencode"} {
+	for _, agentName := range []string{"claude", "codex", "opencode", "cursor"} {
 		agentName := agentName
 		t.Run(agentName, func(t *testing.T) {
 			runHappyPath(t, agentName)
@@ -264,6 +264,9 @@ func runHappyPath(t *testing.T, agentName string) {
 			t.Errorf("expected invocations under %q, got %q (%v)", agentName, inv.Agent, inv.Args)
 		}
 	}
+	if agentName == "cursor" {
+		assertCursorContainmentInvocations(t, invs)
+	}
 
 	// The review step always runs and always calls the agent. Find the
 	// invocation whose prompt contains the review preamble; if missing
@@ -352,6 +355,45 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertEjectOutput(t, h, out)
 	assertOutputDoesNotContainPath(t, out, initWorktree, "eject from worktree")
 	assertGateRemoteAbsent(t, h)
+}
+
+func assertCursorContainmentInvocations(t *testing.T, invocations []Invocation) {
+	t.Helper()
+	for i, invocation := range invocations {
+		workspace := invocationArgValue(invocation.Args, "--workspace")
+		repo := invocationArgValue(invocation.Args, "--add-dir")
+		if workspace == "" || repo == "" || workspace == repo {
+			t.Fatalf("Cursor invocation %d roots workspace=%q repo=%q", i, workspace, repo)
+		}
+		if invocation.CWD != workspace || !strings.HasPrefix(filepath.Base(workspace), "no-mistakes-cursor-workspace-") {
+			t.Fatalf("Cursor invocation %d cwd=%q workspace=%q", i, invocation.CWD, workspace)
+		}
+		if !filepath.IsAbs(repo) {
+			t.Fatalf("Cursor invocation %d added repo is not absolute: %q", i, repo)
+		}
+		for _, want := range []string{repo, "git -C"} {
+			if !strings.Contains(invocation.Prompt, want) {
+				t.Fatalf("Cursor invocation %d prompt missing %q", i, want)
+			}
+		}
+		for _, marker := range []string{"NM_E2E_CURSOR_AGENTS", "NM_E2E_CURSOR_LEGACY", "NM_E2E_CURSOR_MDC"} {
+			if strings.Contains(invocation.Prompt, marker) {
+				t.Fatalf("Cursor invocation %d received repo instruction marker %q", i, marker)
+			}
+		}
+		if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+			t.Fatalf("Cursor invocation %d containment workspace was not removed: %v", i, err)
+		}
+	}
+}
+
+func invocationArgValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func cleanReviewScenario(t *testing.T) string {

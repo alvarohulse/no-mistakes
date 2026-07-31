@@ -198,7 +198,7 @@ const (
 )
 
 // AgentName identifies a supported agent backend. Explicit ACP targets use
-// dynamic acp:<target> values; first-class ACP aliases have constants below.
+// dynamic acp:<target> values.
 type AgentName string
 
 const (
@@ -230,60 +230,45 @@ type AgentObservation struct {
 	InvocationMode AgentInvocationMode `json:"invocation_mode"`
 }
 
-// ACPAlias describes a first-class agent name that resolves to an ACP target.
-type ACPAlias struct {
-	Name           AgentName
+// RegisteredACPTarget describes an ACP target with built-in launch metadata.
+type RegisteredACPTarget struct {
+	LegacyArgsKey  AgentName
 	Target         string
 	DefaultCommand string
 }
 
-var acpAliases = []ACPAlias{
-	{Name: AgentCursor, Target: "cursor", DefaultCommand: "cursor-agent acp"},
+var registeredACPTargets = []RegisteredACPTarget{
+	{LegacyArgsKey: AgentCursor, Target: "cursor", DefaultCommand: "cursor-agent acp"},
 }
 
-// ACPAliasFor returns the ACP alias metadata for a first-class agent name.
-func ACPAliasFor(name AgentName) (ACPAlias, bool) {
-	for _, alias := range acpAliases {
-		if alias.Name == name {
-			return alias, true
+// RegisteredACPTargetFor returns built-in launch metadata for a raw ACP target.
+func RegisteredACPTargetFor(target string) (RegisteredACPTarget, bool) {
+	for _, registered := range registeredACPTargets {
+		if registered.Target == target {
+			return registered, true
 		}
 	}
-	return ACPAlias{}, false
+	return RegisteredACPTarget{}, false
 }
 
-// ACPAliasForTarget returns the ACP alias metadata for a raw ACP target.
-func ACPAliasForTarget(target string) (ACPAlias, bool) {
-	for _, alias := range acpAliases {
-		if alias.Target == target {
-			return alias, true
-		}
-	}
-	return ACPAlias{}, false
-}
-
-// ACPAliases returns all first-class ACP aliases.
-func ACPAliases() []ACPAlias {
-	out := make([]ACPAlias, len(acpAliases))
-	copy(out, acpAliases)
+// RegisteredACPTargets returns all ACP targets with built-in launch metadata.
+func RegisteredACPTargets() []RegisteredACPTarget {
+	out := make([]RegisteredACPTarget, len(registeredACPTargets))
+	copy(out, registeredACPTargets)
 	return out
 }
 
-// DefaultCommandBinary returns the executable named by the alias default command.
-func (a ACPAlias) DefaultCommandBinary() string {
-	fields := strings.Fields(a.DefaultCommand)
+// DefaultCommandBinary returns the executable named by the target's default command.
+func (t RegisteredACPTarget) DefaultCommandBinary() string {
+	fields := strings.Fields(t.DefaultCommand)
 	if len(fields) == 0 {
 		return ""
 	}
 	return fields[0]
 }
 
-// ACPTargetFor resolves the ACP target an agent name drives: the alias target
-// for a first-class alias, or the parsed target of an explicit acp:<target>
-// name. Returns false for non-ACP agent names.
+// ACPTargetFor resolves the parsed target of an explicit acp:<target> name.
 func ACPTargetFor(name AgentName) (string, bool) {
-	if alias, ok := ACPAliasFor(name); ok {
-		return alias.Target, true
-	}
 	value := string(name)
 	if !strings.HasPrefix(value, "acp:") {
 		return "", false
@@ -303,15 +288,15 @@ func IsBareACPModelName(model string) bool {
 }
 
 // ACPRawCommand resolves the raw command acpx runs for an ACP target: a
-// registry override is trimmed and wins when non-blank, otherwise the alias
-// default command is used.
+// registry override is trimmed and wins when non-blank, otherwise a registered
+// target's default command is used.
 // Empty means acpx dispatches the target through its own registry.
 func ACPRawCommand(target string, overrides map[string]string) string {
 	if override := strings.TrimSpace(overrides[target]); override != "" {
 		return override
 	}
-	if alias, ok := ACPAliasForTarget(target); ok {
-		return alias.DefaultCommand
+	if registered, ok := RegisteredACPTargetFor(target); ok {
+		return registered.DefaultCommand
 	}
 	return ""
 }

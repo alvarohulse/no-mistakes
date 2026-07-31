@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ func (a *acpxAgent) Name() string { return "acp:" + a.target }
 
 func (a *acpxAgent) ReportsAgentAttempts() bool { return true }
 
+func (a *acpxAgent) NeutralizesGateInstructions() bool { return a.target == "cursor" }
+
 func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, a.Name(), opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
@@ -35,6 +38,22 @@ func (a *acpxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
+	rawCommand := a.rawCommand
+	if a.target == "cursor" {
+		repo, err := filepath.Abs(opts.CWD)
+		if err != nil {
+			return nil, fmt.Errorf("Cursor ACP repository path: %w", err)
+		}
+		workspace, err := os.MkdirTemp("", "no-mistakes-cursor-acp-workspace-*")
+		if err != nil {
+			return nil, fmt.Errorf("Cursor ACP containment workspace: %w", err)
+		}
+		defer os.RemoveAll(workspace)
+		rawCommand, err = composeCursorACPContainment(rawCommand, workspace, repo)
+		if err != nil {
+			return nil, fmt.Errorf("Cursor ACP containment: %w", err)
+		}
+	}
 	// Write the prompt to a temp file so that large prompts don't exceed the
 	// OS command-line length limit (notably 8191 chars on Windows). acpx
 	// accepts "exec -f <file>" as an alternative to passing the text inline.
@@ -56,7 +75,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		return nil, fmt.Errorf("acpx prompt file close: %w", err)
 	}
 
-	args := a.buildArgs(opts, promptPath)
+	args := a.buildArgsWithCommand(opts, promptPath, rawCommand)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
@@ -106,9 +125,13 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 func (a *acpxAgent) Close() error { return nil }
 
 func (a *acpxAgent) buildArgs(opts RunOpts, promptFile string) []string {
+	return a.buildArgsWithCommand(opts, promptFile, a.rawCommand)
+}
+
+func (a *acpxAgent) buildArgsWithCommand(opts RunOpts, promptFile, rawCommand string) []string {
 	args := make([]string, 0, 14)
-	if a.rawCommand != "" {
-		args = append(args, "--agent", a.rawCommand)
+	if rawCommand != "" {
+		args = append(args, "--agent", rawCommand)
 	}
 	if opts.CWD != "" {
 		args = append(args, "--cwd", opts.CWD)
@@ -120,7 +143,7 @@ func (a *acpxAgent) buildArgs(opts RunOpts, promptFile string) []string {
 		"--non-interactive-permissions", "deny",
 		"--suppress-reads",
 	)
-	if a.rawCommand == "" {
+	if rawCommand == "" {
 		args = append(args, a.target)
 	}
 	args = append(args, "exec", "-f", promptFile)

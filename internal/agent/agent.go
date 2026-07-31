@@ -178,8 +178,9 @@ func NeutralizesGateInstructions(a Agent) bool {
 // the target checkout does not neutralize that checkout's project
 // agent-instruction files. Callers must invoke it before launching any gate
 // agent so an unverified harness is refused with a clear error rather than run
-// unneutralized in the target checkout. Only codex, claude, and pi have a verified
-// neutralization knob today.
+// unneutralized in the target checkout. Cursor's native and ACP paths use
+// mandatory workspace containment; codex, claude, and pi have verified opt-out
+// knobs.
 func EnsureGateNeutralized(a Agent) error {
 	if a == nil {
 		return fmt.Errorf("no gate agent configured")
@@ -189,8 +190,9 @@ func EnsureGateNeutralized(a Agent) error {
 	}
 	return fmt.Errorf("gate agent %q does not neutralize the target repository's project "+
 		"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
-		"checkout. Only codex, claude, and pi have a verified neutralization knob (and only when it "+
-		"is not overridden by agent_args_override); set 'agent' to codex, claude, or pi in "+
+		"checkout. Cursor uses mandatory clean-workspace containment; codex, claude, and pi have "+
+		"verified neutralization knobs (only when not overridden by agent_args_override); set "+
+		"'agent' to cursor, codex, claude, or pi in "+
 		"~/.no-mistakes/config.yaml", a.Name())
 }
 
@@ -271,8 +273,8 @@ type InvocationWorkload struct {
 }
 
 // Options configures backend-specific agent construction behavior.
-// ACPRegistryOverrides maps acpx target names, including first-class alias
-// targets, to raw ACP agent commands.
+// ACPRegistryOverrides maps acpx target names, including registered targets,
+// to raw ACP agent commands.
 type Options struct {
 	ACPRegistryOverrides map[string]string
 	// Model and Vendor are the typed per-step model route. Model is translated
@@ -284,7 +286,7 @@ type Options struct {
 	// after SIGTERM before cleanup escalates to SIGKILL.
 	ProcessTerminationGrace time.Duration
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
-	// claude, pi) to launch with the target repo's project-level agent
+	// claude, pi, or the always-contained Cursor paths) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
 	// from config.Config; adapters without a verified suppression knob ignore it
 	// and are refused separately by EnsureGateNeutralized when the opt-out is on.
@@ -845,6 +847,8 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 			created = &claudeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentCodex:
 			created = &codexAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
+		case types.AgentCursor:
+			created = &cursorAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentRovoDev:
 			created = &rovodevAgent{bin: bin, extraArgs: extraArgs}
 		case types.AgentOpenCode:

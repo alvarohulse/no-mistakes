@@ -160,6 +160,24 @@ func TestLoadGlobal_AgentArgsOverride_EmptyArgRejected(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_CursorManagedArgsRejectedForNativeAndACP(t *testing.T) {
+	for _, agentName := range []string{"cursor", "acp:cursor"} {
+		for _, arg := range []string{"-p", "--print", "--output-format", "--resume", "--continue", "--workspace", "--add-dir", "--trust"} {
+			t.Run(agentName+"_"+arg, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				data := "agent_args_override:\n  " + agentName + ":\n    - " + arg + "\n"
+				if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				_, err := LoadGlobal(path)
+				if err == nil || !strings.Contains(err.Error(), "managed by no-mistakes") {
+					t.Fatalf("LoadGlobal() error = %v, want managed-argument refusal", err)
+				}
+			})
+		}
+	}
+}
+
 func TestAgentArgs_ReturnsEmptyWhenUnset(t *testing.T) {
 	cfg := &Config{Agent: types.AgentClaude}
 	if got := cfg.AgentArgs(); len(got) != 0 {
@@ -189,8 +207,7 @@ func TestAgentArgsFor_UsesEquivalentCursorACPKey(t *testing.T) {
 		route types.AgentName
 		key   string
 	}{
-		{name: "explicit target uses alias key", route: "acp:cursor", key: "cursor"},
-		{name: "alias uses explicit target key", route: types.AgentCursor, key: "acp:cursor"},
+		{name: "explicit target uses legacy key", route: "acp:cursor", key: "cursor"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

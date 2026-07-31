@@ -46,7 +46,7 @@ func TestNewPipelineAgents_CarriesACPModelIdentity(t *testing.T) {
 		Agent:  types.AgentClaude,
 		Agents: []types.AgentName{types.AgentClaude},
 		StepAgents: map[types.StepName][]types.AgentName{
-			types.StepReview: {types.AgentCursor},
+			types.StepReview: {"acp:cursor"},
 		},
 		StepModels: map[types.StepName]config.ModelRoute{
 			types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"},
@@ -67,7 +67,7 @@ func TestNewPipelineAgents_CarriesACPModelIdentity(t *testing.T) {
 	}
 }
 
-func TestNewPipelineAgents_AutoFallsThroughToACPForBareModel(t *testing.T) {
+func TestNewPipelineAgents_AutoSelectsNativeCursorForCrossVendorModel(t *testing.T) {
 	cfg := &config.Config{
 		Agent:  types.AgentCodex,
 		Agents: []types.AgentName{types.AgentCodex},
@@ -91,8 +91,8 @@ func TestNewPipelineAgents_AutoFallsThroughToACPForBareModel(t *testing.T) {
 	}
 	defer routes.Close()
 
-	if got := routes.AgentForStep(types.StepReview).Name(); got != "acp:cursor" {
-		t.Fatalf("review agent = %q, want acp:cursor", got)
+	if got := routes.AgentForStep(types.StepReview).Name(); got != "cursor" {
+		t.Fatalf("review agent = %q, want cursor", got)
 	}
 	want := agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}
 	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepReview)); got != want {

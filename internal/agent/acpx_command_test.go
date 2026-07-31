@@ -22,6 +22,21 @@ func TestComposeACPTargetCommand_FirstClassModelWinsAndStaysExact(t *testing.T) 
 	}
 }
 
+func TestComposeCursorACPContainmentReplacesWorkspaceOverrides(t *testing.T) {
+	got, err := composeCursorACPContainment(
+		"cursor-agent --workspace /unsafe --add-dir=/other --model claude-opus-5 acp",
+		"/tmp/clean",
+		"/repo/worktree",
+	)
+	if err != nil {
+		t.Fatalf("composeCursorACPContainment() error = %v", err)
+	}
+	want := "cursor-agent --model claude-opus-5 --workspace /tmp/clean --add-dir /repo/worktree acp"
+	if got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
 func TestComposeACPTargetCommand_NonCursorArgsAppendToRawCommand(t *testing.T) {
 	got, err := composeACPTargetCommand(
 		"gemini",

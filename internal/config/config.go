@@ -1055,9 +1055,9 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
 # Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
-# "auto" detects the first available native agent or ACP alias on your system
-# "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
-# "acp:cursor" also uses that Cursor default command
+# "auto" detects the first available native agent, then registered ACP fallbacks
+# "cursor" is the native cursor-agent print-mode backend
+# "acp:cursor" keeps the registered cursor-agent acp fallback through acpx
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
@@ -1075,10 +1075,10 @@ agent: auto
 #   adversary_agent: codex
 #   adversary_model: {name: gpt-5.6-sol, vendor: openai}
 
-# Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
+# Optional path to the user-installed acpx binary for acp:<target> agents
 # acpx_path: acpx
 
-# Optional ACP target command overrides for acp:<target> agents and ACP aliases
+# Optional ACP target command overrides for acp:<target> agents
 # acp_registry_overrides:
 #   local-gemini: node /opt/mock-acp-agent.mjs
 #   cursor: cursor-agent acp
@@ -1120,7 +1120,7 @@ log_level: info
 #   claude: /usr/local/bin/claude
 #   codex: /opt/codex
 
-# Extra agent CLI flags (optional, global only). ACP targets and aliases pass
+# Extra agent CLI flags (optional, global only). ACP targets pass
 # these flags into a composable raw target command; arbitrary registry targets
 # need an acp_registry_overrides entry so no arguments are silently discarded.
 # Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
@@ -1178,6 +1178,7 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentOpenCode: "opencode",
 	types.AgentPi:       "pi",
 	types.AgentCopilot:  "copilot",
+	types.AgentCursor:   "cursor-agent",
 }
 
 // nativeAgentProbeOrder is the priority order for auto-detecting native agents.
@@ -1188,6 +1189,7 @@ var nativeAgentProbeOrder = []types.AgentName{
 	types.AgentRovoDev,
 	types.AgentPi,
 	types.AgentCopilot,
+	types.AgentCursor,
 }
 
 func isACPAgent(name types.AgentName) bool {
@@ -1226,7 +1228,7 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 }
 
 // ResolveAgent resolves configured agent names to available agents. A single
-// explicit agent must be runnable; auto probes native agents, then ACP aliases;
+// explicit agent must be runnable; auto probes native agents, then registered ACP fallbacks;
 // an ordered list is filtered to available agents, deduplicated by resolved
 // identity, and kept as fallbacks. The lookPath function should behave like
 // exec.LookPath.
@@ -1340,7 +1342,7 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 }
 
 func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute, lookPath func(string) (string, error)) (types.AgentName, error) {
-	probed := make([]string, 0, len(nativeAgentProbeOrder)+len(types.ACPAliases())+1)
+	probed := make([]string, 0, len(nativeAgentProbeOrder)+len(types.RegisteredACPTargets())+1)
 	for _, name := range nativeAgentProbeOrder {
 		if !agentCanServeModel(name, model) {
 			continue
@@ -1372,20 +1374,21 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 		}
 	}
 	if model.Name != "" && !types.IsBareACPModelName(model.Name) {
-		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); ACP aliases require a bare model family", model.Name, model.Vendor, strings.Join(probed, ", "))
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); registered ACP fallbacks require a bare model family", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
-	for _, alias := range types.ACPAliases() {
-		available, bins, err := c.acpAvailable(alias.Name, lookPath)
+	for _, registered := range types.RegisteredACPTargets() {
+		name := types.AgentName("acp:" + registered.Target)
+		available, bins, err := c.acpAvailable(name, lookPath)
 		probed = append(probed, bins...)
 		if err != nil {
 			return "", err
 		}
 		if available {
-			return alias.Name, nil
+			return name, nil
 		}
 	}
 	if model.Name != "" {
-		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto probed compatible native backends and ACP aliases", model.Name, model.Vendor, strings.Join(probed, ", "))
+		return "", fmt.Errorf("no runnable agent found for model %q (vendor %q; looked for: %s); auto probed compatible native backends and registered ACP fallbacks", model.Name, model.Vendor, strings.Join(probed, ", "))
 	}
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
@@ -1473,6 +1476,8 @@ func agentCanServeModel(name types.AgentName, model ModelRoute) bool {
 		return validOpenCodeModelName(model.Name)
 	case types.AgentPi, types.AgentCopilot:
 		return true
+	case types.AgentCursor:
+		return true
 	default:
 		return false
 	}
@@ -1542,7 +1547,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 }
 
 // AgentPath returns the binary path for the configured agent.
-// ACP agents and ACP aliases use acpx_path if set, otherwise acpx.
+// ACP agents use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
 func (c *Config) AgentPath() string {
 	return c.AgentPathFor(c.Agent)
@@ -1667,8 +1672,8 @@ func (c *Config) AgentArgsFor(name types.AgentName) []string {
 	if !ok {
 		return nil
 	}
-	if alias, ok := types.ACPAliasForTarget(target); ok {
-		if args, exists := c.AgentArgsOverride[string(alias.Name)]; exists {
+	if registered, ok := types.RegisteredACPTargetFor(target); ok {
+		if args, exists := c.AgentArgsOverride[string(registered.LegacyArgsKey)]; exists {
 			return args
 		}
 	}
@@ -1676,7 +1681,7 @@ func (c *Config) AgentArgsFor(name types.AgentName) []string {
 }
 
 // agentArgsOverrideAgents lists native agent names accepted as keys in
-// agent_args_override. ACP aliases and explicit acp:<target> names are
+// agent_args_override. Explicit acp:<target> names are
 // accepted dynamically by validateAgentArgsOverride.
 var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentClaude):   true,
@@ -1685,6 +1690,7 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentOpenCode): true,
 	string(types.AgentPi):       true,
 	string(types.AgentCopilot):  true,
+	string(types.AgentCursor):   true,
 }
 
 // reservedAgentArgs lists flags that no-mistakes manages internally and that
@@ -1738,6 +1744,17 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--output-format": true,
 		"--no-color":      true,
 	},
+	string(types.AgentCursor): {
+		"-p":              true,
+		"--print":         true,
+		"--output-format": true,
+		"--resume":        true,
+		"resume":          true,
+		"--continue":      true,
+		"--workspace":     true,
+		"--add-dir":       true,
+		"--trust":         true,
+	},
 }
 
 // validateAgentArgsOverride ensures each agent key is a known agent name and
@@ -1751,6 +1768,13 @@ func validateAgentArgsOverride(override map[string][]string) error {
 			}
 		}
 		reserved := reservedAgentArgs[name]
+		if reserved == nil {
+			if target, ok := types.ACPTargetFor(types.AgentName(name)); ok {
+				if registered, found := types.RegisteredACPTargetFor(target); found {
+					reserved = reservedAgentArgs[string(registered.LegacyArgsKey)]
+				}
+			}
+		}
 		for i, arg := range args {
 			if strings.TrimSpace(arg) == "" {
 				return fmt.Errorf("invalid agent_args_override.%s[%d]: empty arg", name, i)

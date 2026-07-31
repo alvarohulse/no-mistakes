@@ -10,7 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 )
 
-func TestDoctorACPAliasRequiresBothBinaries(t *testing.T) {
+func TestDoctorCursorNativeDoesNotRequireACPX(t *testing.T) {
 	restore := telemetry.SetDefaultForTesting(&telemetryRecorder{})
 	defer restore()
 
@@ -26,12 +26,12 @@ func TestDoctorACPAliasRequiresBothBinaries(t *testing.T) {
 	}
 
 	line := doctorAgentLine(t, out, "cursor")
-	if !strings.Contains(line, "acpx") {
-		t.Fatalf("cursor alias row should name the missing acpx binary:\n%s", line)
+	if strings.Contains(line, "acpx") {
+		t.Fatalf("native cursor row unexpectedly requires acpx:\n%s", line)
 	}
 }
 
-func TestDoctorACPAliasDetectedWithBothBinaries(t *testing.T) {
+func TestDoctorCursorACPDetectedWithBothBinaries(t *testing.T) {
 	restore := telemetry.SetDefaultForTesting(&telemetryRecorder{})
 	defer restore()
 
@@ -47,10 +47,10 @@ func TestDoctorACPAliasDetectedWithBothBinaries(t *testing.T) {
 		t.Fatalf("doctor failed: %v\n%s", err, out)
 	}
 
-	line := doctorAgentLine(t, out, "cursor")
+	line := doctorAgentLine(t, out, "acp:cursor")
 	for _, want := range []string{cursorPath, acpxPath} {
 		if !strings.Contains(line, want) {
-			t.Fatalf("cursor alias row did not report binary %q:\n%s", want, line)
+			t.Fatalf("Cursor ACP row did not report binary %q:\n%s", want, line)
 		}
 	}
 }

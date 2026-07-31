@@ -141,36 +141,29 @@ func TestStepNameValue_CanonicalizesLegacyRebase(t *testing.T) {
 	}
 }
 
-func TestACPAliasFor(t *testing.T) {
-	alias, ok := ACPAliasFor(AgentCursor)
+func TestRegisteredACPTargetFor(t *testing.T) {
+	registered, ok := RegisteredACPTargetFor("cursor")
 	if !ok {
-		t.Fatal("cursor should be registered as an ACP alias")
+		t.Fatal("cursor should be a registered ACP target")
 	}
-	if alias.Target != "cursor" {
-		t.Fatalf("target = %q, want cursor", alias.Target)
+	if registered.LegacyArgsKey != AgentCursor {
+		t.Fatalf("legacy args key = %q, want %q", registered.LegacyArgsKey, AgentCursor)
 	}
-	if alias.DefaultCommand != "cursor-agent acp" {
-		t.Fatalf("default command = %q, want cursor-agent acp", alias.DefaultCommand)
+	if registered.DefaultCommand != "cursor-agent acp" {
+		t.Fatalf("default command = %q, want cursor-agent acp", registered.DefaultCommand)
 	}
-	if alias.DefaultCommandBinary() != "cursor-agent" {
-		t.Fatalf("default command binary = %q, want cursor-agent", alias.DefaultCommandBinary())
-	}
-	targetAlias, ok := ACPAliasForTarget("cursor")
-	if !ok {
-		t.Fatal("cursor target should resolve to an ACP alias")
-	}
-	if targetAlias.Name != AgentCursor {
-		t.Fatalf("target alias name = %q, want %q", targetAlias.Name, AgentCursor)
+	if registered.DefaultCommandBinary() != "cursor-agent" {
+		t.Fatalf("default command binary = %q, want cursor-agent", registered.DefaultCommandBinary())
 	}
 
-	aliases := ACPAliases()
-	if len(aliases) != 1 {
-		t.Fatalf("aliases = %v, want only cursor", aliases)
+	targets := RegisteredACPTargets()
+	if len(targets) != 1 {
+		t.Fatalf("registered targets = %v, want only cursor", targets)
 	}
-	aliases[0].Target = "mutated"
-	alias, _ = ACPAliasFor(AgentCursor)
-	if alias.Target != "cursor" {
-		t.Fatalf("ACPAliases should return a copy, target = %q", alias.Target)
+	targets[0].Target = "mutated"
+	registered, _ = RegisteredACPTargetFor("cursor")
+	if registered.Target != "cursor" {
+		t.Fatalf("RegisteredACPTargets should return a copy, target = %q", registered.Target)
 	}
 }
 
@@ -181,8 +174,8 @@ func TestACPTargetFor(t *testing.T) {
 		wantTarget string
 		wantOK     bool
 	}{
-		{name: "alias name", agent: AgentCursor, wantTarget: "cursor", wantOK: true},
-		{name: "explicit acp alias target", agent: "acp:cursor", wantTarget: "cursor", wantOK: true},
+		{name: "native cursor", agent: AgentCursor, wantTarget: "", wantOK: false},
+		{name: "explicit registered acp target", agent: "acp:cursor", wantTarget: "cursor", wantOK: true},
 		{name: "explicit acp target", agent: "acp:gemini", wantTarget: "gemini", wantOK: true},
 		{name: "native agent", agent: AgentClaude, wantTarget: "", wantOK: false},
 		{name: "empty target", agent: "acp:", wantTarget: "", wantOK: false},
@@ -205,10 +198,10 @@ func TestACPRawCommand(t *testing.T) {
 		overrides map[string]string
 		want      string
 	}{
-		{name: "alias default without overrides", target: "cursor", overrides: nil, want: "cursor-agent acp"},
-		{name: "override wins over alias default", target: "cursor", overrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp"}, want: "/opt/cursor/cursor-agent acp"},
+		{name: "registered default without overrides", target: "cursor", overrides: nil, want: "cursor-agent acp"},
+		{name: "override wins over registered default", target: "cursor", overrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp"}, want: "/opt/cursor/cursor-agent acp"},
 		{name: "override is trimmed", target: "cursor", overrides: map[string]string{"cursor": "  cursor-agent acp  "}, want: "cursor-agent acp"},
-		{name: "blank override falls back to alias default", target: "cursor", overrides: map[string]string{"cursor": " \t"}, want: "cursor-agent acp"},
+		{name: "blank override falls back to registered default", target: "cursor", overrides: map[string]string{"cursor": " \t"}, want: "cursor-agent acp"},
 		{name: "unknown target without override", target: "gemini", overrides: nil, want: ""},
 		{name: "blank override for unknown target", target: "gemini", overrides: map[string]string{"gemini": "   "}, want: ""},
 		{name: "override for unknown target", target: "gemini", overrides: map[string]string{"gemini": "node /tmp/mock-acp.mjs"}, want: "node /tmp/mock-acp.mjs"},

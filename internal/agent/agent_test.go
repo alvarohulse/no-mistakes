@@ -26,7 +26,7 @@ func TestNew_KnownAgents(t *testing.T) {
 		{name: "opencode", agent: types.AgentOpenCode, bin: "opencode", wantName: "opencode"},
 		{name: "pi", agent: types.AgentPi, bin: "pi", wantName: "pi"},
 		{name: "copilot", agent: types.AgentCopilot, bin: "copilot", wantName: "copilot"},
-		{name: "cursor alias", agent: types.AgentCursor, bin: "acpx", wantName: "acp:cursor"},
+		{name: "cursor", agent: types.AgentCursor, bin: "cursor-agent", wantName: "cursor"},
 	}
 
 	for _, tt := range tests {
@@ -39,6 +39,24 @@ func TestNew_KnownAgents(t *testing.T) {
 				t.Errorf("expected name %q, got %q", tt.wantName, a.Name())
 			}
 		})
+	}
+}
+
+func TestNew_CursorKeepsExplicitACPPath(t *testing.T) {
+	native, err := New(types.AgentCursor, "cursor-agent", nil)
+	if err != nil {
+		t.Fatalf("New(cursor): %v", err)
+	}
+	if _, ok := native.(*cursorAgent); !ok {
+		t.Fatalf("New(cursor) type = %T, want *cursorAgent", native)
+	}
+
+	acp, err := New("acp:cursor", "acpx", nil)
+	if err != nil {
+		t.Fatalf("New(acp:cursor): %v", err)
+	}
+	if _, ok := acp.(*acpxAgent); !ok {
+		t.Fatalf("New(acp:cursor) type = %T, want *acpxAgent", acp)
 	}
 }
 
@@ -66,6 +84,8 @@ func TestNewWithOptions_ThreadsProcessTerminationGraceToNativeCommands(t *testin
 			case *piAgent:
 				got = a.processTerminationGrace
 			case *copilotAgent:
+				got = a.processTerminationGrace
+			case *cursorAgent:
 				got = a.processTerminationGrace
 			case *acpxAgent:
 				got = a.processTerminationGrace
@@ -141,7 +161,7 @@ func (*modelAttemptAgent) Run(_ context.Context, opts RunOpts) (*Result, error) 
 }
 
 func TestNewWithOptions_ACPCarriesBareModelIdentity(t *testing.T) {
-	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
+	a, err := NewWithOptions("acp:cursor", "acpx", nil, Options{Model: "claude-opus-5", Vendor: "anthropic"})
 	if err != nil {
 		t.Fatalf("NewWithOptions() error = %v", err)
 	}
@@ -163,7 +183,7 @@ func TestNewWithOptions_ACPRejectsBracketedModelNames(t *testing.T) {
 	}
 	for _, model := range models {
 		t.Run(model, func(t *testing.T) {
-			_, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{Model: model, Vendor: "anthropic"})
+			_, err := NewWithOptions("acp:cursor", "acpx", nil, Options{Model: model, Vendor: "anthropic"})
 			if err == nil || !strings.Contains(err.Error(), model) || !strings.Contains(err.Error(), "bare model family") {
 				t.Fatalf("NewWithOptions() error = %v, want bracketed ACP refusal", err)
 			}
@@ -202,29 +222,7 @@ func TestNewWithOptions_ACPRegistryOverride(t *testing.T) {
 	}
 }
 
-func TestACPAliasUsesDefaultCommand(t *testing.T) {
-	a, err := New(types.AgentCursor, "acpx", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	acpx, ok := a.(*acpxAgent)
-	if !ok {
-		t.Fatalf("agent type = %T, want *acpxAgent", a)
-	}
-	if acpx.target != "cursor" {
-		t.Errorf("target = %q, want cursor", acpx.target)
-	}
-	if acpx.rawCommand != "cursor-agent acp" {
-		t.Errorf("rawCommand = %q, want cursor-agent acp", acpx.rawCommand)
-	}
-	args := acpx.buildArgs(RunOpts{Prompt: "do work"}, "/tmp/prompt.txt")
-	joined := strings.Join(args, "\x00")
-	if !strings.Contains(joined, "--agent\x00cursor-agent acp") {
-		t.Fatalf("args = %q, want alias default command", args)
-	}
-}
-
-func TestACPTargetUsesAliasDefaultCommand(t *testing.T) {
+func TestRegisteredACPTargetUsesDefaultCommand(t *testing.T) {
 	a, err := New("acp:cursor", "acpx", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -242,12 +240,12 @@ func TestACPTargetUsesAliasDefaultCommand(t *testing.T) {
 	args := acpx.buildArgs(RunOpts{Prompt: "do work"}, "/tmp/prompt.txt")
 	joined := strings.Join(args, "\x00")
 	if !strings.Contains(joined, "--agent\x00cursor-agent acp") {
-		t.Fatalf("args = %q, want target default command", args)
+		t.Fatalf("args = %q, want registered default command", args)
 	}
 }
 
-func TestACPAliasRegistryOverrideRespected(t *testing.T) {
-	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{
+func TestRegisteredACPTargetRegistryOverrideRespected(t *testing.T) {
+	a, err := NewWithOptions("acp:cursor", "acpx", nil, Options{
 		ACPRegistryOverrides: map[string]string{"cursor": "/opt/cursor/cursor-agent acp --profile work"},
 	})
 	if err != nil {
@@ -262,8 +260,8 @@ func TestACPAliasRegistryOverrideRespected(t *testing.T) {
 	}
 }
 
-func TestACPAliasBlankRegistryOverrideUsesDefaultCommand(t *testing.T) {
-	a, err := NewWithOptions(types.AgentCursor, "acpx", nil, Options{
+func TestRegisteredACPTargetBlankRegistryOverrideUsesDefaultCommand(t *testing.T) {
+	a, err := NewWithOptions("acp:cursor", "acpx", nil, Options{
 		ACPRegistryOverrides: map[string]string{"cursor": " \t"},
 	})
 	if err != nil {

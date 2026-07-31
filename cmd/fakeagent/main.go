@@ -1,5 +1,5 @@
-// fakeagent is a deterministic stand-in for the real Claude, Codex, and
-// OpenCode CLIs used by no-mistakes' e2e tests. One binary is compiled and
+// fakeagent is a deterministic stand-in for the real Claude, Codex, Cursor,
+// and OpenCode CLIs used by no-mistakes' e2e tests. One binary is compiled and
 // then symlinked under each agent name; argv[0]'s basename selects which
 // wire protocol to speak.
 //
@@ -40,6 +40,8 @@ func run(argv []string) int {
 		return runClaude(args, os.Stdin, scenario)
 	case "codex":
 		return runCodex(args, scenario)
+	case "cursor-agent":
+		return runCursor(args, os.Stdin, scenario)
 	case "opencode":
 		return runOpencode(args, scenario)
 	case "gh":

@@ -154,6 +154,35 @@ exit 0
 	}
 }
 
+func TestCursorAgent_Run_ReapsLeakedGrandchildOnCleanExit(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "cursor-grandchild.pid")
+	bin := filepath.Join(dir, "cursor-agent")
+	script := `#!/bin/sh
+( sleep 120 >/dev/null 2>&1 ) &
+echo $! > "` + pidFile + `"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"cursor-session"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"cursor-session"}'
+exit 0
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&cursorAgent{bin: bin}).Run(context.Background(), RunOpts{Prompt: "run the tests", CWD: dir})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != "done" {
+		t.Fatalf("result text = %q, want done", result.Text)
+	}
+	grandchild := waitForPidFile(t, pidFile, 5*time.Second)
+	if !pidGoneWithin(grandchild, 5*time.Second) {
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+		t.Fatalf("Cursor grandchild pid %d survived clean leader exit", grandchild)
+	}
+}
+
 func TestClaudeAgent_LargeStdinReapsGrandchildHoldingPipesOnLeaderExit(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")

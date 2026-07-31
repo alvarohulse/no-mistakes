@@ -42,6 +42,23 @@ func composeACPTargetCommand(target, rawCommand string, extraArgs []string, mode
 	return strings.Join(command, " "), nil
 }
 
+func composeCursorACPContainment(rawCommand, workspace, repo string) (string, error) {
+	command, err := splitACPXCommandLine(rawCommand)
+	if err != nil {
+		return "", err
+	}
+	command = withoutFlagValues(command, "--workspace", "--add-dir")
+	insertAt := uniqueCommandTokenIndex(command, "acp")
+	if insertAt < 0 {
+		return "", fmt.Errorf("cursor raw command must contain exactly one acp subcommand so containment arguments can be placed safely")
+	}
+	command = slices.Insert(command, insertAt, "--workspace", workspace, "--add-dir", repo)
+	for i, arg := range command {
+		command[i] = quoteACPXCommandArg(arg)
+	}
+	return strings.Join(command, " "), nil
+}
+
 func uniqueCommandTokenIndex(command []string, token string) int {
 	index := -1
 	for i := 1; i < len(command); i++ {

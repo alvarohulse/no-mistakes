@@ -74,15 +74,16 @@ func TestGitSafeEnv_StampsGateRoleMarker(t *testing.T) {
 // occurrence.
 func TestEverySupportedAdapterPropagatesGateMarkerThroughCanonicalEnv(t *testing.T) {
 	// Native one-shot adapters own their command in the named file. OpenCode
-	// and Rovo Dev use the shared managed-server launcher, while Cursor and
-	// arbitrary ACP targets use acpx. Every route must stay on gitSafeEnv so
+	// and Rovo Dev use the shared managed-server launcher, while ACP targets use
+	// acpx. Every route must stay on gitSafeEnv so
 	// marker propagation cannot drift adapter by adapter.
 	owners := map[string]string{
 		"claude":                          "claude.go",
 		"codex":                           "codex.go",
 		"copilot":                         "copilot.go",
 		"pi":                              "pi.go",
-		"cursor/acp":                      "acpx.go",
+		"cursor":                          "cursor.go",
+		"acp":                             "acpx.go",
 		"opencode/rovodev managed server": "server.go",
 	}
 	for adapter, path := range owners {

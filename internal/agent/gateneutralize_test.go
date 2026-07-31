@@ -19,10 +19,8 @@ func optOutAgent(t *testing.T, name types.AgentName, extraArgs []string) Agent {
 }
 
 // TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut is the core
-// fail-closed contract: under the opt-out, only codex, claude, and pi (whose
-// suppression knobs are empirically verified) neutralize the target repo's
-// project agent settings/instructions; every other harness reports false and is
-// refused rather than launched with project instructions loaded.
+// fail-closed contract for adapters whose neutralization depends on the opt-out.
+// Cursor's mandatory native and ACP containment is covered separately below.
 func TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut(t *testing.T) {
 	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi} {
 		if !NeutralizesGateInstructions(optOutAgent(t, name, nil)) {
@@ -51,8 +49,8 @@ func TestNeutralizesGateInstructions_OnlyVerifiedHarnessesUnderOptOut(t *testing
 }
 
 // TestNeutralizesGateInstructions_FalseWithoutOptOut proves codex, claude, and pi
-// do NOT claim neutralization when the repo did not opt out - the gate only consults
-// this under the opt-out, but the value must be honest.
+// do NOT claim neutralization when the repo did not opt out. Cursor is intentionally
+// excluded because its clean-workspace containment is mandatory.
 func TestNeutralizesGateInstructions_FalseWithoutOptOut(t *testing.T) {
 	for _, name := range []types.AgentName{types.AgentCodex, types.AgentClaude, types.AgentPi} {
 		a, err := NewWithOptions(name, string(name), nil, Options{}) // no opt-out
@@ -62,6 +60,24 @@ func TestNeutralizesGateInstructions_FalseWithoutOptOut(t *testing.T) {
 		if NeutralizesGateInstructions(a) {
 			t.Errorf("%s must not report neutralized when the repo did not opt out", name)
 		}
+	}
+}
+
+func TestNeutralizesGateInstructions_CursorContainmentIsMandatory(t *testing.T) {
+	native, err := NewWithOptions(types.AgentCursor, "cursor-agent", nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !NeutralizesGateInstructions(native) {
+		t.Fatal("native Cursor must report its mandatory clean-workspace containment")
+	}
+
+	acp, err := NewWithOptions("acp:cursor", "acpx", nil, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !NeutralizesGateInstructions(acp) {
+		t.Fatal("Cursor ACP must report its mandatory clean-workspace containment")
 	}
 }
 

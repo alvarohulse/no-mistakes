@@ -36,7 +36,7 @@ func TestGateStepCannotStartRecursivePipeline(t *testing.T) {
 		{name: "opencode", agent: "opencode", executable: "opencode", expectedPhase: "review", completes: true},
 		{name: "pi", agent: "pi", executable: "pi", expectedPhase: "review"},
 		{name: "copilot", agent: "copilot", executable: "copilot", expectedPhase: "review"},
-		{name: "cursor", agent: "cursor", executable: "acpx", expectedPhase: "review"},
+		{name: "cursor", agent: "cursor", executable: "cursor-agent", expectedPhase: "review"},
 		{name: "explicit-acp", agent: "acp:fixture", executable: "acpx", expectedPhase: "review"},
 	}
 	for _, adapter := range adapters {
@@ -214,6 +214,14 @@ func installRecursiveIncidentAgent(t *testing.T, h *Harness, agentName, executab
 	case "codex":
 		promptSource = `prompt=$(cat)`
 		execAgent = fmt.Sprintf(`printf '%%s' "$prompt" | exec %s "$@"`, shellQuote(filepath.Join(realDir, executable)))
+	case "cursor":
+		promptSource = `cat >/dev/null
+prompt="combined documentation and lint housekeeping pass"`
+		probeGuard = `previous=""
+for arg in "$@"; do
+  if [ "$previous" = "--add-dir" ]; then cd "$arg" || exit 1; fi
+  previous="$arg"
+done`
 	case "opencode":
 		promptSource = `prompt="combined documentation and lint housekeeping pass"`
 	case "rovodev":
