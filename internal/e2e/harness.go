@@ -42,15 +42,15 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string // claude / codex / opencode
+	agentName         string // claude / codex / opencode / cursor
 	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
 	daemonOwn         *e2edaemon.Ownership
 }
 
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
-	// Agent picks which fake the harness wires up: "claude", "codex", or
-	// "opencode". The other two binaries are still on PATH (so `auto`
+	// Agent picks which fake the harness wires up: "claude", "codex",
+	// "opencode", or "cursor". The other binaries are still on PATH (so `auto`
 	// detection finds the requested one first via config), but only the
 	// chosen one is exercised.
 	Agent string
@@ -117,7 +117,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// is a guard rail: BinDir is prepended to PATH, so any stray invocation
 	// of gh by the pipeline (e.g. PR/CI on a misconfigured origin) hits
 	// the fakeagent stub instead of a real, authenticated system gh.
-	for _, name := range []string{"claude", "codex", "opencode", "gh"} {
+	for _, name := range []string{"claude", "codex", "opencode", "cursor-agent", "gh"} {
 		linkPath := filepath.Join(h.BinDir, name)
 		if err := os.Symlink(fakeBin, linkPath); err != nil {
 			t.Fatalf("symlink %s: %v", linkPath, err)
@@ -133,6 +133,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	t.Setenv("FAKEAGENT_LOG", h.AgentLog)
 	if h.Scenario != "" {
 		t.Setenv("FAKEAGENT_SCENARIO", h.Scenario)
+	}
+	if h.agentName == "cursor" {
+		t.Setenv("FAKE_CURSOR_EXPECT_INSTRUCTION_MARKERS", "1")
 	}
 	// Point the fake at recorded real-agent fixtures by default. When
 	// the directory contains <agent>/structured.{jsonl,*}, the fake
@@ -196,7 +199,11 @@ func (h *Harness) writeGlobalConfig() {
 	if err := os.MkdirAll(h.NMHome, 0o755); err != nil {
 		h.t.Fatalf("mkdir nm home: %v", err)
 	}
-	binLink := filepath.Join(h.BinDir, h.agentName)
+	binaryName := h.agentName
+	if h.agentName == "cursor" {
+		binaryName = "cursor-agent"
+	}
+	binLink := filepath.Join(h.BinDir, binaryName)
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
 agent_path_override:
@@ -260,7 +267,25 @@ func (h *Harness) initGitRepos() {
 	if err := os.WriteFile(repoConfig, []byte(repoCfg), 0o644); err != nil {
 		h.t.Fatalf("write repo config: %v", err)
 	}
-	mustGit(h.WorkDir, "add", "README.md", ".no-mistakes.yaml")
+	if h.agentName == "cursor" {
+		cursorRulesDir := filepath.Join(h.WorkDir, ".cursor", "rules")
+		if err := os.MkdirAll(cursorRulesDir, 0o755); err != nil {
+			h.t.Fatalf("mkdir cursor rules: %v", err)
+		}
+		for _, entry := range []struct {
+			path   string
+			marker string
+		}{
+			{path: filepath.Join(h.WorkDir, "AGENTS.md"), marker: "NM_E2E_CURSOR_AGENTS"},
+			{path: filepath.Join(h.WorkDir, ".cursorrules"), marker: "NM_E2E_CURSOR_LEGACY"},
+			{path: filepath.Join(cursorRulesDir, "containment.mdc"), marker: "NM_E2E_CURSOR_MDC"},
+		} {
+			if err := os.WriteFile(entry.path, []byte(entry.marker+"\n"), 0o644); err != nil {
+				h.t.Fatalf("write Cursor instruction marker: %v", err)
+			}
+		}
+	}
+	mustGit(h.WorkDir, "add", ".")
 	mustGit(h.WorkDir, "commit", "-m", "initial commit")
 	mustGit(h.WorkDir, "remote", "add", "origin", h.UpstreamDir)
 	mustGit(h.WorkDir, "push", "-u", "origin", "main")

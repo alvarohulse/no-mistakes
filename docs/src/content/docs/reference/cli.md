@@ -401,14 +401,14 @@ Checks:
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
-- Agent runners: native binaries `claude`, `codex`, `acli`, `opencode`, `pi`, and `copilot`, plus the optional ACP bridge `acpx`
-- ACP alias default binaries: `cursor-agent` plus `acpx` for `cursor`
+- Agent runners: native binaries `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, and `cursor-agent`, plus the optional ACP bridge `acpx`
+- registered Cursor ACP fallback binaries: `cursor-agent` plus `acpx` for `acp:cursor`
 - Effective global agent configuration, reported as `gate validation`; an unavailable configured runner is a failed check because the gate cannot validate without it
 - `machine config`, only when `NM_REPO_CONFIG` is set: the path must be absolute, resolve outside the repository, and point to a readable, parseable config with a `repo:` binding (see [`NM_REPO_CONFIG`](/no-mistakes/reference/environment/#nm_repo_config))
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
-The standalone runner rows inspect default binary names; the `cursor` row reports whichever of `cursor-agent` and `acpx` are missing.
+The standalone runner rows inspect default binary names. The `cursor` row checks native `cursor-agent`; the `acp:cursor` row reports whichever of `cursor-agent` and `acpx` are missing.
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 

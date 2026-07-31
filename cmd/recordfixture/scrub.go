@@ -18,11 +18,19 @@ import (
 // actually reads, but they keep personal paths and tool names out of
 // fixtures committed to a public repo.
 func scrubFile(path string) error {
+	return scrubFileWith(path, scrubBytes)
+}
+
+func scrubCursorFile(path string) error {
+	return scrubFileWith(path, scrubCursorBytes)
+}
+
+func scrubFileWith(path string, scrub func([]byte) []byte) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	scrubbed := scrubBytes(data)
+	scrubbed := scrub(data)
 	if bytes.Equal(scrubbed, data) {
 		return nil
 	}
@@ -30,10 +38,17 @@ func scrubFile(path string) error {
 }
 
 func scrubBytes(data []byte) []byte {
+	return scrubClaudeHookEvents(scrubCommonBytes(data))
+}
+
+func scrubCursorBytes(data []byte) []byte {
+	return scrubCommonBytes(data)
+}
+
+func scrubCommonBytes(data []byte) []byte {
 	out := data
 	out = scrubTempDir(out)
 	out = scrubHomeDir(out)
-	out = scrubClaudeHookEvents(out)
 	return out
 }
 

@@ -35,15 +35,14 @@ printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_me
 	return path
 }
 
-// TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides proves both
-// spellings of the Cursor agent drive a real acpx spawn with the alias
-// default raw command — no acp_registry_overrides entry configured.
+// TestAcpxAgent_Run_CursorSpawnsContainedDefaultCommand proves the explicit
+// Cursor ACP path keeps its registered default command while forcing project
+// instruction discovery into a clean primary workspace.
 func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		agent types.AgentName
 	}{
-		{name: "cursor alias", agent: types.AgentCursor},
 		{name: "explicit acp:cursor target", agent: "acp:cursor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,8 +70,22 @@ func TestAcpxAgent_Run_CursorSpawnsDefaultCommandWithoutOverrides(t *testing.T) 
 				t.Fatalf("stub acpx never recorded argv: %v", err)
 			}
 			argv := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-			if len(argv) < 2 || argv[0] != "--agent" || argv[1] != "cursor-agent acp" {
-				t.Errorf("spawned argv = %q, want leading --agent \"cursor-agent acp\"", argv)
+			if len(argv) < 2 || argv[0] != "--agent" {
+				t.Fatalf("spawned argv = %q, want leading --agent <command>", argv)
+			}
+			command, err := splitACPXCommandLine(argv[1])
+			if err != nil {
+				t.Fatalf("parse Cursor ACP command: %v", err)
+			}
+			workspace := argValue(command, "--workspace")
+			if workspace == "" || workspace == dir {
+				t.Fatalf("Cursor ACP workspace = %q, want separate clean directory", workspace)
+			}
+			if got := argValue(command, "--add-dir"); got != dir {
+				t.Fatalf("Cursor ACP --add-dir = %q, want %q", got, dir)
+			}
+			if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+				t.Fatalf("Cursor ACP clean workspace was not removed: %v", err)
 			}
 			if len(argv) < 3 || argv[len(argv)-3] != "exec" || argv[len(argv)-2] != "-f" || argv[len(argv)-1] == "" {
 				t.Errorf("spawned argv = %q, want trailing exec -f <prompt-file>", argv)
@@ -102,7 +115,7 @@ func TestAcpxAgent_Run_CursorPassesConfiguredArgsToTargetSpawn(t *testing.T) {
 	t.Setenv("NM_TEST_ACPX_PROMPT_FILE", promptFile)
 	stub := writeStubAcpx(t, dir)
 
-	a, err := New(types.AgentCursor, stub, []string{"--model", "claude-opus-5", "--profile", "work profile"})
+	a, err := New("acp:cursor", stub, []string{"--model", "claude-opus-5", "--profile", "work profile"})
 	if err != nil {
 		t.Fatalf("New(%q): %v", types.AgentCursor, err)
 	}
@@ -122,8 +135,16 @@ func TestAcpxAgent_Run_CursorPassesConfiguredArgsToTargetSpawn(t *testing.T) {
 	if len(argv) < 2 || argv[0] != "--agent" {
 		t.Fatalf("spawned argv = %q, want leading --agent <command>", argv)
 	}
-	if got, want := argv[1], `cursor-agent --model claude-opus-5 --profile "work profile" acp`; got != want {
-		t.Errorf("target command = %q, want %q", got, want)
+	command, err := splitACPXCommandLine(argv[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(command, "--add-dir"); got != dir {
+		t.Fatalf("target --add-dir = %q, want %q", got, dir)
+	}
+	command = withoutFlagValues(command, "--workspace", "--add-dir")
+	if got, want := strings.Join(command, "\x00"), strings.Join([]string{"cursor-agent", "--model", "claude-opus-5", "--profile", "work profile", "acp"}, "\x00"); got != want {
+		t.Errorf("target command = %q, want %q", command, want)
 	}
 	if promptData, err := os.ReadFile(promptFile); err != nil {
 		t.Fatalf("stub acpx never copied prompt file: %v", err)
@@ -146,7 +167,7 @@ func TestAcpxAgent_Run_CursorFirstClassModelWinsAndReportsIdentity(t *testing.T)
 	stub := writeStubAcpx(t, dir)
 
 	a, err := NewWithOptions(
-		types.AgentCursor,
+		"acp:cursor",
 		stub,
 		[]string{"-m", "claude-sonnet-5", "--model=claude-haiku-5", "--effort", "high"},
 		Options{Model: "claude-opus-5", Vendor: "anthropic"},
@@ -185,8 +206,16 @@ func TestAcpxAgent_Run_CursorFirstClassModelWinsAndReportsIdentity(t *testing.T)
 	if len(argv) < 2 || argv[0] != "--agent" {
 		t.Fatalf("spawned argv = %q, want leading --agent <command>", argv)
 	}
-	if got, want := argv[1], "cursor-agent --effort high --model claude-opus-5 acp"; got != want {
-		t.Fatalf("target command = %q, want %q", got, want)
+	command, err := splitACPXCommandLine(argv[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(command, "--add-dir"); got != dir {
+		t.Fatalf("target --add-dir = %q, want %q", got, dir)
+	}
+	command = withoutFlagValues(command, "--workspace", "--add-dir")
+	if got, want := strings.Join(command, "\x00"), strings.Join([]string{"cursor-agent", "--effort", "high", "--model", "claude-opus-5", "acp"}, "\x00"); got != want {
+		t.Fatalf("target command = %q, want %q", command, want)
 	}
 	if promptData, err := os.ReadFile(promptFile); err != nil {
 		t.Fatalf("stub acpx never copied prompt file: %v", err)

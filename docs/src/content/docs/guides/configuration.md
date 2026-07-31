@@ -4,7 +4,7 @@ description: Global and per-repo configuration options.
 ---
 
 Configuration is optional. Without any config files, `no-mistakes` defaults to
-`agent: auto`, which picks the first supported native agent or ACP alias available on your system,
+`agent: auto`, which picks the first supported native agent and uses the registered Cursor ACP target only when no native agent is runnable,
 with sensible defaults for everything else.
 
 The goal is not to make you configure a mini CI system. The default path should

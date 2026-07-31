@@ -6,6 +6,7 @@
 //
 //	go run ./cmd/recordfixture claude   --out internal/e2e/fixtures/claude
 //	go run ./cmd/recordfixture codex    --out internal/e2e/fixtures/codex
+//	go run ./cmd/recordfixture cursor   --out internal/e2e/fixtures/cursor
 //	go run ./cmd/recordfixture opencode --out internal/e2e/fixtures/opencode
 //
 // Each agent gets a small set of fixture files (one per pipeline-step
@@ -57,17 +58,19 @@ func run() int {
 		return recordClaude(ctx, out, args)
 	case "codex":
 		return recordCodex(ctx, out, args)
+	case "cursor":
+		return recordCursor(ctx, out, args)
 	case "opencode":
 		return recordOpencode(ctx, out, args)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown agent %q (want claude|codex|opencode)\n", agent)
+		fmt.Fprintf(os.Stderr, "unknown agent %q (want claude|codex|cursor|opencode)\n", agent)
 		usage()
 		return 2
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: recordfixture <claude|codex|opencode> --out <dir> [--bin <path>]")
+	fmt.Fprintln(os.Stderr, "usage: recordfixture <claude|codex|cursor|opencode> --out <dir> [--bin <path>]")
 	fmt.Fprintln(os.Stderr, "captures real agent output as e2e fixture files. burns real API quota.")
 }
 

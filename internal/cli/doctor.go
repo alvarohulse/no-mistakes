@@ -185,13 +185,14 @@ func doctorAgentChecks() []doctorAgentCheck {
 		{"opencode", []string{"opencode"}},
 		{"pi", []string{"pi"}},
 		{"copilot", []string{"copilot"}},
+		{"cursor", []string{"cursor-agent"}},
 		{"acpx", []string{"acpx"}},
 	}
-	for _, alias := range types.ACPAliases() {
+	for _, registered := range types.RegisteredACPTargets() {
 		agents = append(agents, doctorAgentCheck{
-			name: string(alias.Name),
+			name: "acp:" + registered.Target,
 			binaries: []string{
-				alias.DefaultCommandBinary(),
+				registered.DefaultCommandBinary(),
 				"acpx",
 			},
 		})

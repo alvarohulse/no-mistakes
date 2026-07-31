@@ -117,7 +117,7 @@ agent_path_override:
   claude: /Users/you/.local/bin/claude
 ```
 
-For `agent: acp:<target>` and ACP aliases such as `agent: cursor`, set `acpx_path` for the bridge.
+For `agent: acp:<target>`, including `agent: acp:cursor`, set `acpx_path` for the bridge. Native `agent: cursor` uses `agent_path_override.cursor` instead.
 If the raw target command is also outside `PATH`, set its target key in `acp_registry_overrides`; `agent_path_override` applies only to native agents:
 
 ```yaml

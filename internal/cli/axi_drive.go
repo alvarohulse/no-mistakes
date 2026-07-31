@@ -95,8 +95,8 @@ func newAxiRunCmd() *cobra.Command {
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
-			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
-			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
+			"agent. The daemon requires a supported native agent binary (including `agent: cursor`)\n" +
+			"or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
 			"first step when none can run.\n\n" +
 			"A failed post-worktree hook parks before any pipeline step. Correct the\n" +
 			"environment outside no-mistakes, run `no-mistakes axi abort`, then start a\n" +
