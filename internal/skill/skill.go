@@ -260,14 +260,23 @@ pipeline including its deterministic refresh step. Do **not** reach for
 reattaches to the running monitor (HEAD unchanged) and returns its output
 without rebasing.
 
-If the worktree or host that ran the gate is gone - a devbox was recycled, or the
-checkout was deleted - the monitor can still be live with no local state left to
-recover from, and ` + "`rerun`" + ` has no worktree to run in. ` + "`no-mistakes axi abort --run <id>`" + `
-needs no repo, branch, or worktree, so run it from anywhere to reap the orphaned
-monitor; the run id appears in ` + "`axi run`" + ` output and in the ` + "`axi`" + ` home view, and
-aborting an id that is not an active run is a successful no-op. Then
-` + "`no-mistakes rerun`" + ` from a fresh checkout of the same branch. Recovery adopts the
-existing PR - never open a second one for the same branch.
+If the worktree that ran the gate is gone - the checkout was deleted or moved -
+the monitor can still be live, because a run lives in the daemon's memory rather
+than in your checkout. ` + "`no-mistakes axi abort --run <id>`" + ` needs no repo, branch,
+or worktree, so run it from any directory on that machine to reap the orphaned
+monitor; the run id appears in ` + "`axi run`" + ` output and in the ` + "`axi`" + ` home view. It
+reaches only the daemon owning that machine's ` + "`NM_HOME`" + `, so ` + "`aborted: false`" + ` means
+there was nothing active to cancel there - a successful no-op, not evidence that
+a monitor on another machine stopped. Then ` + "`no-mistakes rerun`" + ` from a fresh
+checkout of the same branch.
+
+If the host itself is gone - a devbox was recycled, taking its ` + "`NM_HOME`" + ` and
+daemon with it - the monitor died with it, so there is nothing to reap, and
+` + "`rerun`" + ` cannot work either: it resolves the head from that machine's gate and
+needs a prior run row for the branch, and a fresh machine has neither. Recover
+with ` + "`no-mistakes init`" + ` in the new clone, then ` + "`no-mistakes axi run --intent \"...\"`" + `,
+which pushes the branch into the new gate itself. Either path adopts the existing
+PR - never open a second one for the same branch.
 
 On a successful outcome (` + "`checks-passed`" + ` or ` + "`passed`" + `), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable
