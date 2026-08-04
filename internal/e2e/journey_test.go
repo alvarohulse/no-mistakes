@@ -2182,8 +2182,8 @@ func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-cancel-test-e2e")
-	// See the note in assertDifferentBranchSlowRun: the hold must outlast the
-	// gap between observing the running step and issuing the cancel.
+	// See the note in assertDifferentBranchDoesNotCancelActiveRun: the hold must
+	// outlast the gap between observing the running step and issuing the cancel.
 	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write cancel slow test command: %v", err)
 	}
@@ -2205,8 +2205,8 @@ func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 func assertAbortByRunIDReapsRunFromOutsideWorktree(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-abort-byid-test-e2e")
-	// See the note in assertDifferentBranchSlowRun: the hold must outlast the
-	// gap between observing the running step and issuing the abort.
+	// See the note in assertDifferentBranchDoesNotCancelActiveRun: the hold must
+	// outlast the gap between observing the running step and issuing the abort.
 	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write abort-by-id slow test command: %v", err)
 	}
