@@ -234,6 +234,15 @@ pipeline including its deterministic refresh step. Do **not** reach for
 reattaches to the running monitor (HEAD unchanged) and returns its output
 without rebasing.
 
+If the worktree or host that ran the gate is gone - a devbox was recycled, or the
+checkout was deleted - the monitor can still be live with no local state left to
+recover from, and `rerun` has no worktree to run in. `no-mistakes axi abort --run <id>`
+needs no repo, branch, or worktree, so run it from anywhere to reap the orphaned
+monitor; the run id appears in `axi run` output and in the `axi` home view, and
+aborting an id that is not an active run is a successful no-op. Then
+`no-mistakes rerun` from a fresh checkout of the same branch. Recovery adopts the
+existing PR - never open a second one for the same branch.
+
 On a successful outcome (`checks-passed` or `passed`), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable
 format - what was validated and what was found. If the output includes a
