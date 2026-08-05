@@ -2146,7 +2146,12 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-different-branch-slow-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+	// Hold the pipeline open well past the cancel, matching the other hold
+	// commands in this file. A cancelled run never waits this out, so the
+	// duration costs nothing; at 10s the command could finish between observing
+	// StepStatusRunning and issuing the cancel, and CancelRun would then fail on
+	// the daemon's legitimate "no active run".
+	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write different-branch slow test command: %v", err)
 	}
 	slowConfig := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-different-branch-slow-e2e\n  lint: true\n"
@@ -2177,7 +2182,9 @@ func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-cancel-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+	// See the note in assertDifferentBranchDoesNotCancelActiveRun: the hold must
+	// outlast the gap between observing the running step and issuing the cancel.
+	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write cancel slow test command: %v", err)
 	}
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-cancel-test-e2e\n  lint: true\n"
@@ -2198,7 +2205,9 @@ func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 func assertAbortByRunIDReapsRunFromOutsideWorktree(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-abort-byid-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+	// See the note in assertDifferentBranchDoesNotCancelActiveRun: the hold must
+	// outlast the gap between observing the running step and issuing the abort.
+	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write abort-by-id slow test command: %v", err)
 	}
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-abort-byid-test-e2e\n  lint: true\n"
