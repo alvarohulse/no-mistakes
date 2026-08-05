@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -144,6 +146,77 @@ func TestApplyPRBodyHookPassesContractOnStdin(t *testing.T) {
 	// would otherwise have to unpick.
 	if contract.Sections.WhatChanged == nil || !strings.Contains(contract.Sections.WhatChanged.Text, "cap retries") {
 		t.Errorf("what_changed = %+v", contract.Sections.WhatChanged)
+	}
+}
+
+// The pre-assembly capture happens in buildPRContent, not in applyPRBodyHook,
+// so it is only observable from here: a formatter must receive the drafting
+// agent's own prose, never the assembled body it ends up inside. Asserting the
+// prose is present is not enough - the assembled body contains it too - so this
+// asserts the sections assembly adds around it are absent.
+func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-command fixtures are POSIX")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	prose := "## What Changed\n\n- cap scheduler retries at the configured window"
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(prContent{Title: "fix(scheduler): bound the retry window", Body: prose})
+			if err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.UserIntent = "Bound the retry window."
+	dump := filepath.Join(t.TempDir(), "contract.json")
+	sctx.Config.Hooks.PRBody = "cat > " + dump + "; printf 'formatted body\\n'"
+
+	// A completed step, so assembly has a Pipeline section to add and this test
+	// can tell the assembled body from the prose that produced it.
+	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Body != "formatted body" {
+		t.Fatalf("body = %q, want the formatter's output", content.Body)
+	}
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("formatter did not receive a contract: %v", err)
+	}
+	var contract prbody.Contract
+	if err := json.Unmarshal(raw, &contract); err != nil {
+		t.Fatalf("contract is not valid JSON: %v", err)
+	}
+	if contract.Sections.WhatChanged == nil {
+		t.Fatal("what_changed is absent, want the agent's own prose")
+	}
+	if got := contract.Sections.WhatChanged.Text; got != prose {
+		t.Fatalf("what_changed = %q, want exactly the agent's prose %q", got, prose)
+	}
+	// Assembly's own additions must not have leaked in: a formatter that has to
+	// strip a Pipeline section back out has been handed a layout, not material.
+	for _, assembled := range []string{"**Review**", "Bound the retry window."} {
+		if strings.Contains(contract.Sections.WhatChanged.Text, assembled) {
+			t.Fatalf("what_changed carries assembled section %q:\n%s", assembled, contract.Sections.WhatChanged.Text)
+		}
+	}
+	if contract.Sections.Pipeline == nil || len(contract.Sections.Pipeline.Steps) == 0 {
+		t.Fatal("pipeline section should still carry the per-step records separately")
 	}
 }
 
