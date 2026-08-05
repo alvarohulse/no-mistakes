@@ -386,6 +386,41 @@ no-mistakes stats --run <id>
 The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry. The generated PR's existing Pipeline section includes only the compact step/round, top-level invocation, and nested-agent attribution subset.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
+## no-mistakes pr-body
+
+Render a pull request body through the [`hooks.pr_body`](/reference/repo-config/#hookspr_body) formatter and print it.
+
+```sh
+no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+```
+
+| Flag               | Type     | Default    | Description                                                     |
+| ------------------ | -------- | ---------- | --------------------------------------------------------------- |
+| `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
+| `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
+| `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
+| `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
+| `--hook`           | `string` | Configured | Formatter command, overriding `hooks.pr_body` for this run       |
+
+This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
+
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `what_changed`, which is the drafting agent's own output and is not stored separately.
+
+The formatter is resolved the same way a run resolves it: `--hook`, then `NM_REPO_CONFIG`, then the repo's `.no-mistakes.yaml`, then `~/.no-mistakes/config.yaml`. The chosen source is reported on stderr.
+
+A failing formatter exits non-zero here and says that a run would fall back to the built-in body, so the fallback path is visible rather than inferred.
+
+```sh
+# Capture the contract shape to write a formatter against.
+no-mistakes pr-body --sample --print-contract > contract.json
+
+# Iterate on a formatter without running a gate.
+no-mistakes pr-body --sample --hook ~/scripts/format-pr
+
+# Check what the last real run would produce.
+no-mistakes pr-body
+```
+
 ## no-mistakes doctor
 
 Check system health and dependencies.

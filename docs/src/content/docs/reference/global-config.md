@@ -50,6 +50,9 @@ log_level: info
 
 session_reuse: true
 
+hooks:
+  pr_body: "~/scripts/format-pr --auto-linear"
+
 auto_fix:
   refresh: 3
   review: 0
@@ -436,6 +439,19 @@ Branch slashes become nested directories, unsafe branch characters are replaced,
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
 These are global defaults. Per-repo config can override either field.
+
+### hooks.pr_body
+
+Machine-wide default pull request body formatter.
+
+|      |          |
+| ---- | -------- |
+| Type | `string` |
+| Default | Empty (use the built-in body) |
+
+This is the only hook accepted here. One formatter usually serves every repo on a machine, whereas `hooks.post_worktree` is a repo's own install command - setting that globally would run the wrong setup in every other repo, so it is rejected with an error rather than silently ignored.
+
+A repo's own `hooks.pr_body` overrides this value. The field's behavior, contract, and failure handling are owned by [the repo config reference](/no-mistakes/reference/repo-config/#hookspr_body); iterate on a formatter with [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body).
 
 ## Environment variables
 

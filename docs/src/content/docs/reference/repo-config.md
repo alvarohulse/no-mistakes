@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. An optional machine-local file can use the same shape with the additional required `repo:` binding described below.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.post_worktree` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, and the Review adversary route from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
@@ -64,6 +64,7 @@ commands:
 
 hooks:
   post_worktree: "yarn install --immutable"
+  pr_body: "~/scripts/format-pr --auto-linear"
 
 ignore_patterns:
   - "*.generated.go"
@@ -212,7 +213,7 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{build,test,lint,format}`, `hooks.post_worktree`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
@@ -235,6 +236,34 @@ Use this for worktree-local setup that later phases need, such as `yarn install`
 On failure, the run parks before `intent` at `gate.kind: environment`; no step record or auto-fix round is created. Correct the external environment, run `no-mistakes axi abort`, then start a fresh run. `--yes` never auto-resolves this park.
 
 Because the hook executes arbitrary shell with the daemon's credentials, it follows the same trusted-default-branch boundary as `commands.*`. A pushed-branch hook is ignored unless the trusted default branch explicitly enables `allow_repo_commands`.
+
+### hooks.pr_body
+
+External pull request body formatter. Receives the PR body contract as JSON on stdin and returns the finished body on stdout. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (use the built-in body) |
+
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. The contract is data, not markdown: the pipeline is per-step records, risk is its level, rationale, and scope, and testing is the test step's own summary, tested list, and artifacts. Layout is entirely the formatter's decision.
+
+```yaml
+hooks:
+  pr_body: "~/scripts/format-pr --auto-linear"
+```
+
+Any failure - a non-zero exit, a timeout past 60 seconds, empty output, or output over 1 MiB - falls back to the built-in body and reports the reason (including the formatter's own stderr) in the run log. A formatter is a convenience, so a broken one never blocks shipping; the failure is stated rather than swallowed, because a body that silently lost its template is worse than one that never had it. Output is still clamped to the host's body limit, which the contract also supplies as `body_limit` so a formatter can degrade its own layout deliberately.
+
+Iterate on a formatter without running a gate:
+
+```bash
+no-mistakes pr-body --sample --hook ~/scripts/format-pr
+```
+
+See the [`pr-body` command](/reference/cli/#pr-body) for the contract shape and the other data sources.
+
+Unlike `post_worktree`, this hook may also be set machine-wide in `~/.no-mistakes/config.yaml`, because one formatter usually serves every repo on a machine. A repo-level value overrides the global one. It executes arbitrary shell with the daemon's credentials, so it follows the same trusted-default-branch boundary as `commands.*`.
 
 ### disable_project_settings
 
