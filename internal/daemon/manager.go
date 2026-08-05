@@ -860,7 +860,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// Persist the operator PR note atomically with the run. Unlike inferred
 	// intent (which falls back to transcript inference), the note has no
 	// fallback, so writing it in the same insert avoids ever creating a run that
-	// is missing its guaranteed "## Notes" content.
+	// is missing its guaranteed PR-note content.
 	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
 		PRNote:          strings.TrimSpace(prNote),
 		RefreshStrategy: refreshStrategy,

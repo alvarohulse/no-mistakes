@@ -97,7 +97,7 @@ no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacke
 | `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool`   | `false` | Auto-resolve every eligible gate until a decision point or outcome. A Test gate created because the agent changed a test file requires explicit approval and stays parked |
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
-| `--pr-note`   | `string` | (none)  | Trusted author text for the generated PR's Notes section         |
+| `--pr-note`   | `string` | (none)  | Trusted author text added verbatim to the generated PR body      |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
 | `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
 | `--stacked-on` | `string` | default branch | Use this branch as the refresh and pull-request base             |
@@ -108,7 +108,7 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
-`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim after `## Intent`, supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
+`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as a `## Notes` section after `## Intent` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
