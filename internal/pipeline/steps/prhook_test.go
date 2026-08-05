@@ -41,7 +41,7 @@ func TestApplyPRBodyHookUsesFormatterOutput(t *testing.T) {
 	t.Parallel()
 	sctx, _ := newHookTestContext(t, "cat > /dev/null; printf '## Templated\\n\\nformatted body\\n'")
 
-	got := applyPRBodyHook(sctx, prContent{Title: "fix: x", Body: "built-in"}, "## What Changed\n\n- x", prBodyScope{branch: "feature", baseBranch: "main"})
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in"}, "## What Changed\n\n- x", prBodyScope{branch: "feature", baseBranch: "main"})
 	if got.Body != "## Templated\n\nformatted body" {
 		t.Fatalf("body = %q", got.Body)
 	}
@@ -54,7 +54,7 @@ func TestApplyPRBodyHookFallsBackLoudlyOnFailure(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "cat > /dev/null; echo 'no template' >&2; exit 2")
 
-	got := applyPRBodyHook(sctx, prContent{Title: "fix: x", Body: "built-in body"}, "wc", prBodyScope{})
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in body"}, "wc", prBodyScope{})
 	if got.Body != "built-in body" {
 		t.Fatalf("body = %q, want the built-in body", got.Body)
 	}
@@ -72,7 +72,7 @@ func TestApplyPRBodyHookFallsBackOnEmptyOutput(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "cat > /dev/null; exit 0")
 
-	got := applyPRBodyHook(sctx, prContent{Body: "built-in body"}, "wc", prBodyScope{})
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in body"}, "wc", prBodyScope{})
 	if got.Body != "built-in body" {
 		t.Fatalf("body = %q, want the built-in body", got.Body)
 	}
@@ -85,7 +85,7 @@ func TestApplyPRBodyHookNoopWithoutConfiguration(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "")
 
-	got := applyPRBodyHook(sctx, prContent{Body: "built-in body"}, "wc", prBodyScope{})
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in body"}, "wc", prBodyScope{})
 	if got.Body != "built-in body" {
 		t.Fatalf("body = %q", got.Body)
 	}
@@ -98,7 +98,7 @@ func TestApplyPRBodyHookClampsOverLimitOutput(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "cat > /dev/null; head -c 5000 /dev/zero | tr '\\0' 'x'")
 
-	got := applyPRBodyHook(sctx, prContent{Body: "built-in"}, "wc", prBodyScope{bodyLimit: 4000})
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in"}, "wc", prBodyScope{bodyLimit: 4000})
 	// Measured the way a host measures it (UTF-16 units), not in bytes.
 	if n := scm.PRBodyLen(got.Body); n > 4000 {
 		t.Fatalf("body is %d characters, want it clamped to the host limit", n)
@@ -116,8 +116,7 @@ func TestApplyPRBodyHookPassesContractOnStdin(t *testing.T) {
 	sctx.UserIntent = "Bound the retry window."
 	sctx.IntentSource = db.RunIntentSourceAgent
 
-	applyPRBodyHook(sctx,
-		prContent{Title: "fix(scheduler): bound the retry window", Body: "assembled"},
+	applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix(scheduler): bound the retry window", Body: "assembled"},
 		"## What Changed\n\n- cap retries",
 		prBodyScope{branch: "feature", baseBranch: "main", provider: "github", bodyLimit: 0})
 
@@ -233,5 +232,63 @@ func TestContractPipelineIsPerStepData(t *testing.T) {
 	}
 	if !agent.NestedReported || len(agent.Nested) != 1 || agent.Nested[0].Identity != "Explore" {
 		t.Errorf("nested agents = %+v", agent.Nested)
+	}
+}
+
+// The built-in body omits the pr and ci rows because printing them inside the PR
+// body being written reads badly. That is a layout call, and the contract exists
+// to delegate layout - so it carries the rows, and the sample that advertises
+// them (including its only failed and in-flight steps) stays honest.
+func TestContractPipelineCarriesPRAndCISteps(t *testing.T) {
+	t.Parallel()
+	exit := 0
+	failExit := 1
+	contract := BuildContract(ContractInput{
+		Run: &db.Run{ID: "run-1"},
+		Steps: []*db.StepResult{
+			{ID: "s1", StepName: types.StepPush, StepOrder: 8, Status: types.StepStatusCompleted, ExitCode: &exit},
+			{ID: "s2", StepName: types.StepPR, StepOrder: 9, Status: types.StepStatusRunning},
+			{ID: "s3", StepName: types.StepCI, StepOrder: 10, Status: types.StepStatusFailed, ExitCode: &failExit},
+		},
+	})
+
+	if contract.Sections.Pipeline == nil {
+		t.Fatal("pipeline section is absent")
+	}
+	byName := map[string]prbody.PipelineStep{}
+	for _, step := range contract.Sections.Pipeline.Steps {
+		byName[step.Name] = step
+	}
+	pr, ok := byName["pr"]
+	if !ok {
+		t.Fatalf("pr step is missing from %+v", contract.Sections.Pipeline.Steps)
+	}
+	if pr.Status != "running" {
+		t.Errorf("pr status = %q, want running", pr.Status)
+	}
+	ci, ok := byName["ci"]
+	if !ok {
+		t.Fatalf("ci step is missing from %+v", contract.Sections.Pipeline.Steps)
+	}
+	if ci.Status != "failed" {
+		t.Errorf("ci status = %q, want failed", ci.Status)
+	}
+}
+
+// The built-in Pipeline markdown keeps its own omission: this pins the two
+// renderings apart so a future edit cannot collapse them back together.
+func TestBuiltInPipelineSectionStillOmitsPRAndCI(t *testing.T) {
+	t.Parallel()
+	exit := 0
+	failExit := 1
+	records := RunRecords{Steps: []*db.StepResult{
+		{ID: "s1", StepName: types.StepPush, StepOrder: 8, Status: types.StepStatusCompleted, ExitCode: &exit},
+		{ID: "s2", StepName: types.StepPR, StepOrder: 9, Status: types.StepStatusRunning},
+		{ID: "s3", StepName: types.StepCI, StepOrder: 10, Status: types.StepStatusFailed, ExitCode: &failExit},
+	}}
+
+	got := buildPipelineStatusSummary(records.Steps, records.Rounds, records.Invocations, types.RefreshStrategyRebase)
+	if strings.Contains(got, "**PR**") || strings.Contains(got, "**CI**") {
+		t.Fatalf("built-in pipeline section should omit the pr and ci rows, got:\n%s", got)
 	}
 }

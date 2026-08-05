@@ -31,7 +31,7 @@ type prBodyScope struct {
 // formatter is a convenience; a PR that cannot be described is not a reason to
 // stop shipping, and a body that silently lost its template is worse than one
 // that never had it.
-func applyPRBodyHook(sctx *pipeline.StepContext, content prContent, whatChanged string, scope prBodyScope) prContent {
+func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prContent, whatChanged string, scope prBodyScope) prContent {
 	if sctx == nil || sctx.Config == nil {
 		return content
 	}
@@ -40,7 +40,7 @@ func applyPRBodyHook(sctx *pipeline.StepContext, content prContent, whatChanged 
 		return content
 	}
 
-	contract := buildPRBodyContract(sctx, whatChanged, content.Title, scope)
+	contract := buildPRBodyContract(sctx, records, whatChanged, content.Title, scope)
 	result, err := prbody.RunHook(sctx.Ctx, prbody.HookOptions{
 		Command:  hook,
 		Dir:      sctx.WorkDir,

@@ -22,8 +22,14 @@ const (
 	DefaultHookTimeout = 60 * time.Second
 	// MaxHookBodyBytes rejects a runaway formatter before its output reaches
 	// a host. Well above any real PR body, far below anything that could wedge
-	// the run.
+	// the run. It is enforced as output is read, not after: this runs inside
+	// the daemon, so a formatter that streams for the whole timeout must not be
+	// able to grow the daemon's heap first and be rejected afterwards.
 	MaxHookBodyBytes = 1 << 20
+	// maxHookDiagnosticBytes bounds what is READ from a formatter's stderr, for
+	// the same reason as MaxHookBodyBytes. It is far above any real formatter's
+	// stderr, so in practice BoundedDiagnostics still sees the true tail.
+	maxHookDiagnosticBytes = 64 << 10
 	// maxHookDiagnosticRunes bounds the formatter stderr echoed into a
 	// pipeline log line.
 	maxHookDiagnosticRunes = 4 * 1024
@@ -95,22 +101,40 @@ func RunHook(ctx context.Context, opts HookOptions) (*HookResult, error) {
 	}
 	cmd.Dir = opts.Dir
 	cmd.Stdin = bytes.NewReader(payload)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := &cappedBuffer{limit: MaxHookBodyBytes}
+	stderr := &headBuffer{limit: maxHookDiagnosticBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if len(opts.Env) > 0 {
 		cmd.Env = append(cmd.Environ(), opts.Env...)
 	}
 	shellenv.ConfigureShellCommand(cmd, opts.Grace)
 
 	started := time.Now()
+	// RunShellCommand joins its output-copy goroutines before returning, so the
+	// buffers below are this goroutine's again by the time they are read.
 	runErr := shellenv.RunShellCommand(cmd)
 	elapsed := time.Since(started)
 	diagnostics := BoundedDiagnostics(stderr.Bytes())
 
+	// The cap fires while the formatter is still running and kills it, so it is
+	// checked before runErr: the resulting "killed" wait error describes the
+	// symptom, not the reason.
+	if stdout.overflowed() {
+		return nil, fmt.Errorf("pr_body hook returned more than the %d byte cap%s",
+			MaxHookBodyBytes, suffix(diagnostics))
+	}
+
 	if runErr != nil {
-		if ctx.Err() != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			return nil, fmt.Errorf("pr_body hook timed out after %s%s", timeout, suffix(diagnostics))
+		case errors.Is(ctx.Err(), context.Canceled):
+			// An aborted run or a stopping daemon cancels the caller's context.
+			// Reporting that as a timeout blames the formatter for the
+			// operator's decision.
+			return nil, fmt.Errorf("pr_body hook cancelled after %s%s",
+				elapsed.Round(time.Millisecond), suffix(diagnostics))
 		}
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
@@ -119,10 +143,6 @@ func RunHook(ctx context.Context, opts HookOptions) (*HookResult, error) {
 		return nil, fmt.Errorf("pr_body hook failed: %s%s", safeurl.RedactText(runErr.Error()), suffix(diagnostics))
 	}
 
-	if stdout.Len() > MaxHookBodyBytes {
-		return nil, fmt.Errorf("pr_body hook returned %d bytes, over the %d byte cap%s",
-			stdout.Len(), MaxHookBodyBytes, suffix(diagnostics))
-	}
 	body := strings.TrimSpace(stdout.String())
 	if body == "" {
 		return nil, fmt.Errorf("pr_body hook exited 0 but wrote no body%s", suffix(diagnostics))
@@ -130,6 +150,61 @@ func RunHook(ctx context.Context, opts HookOptions) (*HookResult, error) {
 
 	return &HookResult{Body: body, Diagnostics: diagnostics, Duration: elapsed}, nil
 }
+
+// errHookOutputTooLarge stops the output copy the moment a formatter goes over
+// the cap. The copier terminates the command group on a write error, so the
+// formatter is killed instead of being allowed to keep streaming.
+var errHookOutputTooLarge = errors.New("pr_body hook output over the size cap")
+
+// cappedBuffer accumulates up to limit bytes and then fails the write. The body
+// has to be exact, so an over-cap body is rejected rather than truncated.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+	over  bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.over {
+		return 0, errHookOutputTooLarge
+	}
+	if room := c.limit - c.buf.Len(); len(p) > room {
+		if room > 0 {
+			_, _ = c.buf.Write(p[:room])
+		}
+		c.over = true
+		return 0, errHookOutputTooLarge
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
+
+// overflowed reports whether the formatter wrote past the cap.
+func (c *cappedBuffer) overflowed() bool { return c.over }
+
+// headBuffer keeps the first limit bytes and silently discards the rest.
+// Diagnostics are advisory, so a runaway stderr is dropped rather than being
+// allowed to fail the formatter that otherwise produced a usable body.
+type headBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (h *headBuffer) Write(p []byte) (int, error) {
+	if room := h.limit - h.buf.Len(); room > 0 {
+		kept := p
+		if len(kept) > room {
+			kept = kept[:room]
+		}
+		if _, err := h.buf.Write(kept); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (h *headBuffer) Bytes() []byte { return h.buf.Bytes() }
 
 // BoundedDiagnostics redacts and tail-truncates formatter stderr for logging.
 // The tail is kept because a formatter's last lines are its conclusions.

@@ -278,7 +278,7 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx)
+	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	want := "| Step | Agent (via) | Nested agents |\n" +
 		"| --- | --- | --- |\n" +
 		"| Review r1 | codex (harness_cli) | Explore (subagent_tool) |"
@@ -306,7 +306,7 @@ func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutMachinePath(t *t
 		{Kind: db.ConfigSourceMachine, Digest: strings.Repeat("c", 64), Path: "/home/alvaro/private/repo.yaml"},
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx)
+	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	want := "Config sources: `branch@sha256:" + strings.Repeat("a", 12) + "`, `default@sha256:" + strings.Repeat("b", 12) + "`, `machine-local@sha256:" + strings.Repeat("c", 12) + "`"
 	if !strings.Contains(got, want) {
 		t.Fatalf("pipeline config source summary missing:\n%s", got)
@@ -379,7 +379,7 @@ func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx)
+	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	for _, want := range []string{
 		"| Merge r1 | codex (harness_cli) | - |",
 		"<summary>✅ **Merge** - passed</summary>",

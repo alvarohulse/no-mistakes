@@ -9,7 +9,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -158,7 +157,10 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
-	pipelineMD := s.buildPipelineSection(sctx)
+	// One load feeds both renderings: the built-in Pipeline markdown below and,
+	// when a formatter is configured, the contract that replaces it.
+	records := LoadRunRecords(sctx.DB, sctx.Run.ID)
+	pipelineMD := s.buildPipelineSection(sctx, records)
 
 	prompt := fmt.Sprintf(`Draft a pull request title and summary for the full branch delta.
 
@@ -195,7 +197,7 @@ Final diff paths and statuses:
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
 		fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
-		return applyPRBodyHook(sctx, fallback, fallbackWhatChanged(finalDiff), scope), nil
+		return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
 	}
 
 	var content prContent
@@ -219,38 +221,17 @@ Final diff paths and statuses:
 				} else {
 					content.Body = buildPRBody(content.Body, "", "", pipelineMD, sctx)
 				}
-				return applyPRBodyHook(sctx, content, whatChanged, scope), nil
+				return applyPRBodyHook(sctx, records, content, whatChanged, scope), nil
 			}
 		}
 	}
 
 	fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
-	return applyPRBodyHook(sctx, fallback, fallbackWhatChanged(finalDiff), scope), nil
+	return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
 }
 
-func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) string {
-	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
-	if err != nil {
-		slog.Warn("failed to query step results for pipeline summary", "error", err)
-		return ""
-	}
-
-	rounds := make(map[string][]*db.StepRound, len(steps))
-	for _, sr := range steps {
-		r, err := sctx.DB.GetRoundsByStep(sr.ID)
-		if err != nil {
-			slog.Warn("failed to query rounds for step", "step", sr.StepName, "error", err)
-			continue
-		}
-		rounds[sr.ID] = r
-	}
-
-	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
-	if err != nil {
-		slog.Warn("failed to query agent invocations for pipeline summary", "error", err)
-	}
-
-	summary := buildPipelineStatusSummary(steps, rounds, invocations, sctx.Run.RefreshStrategy)
+func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) string {
+	summary := buildPipelineStatusSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy)
 	configSources := configSourcesSummary(sctx.Run.ConfigSources)
 	if summary == "" || configSources == "" {
 		return summary

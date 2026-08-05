@@ -11,12 +11,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/prbody"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/spf13/cobra"
 )
+
+// repoConfigFileName is the committed per-repo config a run reads its trusted
+// hooks.pr_body from.
+const repoConfigFileName = ".no-mistakes.yaml"
 
 func newPRBodyCmd() *cobra.Command {
 	var (
@@ -59,7 +64,15 @@ With no source, the latest run for the current repository is used.
 				return fmt.Errorf("pick one of --sample, --run, or --contract-file")
 			}
 
-			contract, err := resolvePRBodyContract(cmd.Context(), cmd, sample, runID, contractIn)
+			ctx := cmd.Context()
+			_, d, err := openResources()
+			if err != nil {
+				return err
+			}
+			defer d.Close()
+
+			local := resolveLocalRepo(d)
+			contract, err := resolvePRBodyContract(ctx, cmd, d, local, sample, runID, contractIn)
 			if err != nil {
 				return err
 			}
@@ -71,7 +84,7 @@ With no source, the latest run for the current repository is used.
 				return enc.Encode(contract)
 			}
 
-			command, origin, err := resolvePRBodyHook(hook)
+			command, origin, err := resolvePRBodyHook(ctx, hook, local)
 			if err != nil {
 				return err
 			}
@@ -80,9 +93,12 @@ With no source, the latest run for the current repository is used.
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "pr-body: running %s formatter: %s\n", origin, command)
 
-			result, err := prbody.RunHook(cmd.Context(), prbody.HookOptions{
-				Command:  command,
-				Dir:      workingDirOrEmpty(),
+			result, err := prbody.RunHook(ctx, prbody.HookOptions{
+				Command: command,
+				// The repository root, matching a run's worktree root, so a
+				// formatter that reads a relative path such as
+				// .github/PULL_REQUEST_TEMPLATE.md finds it from any cwd.
+				Dir:      local.root,
 				Contract: contract,
 			})
 			if err != nil {
@@ -109,14 +125,42 @@ With no source, the latest run for the current repository is used.
 	return cmd
 }
 
-func resolvePRBodyContract(ctx context.Context, cmd *cobra.Command, sample bool, runID, contractIn string) (*prbody.Contract, error) {
+func resolvePRBodyContract(ctx context.Context, cmd *cobra.Command, d *db.DB, local localRepo, sample bool, runID, contractIn string) (*prbody.Contract, error) {
 	if sample {
 		return prbody.Sample(), nil
 	}
 	if contractIn != "" {
 		return readContractFile(cmd, contractIn)
 	}
-	return storedRunContract(ctx, runID)
+	return storedRunContract(ctx, d, local, runID)
+}
+
+// localRepo is the repository context this command resolves once: the root a
+// formatter runs in, and the registered record the contract and the trusted
+// repo config are read from. Both are best-effort, because --sample and
+// --contract-file are meant to work anywhere.
+type localRepo struct {
+	root string
+	repo *db.Repo
+}
+
+func resolveLocalRepo(d *db.DB) localRepo {
+	root, err := git.FindGitRoot(".")
+	if err != nil {
+		return localRepo{}
+	}
+	local := localRepo{root: root}
+	if repo, err := findRepo(d); err == nil {
+		local.repo = repo
+	}
+	return local
+}
+
+func (l localRepo) defaultBranch() string {
+	if l.repo == nil {
+		return ""
+	}
+	return strings.TrimSpace(l.repo.DefaultBranch)
 }
 
 func readContractFile(cmd *cobra.Command, path string) (*prbody.Contract, error) {
@@ -147,19 +191,19 @@ func readContractFile(cmd *cobra.Command, path string) (*prbody.Contract, error)
 // The What Changed section is not stored - it is the drafting agent's output,
 // which lives only in the assembled body - so it is absent here. Every other
 // section is reconstructed exactly as the pr step would have built it.
-func storedRunContract(ctx context.Context, runID string) (*prbody.Contract, error) {
-	_, d, err := openResources()
-	if err != nil {
-		return nil, err
-	}
-	defer d.Close()
-
-	repo, err := findRepo(d)
-	if err != nil {
-		return nil, err
+func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID string) (*prbody.Contract, error) {
+	repo := local.repo
+	if repo == nil {
+		if _, err := git.FindGitRoot("."); err != nil {
+			return nil, fmt.Errorf("not in a git repository")
+		}
+		return nil, fmt.Errorf("repo not initialized (run 'no-mistakes init' first)")
 	}
 
-	var run *db.Run
+	var (
+		run *db.Run
+		err error
+	)
 	if runID != "" {
 		run, err = d.GetRun(runID)
 		if err != nil {
@@ -167,6 +211,11 @@ func storedRunContract(ctx context.Context, runID string) (*prbody.Contract, err
 		}
 		if run == nil {
 			return nil, fmt.Errorf("run %s not found", runID)
+		}
+		// Without this, a run id from another repository renders a contract
+		// whose repo block is this directory and whose run data is elsewhere.
+		if run.RepoID != repo.ID {
+			return nil, fmt.Errorf("run %s belongs to another repository", runID)
 		}
 	} else {
 		runs, err := d.GetRunsByRepo(repo.ID)
@@ -179,19 +228,21 @@ func storedRunContract(ctx context.Context, runID string) (*prbody.Contract, err
 		run = runs[0]
 	}
 
-	stepResults, rounds, invocations := steps.LoadRunRecords(d, run.ID)
+	records := steps.LoadRunRecords(d, run.ID)
 	provider := scm.DetectProviderContext(ctx, repo.UpstreamURL)
 	in := steps.ContractInput{
 		Run:         run,
 		Repo:        repo,
-		Steps:       stepResults,
-		Rounds:      rounds,
-		Invocations: invocations,
+		Steps:       records.Steps,
+		Rounds:      records.Rounds,
+		Invocations: records.Invocations,
 		Branch:      run.Branch,
-		BaseBranch:  repo.DefaultBranch,
-		BaseSHA:     run.BaseSHA,
-		Provider:    string(provider),
-		BodyLimit:   scm.MaxPRBodyChars(provider),
+		// The same rule the live step used, so a stacked run reconstructs onto
+		// its parent branch rather than the default branch.
+		BaseBranch: steps.BaseBranchForRun(run, repo.DefaultBranch),
+		BaseSHA:    run.BaseSHA,
+		Provider:   string(provider),
+		BodyLimit:  scm.MaxPRBodyChars(provider),
 	}
 	if run.Intent != nil {
 		in.Intent = strings.TrimSpace(*run.Intent)
@@ -208,7 +259,12 @@ func storedRunContract(ctx context.Context, runID string) (*prbody.Contract, err
 
 // resolvePRBodyHook mirrors the run-time precedence: an explicit override, then
 // the machine-local repo config, then the repo's own, then the global default.
-func resolvePRBodyHook(override string) (command, origin string, err error) {
+//
+// It also mirrors the run-time trust boundary. The repo layer is read from the
+// default branch, never from the checkout: hooks.pr_body executes arbitrary
+// shell, and a preview that honored the working tree would run whatever a
+// contributor's branch declares as soon as someone checked it out to look at it.
+func resolvePRBodyHook(ctx context.Context, override string, local localRepo) (command, origin string, err error) {
 	if trimmed := strings.TrimSpace(override); trimmed != "" {
 		return trimmed, "--hook", nil
 	}
@@ -231,10 +287,14 @@ func resolvePRBodyHook(override string) (command, origin string, err error) {
 		}
 	}
 
-	if workDir := workingDirOrEmpty(); workDir != "" {
-		if repoCfg, err := config.LoadRepo(workDir); err == nil {
+	if ref, ok := trustedRepoConfigRef(ctx, local); ok {
+		if data, err := git.ShowFileBytes(ctx, local.root, ref, repoConfigFileName); err == nil {
+			repoCfg, err := config.LoadRepoFromBytes(data)
+			if err != nil {
+				return "", "", fmt.Errorf("parse %s at %s: %w", repoConfigFileName, ref, err)
+			}
 			if hook := strings.TrimSpace(repoCfg.Hooks.PRBody); hook != "" {
-				return hook, "repo config", nil
+				return hook, "repo config at " + ref, nil
 			}
 		}
 	}
@@ -250,10 +310,21 @@ func resolvePRBodyHook(override string) (command, origin string, err error) {
 	return strings.TrimSpace(globalCfg.Hooks.PRBody), "global config", nil
 }
 
-func workingDirOrEmpty() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
+// trustedRepoConfigRef picks the local ref that stands in for the trusted
+// default-branch config. A run pins a freshly fetched commit; a preview must not
+// fetch, so it prefers the remote-tracking ref and falls back to the local
+// branch. Both are refs a contributor cannot move by pushing a feature branch,
+// which is the property that matters here. With no known default branch there is
+// no trusted copy to read, and the repo layer is skipped rather than guessed.
+func trustedRepoConfigRef(ctx context.Context, local localRepo) (string, bool) {
+	branch := local.defaultBranch()
+	if local.root == "" || branch == "" {
+		return "", false
 	}
-	return dir
+	for _, ref := range []string{"refs/remotes/origin/" + branch, "refs/heads/" + branch} {
+		if _, err := git.Run(ctx, local.root, "rev-parse", "-q", "--verify", ref+"^{commit}"); err == nil {
+			return ref, true
+		}
+	}
+	return "", false
 }

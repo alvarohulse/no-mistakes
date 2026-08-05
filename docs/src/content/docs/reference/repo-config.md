@@ -261,7 +261,7 @@ Iterate on a formatter without running a gate:
 no-mistakes pr-body --sample --hook ~/scripts/format-pr
 ```
 
-See the [`pr-body` command](/reference/cli/#pr-body) for the contract shape and the other data sources.
+See the [`pr-body` command](/no-mistakes/reference/cli/#no-mistakes-pr-body) for the contract shape and the other data sources.
 
 Unlike `post_worktree`, this hook may also be set machine-wide in `~/.no-mistakes/config.yaml`, because one formatter usually serves every repo on a machine. A repo-level value overrides the global one. It executes arbitrary shell with the daemon's credentials, so it follows the same trusted-default-branch boundary as `commands.*`.
 

@@ -73,18 +73,18 @@ type GlobalConfig struct {
 	// here: a PR body formatter is the same script for every repo on a
 	// machine, while post_worktree is a repo's own install command and stays
 	// repo-only.
-	Hooks   Hooks `yaml:"-"`
-	AutoFix AutoFixRaw
-	Commit  CommitRaw
-	Intent       IntentRaw
-	Refresh      StepAgentRaw
-	Review       ReviewRaw
-	Build        StepAgentRaw
-	Test         TestRaw
-	Document     DocumentRaw
-	Lint         StepAgentRaw
-	PR           StepAgentRaw
-	CI           StepAgentRaw
+	Hooks    Hooks `yaml:"-"`
+	AutoFix  AutoFixRaw
+	Commit   CommitRaw
+	Intent   IntentRaw
+	Refresh  StepAgentRaw
+	Review   ReviewRaw
+	Build    StepAgentRaw
+	Test     TestRaw
+	Document DocumentRaw
+	Lint     StepAgentRaw
+	PR       StepAgentRaw
+	CI       StepAgentRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.

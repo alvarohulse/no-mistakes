@@ -3,6 +3,8 @@ package prbody
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -123,6 +125,61 @@ func TestRunHookRejectsOversizedBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cap") {
 		t.Fatalf("error = %v, want the size cap", err)
+	}
+}
+
+// The cap has to be enforced as output is read, not after the whole stream has
+// been buffered: this runs in the daemon, and a formatter that streams for the
+// full timeout would otherwise grow its heap by gigabytes before being rejected.
+// The marker file is the proof - the formatter is killed mid-stream, so the
+// command after the stream never runs.
+func TestRunHookStopsAStreamingFormatterAtTheCap(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	marker := filepath.Join(t.TempDir(), "drained")
+	_, err := RunHook(context.Background(), HookOptions{
+		Command:  "cat > /dev/null; head -c 8000000 /dev/zero | tr '\\0' 'x'; touch " + marker,
+		Contract: Sample(),
+		Timeout:  30 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("error = %v, want the size cap", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("the formatter ran to completion; the cap was applied after buffering the whole stream")
+	}
+}
+
+// An aborted run or a stopping daemon cancels the caller's context. Reporting
+// that as a timeout blames the formatter for the operator's decision.
+func TestRunHookReportsCancellationRatherThanTimeout(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := RunHook(ctx, HookOptions{
+		Command:  "cat > /dev/null; sleep 30",
+		Contract: Sample(),
+		Timeout:  30 * time.Second,
+	})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want a cancellation rather than a timeout", err)
+	}
+	if !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("error = %v, want it to name the cancellation", err)
 	}
 }
 

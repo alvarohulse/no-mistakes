@@ -102,13 +102,22 @@ func BuildContract(in ContractInput) *prbody.Contract {
 	return contract
 }
 
+// RunRecords is the stored per-step state a PR body reads. The built-in
+// Pipeline section and the formatter contract are two renderings of the same
+// records, so a body loads them once and hands them to both.
+type RunRecords struct {
+	Steps       []*db.StepResult
+	Rounds      map[string][]*db.StepRound
+	Invocations []db.AgentInvocation
+}
+
 // LoadRunRecords loads the stored per-step state a contract needs. A query
 // failure degrades that part of the contract rather than the whole body.
-func LoadRunRecords(d *db.DB, runID string) ([]*db.StepResult, map[string][]*db.StepRound, []db.AgentInvocation) {
+func LoadRunRecords(d *db.DB, runID string) RunRecords {
 	steps, err := d.GetStepsByRun(runID)
 	if err != nil {
 		slog.Warn("failed to query step results for pr body contract", "error", err)
-		return nil, nil, nil
+		return RunRecords{}
 	}
 	rounds := make(map[string][]*db.StepRound, len(steps))
 	for _, sr := range steps {
@@ -123,18 +132,17 @@ func LoadRunRecords(d *db.DB, runID string) ([]*db.StepResult, map[string][]*db.
 	if err != nil {
 		slog.Warn("failed to query agent invocations for pr body contract", "error", err)
 	}
-	return steps, rounds, invocations
+	return RunRecords{Steps: steps, Rounds: rounds, Invocations: invocations}
 }
 
 // buildPRBodyContract assembles the contract for a live run.
-func buildPRBodyContract(sctx *pipeline.StepContext, whatChanged, title string, scope prBodyScope) *prbody.Contract {
-	steps, rounds, invocations := LoadRunRecords(sctx.DB, sctx.Run.ID)
+func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, whatChanged, title string, scope prBodyScope) *prbody.Contract {
 	return BuildContract(ContractInput{
 		Run:                 sctx.Run,
 		Repo:                sctx.Repo,
-		Steps:               steps,
-		Rounds:              rounds,
-		Invocations:         invocations,
+		Steps:               records.Steps,
+		Rounds:              records.Rounds,
+		Invocations:         records.Invocations,
 		Commits:             contractCommits(sctx, scope.baseSHA),
 		Intent:              cleanedUserIntent(sctx),
 		IntentSource:        sctx.IntentSource,
@@ -290,10 +298,12 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			})
 		}
 	}
+	// Every recorded step is emitted, including pr and ci. The built-in body
+	// hides those two because printing "PR: running" inside the PR body it is
+	// currently writing reads badly - a layout judgement, and layout is exactly
+	// what this contract delegates. A formatter that wants the same omission can
+	// make it; one that reconstructs a run's history needs the rows.
 	for _, sr := range steps {
-		if shouldOmitPipelineStep(sr) {
-			continue
-		}
 		step := prbody.PipelineStep{
 			Name:       string(sr.StepName),
 			Label:      sr.StepName.DisplayName(strategy),
