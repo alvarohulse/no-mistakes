@@ -82,7 +82,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	baseBranch := refreshBaseBranch(sctx, defaultBranch)
 	// Resolve the branch base so PR summaries cover the full stacked delta.
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
-	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, scm.MaxPRBodyChars(provider))
+	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
 	if err != nil {
 		return nil, err
 	}
@@ -144,8 +144,15 @@ func describePR(pr *scm.PR) string {
 	return ""
 }
 
-func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, bodyLimit int) (prContent, error) {
+func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
+	scope := prBodyScope{
+		branch:     branch,
+		baseBranch: baseBranch,
+		baseSHA:    baseSHA,
+		provider:   string(provider),
+		bodyLimit:  bodyLimit,
+	}
 	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
 	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
@@ -187,7 +194,8 @@ Final diff paths and statuses:
 	})
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		return fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit), nil
+		fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
+		return applyPRBodyHook(sctx, fallback, fallbackWhatChanged(finalDiff), scope), nil
 	}
 
 	var content prContent
@@ -203,17 +211,21 @@ Final diff paths and statuses:
 				if content.Title != originalTitle {
 					slog.Warn("tightened agent PR title type", "from", originalTitle, "to", content.Title)
 				}
+				// Kept before assembly: the contract wants the agent's own
+				// What Changed prose, not the assembled body it ends up in.
+				whatChanged := content.Body
 				if bodyLimit > 0 {
 					content.Body = assemblePRBody(sctx, content.Body, "", "", pipelineMD, bodyLimit)
 				} else {
 					content.Body = buildPRBody(content.Body, "", "", pipelineMD, sctx)
 				}
-				return content, nil
+				return applyPRBodyHook(sctx, content, whatChanged, scope), nil
 			}
 		}
 	}
 
-	return fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit), nil
+	fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
+	return applyPRBodyHook(sctx, fallback, fallbackWhatChanged(finalDiff), scope), nil
 }
 
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) string {
@@ -1135,13 +1147,19 @@ func prNotePromptSection(sctx *pipeline.StepContext) string {
 		"-----BEGIN AUTHOR NOTES-----\n" + note + "\n-----END AUTHOR NOTES-----\n"
 }
 
+// fallbackWhatChanged is the deterministic What Changed section used when the
+// drafting agent produced nothing usable.
+func fallbackWhatChanged(finalDiff string) string {
+	diffSummary := strings.TrimSpace(finalDiff)
+	if diffSummary == "" {
+		return "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
+	}
+	return "## What Changed\n\nFinal changed paths and statuses:\n\n```text\n" + escapeMarkdownFence(diffSummary) + "\n```"
+}
+
 func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, pipelineMD string, bodyLimit int) prContent {
 	title := "chore: update pull request"
-	diffSummary := strings.TrimSpace(finalDiff)
-	body := "## What Changed\n\nFinal changed paths and statuses:\n\n```text\n" + escapeMarkdownFence(diffSummary) + "\n```"
-	if diffSummary == "" {
-		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
-	}
+	body := fallbackWhatChanged(finalDiff)
 	if bodyLimit > 0 {
 		body = assemblePRBody(sctx, body, "", "", pipelineMD, bodyLimit)
 	} else {

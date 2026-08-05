@@ -1,0 +1,334 @@
+package steps
+
+import (
+	"log/slog"
+	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/prbody"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// maxContractCommits bounds the commit list handed to a formatter. A branch
+// with more commits than this has a delta no PR body summarizes commit by
+// commit, and the truncation is logged rather than silent.
+const maxContractCommits = 200
+
+// ContractInput is everything BuildContract needs, sourced either from a live
+// step context or from stored run records.
+type ContractInput struct {
+	Run         *db.Run
+	Repo        *db.Repo
+	Steps       []*db.StepResult
+	Rounds      map[string][]*db.StepRound
+	Invocations []db.AgentInvocation
+	Commits     []prbody.Commit
+
+	// Intent is already sanitized. Callers must pass cleanedUserIntent's
+	// output, never raw run intent: an inferred intent carries whatever the
+	// transcript carried.
+	Intent              string
+	IntentSource        string
+	IntentAuthoritative bool
+	// Note is the author's --pr-note, trimmed and otherwise verbatim.
+	Note string
+
+	Title       string
+	WhatChanged string
+	Branch      string
+	BaseBranch  string
+	BaseSHA     string
+	Provider    string
+	BodyLimit   int
+}
+
+// BuildContract assembles the hooks.pr_body payload.
+//
+// Everything here is raw material: per-step records rather than a rendered
+// pipeline table, the three stored risk fields rather than a risk line, the
+// test step's own evidence rather than a Testing section. The formatter owns
+// every layout decision, which is the entire point of the hook.
+func BuildContract(in ContractInput) *prbody.Contract {
+	contract := &prbody.Contract{
+		Version:         prbody.Version,
+		Branch:          in.Branch,
+		BaseBranch:      in.BaseBranch,
+		BaseSHA:         in.BaseSHA,
+		Provider:        in.Provider,
+		BodyLimit:       in.BodyLimit,
+		Title:           in.Title,
+		Commits:         in.Commits,
+		RefreshStrategy: string(types.RefreshStrategy("").OrDefault()),
+	}
+	if in.Run != nil {
+		contract.RunID = in.Run.ID
+		contract.HeadSHA = in.Run.HeadSHA
+		contract.RefreshStrategy = string(in.Run.RefreshStrategy.OrDefault())
+	}
+	if in.Repo != nil {
+		contract.Repo = prbody.Repo{
+			Root:          in.Repo.WorkingPath,
+			UpstreamURL:   in.Repo.UpstreamURL,
+			DefaultBranch: in.Repo.DefaultBranch,
+		}
+	}
+
+	// Notes and Risk are always present; see the Sections doc comment for why
+	// their absence has to be stated rather than implied.
+	contract.Sections.Notes = prbody.NotesSection{Trusted: true}
+	if note := strings.TrimSpace(in.Note); note != "" {
+		contract.Sections.Notes.Text = note
+		contract.Sections.Notes.Supplied = true
+	}
+
+	if intentText := strings.TrimSpace(in.Intent); intentText != "" {
+		contract.Sections.Intent = &prbody.IntentSection{
+			Text:          intentText,
+			Source:        in.IntentSource,
+			Authoritative: in.IntentAuthoritative,
+			Trusted:       false,
+		}
+	}
+
+	if trimmed := strings.TrimSpace(in.WhatChanged); trimmed != "" {
+		contract.Sections.WhatChanged = &prbody.TextSection{Text: trimmed}
+	}
+
+	contract.Sections.Risk = contractRisk(in.Steps, in.Rounds)
+	contract.Sections.Testing = contractTesting(in.Steps, in.Rounds)
+	contract.Sections.Pipeline = contractPipeline(in.Steps, in.Rounds, in.Invocations, in.Run)
+	return contract
+}
+
+// LoadRunRecords loads the stored per-step state a contract needs. A query
+// failure degrades that part of the contract rather than the whole body.
+func LoadRunRecords(d *db.DB, runID string) ([]*db.StepResult, map[string][]*db.StepRound, []db.AgentInvocation) {
+	steps, err := d.GetStepsByRun(runID)
+	if err != nil {
+		slog.Warn("failed to query step results for pr body contract", "error", err)
+		return nil, nil, nil
+	}
+	rounds := make(map[string][]*db.StepRound, len(steps))
+	for _, sr := range steps {
+		r, err := d.GetRoundsByStep(sr.ID)
+		if err != nil {
+			slog.Warn("failed to query rounds for pr body contract", "step", sr.StepName, "error", err)
+			continue
+		}
+		rounds[sr.ID] = r
+	}
+	invocations, err := d.GetAgentInvocationsByRun(runID)
+	if err != nil {
+		slog.Warn("failed to query agent invocations for pr body contract", "error", err)
+	}
+	return steps, rounds, invocations
+}
+
+// buildPRBodyContract assembles the contract for a live run.
+func buildPRBodyContract(sctx *pipeline.StepContext, whatChanged, title string, scope prBodyScope) *prbody.Contract {
+	steps, rounds, invocations := LoadRunRecords(sctx.DB, sctx.Run.ID)
+	return BuildContract(ContractInput{
+		Run:                 sctx.Run,
+		Repo:                sctx.Repo,
+		Steps:               steps,
+		Rounds:              rounds,
+		Invocations:         invocations,
+		Commits:             contractCommits(sctx, scope.baseSHA),
+		Intent:              cleanedUserIntent(sctx),
+		IntentSource:        sctx.IntentSource,
+		IntentAuthoritative: intentSourceIsAuthoritative(sctx),
+		Note:                cleanedPRNote(sctx),
+		Title:               title,
+		WhatChanged:         whatChanged,
+		Branch:              scope.branch,
+		BaseBranch:          scope.baseBranch,
+		BaseSHA:             scope.baseSHA,
+		Provider:            scope.provider,
+		BodyLimit:           scope.bodyLimit,
+	})
+}
+
+func contractCommits(sctx *pipeline.StepContext, baseSHA string) []prbody.Commit {
+	if strings.TrimSpace(baseSHA) == "" || strings.TrimSpace(sctx.Run.HeadSHA) == "" {
+		return nil
+	}
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "log", "--format=%H%x00%s", baseSHA+".."+sctx.Run.HeadSHA)
+	if err != nil {
+		slog.Warn("failed to read branch commits for pr body contract", "error", err)
+		return nil
+	}
+	var commits []prbody.Commit
+	for _, line := range strings.Split(out, "\n") {
+		sha, subject, ok := strings.Cut(strings.TrimSpace(line), "\x00")
+		if !ok || sha == "" {
+			continue
+		}
+		commits = append(commits, prbody.Commit{SHA: sha, Subject: subject})
+		if len(commits) == maxContractCommits {
+			slog.Warn("pr body contract commit list truncated", "limit", maxContractCommits)
+			break
+		}
+	}
+	return commits
+}
+
+// contractRisk reads the review step's assessment. It mirrors extractRiskLine's
+// sourcing - final step findings, falling back to the last round's - but keeps
+// all three fields instead of collapsing them into one line.
+func contractRisk(steps []*db.StepResult, rounds map[string][]*db.StepRound) prbody.RiskSection {
+	for _, sr := range steps {
+		if sr.StepName != types.StepReview {
+			continue
+		}
+		findings := finalStepFindings(sr, rounds[sr.ID])
+		if findings == nil || findings.RiskLevel == "" {
+			return prbody.RiskSection{}
+		}
+		return prbody.RiskSection{
+			Level:     findings.RiskLevel,
+			Rationale: findings.RiskRationale,
+			Scope:     findings.RiskScope,
+			Reported:  true,
+		}
+	}
+	return prbody.RiskSection{}
+}
+
+func contractTesting(steps []*db.StepResult, rounds map[string][]*db.StepRound) *prbody.TestingSection {
+	for _, sr := range steps {
+		if sr.StepName != types.StepTest {
+			continue
+		}
+		findings := finalStepFindings(sr, rounds[sr.ID])
+		if findings == nil {
+			return nil
+		}
+		section := &prbody.TestingSection{
+			Summary: strings.TrimSpace(findings.TestingSummary),
+			Tested:  findings.Tested,
+		}
+		for _, artifact := range findings.Artifacts {
+			section.Artifacts = append(section.Artifacts, prbody.Artifact{
+				Kind:  artifact.Kind,
+				Label: artifact.Label,
+				Path:  artifact.Path,
+				URL:   artifact.URL,
+			})
+		}
+		if section.Summary == "" && len(section.Tested) == 0 && len(section.Artifacts) == 0 {
+			return nil
+		}
+		return section
+	}
+	return nil
+}
+
+// finalStepFindings returns a step's authoritative findings: the step row's
+// own, or the last round's when the step row has none.
+func finalStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) *types.Findings {
+	if sr.FindingsJSON != nil {
+		f, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err != nil {
+			// An unreadable step row is not a reason to fall back to a
+			// staler round; report nothing rather than something wrong.
+			return nil
+		}
+		return &f
+	}
+	for i := len(stepRounds) - 1; i >= 0; i-- {
+		if stepRounds[i].FindingsJSON == nil {
+			continue
+		}
+		if f, err := types.ParseFindingsJSON(*stepRounds[i].FindingsJSON); err == nil {
+			return &f
+		}
+	}
+	return nil
+}
+
+func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, run *db.Run) *prbody.PipelineSection {
+	if len(steps) == 0 {
+		return nil
+	}
+	var strategy types.RefreshStrategy
+	if run != nil {
+		strategy = run.RefreshStrategy
+	}
+
+	byStep := make(map[string][]prbody.AgentRun, len(invocations))
+	for _, invocation := range invocations {
+		agentRun := prbody.AgentRun{
+			Round:          invocation.Round,
+			Purpose:        invocation.Purpose,
+			Agent:          invocation.Agent,
+			Model:          invocation.Model,
+			InvocationMode: string(invocation.InvocationMode),
+			NestedReported: invocation.AgentObservationsReported,
+		}
+		if invocation.ModelProvider != nil {
+			agentRun.Vendor = *invocation.ModelProvider
+		}
+		for _, observation := range invocation.AgentObservations {
+			agentRun.Nested = append(agentRun.Nested, prbody.NestedAgent{
+				Identity:       observation.Identity,
+				InvocationMode: string(observation.InvocationMode),
+			})
+		}
+		byStep[invocation.StepName] = append(byStep[invocation.StepName], agentRun)
+	}
+
+	section := &prbody.PipelineSection{
+		Attribution: prbody.Attribution{Name: prBodyAttributionName, URL: prBodyAttributionURL},
+	}
+	if run != nil {
+		for _, source := range run.ConfigSources {
+			section.ConfigSources = append(section.ConfigSources, prbody.ConfigSource{
+				Kind:   source.Kind,
+				Digest: source.Digest,
+			})
+		}
+	}
+	for _, sr := range steps {
+		if shouldOmitPipelineStep(sr) {
+			continue
+		}
+		step := prbody.PipelineStep{
+			Name:       string(sr.StepName),
+			Label:      sr.StepName.DisplayName(strategy),
+			Order:      sr.StepOrder,
+			Status:     string(sr.Status),
+			ExitCode:   sr.ExitCode,
+			DurationMS: sr.DurationMS,
+			Rounds:     len(rounds[sr.ID]),
+			Findings:   contractStepFindings(sr, rounds[sr.ID]),
+			Agents:     byStep[string(sr.StepName)],
+		}
+		if step.Rounds == 0 {
+			// A step that ran without recording rounds still ran once.
+			step.Rounds = 1
+		}
+		section.Steps = append(section.Steps, step)
+	}
+	if len(section.Steps) == 0 {
+		return nil
+	}
+	return section
+}
+
+func contractStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) prbody.StepFindings {
+	findings := finalStepFindings(sr, stepRounds)
+	if findings == nil || len(findings.Items) == 0 {
+		return prbody.StepFindings{}
+	}
+	out := prbody.StepFindings{Total: len(findings.Items), BySeverity: map[string]int{}}
+	for _, item := range findings.Items {
+		severity := strings.TrimSpace(item.Severity)
+		if severity == "" {
+			severity = "unspecified"
+		}
+		out.BySeverity[severity]++
+	}
+	return out
+}
