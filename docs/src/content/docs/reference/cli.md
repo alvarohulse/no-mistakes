@@ -257,9 +257,10 @@ Pass `--run <id>` to cancel a specific run by its id instead of resolving the cu
 no-mistakes axi abort --run <id>
 ```
 
-`--run` does not need a repo, branch, or worktree, so it works from anywhere.
+`--run` does not need a repo, branch, or worktree, so it works from any directory on the machine whose `NM_HOME` owns the run.
 Use it to reap an orphaned CI monitor whose worktree was torn down before the PR merged - the run id is shown in `axi run` output and in the `axi` home view.
-Aborting an id that is not an active run is a successful no-op.
+Aborting an id that is not an active run is a successful no-op, and so is aborting while no daemon is running, because a run lives only in its daemon's memory.
+Read `aborted: false` as "nothing was active to cancel on this machine", not as proof that a monitor elsewhere stopped.
 When the daemon is already running, `axi abort` can cancel an active run even if the global config file has become invalid, because it is not starting a fresh run.
 Branch-scoped abort waits for the cancellation state to persist, then renders the refreshed `branch_sync` object and its exact next action.
 Pipeline-created commits remain preserved in the gate and a recoverable cancellation points directly to `no-mistakes axi sync --recover`.

@@ -86,6 +86,67 @@ func TestBodyDocumentsAxiGateGuidance(t *testing.T) {
 	}
 }
 
+// orphanedMonitorRecoveryPhrases are the load-bearing claims of the
+// orphaned-monitor recovery guidance, which the generator was missing while a
+// hand-maintained local skill copy carried it. The two branches must stay
+// distinct: a lost worktree leaves a live monitor to reap by run id and rerun,
+// while a lost host leaves nothing to reap and no prior run row, so recovery
+// goes through init plus a fresh axi run. Both adopt the existing PR.
+var orphanedMonitorRecoveryPhrases = []string{
+	"If the worktree that ran the gate is gone",
+	"`no-mistakes axi abort --run <id>` needs no repo, branch, or worktree",
+	"run it from any directory on that machine to reap the orphaned monitor",
+	"`aborted: false` means there was nothing active to cancel there - a successful no-op",
+	"Then `no-mistakes rerun` from a fresh checkout of the same branch.",
+	"If the host itself is gone",
+	"the monitor died with it, so there is nothing to reap",
+	"`rerun` cannot work either",
+	"needs a prior run row for the branch",
+	"with `no-mistakes init` in the new clone, then `no-mistakes axi run --intent \"...\"`",
+	"Either path adopts the existing PR - never open a second one for the same branch.",
+}
+
+// TestBodyDocumentsOrphanedMonitorRecovery pins the recovery path an agent needs
+// when the checkout, or the whole machine, that ran a gate is gone. It reads the
+// body with whitespace normalized so the assertions survive re-wrapping.
+func TestBodyDocumentsOrphanedMonitorRecovery(t *testing.T) {
+	body := normalizeSpace(Markdown())
+	for _, want := range orphanedMonitorRecoveryPhrases {
+		if !strings.Contains(body, want) {
+			t.Errorf("body should document orphaned-monitor recovery: missing %q", want)
+		}
+	}
+}
+
+// TestInstalledSkillDeliversOrphanedMonitorRecovery proves the guidance reaches
+// the agent through the file `no-mistakes init` installs, not just the in-memory
+// body.
+func TestInstalledSkillDeliversOrphanedMonitorRecovery(t *testing.T) {
+	root := t.TempDir()
+	written, err := Install(root)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	for _, rel := range written {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		installed := normalizeSpace(string(data))
+		for _, want := range orphanedMonitorRecoveryPhrases {
+			if !strings.Contains(installed, want) {
+				t.Errorf("installed %s is missing orphaned-monitor recovery guidance %q", rel, want)
+			}
+		}
+	}
+}
+
+// normalizeSpace collapses the body's hard-wrapped newlines into single spaces
+// so a phrase assertion matches regardless of where a line break falls.
+func normalizeSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 func TestInstallWritesBothPaths(t *testing.T) {
 	root := t.TempDir()
 	written, err := Install(root)
