@@ -16,6 +16,129 @@ import (
 	"time"
 )
 
+// Escaped-descendant helpers use a short, self-expiring marker so a crashed or
+// killed test run cannot leave anything behind for long. The assertions all
+// resolve in seconds; this is only the worst-case backstop.
+const (
+	escapedDescendantMarkerSeconds  = "90"
+	escapedDescendantMarkerLifetime = 90 * time.Second
+)
+
+// TestShellCommandDescendants_ReapsSetsidEscapedDescendantsOnCleanExit is the
+// regression test for the leak that survived process-group cleanup entirely.
+//
+// ConfigureShellCommand puts the leader in its own process group and
+// TerminateShellCommandGroup signals that group on every exit path, but a
+// descendant that calls setsid leaves the group and the session before it
+// backgrounds anything. kill(-leaderPGID) then reaches nothing: the escapee has
+// its own process-group id, and once the leader exits the escapee reparents
+// away, so its ancestry is gone too. This is exactly what agent CLIs do - they
+// spawn each tool-call shell detached - so work an agent backgrounds outlives
+// the step that started it and keeps burning CPU for hours.
+//
+// Descendant discovery closes that gap by learning the escapee from kernel
+// process events while the leader is still alive, so teardown can reach it
+// afterwards.
+func TestShellCommandDescendants_ReapsSetsidEscapedDescendantsOnCleanExit(t *testing.T) {
+	dir := t.TempDir()
+	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-escaped", dir)
+	ConfigureShellCommand(cmd, 5*time.Second)
+
+	descendants := PrepareShellCommandDescendants(cmd, 5*time.Second)
+	if err := StartShellCommand(cmd); err != nil {
+		t.Fatalf("StartShellCommand() error = %v", err)
+	}
+	descendants.Watch()
+	release := func() { _ = os.WriteFile(filepath.Join(dir, "leader-release"), []byte("go"), 0o644) }
+	t.Cleanup(release)
+
+	escapedPID := readPID(t, filepath.Join(dir, "escaped.pid"), 10*time.Second)
+	markerPID := readPID(t, filepath.Join(dir, "escaped-marker.pid"), 10*time.Second)
+	// Never leave the markers behind, however this test exits.
+	t.Cleanup(func() {
+		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+		_ = syscall.Kill(markerPID, syscall.SIGKILL)
+	})
+
+	// Precondition: the escapee really did leave the leader's process group, so
+	// the group kill below cannot be what reaps it.
+	escapedPGID, err := syscall.Getpgid(escapedPID)
+	if err != nil {
+		t.Fatalf("Getpgid(%d): %v", escapedPID, err)
+	}
+	if escapedPGID == cmd.Process.Pid {
+		t.Fatalf("precondition failed: descendant %d stayed in the leader's process group %d", escapedPID, escapedPGID)
+	}
+
+	// Let the leader exit only once discovery has seen the escapee, so the test
+	// pins the reaping behaviour rather than racing event delivery.
+	if !waitForRecordedDescendant(descendants, escapedPID, 30*time.Second) {
+		t.Fatalf("discovery never recorded escaped descendant %d", escapedPID)
+	}
+	release()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("leader Wait() error = %v", err)
+	}
+
+	TerminateShellCommandGroup(cmd)
+	descendants.Terminate()
+
+	if !pidGoneWithin(escapedPID, 10*time.Second) {
+		t.Errorf("escaped session leader %d survived teardown; descendants that setsid out of the group leak", escapedPID)
+	}
+	if !pidGoneWithin(markerPID, 10*time.Second) {
+		t.Errorf("marker %d backgrounded by the escaped descendant survived teardown", markerPID)
+	}
+}
+
+// TestShellCommandDescendants_SentinelDetectsAnUnsweptSurvivor pins the
+// backstop. Discovery narrows the window but does not close it, so the sentinel
+// exists to answer whether anything survived the sweep. Here nothing is ever
+// discovered (no Watch, so no kill), and the sentinel must still see that a
+// descendant is holding the inherited descriptor.
+func TestShellCommandDescendants_SentinelDetectsAnUnsweptSurvivor(t *testing.T) {
+	dir := t.TempDir()
+	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-escaped", dir)
+	ConfigureShellCommand(cmd, time.Second)
+
+	descendants := PrepareShellCommandDescendants(cmd, time.Second)
+	if descendants == nil || descendants.sentinel == nil {
+		t.Fatal("PrepareShellCommandDescendants did not install a sentinel")
+	}
+	if err := StartShellCommand(cmd); err != nil {
+		t.Fatalf("StartShellCommand() error = %v", err)
+	}
+	// Deliberately no Watch: this models a descendant discovery never saw.
+	descendants.sentinel.releaseParentEnd()
+
+	escapedPID := readPID(t, filepath.Join(dir, "escaped.pid"), 10*time.Second)
+	markerPID := readPID(t, filepath.Join(dir, "escaped-marker.pid"), 10*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+		_ = syscall.Kill(markerPID, syscall.SIGKILL)
+	})
+	_ = os.WriteFile(filepath.Join(dir, "leader-release"), []byte("go"), 0o644)
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("leader Wait() error = %v", err)
+	}
+	TerminateShellCommandGroup(cmd)
+
+	if !descendants.sentinel.holdersRemain() {
+		t.Fatal("sentinel reported a clean sweep while an escaped descendant was still running")
+	}
+
+	// And once the survivors are gone the sentinel stops crying wolf.
+	_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+	_ = syscall.Kill(markerPID, syscall.SIGKILL)
+	if !pidGoneWithin(escapedPID, 10*time.Second) || !pidGoneWithin(markerPID, 10*time.Second) {
+		t.Fatal("could not clear the survivors before asserting the sentinel clears")
+	}
+	if descendants.sentinel.holdersRemain() {
+		t.Error("sentinel still reports holders after every descendant exited")
+	}
+	descendants.sentinel.close()
+}
+
 func TestTerminateShellCommandGroup_AllowsCooperativeDescendantCleanup(t *testing.T) {
 	dir := t.TempDir()
 	cmd := shellCommandTerminationHelper(t, context.Background(), "leader-clean", dir)
@@ -108,6 +231,47 @@ func TestShellCommandTerminationHelper(t *testing.T) {
 	dir := os.Getenv("NM_SHELLENV_TERMINATION_DIR")
 
 	switch mode {
+	case "leader-escaped":
+		// Mirrors an agent CLI launching a tool-call shell: the child is spawned
+		// detached, so it leaves the leader's process group AND session before
+		// backgrounding work of its own.
+		child := exec.Command(os.Args[0], "-test.run=^TestShellCommandTerminationHelper$")
+		child.Env = append(os.Environ(),
+			"NM_SHELLENV_TERMINATION_HELPER=descendant-escaped",
+			"NM_SHELLENV_TERMINATION_DIR="+dir,
+		)
+		// Detached stdio: the escapee must not hold the leader's pipes open, so
+		// this exercises the process-tree leak and not the WaitDelay path.
+		if err := child.Start(); err != nil {
+			os.Exit(20)
+		}
+		if !waitForHelperReady(filepath.Join(dir, "escaped-ready"), 10*time.Second) {
+			os.Exit(21)
+		}
+		// Keep running until released, the way a real agent keeps working after a
+		// tool call backgrounds something. Exiting instantly instead would make the
+		// test a race against the watcher's sampling interval.
+		if !waitForHelperReady(filepath.Join(dir, "leader-release"), 60*time.Second) {
+			os.Exit(25)
+		}
+		os.Exit(0)
+	case "descendant-escaped":
+		if _, err := syscall.Setsid(); err != nil {
+			os.Exit(22)
+		}
+		// A cheap, bounded marker stands in for the runaway work the real leak
+		// left behind. It self-expires so a crashed test cannot leak it for long.
+		marker := exec.Command("sleep", escapedDescendantMarkerSeconds)
+		if err := marker.Start(); err != nil {
+			os.Exit(23)
+		}
+		_ = os.WriteFile(filepath.Join(dir, "escaped.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, "escaped-marker.pid"), []byte(strconv.Itoa(marker.Process.Pid)), 0o644)
+		if err := os.WriteFile(filepath.Join(dir, "escaped-ready"), []byte("ready"), 0o644); err != nil {
+			os.Exit(24)
+		}
+		time.Sleep(escapedDescendantMarkerLifetime)
+		os.Exit(0)
 	case "leader-clean", "leader-wait", "leader-clean-ignore":
 		descendantMode := "descendant-cooperative"
 		if mode == "leader-clean-ignore" {
@@ -274,6 +438,20 @@ func TestShellOutputPipeHelper(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}
+}
+
+func waitForRecordedDescendant(d *ShellCommandDescendants, pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		d.mu.Lock()
+		tracked, ok := d.tracked[pid]
+		d.mu.Unlock()
+		if ok && tracked.escaped {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
 }
 
 func readPID(t *testing.T, path string, timeout time.Duration) int {

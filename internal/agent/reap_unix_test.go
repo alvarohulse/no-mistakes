@@ -265,6 +265,116 @@ func TestCodexAgent_Run_ReapsGrandchildHoldingStdoutPipeOnLeaderExit(t *testing.
 	}
 }
 
+// escapedToolShellHold keeps the fake agent alive briefly after its tool shell
+// escapes, which is what a real agent does - it keeps working after a tool call
+// backgrounds something.
+//
+// Discovery is driven by kernel fork events, so the descendant is normally known
+// within a fraction of a millisecond; this is slack for event delivery, not a
+// sampling interval being waited out. Some slack is still needed because an
+// agent that vanished in the very same instant as its fork would be testing the
+// residual discovery window rather than the reaping behaviour.
+const escapedToolShellHold = 500 * time.Millisecond
+
+// TestClaudeAgent_Run_ReapsToolShellThatEscapedTheProcessGroup is the
+// end-to-end regression test for the leak observed in a real gate run: a Test
+// step whose agent backgrounded work left 88 processes running for hours at
+// 574% CPU, long after the step had finished and the run had moved on.
+//
+// The mechanism, reproduced here: agent CLIs spawn each tool-call shell
+// detached, so the shell calls setsid and leads its own session and process
+// group. ConfigureShellCommand's kill(-agentPGID) then reaches nothing the agent
+// backgrounded, and once the agent exits the escapee reparents away, erasing the
+// ancestry that could have identified it afterwards. The group cleanup was
+// working exactly as designed and still could not see these processes.
+//
+// This exercises the real spawn path end to end - PrepareShellCommandDescendants
+// before the start, kernel-driven discovery after it, and the sweep in
+// terminate() - rather than the shellenv primitives in isolation.
+//
+// The fake agent mirrors that shape: an escaped session leader plus a cheap,
+// self-expiring marker standing in for the runaway work. Both must be gone once
+// Run returns.
+func TestClaudeAgent_Run_ReapsToolShellThatEscapedTheProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NM_AGENT_ESCAPED_HELPER", "tool-shell")
+	t.Setenv("NM_AGENT_ESCAPED_DIR", dir)
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("current test executable: %v", err)
+	}
+	a := &claudeAgent{
+		bin:                     exe,
+		extraArgs:               []string{"-test.run=^TestAgentEscapedSessionHelper$", "--"},
+		disableProjectSettings:  true,
+		processTerminationGrace: 5 * time.Second,
+	}
+
+	result, err := a.runOnce(context.Background(), RunOpts{Prompt: "run the tests", CWD: dir})
+	if err != nil {
+		t.Fatalf("runOnce() error = %v", err)
+	}
+	if result.Text != "ok" {
+		t.Fatalf("result text = %q, want ok", result.Text)
+	}
+
+	escapedPID := waitForPidFile(t, filepath.Join(dir, "escaped.pid"), 5*time.Second)
+	markerPID := waitForPidFile(t, filepath.Join(dir, "marker.pid"), 5*time.Second)
+	t.Cleanup(func() {
+		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+		_ = syscall.Kill(markerPID, syscall.SIGKILL)
+	})
+
+	if !pidGoneWithin(escapedPID, 10*time.Second) {
+		t.Errorf("escaped tool shell %d survived the agent run; this is the gate leak", escapedPID)
+	}
+	if !pidGoneWithin(markerPID, 10*time.Second) {
+		t.Errorf("work %d backgrounded by the escaped tool shell survived the agent run", markerPID)
+	}
+}
+
+// TestAgentEscapedSessionHelper is the fake agent CLI and its escaping tool
+// shell. It is inert unless NM_AGENT_ESCAPED_HELPER selects a role.
+func TestAgentEscapedSessionHelper(t *testing.T) {
+	dir := os.Getenv("NM_AGENT_ESCAPED_DIR")
+	switch os.Getenv("NM_AGENT_ESCAPED_HELPER") {
+	case "tool-shell":
+		child := exec.Command(os.Args[0], "-test.run=^TestAgentEscapedSessionHelper$")
+		child.Env = append(os.Environ(),
+			"NM_AGENT_ESCAPED_HELPER=escaped-session",
+			"NM_AGENT_ESCAPED_DIR="+dir,
+		)
+		if err := child.Start(); err != nil {
+			os.Exit(30)
+		}
+		if !waitForNativeAgentPipeHelperReady(filepath.Join(dir, "escaped-ready"), 10*time.Second) {
+			os.Exit(31)
+		}
+		time.Sleep(escapedToolShellHold)
+		_, _ = io.WriteString(os.Stdout, `{"type":"assistant","session_id":"escape-session","message":{"model":"helper-model","usage":{"input_tokens":1,"output_tokens":1},"content":[{"type":"text","text":"ok"}]}}`+"\n")
+		_, _ = io.WriteString(os.Stdout, `{"type":"result","subtype":"success","session_id":"escape-session"}`+"\n")
+		os.Exit(0)
+	case "escaped-session":
+		if _, err := syscall.Setsid(); err != nil {
+			os.Exit(32)
+		}
+		// Self-expiring marker: cheap, unambiguous, and incapable of outliving a
+		// crashed test run for long.
+		marker := exec.Command("sleep", "90")
+		if err := marker.Start(); err != nil {
+			os.Exit(33)
+		}
+		_ = os.WriteFile(filepath.Join(dir, "escaped.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, "marker.pid"), []byte(strconv.Itoa(marker.Process.Pid)), 0o644)
+		if err := os.WriteFile(filepath.Join(dir, "escaped-ready"), []byte("ready"), 0o644); err != nil {
+			os.Exit(34)
+		}
+		time.Sleep(90 * time.Second)
+		os.Exit(0)
+	}
+}
+
 func waitForPidFile(t *testing.T, path string, timeout time.Duration) int {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
