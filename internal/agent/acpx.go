@@ -82,7 +82,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, a.processTerminationGrace)
 	if err != nil {
 		return nil, fmt.Errorf("acpx start: %w", err)
 	}
