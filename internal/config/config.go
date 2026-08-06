@@ -836,35 +836,58 @@ type PromptConfig struct {
 // ForStep returns the prompt additions for a model-invoking step: shared
 // guidance first, then the step-specific guidance.
 func (p PromptConfig) ForStep(step types.StepName) string {
-	stepPrompt := ""
+	return p.ForSteps(step)
+}
+
+// ForSteps returns the prompt additions for one agent invocation that carries
+// the duties of several steps - the combined document+lint housekeeping pass
+// is one invocation owning both keys. Shared guidance is emitted exactly once,
+// followed by each step's specific guidance in the order given.
+func (p PromptConfig) ForSteps(steps ...types.StepName) string {
+	parts := make([]string, 0, len(steps)+1)
+	parts = append(parts, p.Shared)
+	for _, step := range steps {
+		parts = append(parts, p.forStepOnly(step))
+	}
+	return combinePromptText(parts...)
+}
+
+// forStepOnly returns a step's own guidance without the shared guidance.
+func (p PromptConfig) forStepOnly(step types.StepName) string {
 	switch step.Canonical() {
 	case types.StepIntent:
-		stepPrompt = p.Intent
+		return p.Intent
 	case types.StepRefresh:
-		stepPrompt = p.Refresh
+		return p.Refresh
 	case types.StepReview:
-		stepPrompt = p.Review
+		return p.Review
 	case types.StepBuild:
-		stepPrompt = p.Build
+		return p.Build
 	case types.StepTest:
-		stepPrompt = p.Test
+		return p.Test
 	case types.StepDocument:
-		stepPrompt = p.Document
+		return p.Document
 	case types.StepLint:
-		stepPrompt = p.Lint
+		return p.Lint
 	case types.StepPR:
-		stepPrompt = p.PR
+		return p.PR
 	case types.StepCI:
-		stepPrompt = p.CI
+		return p.CI
 	}
-	return combinePromptText(p.Shared, stepPrompt)
+	return ""
 }
 
 // SectionForStep formats prompt additions as an append-only prompt section.
 // The wrapper keeps the built-in prompt's structure and safety constraints
 // above any configured guidance.
 func (p PromptConfig) SectionForStep(step types.StepName) string {
-	text := strings.TrimSpace(p.ForStep(step))
+	return p.SectionForSteps(step)
+}
+
+// SectionForSteps is SectionForStep for an invocation covering several steps,
+// wrapping the combined guidance in a single append-only section.
+func (p PromptConfig) SectionForSteps(steps ...types.StepName) string {
+	text := strings.TrimSpace(p.ForSteps(steps...))
 	if text == "" {
 		return ""
 	}
@@ -2200,15 +2223,16 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Prompts (appended to
-// every pipeline agent prompt) and Document (the
-// documentation placement policy injected into the document gate prompt) are
-// trusted-only for the same reason: a pushed branch must not steer the agents
-// that gate itself. DisableProjectSettings is also
-// trusted-only so a pushed branch cannot enable or defeat the gate-agent
-// project-instruction boundary. When allowRepoCommands is
+// every pipeline agent prompt) follows the same opt-in boundary as those
+// fields: a pushed branch must not steer the agents that gate it unless the
+// maintainer opted in. Document (the documentation placement policy injected
+// into the document gate prompt) and DisableProjectSettings are
+// unconditionally trusted-only, so not even the opt-in lets a pushed branch
+// weaken the placement policy or the gate-agent project-instruction boundary.
+// When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
-// and agent selection, including step routes.
+// prompt additions, and agent selection, including step routes.
 // When there is no trusted copy and the maintainer has not opted in, all
 // code-executing selectors are forced empty (Agent "" and nil Agents inherit
 // the global agent; empty step routes inherit that run route; Commands{} and

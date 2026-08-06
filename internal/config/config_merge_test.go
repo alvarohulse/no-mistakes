@@ -62,6 +62,29 @@ func TestMerge_PromptsCombineGlobalThenRepo(t *testing.T) {
 	}
 }
 
+// TestPrompts_ForStepsEmitsSharedOnce covers an agent invocation owning several
+// steps' duties, like the combined document+lint housekeeping pass.
+func TestPrompts_ForStepsEmitsSharedOnce(t *testing.T) {
+	p := PromptConfig{
+		Shared:   "shared",
+		Document: "document",
+		Lint:     "lint",
+	}
+
+	if got, want := p.ForSteps(types.StepDocument, types.StepLint), "shared\n\ndocument\n\nlint"; got != want {
+		t.Errorf("document+lint prompt = %q, want %q", got, want)
+	}
+	if got, want := p.ForSteps(types.StepLint, types.StepDocument), "shared\n\nlint\n\ndocument"; got != want {
+		t.Errorf("step order must be preserved: got %q, want %q", got, want)
+	}
+	if got, want := p.ForSteps(types.StepDocument), p.ForStep(types.StepDocument); got != want {
+		t.Errorf("single-step ForSteps = %q, want ForStep %q", got, want)
+	}
+	if got := (PromptConfig{}).SectionForSteps(types.StepDocument, types.StepLint); got != "" {
+		t.Errorf("unconfigured prompts section = %q, want empty", got)
+	}
+}
+
 func TestMerge_UsesRepoRefreshStrategy(t *testing.T) {
 	cfg := Merge(DefaultGlobalConfig(), &RepoConfig{Refresh: RefreshRaw{Strategy: types.RefreshStrategyMerge}})
 	if cfg.RefreshStrategy != types.RefreshStrategyMerge {

@@ -80,6 +80,42 @@ func TestConfiguredPromptSectionCoversEveryAgentInvokingStep(t *testing.T) {
 	}
 }
 
+// TestConfiguredPromptSectionForSeveralSteps covers one agent invocation that
+// owns several steps' duties: shared guidance is emitted once, then each
+// step's guidance in the order requested, under a single wrapper.
+func TestConfiguredPromptSectionForSeveralSteps(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{
+		Config: &config.Config{
+			Prompts: config.PromptConfig{
+				Shared:   "shared guidance",
+				Document: "document guidance",
+				Lint:     "lint guidance",
+			},
+		},
+	}
+
+	got := configuredPromptSection(sctx, types.StepDocument, types.StepLint)
+	if n := strings.Count(got, "shared guidance"); n != 1 {
+		t.Fatalf("shared guidance appears %d times, want exactly once:\n%s", n, got)
+	}
+	if n := strings.Count(got, "Additional prompt config:"); n != 1 {
+		t.Fatalf("wrapper appears %d times, want exactly once:\n%s", n, got)
+	}
+	sharedAt := strings.Index(got, "shared guidance")
+	docAt := strings.Index(got, "document guidance")
+	lintAt := strings.Index(got, "lint guidance")
+	if docAt < 0 || lintAt < 0 {
+		t.Fatalf("section missing document (%d) or lint (%d) guidance:\n%s", docAt, lintAt, got)
+	}
+	if !(sharedAt < docAt && docAt < lintAt) {
+		t.Fatalf("want shared(%d) < document(%d) < lint(%d):\n%s", sharedAt, docAt, lintAt, got)
+	}
+	if single := configuredPromptSection(sctx, types.StepDocument); strings.Contains(single, "lint guidance") {
+		t.Fatalf("single-step section must not carry another step's guidance:\n%s", single)
+	}
+}
+
 func TestConfiguredPromptSectionEmpty(t *testing.T) {
 	t.Parallel()
 	if got := configuredPromptSection(nil, types.StepReview); got != "" {
