@@ -110,7 +110,7 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	cmd.Env = gitSafeEnv(workspace)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, a.processTerminationGrace)
 	if err != nil {
 		return nil, fmt.Errorf("cursor start: %w", err)
 	}

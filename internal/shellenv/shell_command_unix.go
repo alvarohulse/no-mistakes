@@ -96,12 +96,23 @@ func terminateShellCommandGroup(cmd *exec.Cmd, processTerminationGrace time.Dura
 	if err := signalShellCommandGroup(cmd, syscall.SIGTERM); err != nil {
 		return err
 	}
+	leader := 0
+	if cmd != nil && cmd.Process != nil {
+		leader = cmd.Process.Pid
+	}
 
 	deadline := time.Now().Add(processTerminationGrace)
 	for {
 		if err := signalShellCommandGroup(cmd, 0); errors.Is(err, os.ErrProcessDone) {
 			return nil
 		}
+		// The group still has a member. On a platform where this process is a
+		// subreaper that member can be a descendant it adopted and that has
+		// already exited: an uncollected zombie is still in the group, so without
+		// collecting it here the loop would wait out the whole grace window and
+		// then SIGKILL a corpse. Nothing happens on the common empty-group path,
+		// which returns above before reaching this.
+		collectAdoptedGroupOrphans(leader, 0)
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -115,6 +126,10 @@ func terminateShellCommandGroup(cmd *exec.Cmd, processTerminationGrace time.Dura
 	}
 
 	err := signalShellCommandGroup(cmd, syscall.SIGKILL)
+	// A force-killed member this process adopted becomes its zombie rather than
+	// disappearing, and the kill lands asynchronously, so the collection here
+	// gets a bounded window to wait the stragglers out.
+	collectAdoptedGroupOrphans(leader, adoptedReapWindow)
 	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}

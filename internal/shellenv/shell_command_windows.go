@@ -152,6 +152,25 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	_ = kill.Run()
 }
 
+// ShellCommandDescendants is inert on Windows. The kill-on-close job object
+// assigned in StartShellCommand already owns every descendant, whatever process
+// group it creates for itself, so there is no escapee class to track and no
+// discovery window to narrow. Windows keeps the guarantee structurally; unix has
+// to reconstruct it (see shell_command_descendants_unix.go).
+type ShellCommandDescendants struct{}
+
+// PrepareShellCommandDescendants is a no-op on Windows; the job object covers
+// the whole tree.
+func PrepareShellCommandDescendants(cmd *exec.Cmd, _ time.Duration) *ShellCommandDescendants {
+	return nil
+}
+
+// Watch is a no-op, including on the nil receiver call sites use.
+func (d *ShellCommandDescendants) Watch() {}
+
+// Terminate is a no-op, including on the nil receiver call sites use.
+func (d *ShellCommandDescendants) Terminate() {}
+
 func newShellCommandJob() (windows.Handle, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
