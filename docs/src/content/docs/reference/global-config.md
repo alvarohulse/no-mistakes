@@ -316,6 +316,16 @@ Accepts any positive Go `time.ParseDuration` string. Invalid, zero, and negative
 
 This is a ceiling, not an unconditional delay. When the agent, test runner, build watcher, or other descendant exits promptly after `SIGTERM`, no-mistakes continues immediately. Windows process trees use job-object termination and do not wait on this Unix signal window.
 
+The same ceiling bounds cleanup of descendants that left the process group. Agent CLIs spawn each tool-call shell detached, so anything an agent backgrounds leads its own Unix session and cannot be reached by a process-group signal. On Unix, no-mistakes discovers those escaped descendants while the agent is still running and terminates them when the step tears down, using the same `SIGTERM`-then-`SIGKILL` escalation. Discovery is driven by the kernel and never by a timer: macOS learns of each fork through kqueue process events, and Linux makes the daemon a child subreaper so orphaned descendants reparent onto it instead of vanishing to init.
+
+Discovery narrows the window rather than closing it, and the residual gap differs by platform:
+
+- **macOS** reports *that* a process forked but not which pid, so no-mistakes reads the process table on each wakeup. A descendant that both escapes and is orphaned inside that gap is missed.
+- **Linux** collects orphans by session at teardown, so a descendant that escaped by changing only its process group, without `setsid`, is not collected.
+- **Windows** has no such window at all: the job object owns the whole tree structurally.
+
+Because the window is real, every agent subprocess also inherits a sentinel descriptor that reaches end-of-file only once the last descendant has exited. After the sweep no-mistakes checks it, and logs `processes survived step teardown` with the agent pid if anything still holds it. Treat that warning as a report of stray processes left behind by that step — it is the difference between a leak you can see and a silent one.
+
 ### log_level
 
 Daemon log verbosity.

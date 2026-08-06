@@ -22,3 +22,18 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // primitive, mirroring ConfigureShellCommand. The reap-the-group-on-exit
 // guarantee is best-effort and platform-gated.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {}
+
+// ShellCommandDescendants is the inert stand-in on platforms with no
+// process-group model to escape from in the first place.
+type ShellCommandDescendants struct{}
+
+// PrepareShellCommandDescendants is a no-op on platforms without process groups.
+func PrepareShellCommandDescendants(cmd *exec.Cmd, _ time.Duration) *ShellCommandDescendants {
+	return nil
+}
+
+// Watch is a no-op, including on the nil receiver call sites use.
+func (d *ShellCommandDescendants) Watch() {}
+
+// Terminate is a no-op, including on the nil receiver call sites use.
+func (d *ShellCommandDescendants) Terminate() {}
