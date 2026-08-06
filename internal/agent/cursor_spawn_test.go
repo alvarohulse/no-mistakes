@@ -142,6 +142,38 @@ while :; do sleep 1; done
 	}
 }
 
+// Whether the stream reader or the wait path observes a cancellation depends on
+// whether an unread event was still buffered when it landed. This is the reader
+// ordering: every event arrives in one write, so the reader keeps scanning from
+// memory after the cancellation and aborts mid-stream instead of seeing EOF.
+// The unbuffered ordering is covered above and races between the two.
+func TestCursorAgent_CancellationMidStreamIsCancellation(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cursor-agent")
+	contents := `#!/bin/sh
+printf '%s\n%s\n%s\n' '{"type":"system","subtype":"init","session_id":"cursor-session"}' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}' '{"type":"assistant","message":{"content":[{"type":"text","text":"still working"}]}}'
+trap 'exit 143' TERM INT
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := (&cursorAgent{bin: script}).Run(ctx, RunOpts{
+		Prompt:  "review",
+		CWD:     dir,
+		OnChunk: func(string) { cancel() },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "parse") || strings.Contains(err.Error(), "no result") {
+		t.Fatalf("mid-stream cancellation was misclassified: %v", err)
+	}
+}
+
 func TestCursorAgent_SignalExitWithoutTerminalResultIsCancellation(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "cursor-agent")

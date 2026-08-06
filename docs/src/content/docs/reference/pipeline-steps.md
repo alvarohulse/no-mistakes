@@ -222,6 +222,7 @@ Creates or updates a pull request.
 - Under body caps, the attribution table is removed as a complete unit before the existing Pipeline status-update omission and truncation rules run.
 - When the final-scope body and pipeline status leave insufficient space, the Intent section uses the remaining budget and is truncated with an explicit marker.
 - For Azure DevOps, the PR description is capped at 4000 characters (UTF-16 code units, matching .NET's measurement): the agent is told about the cap and asked to keep `## What Changed` compact, Intent uses the remaining budget, and a final connector-level clamp truncates with a visible marker as a last-resort backstop.
+- When a PR body formatter is configured, its output replaces the built-in body described above and the section layout becomes its decision; the title stays pipeline-drafted, and the host character cap and byte cap above still clamp what the formatter returns, while the built-in body's section-removal and truncation ordering no longer apply. The formatter's data contract, resolution order, and fallback behavior are owned by [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body), and [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body) renders one without running a gate.
 
 Stores the PR URL in the database and streams it to the TUI.
 

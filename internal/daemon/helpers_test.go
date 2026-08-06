@@ -81,6 +81,23 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// Budgets for the polling waits below. Everything they wait for is a chain of
+// git subprocesses and process handoffs, so they are sized for the slowest
+// machine the suite runs on rather than a healthy one: a loaded Windows CI
+// runner has been measured taking ~8x the healthy cost of a push-received run
+// cycle, so a budget with only a second or two of headroom fails a run that is
+// still making progress. Nothing healthy pays these - every wait returns as
+// soon as its condition holds - and a genuinely stuck run still fails, later.
+const (
+	// testRunTerminalBudget bounds one run reaching a terminal state. Its
+	// critical path includes the repo-URL refresh, the trusted-config fetch,
+	// and the worktree carve, all of which run before the first step.
+	testRunTerminalBudget = 30 * time.Second
+	// testDaemonStopBudget bounds shutdown, which drains any in-flight run
+	// before RunWithOptions/RunWithResources returns.
+	testDaemonStopBudget = 20 * time.Second
+)
+
 // startTestDaemon starts RunWithResources in a goroutine with a temp root.
 // Returns paths, db, and a cleanup function that stops the daemon.
 func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
@@ -127,8 +144,8 @@ func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
 		}
 		select {
 		case <-errCh:
-		case <-time.After(3 * time.Second):
-			t.Error("daemon did not stop within 3s")
+		case <-time.After(testDaemonStopBudget):
+			t.Errorf("daemon did not stop within %s", testDaemonStopBudget)
 		}
 	})
 
@@ -232,8 +249,8 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 		}
 		select {
 		case <-errCh:
-		case <-time.After(3 * time.Second):
-			t.Error("daemon did not stop within 3s")
+		case <-time.After(testDaemonStopBudget):
+			t.Errorf("daemon did not stop within %s", testDaemonStopBudget)
 		}
 	})
 
@@ -427,7 +444,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testRunTerminalBudget)
 	for time.Now().Before(deadline) {
 		run, err := d.GetRun(runID)
 		if err != nil {
@@ -438,6 +455,16 @@ func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("run %s did not reach terminal state", runID)
+	run, err := d.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Name the state it was left in: "did not finish" alone cannot distinguish a
+	// run still carving its worktree from one wedged mid-step.
+	status := types.RunStatus("<missing>")
+	if run != nil {
+		status = run.Status
+	}
+	t.Fatalf("run %s did not reach terminal state within %s (status %s)", runID, testRunTerminalBudget, status)
 	return nil
 }

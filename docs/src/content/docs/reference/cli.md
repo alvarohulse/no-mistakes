@@ -97,7 +97,7 @@ no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacke
 | `--intent`    | `string` | (none)  | What the user set out to accomplish; required to start a new run |
 | `-y`, `--yes` | `bool`   | `false` | Auto-resolve every eligible gate until a decision point or outcome. A Test gate created because the agent changed a test file requires explicit approval and stays parked |
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
-| `--pr-note`   | `string` | (none)  | Trusted author text for the generated PR's Notes section         |
+| `--pr-note`   | `string` | (none)  | Trusted author text added verbatim to the generated PR body      |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
 | `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
 | `--stacked-on` | `string` | default branch | Use this branch as the refresh and pull-request base             |
@@ -108,7 +108,7 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
-`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim after `## Intent`, supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
+`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as a `## Notes` section after `## Intent` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -385,6 +385,43 @@ no-mistakes stats --run <id>
 
 The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry. The generated PR's existing Pipeline section includes only the compact step/round, top-level invocation, and nested-agent attribution subset.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
+
+## no-mistakes pr-body
+
+Render a pull request body through the [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter and print it.
+
+```sh
+no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+```
+
+| Flag               | Type     | Default    | Description                                                     |
+| ------------------ | -------- | ---------- | --------------------------------------------------------------- |
+| `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
+| `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
+| `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
+| `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
+| `--hook`           | `string` | Configured | Formatter command, overriding `hooks.pr_body` for this run       |
+
+This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
+
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `what_changed`, which is the drafting agent's own output and is not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block.
+
+The formatter is resolved the same way a run resolves it: `--hook`, then `NM_REPO_CONFIG`, then the repo's `.no-mistakes.yaml`, then `~/.no-mistakes/config.yaml`. The chosen source is reported on stderr.
+
+Like a run, the repo layer is read from your **default branch**, never from the checkout - `hooks.pr_body` executes arbitrary shell, so a preview that honored the working tree would run whatever a contributor's branch declares as soon as you checked it out to look at it. The command does not fetch, so it reads `origin/<default branch>` and falls back to the local branch. It runs the formatter from the repository root, matching the run's worktree root, so a template read by relative path resolves the same way from any subdirectory.
+
+A failing formatter exits non-zero here and says that a run would fall back to the built-in body, so the fallback path is visible rather than inferred.
+
+```sh
+# Capture the contract shape to write a formatter against.
+no-mistakes pr-body --sample --print-contract > contract.json
+
+# Iterate on a formatter without running a gate.
+no-mistakes pr-body --sample --hook ~/scripts/format-pr
+
+# Check what the last real run would produce.
+no-mistakes pr-body
+```
 
 ## no-mistakes doctor
 

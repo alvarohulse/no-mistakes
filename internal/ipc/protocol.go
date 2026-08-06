@@ -67,8 +67,8 @@ func (e *RPCError) Error() string { return e.Message }
 //
 // PRNote, when set, is operator-supplied content (via `axi run --pr-note`/
 // `--pr-note-file`). It is stamped onto the run so, after trimming surrounding
-// whitespace, the PR step renders it verbatim in a "## Notes" section and feeds
-// it to the PR summary prompt.
+// whitespace, the PR step renders it verbatim in the PR body and feeds it to the
+// PR summary prompt. The PR step owns where it lands.
 type PushReceivedParams struct {
 	// Gate is the absolute path to the gate bare repo.
 	Gate            string                `json:"gate"`

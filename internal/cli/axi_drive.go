@@ -101,9 +101,10 @@ func newAxiRunCmd() *cobra.Command {
 			"A failed post-worktree hook parks before any pipeline step. Correct the\n" +
 			"environment outside no-mistakes, run `no-mistakes axi abort`, then start a\n" +
 			"fresh run; --yes never resolves this controller gate.\n\n" +
-			"--pr-note or --pr-note-file injects trusted author text into the PR body's\n" +
-			"## Notes section. The flags are mutually exclusive, limited to 16 KiB, and\n" +
-			"apply only when starting a new run.\n\n" +
+			"--pr-note or --pr-note-file injects trusted author text verbatim into the\n" +
+			"PR body: a ## Notes section in the built-in body, or wherever a configured\n" +
+			"hooks.pr_body formatter places it. The flags are mutually exclusive,\n" +
+			"limited to 16 KiB, and apply only when starting a new run.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,

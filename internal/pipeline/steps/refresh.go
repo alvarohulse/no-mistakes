@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -143,11 +144,21 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	return updateHeadSHA(ctx, sctx)
 }
 
-func refreshBaseBranch(sctx *pipeline.StepContext, defaultBranch string) string {
-	if stackedOn := strings.TrimSpace(sctx.Run.StackedOn); stackedOn != "" {
-		return stackedOn
+// BaseBranchForRun is the branch a run refreshes onto and targets its PR at:
+// its stacked-on parent when set, else the repository default branch. It is the
+// single owner of that rule so a caller reconstructing a run outside a step
+// context cannot drift from what the live step used.
+func BaseBranchForRun(run *db.Run, defaultBranch string) string {
+	if run != nil {
+		if stackedOn := strings.TrimSpace(run.StackedOn); stackedOn != "" {
+			return stackedOn
+		}
 	}
 	return defaultBranch
+}
+
+func refreshBaseBranch(sctx *pipeline.StepContext, defaultBranch string) string {
+	return BaseBranchForRun(sctx.Run, defaultBranch)
 }
 
 // refreshTargets returns the ordered list of refs to incorporate.

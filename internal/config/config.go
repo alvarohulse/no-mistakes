@@ -69,17 +69,22 @@ type GlobalConfig struct {
 	// separate durable fixer session across fix turns). Default true; set
 	// session_reuse: false to force every invocation cold.
 	SessionReuse bool `yaml:"-"`
-	AutoFix      AutoFixRaw
-	Commit       CommitRaw
-	Intent       IntentRaw
-	Refresh      StepAgentRaw
-	Review       ReviewRaw
-	Build        StepAgentRaw
-	Test         TestRaw
-	Document     DocumentRaw
-	Lint         StepAgentRaw
-	PR           StepAgentRaw
-	CI           StepAgentRaw
+	// Hooks carries the machine-wide hook defaults. Only pr_body is accepted
+	// here: a PR body formatter is the same script for every repo on a
+	// machine, while post_worktree is a repo's own install command and stays
+	// repo-only.
+	Hooks    Hooks `yaml:"-"`
+	AutoFix  AutoFixRaw
+	Commit   CommitRaw
+	Intent   IntentRaw
+	Refresh  StepAgentRaw
+	Review   ReviewRaw
+	Build    StepAgentRaw
+	Test     TestRaw
+	Document DocumentRaw
+	Lint     StepAgentRaw
+	PR       StepAgentRaw
+	CI       StepAgentRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -96,6 +101,7 @@ type globalConfigRaw struct {
 	StepQuietWarning        string              `yaml:"step_quiet_warning"`
 	LogLevel                string              `yaml:"log_level"`
 	SessionReuse            *bool               `yaml:"session_reuse"`
+	Hooks                   Hooks               `yaml:"hooks"`
 	AutoFix                 AutoFixRaw          `yaml:"auto_fix"`
 	Commit                  CommitRaw           `yaml:"commit"`
 	Intent                  IntentRaw           `yaml:"intent"`
@@ -119,7 +125,7 @@ type RepoConfig struct {
 	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{build,test,lint,format}, hooks.post_worktree, agent, and every step agent route) from a contributor's
+	// fields (commands.{build,test,lint,format}, hooks.{post_worktree,pr_body}, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -440,6 +446,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("hooks.post_worktree") {
 		out.Hooks.PostWorktree = override.Hooks.PostWorktree
 	}
+	if override.has("hooks.pr_body") {
+		out.Hooks.PRBody = override.Hooks.PRBody
+	}
 	if override.has("ignore_patterns") {
 		out.IgnorePatterns = copyStrings(override.IgnorePatterns)
 	}
@@ -663,6 +672,11 @@ type Commands struct {
 // configuration and are never sourced from an untrusted pushed branch.
 type Hooks struct {
 	PostWorktree string `yaml:"post_worktree"`
+	// PRBody is an external PR body formatter. It receives the prbody
+	// contract on stdin and returns the finished body on stdout. A non-zero
+	// exit falls back to the built-in body and is reported, so a broken
+	// formatter never blocks shipping.
+	PRBody string `yaml:"pr_body"`
 }
 
 // AutoFixRaw is the YAML representation of auto-fix config.
@@ -1883,6 +1897,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if strings.TrimSpace(raw.Document.Instructions) != "" {
 		return nil, fmt.Errorf("parse global config: document.instructions is repo-only")
 	}
+	if strings.TrimSpace(raw.Hooks.PostWorktree) != "" {
+		return nil, fmt.Errorf("parse global config: hooks.post_worktree is repo-only")
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -1943,6 +1960,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if raw.SessionReuse != nil {
 		cfg.SessionReuse = *raw.SessionReuse
 	}
+	cfg.Hooks.PRBody = strings.TrimSpace(raw.Hooks.PRBody)
 	if raw.AutoFix.CI == nil {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
 	}
@@ -2301,6 +2319,13 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		commit.FixMessage = *repo.Commit.FixMessage
 	}
 
+	// post_worktree is repo-only, so it comes straight from the repo layer.
+	// pr_body takes a machine-wide default that a repo config can override.
+	hooks := Hooks{PostWorktree: repo.Hooks.PostWorktree, PRBody: global.Hooks.PRBody}
+	if strings.TrimSpace(repo.Hooks.PRBody) != "" {
+		hooks.PRBody = repo.Hooks.PRBody
+	}
+
 	cfg := &Config{
 		Agent:                   global.Agent,
 		Agents:                  copyAgents(global.Agents),
@@ -2318,7 +2343,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		LogLevel:                global.LogLevel,
 		SessionReuse:            global.SessionReuse,
 		Commands:                repo.Commands,
-		Hooks:                   repo.Hooks,
+		Hooks:                   hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
 		Commit:                  commit,

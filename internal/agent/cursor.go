@@ -131,6 +131,15 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if parseErr != nil {
 		parseErr = started.waitAfterParseError(parseErr)
 		stderrWG.Wait()
+		// A cancellation can surface here or on the wait path below, depending
+		// only on whether an unread event was still buffered when it landed: the
+		// reader aborts mid-stream, otherwise it reaches EOF and the wait path
+		// classifies it. Both are the same outcome, so classify it here too -
+		// wrapping it reports a stream-format failure for an ordinary abort.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			emitAgentExited(opts, "cursor", pid, ctxErr)
+			return nil, ctxErr
+		}
 		retErr := fmt.Errorf("cursor parse events: %w", parseErr)
 		emitAgentExited(opts, "cursor", pid, retErr)
 		return nil, retErr
