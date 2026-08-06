@@ -493,3 +493,4 @@ Global prompt config and repo prompt config combine in this order:
 | `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
 
 Push never invokes a model, so there is no `prompts.push`.
+When `commands.lint` is empty, the [combined document+lint housekeeping pass](/no-mistakes/reference/pipeline-steps/#document) is a single invocation, so it carries both `prompts.document` and `prompts.lint` with shared guidance included once.

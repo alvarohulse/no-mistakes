@@ -479,29 +479,9 @@ Global prompt additions appended to no-mistakes' built-in pipeline prompts.
 | Default | Empty (built-in prompts only) |
 
 Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
-`prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
+Values set here apply to every repository gated by this machine.
 
-Per-repo prompt config combines with global prompt config in this order:
-
-1. global `prompts.shared`
-2. repo `prompts.shared`
-3. global `prompts.<step>`
-4. repo `prompts.<step>`
-
-| Field | Applies to |
-|---|---|
-| `prompts.shared` | Every pipeline model prompt |
-| `prompts.intent` | Intent summarization and disambiguation |
-| `prompts.refresh` | Refresh (rebase or merge) conflict resolution |
-| `prompts.review` | Review, adversarial review, and review-fix prompts |
-| `prompts.build` | Build verification and build-fix prompts |
-| `prompts.test` | Test evidence and test-fix prompts |
-| `prompts.document` | Documentation update prompt |
-| `prompts.lint` | Lint agent and lint-fix prompts |
-| `prompts.pr` | PR title/body prompt |
-| `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
-
-Push never invokes a model, so there is no `prompts.push`.
+A repo's own `prompts` never replaces these values; the two append, global guidance first. The supported keys, the step each one reaches, and the full merge order are owned by [the repo config reference](/no-mistakes/reference/repo-config/#prompts).
 
 ## Environment variables
 

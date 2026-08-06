@@ -43,7 +43,7 @@ Opt into a machine-local repo config that is not committed to the repository.
 | Type    | `string` (absolute path to YAML file) |
 | Default | unset                                |
 
-The file uses the [repo config](/no-mistakes/reference/repo-config/) shape and overrides committed repo config field by field, including `commands`, `hooks`, the run-wide `agent`, and per-step agent routes. Explicit empty values clear the corresponding committed value.
+The file uses the [repo config](/no-mistakes/reference/repo-config/) shape and overrides committed repo config field by field, including `commands`, `hooks`, the run-wide `agent`, per-step agent routes, and individual [`prompts`](/no-mistakes/reference/repo-config/#prompts) keys. Explicit empty values clear the corresponding committed value.
 
 The path must be absolute, resolve outside the repository (including across symlinks), and point to a readable config that declares its own `repo:` binding. The binding must identify the registered upstream repository; equivalent SSH and HTTPS GitHub remotes match. An empty, relative, missing, unreadable, unparseable, unbound, or mismatched config fails the run before pipeline work starts. `no-mistakes doctor` checks the path, syntax, and required binding; the run also checks the binding against the selected repository.
 
