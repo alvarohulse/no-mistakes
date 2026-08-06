@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,18 +18,28 @@ var (
 	childSubreaperErr  error
 )
 
+// descendantDiscoveryTracksLiveLeader reports whether discovery learns
+// descendants while the leader is still running. Linux does not: there is no
+// unprivileged fork notification, so everything is enumerated once at teardown.
+const descendantDiscoveryTracksLiveLeader = false
+
 // startDescendantDiscovery makes this process a child subreaper and returns the
 // teardown-time collector.
 //
 // Linux needs no fork notification at all, which is the whole point of doing it
 // this way. PR_SET_CHILD_SUBREAPER redirects orphan reparenting from init to the
 // nearest living subreaper ancestor, so ancestry is never destroyed rather than
-// being raced against. While an agent leader is alive its own orphans stay
-// inside its subtree; only when the leader itself dies do they land on us, which
-// is precisely the moment teardown looks.
+// being raced against, and teardown can enumerate what landed on us.
 //
-// The attribute is inherited across fork and preserved across exec, and it is
-// idempotent, so setting it once per process is enough.
+// The attribute is preserved across exec but, per prctl(2), is NOT inherited
+// across fork or clone, and nothing we spawn sets it for itself. Every orphan
+// under this process therefore reparents onto the daemon directly and
+// immediately, including orphans of a pipeline that is still running. Which
+// invocation an orphan belongs to is decided by recordAdoptedOrphans, not by the
+// shape of the process tree; do not reintroduce the assumption that a live
+// leader shields its own subtree.
+//
+// The prctl is idempotent, so setting it once per process is enough.
 func startDescendantDiscovery(d *ShellCommandDescendants) descendantDiscovery {
 	childSubreaperOnce.Do(func() {
 		childSubreaperErr = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
@@ -45,17 +56,44 @@ type subreaperDiscovery struct {
 	stopOnce    sync.Once
 }
 
-// stop runs at teardown, immediately after the leader was reaped, and collects
-// the orphans that just reparented onto us. See recordAdoptedOrphans for why
-// what we see now is this leader's and not a concurrently running run's.
+// stop runs at teardown and collects the orphans this process adopted. Orphans
+// of a concurrently running invocation are sitting in the same place, so
+// ownership is proved per pid rather than assumed; see recordAdoptedOrphans.
 func (s *subreaperDiscovery) stop() {
 	s.stopOnce.Do(func() {
-		s.descendants.recordAdoptedOrphans(sampleProcessTable())
+		s.descendants.recordAdoptedOrphans(sampleProcessTable(), s.descendants.carriesInvocationToken)
 	})
 }
 
+// processCarriesDescendantToken reports whether pid's environment still holds
+// token. /proc/<pid>/environ is the process's initial environment, which fork
+// and exec propagate down the whole subtree, so it answers "did this come from
+// that invocation" without needing an ancestry that is already gone.
+//
+// Every failure - an exited process, an unreadable environment, a zombie whose
+// environment the kernel has already dropped - reads as "not ours", which leaves
+// the process running instead of terminating a stranger's work.
+func processCarriesDescendantToken(pid int, token string) bool {
+	if pid <= 1 || token == "" {
+		return false
+	}
+	environ, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		return false
+	}
+	want := descendantTokenEnv + "=" + token
+	for _, entry := range strings.Split(string(environ), "\x00") {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
 // sampleProcessTable reads pid, ppid, pgid, session and start time from /proc.
-// It is taken once at teardown, not on a schedule.
+// It is only ever taken during teardown - never on a schedule - and the
+// process-group path reaches it only once a group has proved to still have a
+// member, so a clean exit pays for no snapshot at all.
 func sampleProcessTable() map[int]procEntry {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -127,29 +165,61 @@ func parseProcPIDStat(stat string) (procEntry, bool) {
 	}, true
 }
 
-// reapAdoptedDescendant collects an orphan this process adopted as a subreaper.
-// Without it every reaped escapee would linger as a zombie for the daemon's
-// lifetime, trading a CPU leak for a pid-table leak.
+// collectAdoptedDescendant makes one non-blocking attempt to collect an orphan
+// this process adopted as a subreaper, reporting whether it was collected.
+// Without collection every reaped escapee would linger as a zombie for the
+// daemon's lifetime, trading a CPU leak for a pid-table leak.
 //
-// Only pids identified as adopted reach here. That restriction is what makes it
-// safe: a bare wait(-1) would race os/exec and could consume the exit status a
-// Cmd.Wait is blocked on, and an adopted orphan is by construction not an
-// os/exec child.
-func reapAdoptedDescendant(pid int) {
+// Always waiting on an exact pid is what makes it safe. A bare wait(-1) would
+// race os/exec and could consume the exit status a Cmd.Wait is blocked on;
+// waiting on a specific pid that os/exec does not own cannot, and a pid that is
+// not our child fails with ECHILD without disturbing anything.
+func collectAdoptedDescendant(pid int) bool {
 	if pid <= 1 {
-		return
+		return false
 	}
 	var status unix.WaitStatus
-	for attempt := 0; attempt < adoptedReapAttempts; attempt++ {
-		waited, err := unix.Wait4(pid, &status, unix.WNOHANG, nil)
-		if waited == pid || err != nil {
-			return // collected, or never ours to collect
-		}
-		unix.Nanosleep(&unix.Timespec{Nsec: int64(adoptedReapPause)}, nil)
-	}
+	collected, err := unix.Wait4(pid, &status, unix.WNOHANG, nil)
+	return err == nil && collected == pid
 }
 
-const (
-	adoptedReapAttempts = 20
-	adoptedReapPause    = 5_000_000 // 5ms in nanoseconds
-)
+// collectAdoptedGroupOrphans collects the members of leaderPID's process group
+// that this process adopted as a subreaper and that have since exited.
+//
+// The subreaper obliges us to wait on what we adopt, and process-group cleanup
+// is where the obligation falls due for descendants that never left the group:
+// a worker backgrounded by a configured build/test/lint shell is orphaned the
+// moment that shell exits, reparents onto the daemon rather than init, and after
+// the group SIGTERM stays a zombie that nothing collects. That costs a pid slot
+// for the daemon's lifetime, and - because kill(-pgid, 0) still succeeds for a
+// group whose only remaining member is a zombie - it would also make every such
+// teardown burn the whole grace window before SIGKILLing a corpse.
+//
+// Attribution here needs no token: Setpgid makes the group id the leader's pid,
+// so the only member of it that os/exec owns is the leader itself, and every
+// other member that is a direct child of ours was adopted rather than spawned.
+//
+// within bounds how long it waits for stragglers still on their way out; zero
+// makes it a single pass. It returns as soon as the group is empty either way.
+func collectAdoptedGroupOrphans(leaderPID int, within time.Duration) {
+	if leaderPID <= 1 {
+		return
+	}
+	self := os.Getpid()
+	deadline := time.Now().Add(within)
+	for {
+		for pid, entry := range sampleProcessTable() {
+			if pid == leaderPID || pid == self || !entry.zombie {
+				continue
+			}
+			if entry.ppid != self || entry.pgid != leaderPID {
+				continue
+			}
+			collectAdoptedDescendant(pid)
+		}
+		if unix.Kill(-leaderPID, 0) == unix.ESRCH || !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(processGroupTerminationPollInterval)
+	}
+}

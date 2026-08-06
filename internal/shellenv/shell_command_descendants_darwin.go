@@ -5,6 +5,7 @@ package shellenv
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,13 +37,24 @@ const descendantProcEvents = unix.NOTE_FORK | unix.NOTE_EXEC | unix.NOTE_EXIT
 // This narrows the discovery window to wakeup-to-snapshot rather than closing
 // it. A grandchild forked and orphaned inside that window is still missed; the
 // sentinel in the shared file is what makes such a miss visible.
+//
+// registered is keyed by pid but records process identity, because the kernel
+// drops an EVFILT_PROC registration when its process exits: a bare "already
+// subscribed" set would treat a recycled pid as covered and stay blind to the
+// new process's forks for the rest of the invocation.
 type kqueueDiscovery struct {
 	descendants *ShellCommandDescendants
 	kq          int
-	registered  map[int]bool
+	registered  map[int]uint64
 	done        chan struct{}
 	stopOnce    sync.Once
+	kqClosed    bool
 }
+
+// descendantDiscoveryTracksLiveLeader reports whether discovery learns
+// descendants while the leader is still running. kqueue process events do, which
+// is what lets teardown reach an escapee whose ancestry is gone by then.
+const descendantDiscoveryTracksLiveLeader = true
 
 func startDescendantDiscovery(d *ShellCommandDescendants) descendantDiscovery {
 	kq, err := unix.Kqueue()
@@ -65,7 +77,7 @@ func startDescendantDiscovery(d *ShellCommandDescendants) descendantDiscovery {
 	discovery := &kqueueDiscovery{
 		descendants: d,
 		kq:          kq,
-		registered:  make(map[int]bool),
+		registered:  make(map[int]uint64),
 		done:        make(chan struct{}),
 	}
 	if err := discovery.subscribe(d.leaderPID); err != nil {
@@ -118,8 +130,16 @@ func (k *kqueueDiscovery) snapshot() {
 	if len(table) == 0 {
 		return
 	}
+	// Registrations die with their process, so forget the ones whose process is
+	// gone. That both bounds the map and makes a recycled pid look unregistered,
+	// which it is.
+	for pid, startedAt := range k.registered {
+		if entry, ok := table[pid]; !ok || entry.startedAt != startedAt {
+			delete(k.registered, pid)
+		}
+	}
 	for _, pid := range k.descendants.recordDescendants(table) {
-		if k.registered[pid] {
+		if _, ok := k.registered[pid]; ok {
 			continue
 		}
 		if err := k.subscribe(pid); err != nil {
@@ -132,7 +152,7 @@ func (k *kqueueDiscovery) snapshot() {
 			}
 			continue
 		}
-		k.registered[pid] = true
+		k.registered[pid] = table[pid].startedAt
 	}
 }
 
@@ -159,12 +179,18 @@ func (k *kqueueDiscovery) stop() {
 		}
 		if _, err := unix.Kevent(k.kq, []unix.Kevent_t{trigger}, nil, nil); err != nil {
 			// Without the wakeup the loop would park forever, so close the queue to
-			// force kevent to fail out instead of deadlocking teardown.
+			// force kevent to fail out instead of deadlocking teardown. The loop
+			// goroutine observes EBADF and finishes, and the descriptor must not be
+			// closed a second time below: the daemon opens files, pipes and sockets
+			// constantly, so the number would by then belong to something else.
 			_ = unix.Close(k.kq)
+			k.kqClosed = true
 		}
 	})
 	<-k.done
-	_ = unix.Close(k.kq)
+	if !k.kqClosed {
+		_ = unix.Close(k.kq)
+	}
 }
 
 // sampleProcessTable reads pid, ppid, pgid and start time for every process in
@@ -199,7 +225,13 @@ func sampleProcessTable() map[int]procEntry {
 // zombieProcessState is SZOMB from sys/proc.h: exited, awaiting collection.
 const zombieProcessState = 5
 
-// reapAdoptedDescendant is a no-op on Darwin. Nothing is ever adopted here -
-// there is no PR_SET_CHILD_SUBREAPER equivalent, so orphans go straight to init
-// and init collects them.
-func reapAdoptedDescendant(int) {}
+// collectAdoptedDescendant and collectAdoptedGroupOrphans are no-ops on Darwin.
+// Nothing is ever adopted here - there is no PR_SET_CHILD_SUBREAPER equivalent,
+// so orphans go straight to init and init collects them.
+func collectAdoptedDescendant(int) bool { return false }
+
+func collectAdoptedGroupOrphans(int, time.Duration) {}
+
+// processCarriesDescendantToken is unused on Darwin: the invocation token exists
+// to attribute adopted orphans, and Darwin adopts none.
+func processCarriesDescendantToken(int, string) bool { return false }

@@ -3,6 +3,8 @@
 package shellenv
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,6 +15,19 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// descendantTokenEnv carries a per-invocation identity into the command and,
+// through ordinary environment inheritance, into everything it spawns. It is
+// what lets teardown tell this invocation's escaped descendants from a
+// concurrently running one's; see recordAdoptedOrphans.
+const descendantTokenEnv = "NO_MISTAKES_DESCENDANT_TOKEN"
+
+// adoptedReapWindow bounds the final collection pass over adopted victims. A
+// process killed at the end of the grace window may only reparent onto us once
+// its own parent has gone, so the pass has to outlive the kill by a little; it
+// is a ceiling, not a delay, and converges immediately once every victim is
+// collected or confirmed gone.
+const adoptedReapWindow = 250 * time.Millisecond
 
 // procEntry is one row of a platform process-table snapshot.
 //
@@ -75,6 +90,7 @@ type ShellCommandDescendants struct {
 	grace      time.Duration
 	leaderPID  int
 	leaderPGID int
+	token      string
 	sentinel   *descendantSentinel
 	discovery  descendantDiscovery
 
@@ -85,8 +101,10 @@ type ShellCommandDescendants struct {
 }
 
 // PrepareShellCommandDescendants sets up descendant tracking for cmd. It must be
-// called BEFORE StartShellCommand, because it installs the inherited sentinel
-// descriptor that later answers "did the sweep actually get everything?".
+// called BEFORE StartShellCommand, because it installs both inherited markers
+// this depends on: the sentinel descriptor that later answers "did the sweep
+// actually get everything?", and the per-invocation token that says which
+// invocation an orphan came from.
 //
 // Pair it with Watch immediately after a successful start, and Terminate at
 // teardown. Returns nil for a nil command, and every method tolerates a nil
@@ -98,12 +116,53 @@ func PrepareShellCommandDescendants(cmd *exec.Cmd, processTerminationGrace time.
 	if processTerminationGrace <= 0 {
 		processTerminationGrace = DefaultProcessTerminationGrace
 	}
-	return &ShellCommandDescendants{
+	d := &ShellCommandDescendants{
 		cmd:      cmd,
 		grace:    processTerminationGrace,
+		token:    newDescendantToken(),
 		sentinel: newDescendantSentinel(cmd),
 		tracked:  make(map[int]trackedDescendant),
 	}
+	d.installToken(cmd)
+	return d
+}
+
+// newDescendantToken mints the per-invocation identity. An unreadable random
+// source yields an empty token, which fails the attribution test closed: nothing
+// is adopted, so a leak is reported rather than a stranger being killed.
+func newDescendantToken() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		slog.Warn("descendant attribution unavailable: cannot mint an invocation token",
+			"error", err,
+			"detail", "orphaned descendants of this command will be left running rather than "+
+				"risk terminating another run's processes")
+		return ""
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+// installToken puts the invocation token in the command's environment, from
+// where fork and exec carry it to every descendant unless one deliberately
+// replaces its environment.
+func (d *ShellCommandDescendants) installToken(cmd *exec.Cmd) {
+	if d.token == "" {
+		return
+	}
+	env := cmd.Env
+	if env == nil {
+		// A nil Env means "inherit ours"; materialise that so appending keeps the
+		// same effective environment instead of narrowing it to one variable.
+		env = os.Environ()
+	}
+	cmd.Env = append(append(make([]string, 0, len(env)+1), env...), descendantTokenEnv+"="+d.token)
+}
+
+// carriesInvocationToken reports whether pid still holds this invocation's
+// token, which is the proof that it descends from this command and not from a
+// concurrently running one.
+func (d *ShellCommandDescendants) carriesInvocationToken(pid int) bool {
+	return d.token != "" && processCarriesDescendantToken(pid, d.token)
 }
 
 // Watch begins kernel-driven discovery. Call it immediately after a successful
@@ -174,6 +233,12 @@ func (d *ShellCommandDescendants) terminate() {
 // leader's subtree, but they stay reachable from the descendant already
 // recorded. Seeds are re-verified by start time first, so a recycled pid can
 // never drag unrelated processes into the closure.
+//
+// Entries confirmed gone are dropped as they are re-verified, so the per-wakeup
+// cost stays proportional to the live subtree rather than to every process the
+// agent ever spawned. A pid missing from a complete snapshot has exited and can
+// never come back under the same identity, and its own children are already
+// tracked in their own right.
 func (d *ShellCommandDescendants) recordDescendants(table map[int]procEntry) []int {
 	if len(table) == 0 {
 		return nil
@@ -198,10 +263,13 @@ func (d *ShellCommandDescendants) recordDescendants(table map[int]procEntry) []i
 		seeds = append(seeds, d.leaderPID)
 	}
 	for pid, tracked := range d.tracked {
-		if entry, ok := table[pid]; ok && entry.startedAt == tracked.startedAt {
-			seeds = append(seeds, pid)
-			known = append(known, pid)
+		entry, ok := table[pid]
+		if !ok || entry.startedAt != tracked.startedAt {
+			delete(d.tracked, pid)
+			continue
 		}
+		seeds = append(seeds, pid)
+		known = append(known, pid)
 	}
 	if len(seeds) == 0 {
 		return nil
@@ -277,23 +345,35 @@ func signallableEscapee(pid, pgid, leaderPGID, ownPGID int) bool {
 // subreaper. It is the Linux collection step, kept in this shared file rather
 // than the Linux one so it stays unit-testable on a macOS development machine.
 //
-// Attribution is safe for a specific, load-bearing reason. The subreaper
-// attribute is inherited, so a live agent leader is itself the nearest subreaper
-// ancestor of its own subtree: orphans of a concurrently running step reparent
-// to THAT step's leader, not to this process. An orphan only reaches us when its
-// own leader dies. Since this runs immediately after our leader was reaped, the
-// adopted strangers visible now are ours. This matters because the daemon runs
-// pipelines concurrently with no cap (internal/daemon/manager.go starts a
-// goroutine per run and serialises only per repo+branch), so getting attribution
-// wrong would mean one run's teardown killing another run's work.
+// Attribution needs two independent proofs, and both are load-bearing.
 //
-// The session test is what separates an adopted orphan from a process we
-// deliberately spawned: os/exec never calls setsid and ConfigureShellCommand
-// only sets a process group, so our own children share our session. A child of
-// ours in a different session was adopted, not spawned. A descendant that
-// escaped by setpgid alone is therefore not collected on this path; that is a
-// known narrowing, and the sentinel is what makes such a miss visible.
-func (d *ShellCommandDescendants) recordAdoptedOrphans(table map[int]procEntry) {
+// The session test separates an adopted orphan from a process we deliberately
+// spawned: os/exec never calls setsid and ConfigureShellCommand only sets a
+// process group, so our own children share our session. A child of ours in a
+// different session was adopted, not spawned. A descendant that escaped by
+// setpgid alone is therefore not collected on this path; that is a known
+// narrowing, and the sentinel is what makes such a miss visible.
+//
+// ownedByInvocation then separates OUR adopted orphans from another concurrent
+// run's. This is not optional and must not be simplified away on the theory that
+// the subreaper attribute keeps each run's orphans under its own leader: it does
+// not. PR_SET_CHILD_SUBREAPER sets is_child_subreaper on the calling process
+// only, and prctl(2) is explicit that the attribute is NOT inherited across fork
+// or clone. Agent CLIs never set it for themselves, so find_new_reaper walks
+// straight past a live agent leader and lands every orphan in the daemon,
+// immediately, while the run that spawned it is still executing. Without a
+// per-invocation proof, one run's teardown would enumerate and kill another
+// run's live work - and the daemon runs pipelines concurrently with no cap
+// (internal/daemon/manager.go starts a goroutine per run and serialises only per
+// repo+branch), so that is a routine situation rather than a corner case.
+//
+// An orphan that shed the token (by replacing its environment) is left running
+// rather than guessed at; that failure direction is deliberate, and the sentinel
+// reports it. A zombie is exempt from the ownership proof because its
+// environment is no longer readable and collecting one cannot harm whoever it
+// belonged to: nothing but a subreaper is waiting on it, and leaving it
+// uncollected would leak a pid slot for the daemon's lifetime.
+func (d *ShellCommandDescendants) recordAdoptedOrphans(table map[int]procEntry, ownedByInvocation func(int) bool) {
 	if len(table) == 0 {
 		return
 	}
@@ -310,6 +390,9 @@ func (d *ShellCommandDescendants) recordAdoptedOrphans(table map[int]procEntry) 
 	var roots []int
 	for pid, entry := range table {
 		if !adoptedOrphan(pid, entry, self, selfEntry.sid) {
+			continue
+		}
+		if !entry.zombie && (ownedByInvocation == nil || !ownedByInvocation(pid)) {
 			continue
 		}
 		if !signallableEscapee(pid, entry.pgid, 0, ownPGID) {
@@ -378,7 +461,15 @@ func (d *ShellCommandDescendants) reapEscapees() {
 			break
 		}
 		if !time.Now().Before(deadline) {
-			for _, victim := range alive {
+			// Re-verify identity immediately before the destructive escalation. The
+			// check in survivingEscapees is now a whole grace period old, and a
+			// victim that exited in the meantime may have had its pid recycled by an
+			// unrelated process. An unreadable process table yields no victims, so
+			// SIGKILL is skipped rather than aimed at a stale pid.
+			for _, victim := range survivingEscapees(alive, sampleProcessTable()) {
+				if victim.zombie {
+					continue
+				}
 				signalEscapee(victim, syscall.SIGKILL)
 			}
 			break
@@ -386,13 +477,46 @@ func (d *ShellCommandDescendants) reapEscapees() {
 		time.Sleep(processGroupTerminationPollInterval)
 	}
 
-	// Anything adopted as a subreaper is our child in the kernel's eyes, so it
-	// stays a zombie until collected. Only adopted pids are waited on: waiting on
-	// a pid os/exec owns would steal the exit status its Wait is blocked for.
+	reapAdoptedVictims(victims)
+}
+
+// reapAdoptedVictims collects the victims this process adopted as a subreaper.
+// Each is our child in the kernel's eyes, so it stays a zombie holding a pid slot
+// until someone waits on it, and nobody else will.
+//
+// It is a bounded sweep over the whole set rather than a per-pid wait for a
+// reason: a victim deeper in the tree is not our child while its own parent
+// lives, so the wait returns ECHILD until that parent dies and the kernel
+// reparents it onto us. Retrying the set until every pid is either collected or
+// confirmed gone catches those late arrivals; the window caps what a pid that
+// never reaches us can cost.
+func reapAdoptedVictims(victims []trackedDescendant) {
+	pending := make([]int, 0, len(victims))
 	for _, victim := range victims {
 		if victim.adopted {
-			reapAdoptedDescendant(victim.pid)
+			pending = append(pending, victim.pid)
 		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+	deadline := time.Now().Add(adoptedReapWindow)
+	for {
+		remaining := pending[:0:0]
+		for _, pid := range pending {
+			if collectAdoptedDescendant(pid) {
+				continue
+			}
+			if syscall.Kill(pid, 0) == syscall.ESRCH {
+				continue // gone entirely: collected elsewhere, or never ours
+			}
+			remaining = append(remaining, pid)
+		}
+		pending = remaining
+		if len(pending) == 0 || !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(processGroupTerminationPollInterval)
 	}
 }
 
@@ -420,10 +544,26 @@ func survivingEscapees(recorded []trackedDescendant, table map[int]procEntry) []
 	return victims
 }
 
+// aliveEscapees returns the victims that are still running, collecting any that
+// have exited into our hands on the way.
+//
+// The collection attempt is what keeps the grace window honest on a platform
+// with a subreaper. An adopted victim that exits becomes OUR zombie rather than
+// disappearing, and kill(pid, 0) succeeds for a zombie, so without collecting it
+// here a cooperative escapee would never leave this set: every sweep would run
+// the full grace period and then SIGKILL a corpse, and that delay lands on the
+// agent invocation the step is waiting for.
+//
+// Attempting collection for every victim rather than only the ones flagged
+// adopted is safe, and is what catches a descendant that was reparented onto us
+// after it was recorded. The wait can only succeed for a child of ours, and no
+// pid os/exec owns is ever in this set: the leader is excluded from its own
+// descendant closure and fails the adopted-orphan session test, so a tracked
+// descendant that is our child got here by adoption.
 func aliveEscapees(victims []trackedDescendant) []trackedDescendant {
 	alive := victims[:0:0]
 	for _, victim := range victims {
-		if victim.zombie {
+		if victim.zombie || collectAdoptedDescendant(victim.pid) {
 			continue
 		}
 		if syscall.Kill(victim.pid, 0) != syscall.ESRCH {
@@ -493,6 +633,13 @@ type descendantSentinel struct {
 func newDescendantSentinel(cmd *exec.Cmd) *descendantSentinel {
 	read, write, err := os.Pipe()
 	if err != nil {
+		// Losing the backstop is exactly the kind of thing it exists to prevent
+		// happening quietly, and the likeliest cause - descriptor exhaustion - is
+		// also when a leak is most likely to follow. Say so rather than degrade to
+		// a silent nil.
+		slog.Warn("descendant leak backstop unavailable: cannot create the sentinel pipe",
+			"error", err,
+			"detail", "processes surviving this command's teardown will not be reported")
 		return nil
 	}
 	cmd.ExtraFiles = append(cmd.ExtraFiles, write)

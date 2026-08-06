@@ -12,17 +12,16 @@ import (
 )
 
 type nativeAgentCommand struct {
-	cmd                      *exec.Cmd
-	descendants              *shellenv.ShellCommandDescendants
-	stdout                   *nativeAgentPipe
-	stderr                   *nativeAgentPipe
-	waitCh                   chan error
-	terminateOnce            sync.Once
-	terminateDescendantsOnce sync.Once
-	closePipesOnce           sync.Once
-	pipeMu                   sync.Mutex
-	remainingPipes           int
-	pipesDone                chan struct{}
+	cmd            *exec.Cmd
+	descendants    *shellenv.ShellCommandDescendants
+	stdout         *nativeAgentPipe
+	stderr         *nativeAgentPipe
+	waitCh         chan error
+	terminateOnce  sync.Once
+	closePipesOnce sync.Once
+	pipeMu         sync.Mutex
+	remainingPipes int
+	pipesDone      chan struct{}
 }
 
 type nativeAgentPipe struct {
@@ -157,11 +156,10 @@ func (c *nativeAgentCommand) terminate() {
 // work the agent backgrounded from a tool-call shell that had setsid its way out
 // of the group. Without it that work survives the step and burns CPU
 // indefinitely. It is separate from terminate so it can be ordered after pipe
-// handling; see the wait goroutine in startNativeAgentCommand.
+// handling; see the wait goroutine in startNativeAgentCommand. Terminate is
+// itself idempotent and nil-safe, so this needs no guard of its own.
 func (c *nativeAgentCommand) terminateDescendants() {
-	c.terminateDescendantsOnce.Do(func() {
-		c.descendants.Terminate()
-	})
+	c.descendants.Terminate()
 }
 
 func (c *nativeAgentCommand) waitAfterParseError(parseErr error) error {

@@ -321,7 +321,7 @@ The same ceiling bounds cleanup of descendants that left the process group. Agen
 Discovery narrows the window rather than closing it, and the residual gap differs by platform:
 
 - **macOS** reports *that* a process forked but not which pid, so no-mistakes reads the process table on each wakeup. A descendant that both escapes and is orphaned inside that gap is missed.
-- **Linux** collects orphans by session at teardown, so a descendant that escaped by changing only its process group, without `setsid`, is not collected.
+- **Linux** collects orphans at teardown, and identifies which invocation each one came from by an environment marker inherited through the process tree. Because runs execute concurrently and orphans from all of them reparent onto the daemon together, an orphan that cannot be identified is left running rather than terminated on a guess. A descendant that escaped by changing only its process group, without `setsid`, is also not collected on this path — process-group cleanup covers it instead.
 - **Windows** has no such window at all: the job object owns the whole tree structurally.
 
 Because the window is real, every agent subprocess also inherits a sentinel descriptor that reaches end-of-file only once the last descendant has exited. After the sweep no-mistakes checks it, and logs `processes survived step teardown` with the agent pid if anything still holds it. Treat that warning as a report of stray processes left behind by that step — it is the difference between a leak you can see and a silent one.

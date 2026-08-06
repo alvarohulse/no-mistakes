@@ -225,6 +225,40 @@ func TestShellCommandDescendants_RecordSeedsFromKnownDescendants(t *testing.T) {
 	}
 }
 
+// TestShellCommandDescendants_RecordForgetsDeadDescendants keeps the per-wakeup
+// cost proportional to the live subtree rather than to every process the agent
+// ever spawned: discovery re-classifies the whole tracked set on every fork,
+// exec and exit event, and a long agent invocation drives thousands of
+// short-lived compile and test processes through it.
+func TestShellCommandDescendants_RecordForgetsDeadDescendants(t *testing.T) {
+	const leader, shortLived, survivor = 9000, 9001, 9002
+	d := &ShellCommandDescendants{
+		leaderPID:  leader,
+		leaderPGID: leader,
+		tracked:    make(map[int]trackedDescendant),
+	}
+	d.recordDescendants(map[int]procEntry{
+		leader:     {ppid: 8000, pgid: leader, startedAt: 10},
+		shortLived: {ppid: leader, pgid: shortLived, startedAt: 11},
+		survivor:   {ppid: leader, pgid: survivor, startedAt: 12},
+	})
+	if len(d.tracked) != 2 {
+		t.Fatalf("tracked = %#v, want both descendants", d.tracked)
+	}
+
+	// shortLived has exited; survivor is still there under the same identity.
+	d.recordDescendants(map[int]procEntry{
+		leader:   {ppid: 8000, pgid: leader, startedAt: 10},
+		survivor: {ppid: leader, pgid: survivor, startedAt: 12},
+	})
+	if _, ok := d.tracked[shortLived]; ok {
+		t.Errorf("kept exited descendant %d; tracking grows with every process ever spawned", shortLived)
+	}
+	if _, ok := d.tracked[survivor]; !ok {
+		t.Errorf("dropped live descendant %d", survivor)
+	}
+}
+
 // TestAdoptedOrphan pins the Linux attribution rule. Our own children share our
 // session, so a child of ours in a different session was adopted after its real
 // parent died rather than spawned by us.
@@ -249,6 +283,119 @@ func TestAdoptedOrphan(t *testing.T) {
 				t.Fatalf("adoptedOrphan(%d, %#v) = %v, want %v", tt.pid, tt.entry, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRecordAdoptedOrphans_OnlyAdoptsThisInvocationsOrphans is the cross-run
+// guard. PR_SET_CHILD_SUBREAPER is not inherited across fork, so a concurrently
+// running pipeline's orphans reparent onto this process immediately, while that
+// run is still using them. Teardown must terminate only the orphans it can prove
+// came from its own invocation, or one run's cleanup kills another run's work.
+func TestRecordAdoptedOrphans_OnlyAdoptsThisInvocationsOrphans(t *testing.T) {
+	self := os.Getpid()
+	ownPGID, err := syscall.Getpgid(0)
+	if err != nil {
+		t.Fatalf("Getpgid(0): %v", err)
+	}
+	// Any session id of our own will do: what matters is that the orphans lead
+	// sessions of their own, which is what marks them adopted rather than spawned.
+	const selfSID = 700
+	const ours, theirs, ourGrandchild = 9100, 9200, 9101
+	for _, pid := range []int{ours, theirs, ourGrandchild} {
+		if pid == ownPGID || pid == self {
+			t.Skipf("synthetic pid %d collides with this process", pid)
+		}
+	}
+
+	// Both are adopted orphans by every structural test available: our direct
+	// child, leading a session of its own. Only the token tells them apart.
+	table := map[int]procEntry{
+		self:          {ppid: 1, pgid: ownPGID, sid: selfSID, startedAt: 1},
+		ours:          {ppid: self, pgid: ours, sid: ours, startedAt: 10},
+		ourGrandchild: {ppid: ours, pgid: ours, sid: ours, startedAt: 11},
+		theirs:        {ppid: self, pgid: theirs, sid: theirs, startedAt: 12},
+	}
+
+	d := &ShellCommandDescendants{tracked: make(map[int]trackedDescendant)}
+	d.recordAdoptedOrphans(table, func(pid int) bool { return pid == ours })
+
+	if tracked, ok := d.tracked[ours]; !ok || !tracked.escaped || !tracked.adopted {
+		t.Errorf("orphan %d from this invocation = %#v, want adopted and escaped", ours, tracked)
+	}
+	// Ancestry carries ownership: a descendant of a proven orphan is ours even if
+	// it dropped the token itself.
+	if _, ok := d.tracked[ourGrandchild]; !ok {
+		t.Errorf("did not record %d, spawned by an orphan proven to be ours", ourGrandchild)
+	}
+	if tracked, ok := d.tracked[theirs]; ok {
+		t.Errorf("adopted %d from a concurrently running invocation: %#v", theirs, tracked)
+	}
+
+	// No proof available at all must adopt nothing rather than everything.
+	empty := &ShellCommandDescendants{tracked: make(map[int]trackedDescendant)}
+	empty.recordAdoptedOrphans(table, func(int) bool { return false })
+	if len(empty.tracked) != 0 {
+		t.Errorf("adopted %#v without any ownership proof", empty.tracked)
+	}
+}
+
+// TestRecordAdoptedOrphans_CollectsUnattributableZombies covers the one case
+// that is exempt from the ownership proof: a zombie's environment is gone, so it
+// can never carry the token, and leaving it uncollected would leak a pid slot
+// for the daemon's lifetime. Collecting one cannot harm whoever it belonged to.
+func TestRecordAdoptedOrphans_CollectsUnattributableZombies(t *testing.T) {
+	self := os.Getpid()
+	ownPGID, err := syscall.Getpgid(0)
+	if err != nil {
+		t.Fatalf("Getpgid(0): %v", err)
+	}
+	const selfSID = 700
+	const zombie = 9300
+	if zombie == ownPGID || zombie == self {
+		t.Skipf("synthetic pid %d collides with this process", zombie)
+	}
+
+	table := map[int]procEntry{
+		self:   {ppid: 1, pgid: ownPGID, sid: selfSID, startedAt: 1},
+		zombie: {ppid: self, pgid: zombie, sid: zombie, startedAt: 10, zombie: true},
+	}
+	d := &ShellCommandDescendants{tracked: make(map[int]trackedDescendant)}
+	d.recordAdoptedOrphans(table, func(int) bool { return false })
+
+	if tracked, ok := d.tracked[zombie]; !ok || !tracked.adopted {
+		t.Fatalf("adopted zombie %d = %#v, want recorded for collection", zombie, tracked)
+	}
+}
+
+// TestPrepareShellCommandDescendants_InstallsInvocationToken pins that the
+// identity actually reaches the process tree, since attribution is worthless
+// without it, and that two invocations never share one.
+func TestPrepareShellCommandDescendants_InstallsInvocationToken(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "true")
+	cmd.Env = []string{"PATH=/usr/bin"}
+	d := PrepareShellCommandDescendants(cmd, time.Second)
+	if d == nil || d.token == "" {
+		t.Fatal("PrepareShellCommandDescendants did not mint an invocation token")
+	}
+	t.Cleanup(d.Terminate)
+
+	var found bool
+	for _, entry := range cmd.Env {
+		if entry == descendantTokenEnv+"="+d.token {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("command environment %v does not carry the invocation token", cmd.Env)
+	}
+	if got, want := len(cmd.Env), 2; got != want {
+		t.Fatalf("command environment length = %d, want %d: the caller's environment must survive", got, want)
+	}
+
+	other := PrepareShellCommandDescendants(exec.Command("/bin/sh", "-c", "true"), time.Second)
+	t.Cleanup(other.Terminate)
+	if other.token == d.token {
+		t.Fatal("two invocations were given the same token; they could not be told apart")
 	}
 }
 

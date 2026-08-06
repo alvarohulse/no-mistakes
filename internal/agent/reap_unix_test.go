@@ -392,17 +392,24 @@ func waitForPidFile(t *testing.T, path string, timeout time.Duration) int {
 }
 
 // pidGoneWithin reports whether pid stops existing within the window. kill(pid,
-// 0) returns ESRCH once the process is gone (the grandchild reparents to init
-// after the leader exits, so init reaps it the moment it is SIGKILLed).
+// 0) returns ESRCH once the process is gone, but it also succeeds for a zombie,
+// and where this process is a child subreaper an orphaned grandchild reparents
+// onto it rather than init - so a collection attempt has to come first for
+// "gone" to mean gone. The wait targets an exact pid that is never one os/exec
+// owns (these are always grandchildren), so it cannot steal a Cmd.Wait status.
 func pidGoneWithin(pid int, window time.Duration) bool {
 	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
+	for {
+		var status syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
 		if err := syscall.Kill(pid, 0); err == syscall.ESRCH {
 			return true
 		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return syscall.Kill(pid, 0) == syscall.ESRCH
 }
 
 func waitForNativeAgentPipeHelperReady(path string, timeout time.Duration) bool {

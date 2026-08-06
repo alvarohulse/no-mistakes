@@ -70,9 +70,12 @@ func TestShellCommandDescendants_ReapsSetsidEscapedDescendantsOnCleanExit(t *tes
 		t.Fatalf("precondition failed: descendant %d stayed in the leader's process group %d", escapedPID, escapedPGID)
 	}
 
-	// Let the leader exit only once discovery has seen the escapee, so the test
-	// pins the reaping behaviour rather than racing event delivery.
-	if !waitForRecordedDescendant(descendants, escapedPID, 30*time.Second) {
+	// Where discovery runs while the leader is alive, let the leader exit only
+	// once the escapee has been seen, so the test pins the reaping behaviour
+	// rather than racing event delivery. Platforms that enumerate at teardown
+	// instead (Linux, via the child-subreaper adoption path) have nothing
+	// recorded until the leader is gone, so releasing it IS the trigger.
+	if descendantDiscoveryTracksLiveLeader && !waitForRecordedDescendant(descendants, escapedPID, 30*time.Second) {
 		t.Fatalf("discovery never recorded escaped descendant %d", escapedPID)
 	}
 	release()
@@ -494,13 +497,21 @@ func waitForHelperReady(path string, timeout time.Duration) bool {
 	return false
 }
 
+// pidGoneWithin reports whether pid stops existing within the window.
+//
+// It collects first because kill(pid, 0) succeeds for a zombie. Where this
+// process is a child subreaper, a descendant a test kills by hand becomes its
+// zombie rather than disappearing, and only a wait makes it actually gone.
 func pidGoneWithin(pid int, window time.Duration) bool {
 	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
+	for {
+		collectAdoptedDescendant(pid)
 		if syscall.Kill(pid, 0) == syscall.ESRCH {
 			return true
 		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return syscall.Kill(pid, 0) == syscall.ESRCH
 }
