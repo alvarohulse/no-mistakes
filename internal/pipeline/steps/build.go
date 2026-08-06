@@ -65,7 +65,7 @@ func (s *BuildStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 
 func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
 	configuredCommand := sctx.Config.Commands.Build
 	if configuredCommand == "" {
 		configuredCommand = "not configured; inspect the repository for its build or compile command"
@@ -108,7 +108,7 @@ Rules:
 
 func (s *BuildStep) executeAgentBuild(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
 	sctx.Log("no build command configured, asking agent to compile the change...")
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
 		Prompt: fmt.Sprintf(`Verify that this repository builds or compiles successfully.
