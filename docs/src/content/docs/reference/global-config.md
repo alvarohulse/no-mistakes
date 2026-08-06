@@ -75,6 +75,12 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+prompts:
+  shared: |
+    Always included in model prompts.
+  review: |
+    Review-specific additions.
 ```
 
 ## Fields
@@ -462,6 +468,40 @@ Machine-wide default pull request body formatter.
 This is the only hook accepted here. One formatter usually serves every repo on a machine, whereas `hooks.post_worktree` is a repo's own install command - setting that globally would run the wrong setup in every other repo, so it is rejected with an error rather than silently ignored.
 
 A repo's own `hooks.pr_body` overrides this value. The field's behavior, contract, and failure handling are owned by [the repo config reference](/no-mistakes/reference/repo-config/#hookspr_body); iterate on a formatter with [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body).
+
+### prompts
+
+Global prompt additions appended to no-mistakes' built-in pipeline prompts.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` of `string` values |
+| Default | Empty (built-in prompts only) |
+
+Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
+`prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
+
+Per-repo prompt config combines with global prompt config in this order:
+
+1. global `prompts.shared`
+2. repo `prompts.shared`
+3. global `prompts.<step>`
+4. repo `prompts.<step>`
+
+| Field | Applies to |
+|---|---|
+| `prompts.shared` | Every pipeline model prompt |
+| `prompts.intent` | Intent summarization and disambiguation |
+| `prompts.refresh` | Refresh (rebase or merge) conflict resolution |
+| `prompts.review` | Review, adversarial review, and review-fix prompts |
+| `prompts.build` | Build verification and build-fix prompts |
+| `prompts.test` | Test evidence and test-fix prompts |
+| `prompts.document` | Documentation update prompt |
+| `prompts.lint` | Lint agent and lint-fix prompts |
+| `prompts.pr` | PR title/body prompt |
+| `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
+
+Push never invokes a model, so there is no `prompts.push`.
 
 ## Environment variables
 

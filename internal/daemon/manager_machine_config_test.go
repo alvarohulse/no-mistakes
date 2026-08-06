@@ -32,6 +32,9 @@ auto_fix:
   lint: 0
   test: 0
   review: 0
+prompts:
+  shared: committed shared guidance
+  test: committed test guidance
 `
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(committed), 0o644); err != nil {
 		t.Fatal(err)
@@ -49,6 +52,8 @@ commands:
 build:
   agent: codex
   model: {name: gpt-5.6-sol, vendor: openai}
+prompts:
+  test: run the scaleapi testing commands
 `)
 	t.Setenv(machineRepoConfigEnv, path)
 	step := &captureRunConfigStep{captured: make(chan capturedRunConfig, 2)}
@@ -75,6 +80,13 @@ build:
 		}
 		if got.lintCommand != "committed-lint" {
 			t.Fatalf("commands.lint = %q, want inherited committed-lint", got.lintCommand)
+		}
+		// Machine-local prompts overlay the trusted committed prompts key by
+		// key: prompts.test is replaced while prompts.shared is inherited, and
+		// both reach the resolved per-step prompt additions.
+		wantTestPrompt := "committed shared guidance\n\nrun the scaleapi testing commands"
+		if got.testPrompt != wantTestPrompt {
+			t.Fatalf("test prompt additions = %q, want %q", got.testPrompt, wantTestPrompt)
 		}
 	default:
 		t.Fatal("pipeline step did not capture effective config")
@@ -144,6 +156,7 @@ type capturedRunConfig struct {
 	buildModel   string
 	testCommand  string
 	lintCommand  string
+	testPrompt   string
 }
 
 type captureRunConfigStep struct {
@@ -159,6 +172,7 @@ func (s *captureRunConfigStep) Execute(sctx *pipeline.StepContext) (*pipeline.St
 		buildModel:   sctx.Config.ConfiguredModelForStep(types.StepBuild).Name,
 		testCommand:  sctx.Config.Commands.Test,
 		lintCommand:  sctx.Config.Commands.Lint,
+		testPrompt:   sctx.Config.Prompts.ForStep(types.StepTest),
 	}
 	return &pipeline.StepOutcome{}, nil
 }

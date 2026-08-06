@@ -31,6 +31,37 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 }
 
+func TestMerge_PromptsCombineGlobalThenRepo(t *testing.T) {
+	global := &GlobalConfig{
+		Agent:     types.AgentClaude,
+		CITimeout: 4 * time.Hour,
+		LogLevel:  "info",
+		Prompts: PromptConfig{
+			Shared: "global shared",
+			Review: "global review",
+			Test:   "global test",
+		},
+	}
+	repo := &RepoConfig{
+		Prompts: PromptConfig{
+			Shared: "repo shared",
+			Review: "repo review",
+		},
+	}
+
+	cfg := Merge(global, repo)
+
+	if got, want := cfg.Prompts.ForStep(types.StepReview), "global shared\n\nrepo shared\n\nglobal review\n\nrepo review"; got != want {
+		t.Errorf("review prompt = %q, want %q", got, want)
+	}
+	if got, want := cfg.Prompts.ForStep(types.StepTest), "global shared\n\nrepo shared\n\nglobal test"; got != want {
+		t.Errorf("test prompt = %q, want %q", got, want)
+	}
+	if got, want := cfg.Prompts.ForStep(types.StepBuild), "global shared\n\nrepo shared"; got != want {
+		t.Errorf("build prompt = %q, want %q", got, want)
+	}
+}
+
 func TestMerge_UsesRepoRefreshStrategy(t *testing.T) {
 	cfg := Merge(DefaultGlobalConfig(), &RepoConfig{Refresh: RefreshRaw{Strategy: types.RefreshStrategyMerge}})
 	if cfg.RefreshStrategy != types.RefreshStrategyMerge {
