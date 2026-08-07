@@ -31,6 +31,60 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 }
 
+func TestMerge_PromptsCombineGlobalThenRepo(t *testing.T) {
+	global := &GlobalConfig{
+		Agent:     types.AgentClaude,
+		CITimeout: 4 * time.Hour,
+		LogLevel:  "info",
+		Prompts: PromptConfig{
+			Shared: "global shared",
+			Review: "global review",
+			Test:   "global test",
+		},
+	}
+	repo := &RepoConfig{
+		Prompts: PromptConfig{
+			Shared: "repo shared",
+			Review: "repo review",
+		},
+	}
+
+	cfg := Merge(global, repo)
+
+	if got, want := cfg.Prompts.ForStep(types.StepReview), "global shared\n\nrepo shared\n\nglobal review\n\nrepo review"; got != want {
+		t.Errorf("review prompt = %q, want %q", got, want)
+	}
+	if got, want := cfg.Prompts.ForStep(types.StepTest), "global shared\n\nrepo shared\n\nglobal test"; got != want {
+		t.Errorf("test prompt = %q, want %q", got, want)
+	}
+	if got, want := cfg.Prompts.ForStep(types.StepBuild), "global shared\n\nrepo shared"; got != want {
+		t.Errorf("build prompt = %q, want %q", got, want)
+	}
+}
+
+// TestPrompts_ForStepsEmitsSharedOnce covers an agent invocation owning several
+// steps' duties, like the combined document+lint housekeeping pass.
+func TestPrompts_ForStepsEmitsSharedOnce(t *testing.T) {
+	p := PromptConfig{
+		Shared:   "shared",
+		Document: "document",
+		Lint:     "lint",
+	}
+
+	if got, want := p.ForSteps(types.StepDocument, types.StepLint), "shared\n\ndocument\n\nlint"; got != want {
+		t.Errorf("document+lint prompt = %q, want %q", got, want)
+	}
+	if got, want := p.ForSteps(types.StepLint, types.StepDocument), "shared\n\nlint\n\ndocument"; got != want {
+		t.Errorf("step order must be preserved: got %q, want %q", got, want)
+	}
+	if got, want := p.ForSteps(types.StepDocument), p.ForStep(types.StepDocument); got != want {
+		t.Errorf("single-step ForSteps = %q, want ForStep %q", got, want)
+	}
+	if got := (PromptConfig{}).SectionForSteps(types.StepDocument, types.StepLint); got != "" {
+		t.Errorf("unconfigured prompts section = %q, want empty", got)
+	}
+}
+
 func TestMerge_UsesRepoRefreshStrategy(t *testing.T) {
 	cfg := Merge(DefaultGlobalConfig(), &RepoConfig{Refresh: RefreshRaw{Strategy: types.RefreshStrategyMerge}})
 	if cfg.RefreshStrategy != types.RefreshStrategyMerge {

@@ -184,7 +184,7 @@ Diff stat:
 %s
 
 Final diff paths and statuses:
-%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, conventional.ReleaseTypeRule, diffStat, finalDiff, userIntentPromptSection(sctx), prNotePromptSection(sctx), executionContextPromptSection())
+%s%s%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, conventional.ReleaseTypeRule, diffStat, finalDiff, userIntentPromptSection(sctx), prNotePromptSection(sctx), executionContextPromptSection(), configuredPromptSection(sctx, s.Name()))
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 

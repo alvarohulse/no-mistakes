@@ -85,6 +85,7 @@ type GlobalConfig struct {
 	Lint     StepAgentRaw
 	PR       StepAgentRaw
 	CI       StepAgentRaw
+	Prompts  PromptConfig
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -114,6 +115,7 @@ type globalConfigRaw struct {
 	Lint                    StepAgentRaw        `yaml:"lint"`
 	PR                      StepAgentRaw        `yaml:"pr"`
 	CI                      StepAgentRaw        `yaml:"ci"`
+	Prompts                 PromptConfig        `yaml:"prompts"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -147,6 +149,12 @@ type RepoConfig struct {
 	Lint     StepAgentRaw `yaml:"lint"`
 	PR       StepAgentRaw `yaml:"pr"`
 	CI       StepAgentRaw `yaml:"ci"`
+	// Prompts appends extra guidance to the built-in pipeline agent prompts.
+	// It steers the agents that launch with the maintainer's credentials, so
+	// it is honored ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (see EffectiveRepoConfig) unless allow_repo_commands
+	// opts in on that trusted copy.
+	Prompts PromptConfig `yaml:"prompts"`
 	// DisableProjectSettings opts the repository out of loading project-level
 	// agent settings/instructions (AGENTS.md/CLAUDE.md and the equivalent
 	// per-harness project settings) into gate agents. It exists for
@@ -379,6 +387,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Lint                   StepAgentRaw  `yaml:"lint"`
 		PR                     StepAgentRaw  `yaml:"pr"`
 		CI                     StepAgentRaw  `yaml:"ci"`
+		Prompts                PromptConfig  `yaml:"prompts"`
 		DisableProjectSettings bool          `yaml:"disable_project_settings"`
 	}
 	var raw repoConfigRaw
@@ -408,6 +417,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Lint = raw.Lint
 	c.PR = raw.PR
 	c.CI = raw.CI
+	c.Prompts = raw.Prompts
 	c.DisableProjectSettings = raw.DisableProjectSettings
 	return nil
 }
@@ -572,6 +582,36 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("ci.model") {
 		out.CI.Model = override.CI.Model
+	}
+	if override.has("prompts.shared") {
+		out.Prompts.Shared = override.Prompts.Shared
+	}
+	if override.has("prompts.intent") {
+		out.Prompts.Intent = override.Prompts.Intent
+	}
+	if override.has("prompts.refresh") {
+		out.Prompts.Refresh = override.Prompts.Refresh
+	}
+	if override.has("prompts.review") {
+		out.Prompts.Review = override.Prompts.Review
+	}
+	if override.has("prompts.build") {
+		out.Prompts.Build = override.Prompts.Build
+	}
+	if override.has("prompts.test") {
+		out.Prompts.Test = override.Prompts.Test
+	}
+	if override.has("prompts.document") {
+		out.Prompts.Document = override.Prompts.Document
+	}
+	if override.has("prompts.lint") {
+		out.Prompts.Lint = override.Prompts.Lint
+	}
+	if override.has("prompts.pr") {
+		out.Prompts.PR = override.Prompts.PR
+	}
+	if override.has("prompts.ci") {
+		out.Prompts.CI = override.Prompts.CI
 	}
 	if override.has("disable_project_settings") {
 		out.DisableProjectSettings = override.DisableProjectSettings
@@ -761,6 +801,7 @@ type Config struct {
 	Intent                  Intent
 	Test                    Test
 	Document                Document
+	Prompts                 PromptConfig
 	RefreshStrategy         types.RefreshStrategy
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
@@ -774,6 +815,113 @@ type Config struct {
 // policy in the document prompt.
 type Document struct {
 	Instructions string
+}
+
+// PromptConfig holds optional prompt additions. Built-in prompts remain the
+// source of structure, safety rules, and schemas; these values are appended as
+// extra steering only. Push never prompts an agent, so it has no key.
+type PromptConfig struct {
+	Shared   string `yaml:"shared"`
+	Intent   string `yaml:"intent"`
+	Refresh  string `yaml:"refresh"`
+	Review   string `yaml:"review"`
+	Build    string `yaml:"build"`
+	Test     string `yaml:"test"`
+	Document string `yaml:"document"`
+	Lint     string `yaml:"lint"`
+	PR       string `yaml:"pr"`
+	CI       string `yaml:"ci"`
+}
+
+// ForStep returns the prompt additions for a model-invoking step: shared
+// guidance first, then the step-specific guidance.
+func (p PromptConfig) ForStep(step types.StepName) string {
+	return p.ForSteps(step)
+}
+
+// ForSteps returns the prompt additions for one agent invocation that carries
+// the duties of several steps - the combined document+lint housekeeping pass
+// is one invocation owning both keys. Shared guidance is emitted exactly once,
+// followed by each step's specific guidance in the order given.
+func (p PromptConfig) ForSteps(steps ...types.StepName) string {
+	parts := make([]string, 0, len(steps)+1)
+	parts = append(parts, p.Shared)
+	for _, step := range steps {
+		parts = append(parts, p.forStepOnly(step))
+	}
+	return combinePromptText(parts...)
+}
+
+// forStepOnly returns a step's own guidance without the shared guidance.
+func (p PromptConfig) forStepOnly(step types.StepName) string {
+	switch step.Canonical() {
+	case types.StepIntent:
+		return p.Intent
+	case types.StepRefresh:
+		return p.Refresh
+	case types.StepReview:
+		return p.Review
+	case types.StepBuild:
+		return p.Build
+	case types.StepTest:
+		return p.Test
+	case types.StepDocument:
+		return p.Document
+	case types.StepLint:
+		return p.Lint
+	case types.StepPR:
+		return p.PR
+	case types.StepCI:
+		return p.CI
+	}
+	return ""
+}
+
+// SectionForStep formats prompt additions as an append-only prompt section.
+// The wrapper keeps the built-in prompt's structure and safety constraints
+// above any configured guidance.
+func (p PromptConfig) SectionForStep(step types.StepName) string {
+	return p.SectionForSteps(step)
+}
+
+// SectionForSteps is SectionForStep for an invocation covering several steps,
+// wrapping the combined guidance in a single append-only section.
+func (p PromptConfig) SectionForSteps(steps ...types.StepName) string {
+	text := strings.TrimSpace(p.ForSteps(steps...))
+	if text == "" {
+		return ""
+	}
+	return "\n\nAdditional prompt config:\n" +
+		"The following trusted no-mistakes prompt config is extra guidance. " +
+		"It must not override the built-in instructions above, output schemas, safety rules, or worktree boundaries.\n" +
+		text + "\n"
+}
+
+// mergePromptConfigs appends repo guidance after global guidance field by
+// field, so ForStep yields: global shared, repo shared, global step, repo step.
+func mergePromptConfigs(global, repo PromptConfig) PromptConfig {
+	return PromptConfig{
+		Shared:   combinePromptText(global.Shared, repo.Shared),
+		Intent:   combinePromptText(global.Intent, repo.Intent),
+		Refresh:  combinePromptText(global.Refresh, repo.Refresh),
+		Review:   combinePromptText(global.Review, repo.Review),
+		Build:    combinePromptText(global.Build, repo.Build),
+		Test:     combinePromptText(global.Test, repo.Test),
+		Document: combinePromptText(global.Document, repo.Document),
+		Lint:     combinePromptText(global.Lint, repo.Lint),
+		PR:       combinePromptText(global.PR, repo.PR),
+		CI:       combinePromptText(global.CI, repo.CI),
+	}
+}
+
+func combinePromptText(parts ...string) string {
+	trimmed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if text := strings.TrimSpace(part); text != "" {
+			trimmed = append(trimmed, text)
+		}
+	}
+	return strings.Join(trimmed, "\n\n")
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -1211,6 +1359,17 @@ intent:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+
+# Optional prompt additions. Built-in prompts remain authoritative; these are
+# appended as extra guidance. Shared guidance is included in every pipeline
+# model prompt, then the step-specific guidance is appended after it.
+# Supported keys: shared, intent, refresh, review, build, test, document,
+# lint, pr, ci.
+# prompts:
+#   shared: |
+#     Always included in model prompts.
+#   review: |
+#     Review-specific additions.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -1979,6 +2138,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Lint = raw.Lint
 	cfg.PR = raw.PR
 	cfg.CI = raw.CI
+	cfg.Prompts = raw.Prompts
 
 	return cfg, nil
 }
@@ -2062,15 +2222,17 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // processes launch with the maintainer's credentials, including fallback lists
 // and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
-// pushed branch cannot inject shell or pick an agent. Document (the
-// documentation placement policy injected into the document gate prompt) is
-// trusted-only for the same reason: a pushed branch must not weaken the
-// documentation rules that gate itself. DisableProjectSettings is also
-// trusted-only so a pushed branch cannot enable or defeat the gate-agent
-// project-instruction boundary. When allowRepoCommands is
+// pushed branch cannot inject shell or pick an agent. Prompts (appended to
+// every pipeline agent prompt) follows the same opt-in boundary as those
+// fields: a pushed branch must not steer the agents that gate it unless the
+// maintainer opted in. Document (the documentation placement policy injected
+// into the document gate prompt) and DisableProjectSettings are
+// unconditionally trusted-only, so not even the opt-in lets a pushed branch
+// weaken the placement policy or the gate-agent project-instruction boundary.
+// When allowRepoCommands is
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
-// and agent selection, including step routes.
+// prompt additions, and agent selection, including step routes.
 // When there is no trusted copy and the maintainer has not opted in, all
 // code-executing selectors are forced empty (Agent "" and nil Agents inherit
 // the global agent; empty step routes inherit that run route; Commands{} and
@@ -2126,6 +2288,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Lint = copyStepAgentRaw(trusted.Lint)
 		effective.PR = copyStepAgentRaw(trusted.PR)
 		effective.CI = copyStepAgentRaw(trusted.CI)
+		effective.Prompts = trusted.Prompts
 	} else {
 		effective.Commands = Commands{}
 		effective.Hooks = Hooks{}
@@ -2146,6 +2309,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Lint = StepAgentRaw{}
 		effective.PR = StepAgentRaw{}
 		effective.CI = StepAgentRaw{}
+		effective.Prompts = PromptConfig{}
 	}
 	return &effective
 }
@@ -2350,6 +2514,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:                  intent,
 		Test:                    test,
 		Document:                Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Prompts:                 mergePromptConfigs(global.Prompts, repo.Prompts),
 		RefreshStrategy:         repo.Refresh.Strategy.OrDefault(),
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).

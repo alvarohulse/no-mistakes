@@ -75,6 +75,12 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+prompts:
+  shared: |
+    Always included in model prompts.
+  review: |
+    Review-specific additions.
 ```
 
 ## Fields
@@ -462,6 +468,20 @@ Machine-wide default pull request body formatter.
 This is the only hook accepted here. One formatter usually serves every repo on a machine, whereas `hooks.post_worktree` is a repo's own install command - setting that globally would run the wrong setup in every other repo, so it is rejected with an error rather than silently ignored.
 
 A repo's own `hooks.pr_body` overrides this value. The field's behavior, contract, and failure handling are owned by [the repo config reference](/no-mistakes/reference/repo-config/#hookspr_body); iterate on a formatter with [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body).
+
+### prompts
+
+Global prompt additions appended to no-mistakes' built-in pipeline prompts.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` of `string` values |
+| Default | Empty (built-in prompts only) |
+
+Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
+Values set here apply to every repository gated by this machine.
+
+A repo's own `prompts` never replaces these values; the two append, global guidance first. The supported keys, the step each one reaches, and the full merge order are owned by [the repo config reference](/no-mistakes/reference/repo-config/#prompts).
 
 ## Environment variables
 

@@ -7,14 +7,15 @@ Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository 
 
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, and the Review adversary route from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+`prompts` steers those launched agents.
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review adversary route, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
 Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
 
-If you genuinely want per-branch `commands`, `hooks`, `agent`, and step routes (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
+If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
 `NM_REPO_CONFIG` is a separate, machine-owner-controlled escape hatch. When explicitly set, its bound file overlays the effective committed config after these trust rules, including code-executing fields. Do not set it globally without a correct `repo:` binding.
 :::
@@ -35,7 +36,7 @@ commands:
 
 The file must declare `repo:` and its remote identity must match the registered upstream repository. Equivalent SSH and HTTPS GitHub forms match. The path and its resolved symlink target must remain outside the repository; relative paths are rejected because managed services run from a different working directory. `no-mistakes doctor` checks that the path is absolute, readable, parseable, and bound, while run startup also checks the binding against the selected repository.
 
-The machine-local file overlays only fields present in it, after the committed pushed/default config trust resolution. This includes `commands`, `hooks`, the run-wide `agent`, and per-step routes; explicitly present empty values clear committed values. Unset `NM_REPO_CONFIG` leaves established config and recovery behavior unchanged.
+The machine-local file overlays only fields present in it, after the committed pushed/default config trust resolution. This includes `commands`, `hooks`, the run-wide `agent`, per-step routes, and per-key `prompts`; explicitly present empty values clear committed values. Unset `NM_REPO_CONFIG` leaves established config and recovery behavior unchanged.
 
 launchd, systemd, and Windows Task Scheduler definitions forward the current value. Setting or unsetting it causes the next managed daemon start or restart to refresh the service definition; unlike proxy settings, an old machine-config path is not inherited after the variable is removed. The Windows task action points to an atomically written launcher under that `NM_HOME`; the launcher sets only `NM_REPO_CONFIG` and never persists proxy variables or credentials. Stale launchers are removed only after task replacement succeeds.
 
@@ -102,6 +103,14 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+
+# Optional prompt additions, read only from the trusted default branch.
+# Built-in prompts stay authoritative.
+prompts:
+  shared: |
+    Always included in model prompts.
+  test: |
+    Test-specific additions.
 ```
 
 ## Fields
@@ -213,14 +222,14 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, and the Review adversary route) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review adversary route, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, and per-step routes from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell or pick the launched agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### hooks.post_worktree
 
@@ -448,3 +457,40 @@ By default, test evidence stays in a temporary directory keyed by run ID and is 
 Set `store_in_repo: true` to write evidence under `<dir>/<branch-slug>` inside the worktree so push can commit and publish it with the branch.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+
+### prompts
+
+Append repo-specific guidance to no-mistakes' built-in agent prompts.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` of `string` values |
+| Default | Empty (built-in prompts only) |
+
+Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
+`prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
+Repo prompt config is agent-steering config, so it is read from the trusted default-branch copy unless `allow_repo_commands: true` is set there.
+A machine-local [`NM_REPO_CONFIG`](#machine-local-overrides) file can overlay individual `prompts.<key>` values after that trust resolution.
+
+Global prompt config and repo prompt config combine in this order:
+
+1. global `prompts.shared`
+2. repo `prompts.shared`
+3. global `prompts.<step>`
+4. repo `prompts.<step>`
+
+| Field | Applies to |
+|---|---|
+| `prompts.shared` | Every pipeline model prompt |
+| `prompts.intent` | Intent summarization and disambiguation |
+| `prompts.refresh` | Refresh (rebase or merge) conflict resolution |
+| `prompts.review` | Review, adversarial review, and review-fix prompts |
+| `prompts.build` | Build verification and build-fix prompts |
+| `prompts.test` | Test evidence and test-fix prompts |
+| `prompts.document` | Documentation update prompt |
+| `prompts.lint` | Lint agent and lint-fix prompts |
+| `prompts.pr` | PR title/body prompt |
+| `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
+
+Push never invokes a model, so there is no `prompts.push`.
+When `commands.lint` is empty, the [combined document+lint housekeeping pass](/no-mistakes/reference/pipeline-steps/#document) is a single invocation, so it carries both `prompts.document` and `prompts.lint` with shared guidance included once.

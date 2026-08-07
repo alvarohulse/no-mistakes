@@ -131,4 +131,40 @@ test:
 	}
 }
 
+// TestOverlayRepoConfigOverridesPrompts proves the machine-local overlay
+// (NM_REPO_CONFIG) carries prompt additions: present keys replace the
+// committed value (including explicit empties), absent keys inherit it.
+func TestOverlayRepoConfigOverridesPrompts(t *testing.T) {
+	t.Parallel()
+	committed, err := LoadRepoFromBytes([]byte(`
+prompts:
+  shared: committed shared
+  test: committed test
+  review: committed review
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := LoadRepoFromBytes([]byte(`
+repo: https://github.com/owner/project
+prompts:
+  test: run the scaleapi testing commands
+  review: ""
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := OverlayRepoConfig(committed, machine)
+	if got.Prompts.Test != "run the scaleapi testing commands" {
+		t.Fatalf("prompts.test = %q, want machine value", got.Prompts.Test)
+	}
+	if got.Prompts.Shared != "committed shared" {
+		t.Fatalf("prompts.shared = %q, want inherited committed value", got.Prompts.Shared)
+	}
+	if got.Prompts.Review != "" {
+		t.Fatalf("prompts.review = %q, want explicitly cleared", got.Prompts.Review)
+	}
+}
+
 func stringPtr(value string) *string { return &value }

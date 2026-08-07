@@ -121,6 +121,68 @@ func TestDocumentStep_ConfiguredLintCommandKeepsDocOnlyPrompt(t *testing.T) {
 	}
 }
 
+// TestDocumentStep_CombinedPassCarriesBothPromptAdditions proves the combined
+// pass carries the configured prompts.lint guidance - the lint step consumes
+// its stashed result without invoking an agent, so this is the only invocation
+// where prompts.lint can reach a model - with shared guidance emitted once and
+// ordered shared, document, lint.
+func TestDocumentStep_CombinedPassCarriesBothPromptAdditions(t *testing.T) {
+	t.Parallel()
+	prompts := config.PromptConfig{
+		Shared:   "shared guidance",
+		Document: "document guidance",
+		Lint:     "lint guidance",
+	}
+
+	runStep := func(t *testing.T, cmds config.Commands) string {
+		t.Helper()
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"housekeeping clean"}`)}, nil
+			},
+		}
+		sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, cmds)
+		sctx.Config.Prompts = prompts
+		if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		return ag.calls[0].Prompt
+	}
+
+	t.Run("combined pass", func(t *testing.T) {
+		t.Parallel()
+		prompt := runStep(t, config.Commands{})
+		if n := strings.Count(prompt, "shared guidance"); n != 1 {
+			t.Fatalf("shared guidance appears %d times, want exactly once:\n%s", n, prompt)
+		}
+		sharedAt := strings.Index(prompt, "shared guidance")
+		docAt := strings.Index(prompt, "document guidance")
+		lintAt := strings.Index(prompt, "lint guidance")
+		if docAt < 0 || lintAt < 0 {
+			t.Fatalf("combined prompt missing document (%d) or lint (%d) guidance:\n%s", docAt, lintAt, prompt)
+		}
+		if !(sharedAt < docAt && docAt < lintAt) {
+			t.Fatalf("want shared(%d) < document(%d) < lint(%d) ordering:\n%s", sharedAt, docAt, lintAt, prompt)
+		}
+		if n := strings.Count(prompt, "Additional prompt config:"); n != 1 {
+			t.Fatalf("prompt config section appears %d times, want exactly one wrapper", n)
+		}
+	})
+
+	t.Run("configured lint command keeps document-only additions", func(t *testing.T) {
+		t.Parallel()
+		prompt := runStep(t, config.Commands{Lint: "true"})
+		if !strings.Contains(prompt, "document guidance") {
+			t.Fatalf("document-only prompt lost its own guidance:\n%s", prompt)
+		}
+		if strings.Contains(prompt, "lint guidance") {
+			t.Fatalf("document-only prompt must not carry prompts.lint; the lint step runs its own pass:\n%s", prompt)
+		}
+	})
+}
+
 func TestDocumentStep_ConfiguredLintCommandKeepsLintCategorizedFindingInDocumentGate(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

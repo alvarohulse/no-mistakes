@@ -35,6 +35,10 @@ func TestTestStep_FixMode(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
 	sctx.Fixing = true
 	sctx.PreviousFindings = previousFindings
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		Test:   "test prompt config",
+	}
 
 	step := &TestStep{}
 	outcome, err := step.Execute(sctx)
@@ -64,6 +68,15 @@ func TestTestStep_FixMode(t *testing.T) {
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected test fix prompt to prefer root-cause fixes over bandaids")
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "shared prompt config") {
+		t.Fatalf("expected test fix prompt to include shared prompt config, got:\n%s", ag.calls[0].Prompt)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "test prompt config") {
+		t.Fatalf("expected test fix prompt to include test prompt config, got:\n%s", ag.calls[0].Prompt)
+	}
+	if strings.Index(ag.calls[0].Prompt, "shared prompt config") > strings.Index(ag.calls[0].Prompt, "test prompt config") {
+		t.Fatalf("expected shared prompt config before test prompt config, got:\n%s", ag.calls[0].Prompt)
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "remove any transient artifacts your testing created in the working tree") {
 		t.Error("expected test fix prompt to ask the agent to clean up transient testing artifacts before finishing")
@@ -570,6 +583,10 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
 	sctx.UserIntent = "Show users a success screen after checkout"
+	sctx.Config.Prompts = config.PromptConfig{
+		Shared: "shared prompt config",
+		Test:   "test prompt config",
+	}
 
 	step := &TestStep{}
 	outcome, err := step.Execute(sctx)
@@ -612,10 +629,15 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 		"Always include an \"artifacts\" array",
 		"If sufficient evidence is not possible, report a warning finding",
 		"remove any transient artifacts your testing created in the working tree",
+		"shared prompt config",
+		"test prompt config",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected prompt to contain %q, got:\n%s", want, prompt)
 		}
+	}
+	if strings.Index(prompt, "shared prompt config") > strings.Index(prompt, "test prompt config") {
+		t.Fatalf("expected shared prompt config before test prompt config, got:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "will be available from the pushed commit") || strings.Contains(prompt, "files that already exist in the repository") {
 		t.Fatalf("expected prompt not to make the testing agent worry about committed evidence files, got:\n%s", prompt)
