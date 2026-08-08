@@ -288,7 +288,6 @@ func TestRenderLaunchAgentForwardsProxyEnv(t *testing.T) {
 	}
 }
 
-
 // TestRenderLaunchAgentForwardsEveryProxyEnvKey guards that the renderer and
 // proxyEnvKeys cannot drift apart: every declared key handed to the renderer -
 // both the upper- and lower-case spellings - must reach the plist with its
