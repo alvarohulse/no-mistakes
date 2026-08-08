@@ -62,6 +62,9 @@ func TestLoadGlobalRejectsMalformedOverrideKeys(t *testing.T) {
 		{name: "empty repo", key: "scaleapi/"},
 		{name: "embedded whitespace", key: "scale api/scaleapi"},
 		{name: "dot segment", key: "./scaleapi"},
+		// Remote identities are built with .git stripped, so this form is a
+		// key that would pass every other check and never match anything.
+		{name: "clone url dot git suffix", key: "scaleapi/scaleapi.git"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -142,10 +145,9 @@ overrides:
 	for _, identity := range []string{
 		"github.com/scaleapi/other",
 		"github.com/group/scaleapi/scaleapi", // nested path never matches a two-segment key
-		"scaleapi/scaleapi",                  // host-less strings are not identities
 		"",
 	} {
-		if _, _, ok := cfg.OverrideForRepoIdentity(identity); ok && identity != "scaleapi/scaleapi" {
+		if _, _, ok := cfg.OverrideForRepoIdentity(identity); ok {
 			t.Fatalf("identity %q unexpectedly matched", identity)
 		}
 	}

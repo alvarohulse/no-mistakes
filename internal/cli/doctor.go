@@ -11,7 +11,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -23,6 +22,13 @@ type doctorAgentCheck struct {
 	name     string
 	binaries []string
 }
+
+// retiredRepoConfigEnv is the retired machine-local repo-config opt-in,
+// replaced by the global config's overrides map. Nothing reads it any more, so
+// a machine that still exports it would otherwise silently lose the commands,
+// hooks, and agent routes it used to supply; doctor reports it as a migration
+// signal.
+const retiredRepoConfigEnv = "NM_REPO_CONFIG"
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
@@ -85,9 +91,13 @@ func newDoctorCmd() *cobra.Command {
 				}
 
 				if p != nil {
-					if detail, present := doctorOverridesDetail(cmd.Context(), p.ConfigFile()); present {
+					if detail, present := doctorOverridesDetail(cmd.Context(), p); present {
 						ok("repo overrides", detail)
 					}
+				}
+
+				if _, set := os.LookupEnv(retiredRepoConfigEnv); set {
+					warn(retiredRepoConfigEnv, "no longer supported "+sDim.Render("(move its contents into overrides in the global config)"))
 				}
 
 				if p != nil {
@@ -173,8 +183,12 @@ func newDoctorCmd() *cobra.Command {
 // directory's repository matches one. A config that fails to load is reported
 // by the gate-validation check, so this stays silent then; it also stays
 // silent when no overrides are configured.
-func doctorOverridesDetail(ctx context.Context, configFile string) (string, bool) {
-	globalCfg, err := config.LoadGlobal(configFile)
+//
+// Matching goes through localRepoIdentity, so it answers the question a run
+// would answer: the daemon matches the registered upstream URL, and only an
+// unregistered repository falls back to the checkout's origin remote.
+func doctorOverridesDetail(ctx context.Context, p *paths.Paths) (string, bool) {
+	globalCfg, err := config.LoadGlobal(p.ConfigFile())
 	if err != nil || len(globalCfg.Overrides) == 0 {
 		return "", false
 	}
@@ -184,10 +198,12 @@ func doctorOverridesDetail(ctx context.Context, configFile string) (string, bool
 	}
 	sort.Strings(keys)
 	detail := strings.Join(keys, ", ")
-	identity, found := currentRepoIdentity(ctx)
-	switch {
+	local := doctorLocalRepo(p)
+	switch identity, found := localRepoIdentity(ctx, local); {
+	case local.root == "":
+		detail += " " + sDim.Render("(not inside a git repository)")
 	case !found:
-		detail += " " + sDim.Render("(not inside a repository with an origin remote)")
+		detail += " " + sDim.Render("(this repository's remote has no <owner>/<repo> identity, so no override can apply)")
 	default:
 		if _, key, matched := globalCfg.OverrideForRepoIdentity(identity); matched {
 			detail += fmt.Sprintf("; %s applies to this repository", key)
@@ -198,23 +214,23 @@ func doctorOverridesDetail(ctx context.Context, configFile string) (string, bool
 	return detail, true
 }
 
-// currentRepoIdentity resolves the working directory's repository identity
-// from its origin remote, using the same normalization the daemon applies to
-// the registered upstream URL when matching overrides.
-func currentRepoIdentity(ctx context.Context) (string, bool) {
+// doctorLocalRepo resolves the working directory's repository context for the
+// overrides report. The database is opened only when it already exists, so a
+// health check never creates the state database the check below reports on.
+func doctorLocalRepo(p *paths.Paths) localRepo {
 	root, err := git.FindGitRoot(".")
 	if err != nil {
-		return "", false
+		return localRepo{}
 	}
-	urls, err := git.GetConfiguredRemoteURLs(ctx, root, "origin")
-	if err != nil || len(urls) != 1 {
-		return "", false
+	if _, err := os.Stat(p.DB()); err != nil {
+		return localRepo{root: root}
 	}
-	identity, err := gate.RegisteredRemoteIdentity(urls[0])
+	d, err := db.Open(p.DB())
 	if err != nil {
-		return "", false
+		return localRepo{root: root}
 	}
-	return identity, true
+	defer d.Close()
+	return resolveLocalRepo(d)
 }
 
 func doctorAgentChecks() []doctorAgentCheck {

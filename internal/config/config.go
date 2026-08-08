@@ -644,8 +644,10 @@ func (c *RepoConfig) Declares(paths ...string) bool {
 // NormalizeOverrideKey validates one global-config overrides key and returns
 // its normalized (lowercase) form. A key must be exactly `<owner>/<repo>`:
 // two non-empty path segments and nothing else - no scheme, host, userinfo,
-// whitespace, or extra segments - so a malformed binding fails config load
-// loudly instead of silently never matching.
+// whitespace, extra segments, or the clone URL's trailing `.git`, which the
+// remote identities this key is matched against always have stripped - so a
+// malformed binding fails config load loudly instead of silently never
+// matching.
 func NormalizeOverrideKey(key string) (string, error) {
 	if key != strings.TrimSpace(key) {
 		return "", fmt.Errorf("overrides key %q must not have surrounding whitespace", key)
@@ -653,6 +655,9 @@ func NormalizeOverrideKey(key string) (string, error) {
 	owner, repo, ok := strings.Cut(key, "/")
 	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
 		return "", fmt.Errorf("overrides key %q must be exactly <owner>/<repo>", key)
+	}
+	if strings.HasSuffix(key, ".git") {
+		return "", fmt.Errorf("overrides key %q must not end in .git; use the plain <owner>/<repo> identity", key)
 	}
 	for _, segment := range []string{owner, repo} {
 		if segment == "." || segment == ".." {
@@ -686,11 +691,8 @@ func normalizeGlobalOverrides(raw map[string]*RepoConfig) (map[string]*RepoConfi
 		if override.has("repo") {
 			return nil, fmt.Errorf("overrides.%s must not declare repo; the overrides key is the repository binding", key)
 		}
-		if err := validateCommitRaw(override.Commit); err != nil {
+		if err := finalizeRepoConfig(override); err != nil {
 			return nil, fmt.Errorf("overrides.%s: %w", key, err)
-		}
-		if override.AutoFix.CI == nil {
-			override.AutoFix.CI = override.AutoFix.Babysit
 		}
 		overrides[normalized] = override
 	}
@@ -2313,14 +2315,27 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
-	if err := validateCommitRaw(cfg.Commit); err != nil {
+	if err := finalizeRepoConfig(cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// finalizeRepoConfig applies the post-unmarshal normalization every repo-config
+// source shares: commit-template validation, and the auto_fix.ci fallback to
+// the legacy auto_fix.babysit spelling. A committed .no-mistakes.yaml and a
+// global-config overrides entry are the same shape and must be read the same
+// way, so both run through here rather than keeping separate copies that can
+// drift.
+func finalizeRepoConfig(cfg *RepoConfig) error {
+	if err := validateCommitRaw(cfg.Commit); err != nil {
+		return err
 	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
-
-	return cfg, nil
+	return nil
 }
 
 // EffectiveRepoConfig returns the repo config that should drive the pipeline

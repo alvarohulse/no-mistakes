@@ -87,7 +87,8 @@ func legacySystemdUserServicePath() string {
 
 // renderSystemdUnit renders the systemd unit from the current process
 // environment. It is a convenience wrapper used only by tests; production
-// callers resolve inherited proxy settings // opt-in before calling renderSystemdUnitWithForwardedEnv.
+// callers resolve inherited proxy settings before calling
+// renderSystemdUnitWithForwardedEnv.
 func renderSystemdUnit(exe string, p *paths.Paths, home string) string {
 	return renderSystemdUnitWithForwardedEnv(exe, p, home, serviceProxyEnv())
 }
