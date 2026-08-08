@@ -19,8 +19,8 @@ func installSystemdUserService(p *paths.Paths, exe string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create systemd user directory: %w", err)
 	}
-	// writeServiceFile resolves inherited proxy settings and the current
-	// machine-config opt-in once before rendering the service definition.
+	// writeServiceFile resolves inherited proxy settings once before rendering
+	// the service definition.
 	render := func(forwardedEnv [][2]string) string {
 		return renderSystemdUnitWithForwardedEnv(exe, p, home, forwardedEnv)
 	}
@@ -87,14 +87,13 @@ func legacySystemdUserServicePath() string {
 
 // renderSystemdUnit renders the systemd unit from the current process
 // environment. It is a convenience wrapper used only by tests; production
-// callers resolve inherited proxy settings and the current machine-config
-// opt-in before calling renderSystemdUnitWithForwardedEnv.
+// callers resolve inherited proxy settings // opt-in before calling renderSystemdUnitWithForwardedEnv.
 func renderSystemdUnit(exe string, p *paths.Paths, home string) string {
-	return renderSystemdUnitWithForwardedEnv(exe, p, home, serviceForwardedEnv())
+	return renderSystemdUnitWithForwardedEnv(exe, p, home, serviceProxyEnv())
 }
 
 // renderSystemdUnitWithForwardedEnv renders the systemd unit using environment
-// entries supplied by the caller (see serviceForwardedEnv).
+// entries supplied by the caller (see serviceProxyEnv).
 func renderSystemdUnitWithForwardedEnv(exe string, p *paths.Paths, home string, forwardedEnv [][2]string) string {
 	command := strings.Join([]string{
 		systemdEscapeArg(exe),
@@ -107,7 +106,7 @@ func renderSystemdUnitWithForwardedEnv(exe string, p *paths.Paths, home string, 
 		systemdEnvironmentLine("HOME", home),
 		systemdEnvironmentLine("PATH", managedServicePath(home)),
 	}
-	// Forward managed-service environment entries. See serviceForwardedEnv.
+	// Forward managed-service environment entries. See serviceProxyEnv.
 	for _, kv := range forwardedEnv {
 		envLines = append(envLines, systemdEnvironmentLine(kv[0], kv[1]))
 	}

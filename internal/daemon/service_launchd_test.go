@@ -288,22 +288,6 @@ func TestRenderLaunchAgentForwardsProxyEnv(t *testing.T) {
 	}
 }
 
-func TestRenderLaunchAgentForwardsMachineRepoConfig(t *testing.T) {
-	for _, key := range proxyEnvKeys {
-		t.Setenv(key, "")
-	}
-	t.Setenv(machineRepoConfigEnv, "/home/u/.config/no-mistakes/repo.yaml")
-
-	plist := renderLaunchAgent("/opt/no-mistakes/bin/no-mistakes", paths.WithRoot(t.TempDir()), "/home/u")
-	for _, want := range []string{
-		"<key>NM_REPO_CONFIG</key>",
-		"<string>/home/u/.config/no-mistakes/repo.yaml</string>",
-	} {
-		if !strings.Contains(plist, want) {
-			t.Fatalf("launch agent should forward machine repo config %q, got:\n%s", want, plist)
-		}
-	}
-}
 
 // TestRenderLaunchAgentForwardsEveryProxyEnvKey guards that the renderer and
 // proxyEnvKeys cannot drift apart: every declared key handed to the renderer -

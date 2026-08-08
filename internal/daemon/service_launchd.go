@@ -33,8 +33,8 @@ func installLaunchAgent(p *paths.Paths, exe string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create launch agents directory: %w", err)
 	}
-	// writeServiceFile resolves inherited proxy settings and the current
-	// machine-config opt-in once before rendering the service definition.
+	// writeServiceFile resolves inherited proxy settings once before rendering
+	// the service definition.
 	render := func(forwardedEnv [][2]string) string {
 		return renderLaunchAgentWithForwardedEnv(exe, p, home, forwardedEnv)
 	}
@@ -180,14 +180,14 @@ func launchdDomainTarget() (string, error) {
 
 // renderLaunchAgent renders the launchd plist from the current process
 // environment. It is a convenience wrapper used only by tests; production
-// callers resolve inherited proxy settings and the current machine-config
-// opt-in before calling renderLaunchAgentWithForwardedEnv.
+// callers resolve inherited proxy settings before calling
+// renderLaunchAgentWithForwardedEnv.
 func renderLaunchAgent(exe string, p *paths.Paths, home string) string {
-	return renderLaunchAgentWithForwardedEnv(exe, p, home, serviceForwardedEnv())
+	return renderLaunchAgentWithForwardedEnv(exe, p, home, serviceProxyEnv())
 }
 
 // renderLaunchAgentWithForwardedEnv renders the launchd plist using environment
-// entries supplied by the caller (see serviceForwardedEnv).
+// entries supplied by the caller (see serviceProxyEnv).
 func renderLaunchAgentWithForwardedEnv(exe string, p *paths.Paths, home string, forwardedEnv [][2]string) string {
 	values := []string{exe, "daemon", "run", "--root", p.Root()}
 	var args strings.Builder
@@ -202,7 +202,7 @@ func renderLaunchAgentWithForwardedEnv(exe string, p *paths.Paths, home string, 
 	// environment fragment into the template via "%s  </dict>", which depended on the
 	// fragment's trailing newline and indentation lining up. Proxy variables are
 	// forwarded so the daemon (and the agents it spawns) can reach the network
-	// through the user's proxy. See serviceForwardedEnv.
+	// through the user's proxy. See serviceProxyEnv.
 	var envDict strings.Builder
 	envDict.WriteString("  <dict>\n")
 	envDict.WriteString("    <key>HOME</key>\n    <string>")
