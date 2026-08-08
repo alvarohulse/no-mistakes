@@ -24,8 +24,8 @@ const (
 )
 
 // ConfigSource binds one effective run-config input to the exact bytes read at
-// launch. Path is private recovery metadata for machine-local config and must
-// not be rendered into public PR text.
+// launch. Path (and, for global overrides, the matched key in Ref) is private
+// recovery metadata and must not be rendered into public PR text.
 type ConfigSource struct {
 	Kind   string `json:"kind"`
 	Digest string `json:"digest"`

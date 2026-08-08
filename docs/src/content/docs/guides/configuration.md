@@ -20,13 +20,12 @@ work. Config exists for the parts that genuinely vary by machine or repo:
 - whether no-mistakes should infer intent from recent local agent transcripts
 - extra prompt guidance for pipeline step agents
 
-Config normally uses two files, with an optional machine-local repo override:
+Config uses two files:
 
 | File                         | Scope                                      | Full field reference                                             |
 | ---------------------------- | ------------------------------------------ | ---------------------------------------------------------------- |
-| `~/.no-mistakes/config.yaml` | Global defaults for all repos              | [Global Config Reference](/no-mistakes/reference/global-config/) |
+| `~/.no-mistakes/config.yaml` | Global defaults for all repos, plus optional per-repo machine-local `overrides` | [Global Config Reference](/no-mistakes/reference/global-config/) |
 | `<repo>/.no-mistakes.yaml`   | Committed per-repo policy                  | [Repo Config Reference](/no-mistakes/reference/repo-config/)     |
-| `$NM_REPO_CONFIG`            | Optional machine-local overrides for one repo | [Repo Config Reference](/no-mistakes/reference/repo-config/#machine-local-overrides) |
 
 Set `NM_HOME` to relocate the global config directory (the global file becomes `$NM_HOME/config.yaml`).
 Bitbucket Cloud credentials come from environment variables rather than config files.
@@ -36,7 +35,7 @@ For Azure DevOps, authenticate the `az` CLI with either `az devops login` or `AZ
 
 - **Global config** is for your machine-level defaults.
 - **Repo config** is for codebase-specific behavior that should travel with the repo.
-- **Machine-local repo config** is an explicit escape hatch for codebase-specific behavior that cannot be committed, such as canonical commands in a repository whose default branch you do not control.
+- **Machine-local repo overrides** (the global config's `overrides` map, keyed `<owner>/<repo>`) are an explicit escape hatch for codebase-specific behavior that cannot be committed, such as canonical commands in a repository whose default branch you do not control.
 
 In practice, most teams should keep personal preferences global and repo policy
 local.
@@ -57,13 +56,13 @@ The rest of this page covers only the cross-cutting rules that involve both file
 ## Precedence
 
 - Repo config overrides global config field by field: repo `agent` replaces the global `agent` (including a full ordered fallback list), each repo `<step>.agent` and `<step>.model` replaces the matching global route, and the Review adversary fields replace their global counterparts, while `auto_fix`, `commit`, `intent`, and `test.evidence` overlay individual fields and fall through to the global default for anything unset (`intent.disabled_readers` adds to the globally disabled readers instead of replacing them).
-- When `NM_REPO_CONFIG` is set, its repo-shaped file overlays the effective committed repo config field by field after the default-branch trust rules are applied. Present empty values can intentionally clear committed commands or routes. Unset preserves existing behavior.
+- A matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry overlays the effective committed repo config field by field after the default-branch trust rules are applied. Present empty values can intentionally clear committed commands or routes. Repositories without a matching key are unaffected.
 - `prompts` never overrides: global and repo guidance append, global before repo and shared before step-specific, and built-in prompts stay authoritative. [`prompts`](/no-mistakes/reference/repo-config/#prompts) owns the exact order and the per-step keys.
 - `agent_path_override`, `agent_args_override`, `acpx_path`, `acp_registry_overrides`, `ci_timeout`, `daemon_connect_timeout`, `step_quiet_warning`, `log_level`, and `session_reuse` are global-only fields.
 - `commands`, `ignore_patterns`, `hooks.post_worktree`, `document.instructions`, `allow_repo_commands`, and `disable_project_settings` are repo-only fields; a global `hooks.post_worktree` is rejected with an error. [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) is the one hook accepted in both files, and a repo value replaces the global one. By default, `commands`, `hooks`, `agent`, every per-step agent/model route, the Review adversary route, and `prompts` are read from the trusted default branch; a trusted `allow_repo_commands: true` opt-in instead honors their pushed-branch values. The other gate-control fields always come from the trusted default branch. See the [Repo Config Reference](/no-mistakes/reference/repo-config/) security note.
 - no-mistakes reloads global config while setting up each run, so edits made before starting a run apply to it. For repeatable profiles (for example fast versus deep Codex settings), use separately initialized `NM_HOME` roots; `NM_HOME` moves all no-mistakes state, not just config.
 
-Machine-local overrides require an absolute path outside the repository and a matching `repo:` binding. Enabled runs record the contributing global, branch, trusted-default, and machine-local sources by digest. Full paths and digests remain local; the PR Pipeline section publishes only generic labels and short digest prefixes so reviewers can see that inputs changed without exposing machine paths.
+Machine-local overrides bind by `<owner>/<repo>` key against the registered upstream repository's normalized identity. Runs with a matching entry record the contributing global, branch, trusted-default, and global-override sources by digest. Full digests, the matched key, and the config path remain local; the PR Pipeline section publishes only generic labels and short digest prefixes so reviewers can see that inputs changed without exposing machine paths.
 
 ## Explicit commands versus agent detection
 
