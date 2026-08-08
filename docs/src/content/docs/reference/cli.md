@@ -443,6 +443,7 @@ Checks:
 - registered Cursor ACP fallback binaries: `cursor-agent` plus `acpx` for `acp:cursor`
 - Effective global agent configuration, reported as `gate validation`; an unavailable configured runner is a failed check because the gate cannot validate without it
 - `repo overrides`, only when the global config declares [`overrides`](/no-mistakes/reference/global-config/#overrides): lists the configured `<owner>/<repo>` keys and reports whether the current directory's repository matches one
+- `NM_REPO_CONFIG`, only when that retired environment variable is still exported: warns that it is no longer supported and that its contents belong in [`overrides`](/no-mistakes/reference/global-config/#overrides)
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 
