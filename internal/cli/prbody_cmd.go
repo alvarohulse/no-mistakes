@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
@@ -257,8 +257,11 @@ func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID str
 	return steps.BuildContract(in), nil
 }
 
-// resolvePRBodyHook mirrors the run-time precedence: an explicit override, then
-// the machine-local repo config, then the repo's own, then the global default.
+// resolvePRBodyHook mirrors the run-time precedence: an explicit override,
+// then a matching machine-local override from the global config, then the
+// repo's own, then the global default. A matching override that explicitly
+// declares an empty hooks.pr_body clears the repo layer, exactly as the
+// run-time overlay does.
 //
 // It also mirrors the run-time trust boundary. The repo layer is read from the
 // default branch, never from the checkout: hooks.pr_body executes arbitrary
@@ -269,21 +272,23 @@ func resolvePRBodyHook(ctx context.Context, override string, local localRepo) (c
 		return trimmed, "--hook", nil
 	}
 
-	if rawPath, set := os.LookupEnv("NM_REPO_CONFIG"); set {
-		path, err := daemon.ValidateMachineRepoConfigPath(rawPath)
-		if err != nil {
-			return "", "", fmt.Errorf("NM_REPO_CONFIG: %w", err)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", "", fmt.Errorf("read NM_REPO_CONFIG: %w", err)
-		}
-		repoCfg, err := config.LoadRepoFromBytes(data)
-		if err != nil {
-			return "", "", fmt.Errorf("parse NM_REPO_CONFIG: %w", err)
-		}
-		if hook := strings.TrimSpace(repoCfg.Hooks.PRBody); hook != "" {
-			return hook, "NM_REPO_CONFIG", nil
+	p, err := paths.New()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve paths: %w", err)
+	}
+	globalCfg, err := config.LoadGlobal(p.ConfigFile())
+	if err != nil {
+		return "", "", fmt.Errorf("load global config: %w", err)
+	}
+
+	if identity, ok := localRepoIdentity(ctx, local); ok {
+		if overrideCfg, key, matched := globalCfg.OverrideForRepoIdentity(identity); matched && overrideCfg.Declares("hooks.pr_body") {
+			if hook := strings.TrimSpace(overrideCfg.Hooks.PRBody); hook != "" {
+				return hook, "global override " + key, nil
+			}
+			// Explicitly cleared: the repo layer is displaced, and the global
+			// default applies, matching OverlayRepoConfig + Merge at run time.
+			return strings.TrimSpace(globalCfg.Hooks.PRBody), "global config", nil
 		}
 	}
 
@@ -299,15 +304,31 @@ func resolvePRBodyHook(ctx context.Context, override string, local localRepo) (c
 		}
 	}
 
-	p, err := paths.New()
-	if err != nil {
-		return "", "", fmt.Errorf("resolve paths: %w", err)
-	}
-	globalCfg, err := config.LoadGlobal(p.ConfigFile())
-	if err != nil {
-		return "", "", fmt.Errorf("load global config: %w", err)
-	}
 	return strings.TrimSpace(globalCfg.Hooks.PRBody), "global config", nil
+}
+
+// localRepoIdentity resolves the repository identity used for global-override
+// matching: the registered upstream URL when the repo is initialized, falling
+// back to the checkout's origin remote. Best-effort, like the rest of this
+// command's repository context.
+func localRepoIdentity(ctx context.Context, local localRepo) (string, bool) {
+	if local.repo != nil {
+		if identity, err := gate.RegisteredRemoteIdentity(local.repo.UpstreamURL); err == nil {
+			return identity, true
+		}
+	}
+	if local.root == "" {
+		return "", false
+	}
+	urls, err := git.GetConfiguredRemoteURLs(ctx, local.root, "origin")
+	if err != nil || len(urls) != 1 {
+		return "", false
+	}
+	identity, err := gate.RegisteredRemoteIdentity(urls[0])
+	if err != nil {
+		return "", false
+	}
+	return identity, true
 }
 
 // trustedRepoConfigRef picks the local ref that stands in for the trusted

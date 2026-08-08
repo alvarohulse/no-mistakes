@@ -300,3 +300,63 @@ func TestPRBodyReportsThatARunWouldFallBack(t *testing.T) {
 		t.Fatalf("err = %v, want the formatter's own diagnostic", err)
 	}
 }
+
+// A matching global-config override supplies hooks.pr_body ahead of the
+// repo's committed formatter, mirroring the run-time overlay precedence.
+func TestPRBodyHookComesFromMatchingGlobalOverride(t *testing.T) {
+	local := setupPRBodyRepo(t)
+
+	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
+	globalConfig := "overrides:\n  Example/Example:\n    hooks:\n      pr_body: 'cat > /dev/null; echo override-body'\n"
+	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runPRBody(t, "", "--sample")
+	if err != nil {
+		t.Fatalf("pr-body: %v\n%s", err, errOut)
+	}
+	if !strings.Contains(out, "override-body") || strings.Contains(out, "repo-body") {
+		t.Fatalf("stdout = %q, want the override formatter ahead of the repo formatter", out)
+	}
+	if !strings.Contains(errOut, "global override example/example") {
+		t.Fatalf("stderr = %q, want the override source reported", errOut)
+	}
+}
+
+// An override that explicitly clears hooks.pr_body displaces the repo's
+// committed formatter, exactly as OverlayRepoConfig does at run time.
+func TestPRBodyGlobalOverrideExplicitEmptyClearsRepoFormatter(t *testing.T) {
+	local := setupPRBodyRepo(t)
+
+	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
+	globalConfig := "overrides:\n  example/example:\n    hooks:\n      pr_body: \"\"\n"
+	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := runPRBody(t, "", "--sample")
+	if err == nil || !strings.Contains(err.Error(), "no formatter configured") {
+		t.Fatalf("err = %v, want no-formatter error after the override cleared the repo layer", err)
+	}
+}
+
+// An override for a different repository must not steer this repository's
+// formatter resolution.
+func TestPRBodyIgnoresNonMatchingGlobalOverride(t *testing.T) {
+	local := setupPRBodyRepo(t)
+
+	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
+	globalConfig := "overrides:\n  other/project:\n    hooks:\n      pr_body: 'cat > /dev/null; echo other-body'\n"
+	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errOut, err := runPRBody(t, "", "--sample")
+	if err != nil {
+		t.Fatalf("pr-body: %v\n%s", err, errOut)
+	}
+	if !strings.Contains(out, "repo-body") || strings.Contains(out, "other-body") {
+		t.Fatalf("stdout = %q, want the repo formatter untouched by the non-matching override", out)
+	}
+}

@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -80,22 +84,9 @@ func newDoctorCmd() *cobra.Command {
 					ok("data directory", p.Root())
 				}
 
-				if rawPath, set := os.LookupEnv("NM_REPO_CONFIG"); set {
-					path, err := daemon.ValidateMachineRepoConfigPath(rawPath)
-					if err != nil {
-						fail("machine config", err.Error())
-						allOK = false
-					} else if data, err := os.ReadFile(path); err != nil {
-						fail("machine config", fmt.Sprintf("unreadable (%v)", err))
-						allOK = false
-					} else if repoCfg, err := config.LoadRepoFromBytes(data); err != nil {
-						fail("machine config", fmt.Sprintf("invalid (%v)", err))
-						allOK = false
-					} else if strings.TrimSpace(repoCfg.Repo) == "" {
-						fail("machine config", "invalid (repo binding is required)")
-						allOK = false
-					} else {
-						ok("machine config", path)
+				if p != nil {
+					if detail, present := doctorOverridesDetail(cmd.Context(), p.ConfigFile()); present {
+						ok("repo overrides", detail)
 					}
 				}
 
@@ -175,6 +166,55 @@ func newDoctorCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+// doctorOverridesDetail summarizes the global config's machine-local repo
+// overrides: which <owner>/<repo> keys exist and whether the current
+// directory's repository matches one. A config that fails to load is reported
+// by the gate-validation check, so this stays silent then; it also stays
+// silent when no overrides are configured.
+func doctorOverridesDetail(ctx context.Context, configFile string) (string, bool) {
+	globalCfg, err := config.LoadGlobal(configFile)
+	if err != nil || len(globalCfg.Overrides) == 0 {
+		return "", false
+	}
+	keys := make([]string, 0, len(globalCfg.Overrides))
+	for key := range globalCfg.Overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	detail := strings.Join(keys, ", ")
+	identity, found := currentRepoIdentity(ctx)
+	switch {
+	case !found:
+		detail += " " + sDim.Render("(not inside a repository with an origin remote)")
+	default:
+		if _, key, matched := globalCfg.OverrideForRepoIdentity(identity); matched {
+			detail += fmt.Sprintf("; %s applies to this repository", key)
+		} else {
+			detail += "; none apply to this repository"
+		}
+	}
+	return detail, true
+}
+
+// currentRepoIdentity resolves the working directory's repository identity
+// from its origin remote, using the same normalization the daemon applies to
+// the registered upstream URL when matching overrides.
+func currentRepoIdentity(ctx context.Context) (string, bool) {
+	root, err := git.FindGitRoot(".")
+	if err != nil {
+		return "", false
+	}
+	urls, err := git.GetConfiguredRemoteURLs(ctx, root, "origin")
+	if err != nil || len(urls) != 1 {
+		return "", false
+	}
+	identity, err := gate.RegisteredRemoteIdentity(urls[0])
+	if err != nil {
+		return "", false
+	}
+	return identity, true
 }
 
 func doctorAgentChecks() []doctorAgentCheck {
