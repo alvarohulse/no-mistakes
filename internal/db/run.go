@@ -13,6 +13,13 @@ const (
 	ConfigSourceGlobal  = "global"
 	ConfigSourceBranch  = "branch"
 	ConfigSourceDefault = "default"
+	// ConfigSourceGlobalOverride is a matched machine-local overrides entry
+	// from the global config file; its digest is the global config file's
+	// digest and its ref is the matched <owner>/<repo> key.
+	ConfigSourceGlobalOverride = "global-override"
+	// ConfigSourceMachine is the retired machine-local repo-config file
+	// mechanism. It is kept only so recovery can refuse runs launched by
+	// older binaries instead of silently dropping their launch-time overlay.
 	ConfigSourceMachine = "machine-local"
 )
 

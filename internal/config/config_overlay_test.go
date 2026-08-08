@@ -22,7 +22,6 @@ review:
 		t.Fatal(err)
 	}
 	machine, err := LoadRepoFromBytes([]byte(`
-repo: git@github.com:owner/project.git
 agent: opencode
 commands:
   test: machine-test
@@ -65,7 +64,6 @@ review:
 		t.Fatal(err)
 	}
 	machine, err := LoadRepoFromBytes([]byte(`
-repo: https://github.com/owner/project
 agent: ""
 commands:
   test: ""
@@ -105,7 +103,6 @@ func TestOverlayRepoConfigOverridesNestedSettingsWithoutReplacingSiblings(t *tes
 		}},
 	}
 	machine, err := LoadRepoFromBytes([]byte(`
-repo: https://github.com/owner/project
 auto_fix:
   review: 0
 test:
@@ -132,8 +129,9 @@ test:
 }
 
 // TestOverlayRepoConfigOverridesPrompts proves the machine-local overlay
-// (NM_REPO_CONFIG) carries prompt additions: present keys replace the
-// committed value (including explicit empties), absent keys inherit it.
+// (a global-config overrides entry) carries prompt additions: present keys
+// replace the committed value (including explicit empties), absent keys
+// inherit it.
 func TestOverlayRepoConfigOverridesPrompts(t *testing.T) {
 	t.Parallel()
 	committed, err := LoadRepoFromBytes([]byte(`
@@ -146,7 +144,6 @@ prompts:
 		t.Fatal(err)
 	}
 	machine, err := LoadRepoFromBytes([]byte(`
-repo: https://github.com/owner/project
 prompts:
   test: run the scaleapi testing commands
   review: ""
