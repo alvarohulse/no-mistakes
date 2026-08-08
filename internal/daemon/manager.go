@@ -849,17 +849,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	} else {
 		repo = refreshed
 	}
-	// Load the global config before creating the run so a malformed config
-	// (including a malformed overrides section) refuses run creation instead
-	// of recording a failed run.
-	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
-	if err != nil {
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
-	globalCfg := globalInput.Config
-	globalOverride := resolveGlobalOverride(globalInput, repo)
-
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -939,6 +928,18 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}()
 
+	// A malformed global config (including a malformed overrides section) is
+	// recorded on the run rather than refusing run creation: the run row plus
+	// its error is the only feedback a push-triggered pipeline can give, and
+	// the deferred cleanup above still removes the setup worktree.
+	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
+		trackStartFailure("load_global_config")
+		return "", fmt.Errorf("load global config: %w", err)
+	}
+	globalCfg := globalInput.Config
+	globalOverride := resolveGlobalOverride(globalInput, repo)
 	pushedRepoInput, err := loadPushedRepoConfigInput(ctx, wtDir, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))

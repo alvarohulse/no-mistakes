@@ -129,7 +129,7 @@ prompts:
 	}
 }
 
-func TestRunStartRejectsMalformedOverridesBeforeCreatingRun(t *testing.T) {
+func TestRunStartRecordsMalformedOverridesAsFailedRun(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database := newRefreshRunFixture(t)
 	repo, head := setupTestGitRepo(t, p, database, "override-config-malformed")
@@ -143,12 +143,24 @@ func TestRunStartRejectsMalformedOverridesBeforeCreatingRun(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "overrides key") {
 		t.Fatalf("error = %v, want malformed-key refusal", err)
 	}
+	// A malformed overrides section fails like any other malformed global
+	// config: the run row carries the reason (the only feedback a
+	// push-triggered pipeline has) and the setup worktree is cleaned up.
 	runs, queryErr := database.GetRunsByRepo(repo.ID)
 	if queryErr != nil {
 		t.Fatal(queryErr)
 	}
-	if len(runs) != 0 {
-		t.Fatalf("runs = %d, want none before config validation", len(runs))
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want the failed run to be recorded", len(runs))
+	}
+	if runs[0].Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", runs[0].Status)
+	}
+	if runs[0].Error == nil || !strings.Contains(*runs[0].Error, "overrides key") {
+		t.Fatalf("run error = %v, want the malformed-key reason", runs[0].Error)
+	}
+	if _, statErr := os.Stat(p.WorktreeDir(repo.ID, runs[0].ID)); !os.IsNotExist(statErr) {
+		t.Fatalf("setup-failure worktree still present, stat err = %v", statErr)
 	}
 }
 
