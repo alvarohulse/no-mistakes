@@ -81,6 +81,14 @@ prompts:
     Always included in model prompts.
   review: |
     Review-specific additions.
+
+overrides:
+  example/project:
+    commands:
+      build: "make build"
+    prompts:
+      test: |
+        Repo-specific testing guidance.
 ```
 
 ## Fields
@@ -482,6 +490,35 @@ Built-in prompts remain authoritative: configured prompt text is appended as ext
 Values set here apply to every repository gated by this machine.
 
 A repo's own `prompts` never replaces these values; the two append, global guidance first. The supported keys, the step each one reaches, and the full merge order are owned by [the repo config reference](/no-mistakes/reference/repo-config/#prompts).
+
+### overrides
+
+Machine-local per-repository configuration, keyed by repository identity.
+
+|      |          |
+| ---- | -------- |
+| Type | `map` of `<owner>/<repo>` keys to [repo-config](/no-mistakes/reference/repo-config/)-shaped objects |
+| Default | Empty (no repository is overridden) |
+
+Use an entry here for repo-specific values that cannot be committed to the repository's default branch - for example canonical commands in a repository whose default branch you do not control. This is machine-owner-trusted configuration with the same standing the retired machine-local config file had: it can set code-executing fields (`commands`, `hooks`), the run-wide `agent`, per-step agent/model routes, and per-key `prompts`.
+
+```yaml
+overrides:
+  example/project:
+    agent: codex
+    commands:
+      build: "go build ./..."
+      lint: "make lint"
+    prompts:
+      test: |
+        Repo-specific testing guidance.
+```
+
+**Keys and identity matching.** A key must be exactly `<owner>/<repo>` - two path segments, no scheme, host, URL syntax, or a clone URL's trailing `.git` - and is matched case-insensitively. At run start the daemon normalizes the registered upstream URL through the same identity rules the gate uses, so equivalent SSH and HTTPS remotes for the same repository match the same key; the match is host-agnostic, comparing only the owner/repo path. A malformed key or unparseable entry fails config loading loudly. A repository no key matches - including one whose registered remote has no normalizable identity, such as a local-path remote, and one whose identity path is deeper than two segments, such as a GitLab subgroup project - behaves exactly as if nothing was configured. An entry must not declare the legacy `repo:` field; the key is the binding. `no-mistakes doctor` reports the configured keys and whether the current repository matches one, and flags the retired `NM_REPO_CONFIG` environment variable if a machine still exports it, since its contents belong here now.
+
+**Precedence.** A matching entry overlays the effective committed config after the [default-branch trust rules](/no-mistakes/reference/repo-config/) are applied: only fields explicitly present in the entry apply, and explicitly present empty values clear the committed value (for example `commands.test: ""` disables a committed test command). Fields absent from the entry keep the committed/trusted resolution, and the result then merges over this file's global defaults as usual.
+
+**Trust model.** Entries live in this machine-local file, which only the machine owner edits, so they sit on the trusted side of the pushed-branch boundary - a contributor's branch can neither add nor disturb them. Runs with a matching entry record their contributing config sources: the PR Pipeline section shows only generic source labels (including `global-override`) with 12-character digest prefixes, while the full digest, the matched key, and this file's path stay in the local state database. Recovery requires the launch-time global config digest and re-reads committed inputs from their launch-time Git refs, refusing drift instead of silently changing a run's config.
 
 ## Environment variables
 

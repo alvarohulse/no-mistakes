@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,12 +19,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
-const machineRepoConfigEnv = "NM_REPO_CONFIG"
-
-type machineRepoConfig struct {
+// globalOverrideInput is the global config's machine-local override matched
+// to one run's registered repository, pinned to the exact global-config bytes
+// read at launch. Digest and Path identify the global config file the entry
+// came from, so recovery can refuse a drifted file just like it refuses a
+// drifted committed input.
+type globalOverrideInput struct {
 	Config *config.RepoConfig
-	Path   string
+	Key    string
 	Digest string
+	Path   string
 }
 
 type repoConfigInput struct {
@@ -36,75 +41,34 @@ type globalConfigInput struct {
 	Source *db.ConfigSource
 }
 
-func loadMachineRepoConfig(repo *db.Repo, lookupEnv func(string) (string, bool)) (*machineRepoConfig, error) {
-	rawPath, set := lookupEnv(machineRepoConfigEnv)
-	if !set {
-		return nil, nil
+// resolveGlobalOverride matches the run's registered repository against the
+// global config's overrides map. The registered upstream URL is normalized
+// through the same identity rules as gate refresh (so equivalent SSH and
+// HTTPS forms match) and compared against the `<owner>/<repo>` overrides
+// keys. No matching key means no overlay: the repository behaves exactly as
+// if nothing was configured. A registered remote whose identity cannot be
+// normalized (for example a local-path remote) can never match a key, so it
+// resolves to no overlay with a warning rather than failing every run on the
+// machine.
+func resolveGlobalOverride(global *globalConfigInput, repo *db.Repo) *globalOverrideInput {
+	if global == nil || len(global.Config.Overrides) == 0 {
+		return nil
 	}
-	path, err := ValidateMachineRepoConfigPath(rawPath)
+	identity, err := gate.RegisteredRemoteIdentity(repo.UpstreamURL)
 	if err != nil {
-		return nil, err
+		slog.Warn("global config overrides are configured but the registered repository remote has no normalizable identity; no override applies", "repo_id", repo.ID)
+		return nil
 	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s target: %w", machineRepoConfigEnv, err)
+	override, key, ok := global.Config.OverrideForRepoIdentity(identity)
+	if !ok {
+		return nil
 	}
-	repoPath, err := filepath.Abs(repo.WorkingPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve repository path for %s: %w", machineRepoConfigEnv, err)
+	input := &globalOverrideInput{Config: override, Key: key}
+	if global.Source != nil {
+		input.Digest = global.Source.Digest
+		input.Path = global.Source.Path
 	}
-	repoPath = filepath.Clean(repoPath)
-	resolvedRepoPath, err := filepath.EvalSymlinks(repoPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve repository path for %s: %w", machineRepoConfigEnv, err)
-	}
-	if pathWithin(repoPath, path) || pathWithin(resolvedRepoPath, resolvedPath) {
-		return nil, fmt.Errorf("%s must be outside the repository", machineRepoConfigEnv)
-	}
-
-	data, err := os.ReadFile(resolvedPath)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", machineRepoConfigEnv, err)
-	}
-	repoConfig, err := config.LoadRepoFromBytes(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", machineRepoConfigEnv, err)
-	}
-	if strings.TrimSpace(repoConfig.Repo) == "" {
-		return nil, fmt.Errorf("%s must declare repo", machineRepoConfigEnv)
-	}
-	configuredIdentity, err := gate.RemoteIdentity(repoConfig.Repo)
-	if err != nil {
-		return nil, fmt.Errorf("%s repo binding is invalid", machineRepoConfigEnv)
-	}
-	registeredIdentity, err := gate.RegisteredRemoteIdentity(repo.UpstreamURL)
-	if err != nil {
-		return nil, fmt.Errorf("registered repository remote cannot be validated for %s", machineRepoConfigEnv)
-	}
-	if configuredIdentity != registeredIdentity {
-		return nil, fmt.Errorf("%s repo binding does not match the registered repository", machineRepoConfigEnv)
-	}
-
-	return &machineRepoConfig{
-		Config: repoConfig,
-		Path:   resolvedPath,
-		Digest: configDigest(data),
-	}, nil
-}
-
-// ValidateMachineRepoConfigPath validates the environment-level path contract
-// shared by run startup and doctor. Relative paths are refused because managed
-// daemons resolve them from the service working directory, not the shell that
-// installed or refreshed the service.
-func ValidateMachineRepoConfigPath(rawPath string) (string, error) {
-	path := strings.TrimSpace(rawPath)
-	if path == "" {
-		return "", fmt.Errorf("%s is set but empty", machineRepoConfigEnv)
-	}
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%s must be an absolute path", machineRepoConfigEnv)
-	}
-	return filepath.Clean(path), nil
+	return input
 }
 
 // loadPushedRepoConfigInput reads the branch (pushed) .no-mistakes.yaml from the
@@ -188,7 +152,7 @@ func repoConfigInputFromBytes(repoConfig *config.RepoConfig, data []byte, kind, 
 	}
 }
 
-func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *repoConfigInput, machine *machineRepoConfig) (*config.RepoConfig, []db.ConfigSource) {
+func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *repoConfigInput, override *globalOverrideInput) (*config.RepoConfig, []db.ConfigSource) {
 	if global == nil {
 		global = &globalConfigInput{Config: config.DefaultGlobalConfig()}
 	}
@@ -202,13 +166,13 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 	allowRepoCommands := trustedConfig != nil && trustedConfig.AllowRepoCommands
 	resolve := func(pushedConfig, trustedConfig *config.RepoConfig, allow bool) *config.RepoConfig {
 		effective := config.EffectiveRepoConfig(pushedConfig, trustedConfig, allow)
-		if machine != nil {
-			effective = config.OverlayRepoConfig(effective, machine.Config)
+		if override != nil {
+			effective = config.OverlayRepoConfig(effective, override.Config)
 		}
 		return effective
 	}
 	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
-	if machine == nil {
+	if override == nil {
 		return effective, nil
 	}
 	resolved := config.Merge(global.Config, effective)
@@ -229,46 +193,48 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 			sources = append(sources, *trusted.Source)
 		}
 	}
-	if machine != nil {
-		sources = append(sources, db.ConfigSource{
-			Kind:   db.ConfigSourceMachine,
-			Digest: machine.Digest,
-			Path:   machine.Path,
-		})
-	}
+	sources = append(sources, db.ConfigSource{
+		Kind:   db.ConfigSourceGlobalOverride,
+		Digest: override.Digest,
+		Ref:    override.Key,
+		Path:   override.Path,
+	})
 	return effective, sources
 }
 
-func validateRecoveredMachineRepoConfig(sources []db.ConfigSource, machine *machineRepoConfig) error {
+func validateRecoveredGlobalOverride(sources []db.ConfigSource, override *globalOverrideInput) error {
 	var expected *db.ConfigSource
 	for i := range sources {
-		if sources[i].Kind != db.ConfigSourceMachine {
+		if sources[i].Kind != db.ConfigSourceGlobalOverride {
 			continue
 		}
 		if expected != nil {
-			return fmt.Errorf("run records multiple machine-local config sources")
+			return fmt.Errorf("run records multiple global-override config sources")
 		}
 		expected = &sources[i]
 	}
 	if expected == nil {
-		if machine != nil {
-			return fmt.Errorf("recovered run was launched without %s; refusing to apply it mid-run", machineRepoConfigEnv)
+		if override != nil {
+			return fmt.Errorf("recovered run was launched without a global config override for this repository; refusing to apply one mid-run")
 		}
 		return nil
 	}
-	if machine == nil {
-		return fmt.Errorf("recovered run requires the launch-time %s", machineRepoConfigEnv)
+	if override == nil {
+		return fmt.Errorf("recovered run requires the launch-time global config override")
 	}
-	if machine.Path != expected.Path {
-		return fmt.Errorf("recovered run %s path differs from launch", machineRepoConfigEnv)
+	if override.Key != expected.Ref {
+		return fmt.Errorf("recovered run global config override key differs from launch")
 	}
-	if machine.Digest != expected.Digest {
-		return fmt.Errorf("recovered run %s digest differs from launch", machineRepoConfigEnv)
+	if override.Path != expected.Path {
+		return fmt.Errorf("recovered run global config path differs from launch")
+	}
+	if override.Digest != expected.Digest {
+		return fmt.Errorf("recovered run global config digest differs from launch")
 	}
 	return nil
 }
 
-func loadRecordedRunConfig(ctx context.Context, run *db.Run, workDir string, machine *machineRepoConfig) (*config.Config, error) {
+func loadRecordedRunConfig(ctx context.Context, run *db.Run, workDir string, override *globalOverrideInput) (*config.Config, error) {
 	globalInput, err := loadRecordedGlobalConfig(run.ConfigSources)
 	if err != nil {
 		return nil, err
@@ -281,7 +247,7 @@ func loadRecordedRunConfig(ctx context.Context, run *db.Run, workDir string, mac
 	if err != nil {
 		return nil, err
 	}
-	effective, sources := effectiveRepoConfigAndSources(globalInput, pushedInput, trustedInput, machine)
+	effective, sources := effectiveRepoConfigAndSources(globalInput, pushedInput, trustedInput, override)
 	if !reflect.DeepEqual(sources, run.ConfigSources) {
 		return nil, fmt.Errorf("recovered run config provenance differs from launch")
 	}
@@ -377,12 +343,4 @@ func repoConfigFromInput(input *repoConfigInput) *config.RepoConfig {
 func configDigest(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
-}
-
-func pathWithin(root, target string) bool {
-	rel, err := filepath.Rel(root, target)
-	if err != nil {
-		return false
-	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
 }

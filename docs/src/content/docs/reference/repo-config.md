@@ -3,7 +3,7 @@ title: Repo Config Reference
 description: All fields for .no-mistakes.yaml.
 ---
 
-Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. An optional machine-local file can use the same shape with the additional required `repo:` binding described below.
+Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
@@ -17,30 +17,12 @@ Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings o
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
-`NM_REPO_CONFIG` is a separate, machine-owner-controlled escape hatch. When explicitly set, its bound file overlays the effective committed config after these trust rules, including code-executing fields. Do not set it globally without a correct `repo:` binding.
+The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map is a separate, machine-owner-controlled escape hatch. A matching entry overlays the effective committed config after these trust rules, including code-executing fields.
 :::
 
 ## Machine-local overrides
 
-Set `NM_REPO_CONFIG` to an absolute path outside the repository when you need repo-specific values that cannot be committed to the default branch:
-
-```yaml
-repo: https://github.com/example/project
-
-agent: codex
-commands:
-  build: "go build ./..."
-  test: "go test ./internal/cli"
-  lint: "make lint"
-```
-
-The file must declare `repo:` and its remote identity must match the registered upstream repository. Equivalent SSH and HTTPS GitHub forms match. The path and its resolved symlink target must remain outside the repository; relative paths are rejected because managed services run from a different working directory. `no-mistakes doctor` checks that the path is absolute, readable, parseable, and bound, while run startup also checks the binding against the selected repository.
-
-The machine-local file overlays only fields present in it, after the committed pushed/default config trust resolution. This includes `commands`, `hooks`, the run-wide `agent`, per-step routes, and per-key `prompts`; explicitly present empty values clear committed values. Unset `NM_REPO_CONFIG` leaves established config and recovery behavior unchanged.
-
-launchd, systemd, and Windows Task Scheduler definitions forward the current value. Setting or unsetting it causes the next managed daemon start or restart to refresh the service definition; unlike proxy settings, an old machine-config path is not inherited after the variable is removed. The Windows task action points to an atomically written launcher under that `NM_HOME`; the launcher sets only `NM_REPO_CONFIG` and never persists proxy variables or credentials. Stale launchers are removed only after task replacement succeeds.
-
-For enabled runs, no-mistakes stores full SHA-256 digests and private source paths or Git refs in the local database. The PR Pipeline section renders only source kinds and 12-character digest prefixes, never absolute paths. Recovery requires the same machine/global path and digest and reads committed configs from their launch-time Git refs, refusing drift instead of silently changing the run's config.
+Repo-specific values that cannot be committed to the default branch (for example canonical commands in a repository whose default branch you do not control) live in the global config's `overrides` map, keyed by the repository's `<owner>/<repo>` identity. Each entry uses this page's repo-config shape and overlays only the fields present in it, after the committed pushed/default trust resolution. The [Global Config Reference](/no-mistakes/reference/global-config/#overrides) owns the key syntax, identity matching, precedence, trust model, and recovery semantics.
 
 ```yaml
 # .no-mistakes.yaml
@@ -114,17 +96,6 @@ prompts:
 ```
 
 ## Fields
-
-### repo
-
-Bind a machine-local config to one registered upstream repository.
-
-| | |
-| --- | --- |
-| Type | `string` (Git remote URL) |
-| Default | None |
-
-This field is required in the file selected by `NM_REPO_CONFIG` and is not needed in committed `.no-mistakes.yaml`. The binding compares normalized remote identities, so common SSH and HTTPS forms for the same GitHub repository are equivalent. A missing, invalid, or mismatched binding fails the run before pipeline work starts.
 
 ### agent
 
@@ -470,7 +441,7 @@ Append repo-specific guidance to no-mistakes' built-in agent prompts.
 Built-in prompts remain authoritative: configured prompt text is appended as extra guidance and must not replace output schemas, safety rules, or worktree boundaries.
 `prompts.shared` is appended to every pipeline model prompt, then the matching step-specific prompt is appended after it.
 Repo prompt config is agent-steering config, so it is read from the trusted default-branch copy unless `allow_repo_commands: true` is set there.
-A machine-local [`NM_REPO_CONFIG`](#machine-local-overrides) file can overlay individual `prompts.<key>` values after that trust resolution.
+A machine-local [overrides entry](#machine-local-overrides) can overlay individual `prompts.<key>` values after that trust resolution.
 
 Global prompt config and repo prompt config combine in this order:
 

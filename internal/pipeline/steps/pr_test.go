@@ -290,7 +290,7 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	}
 }
 
-func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutMachinePath(t *testing.T) {
+func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutPrivatePathOrKey(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -303,25 +303,26 @@ func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutMachinePath(t *t
 	sctx.Run.ConfigSources = []db.ConfigSource{
 		{Kind: db.ConfigSourceBranch, Digest: strings.Repeat("a", 64)},
 		{Kind: db.ConfigSourceDefault, Digest: strings.Repeat("b", 64)},
-		{Kind: db.ConfigSourceMachine, Digest: strings.Repeat("c", 64), Path: "/home/alvaro/private/repo.yaml"},
+		{Kind: db.ConfigSourceGlobalOverride, Digest: strings.Repeat("c", 64), Ref: "private-owner/private-repo", Path: "/home/alvaro/private/config.yaml"},
 	}
 
 	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
-	want := "Config sources: `branch@sha256:" + strings.Repeat("a", 12) + "`, `default@sha256:" + strings.Repeat("b", 12) + "`, `machine-local@sha256:" + strings.Repeat("c", 12) + "`"
+	want := "Config sources: `branch@sha256:" + strings.Repeat("a", 12) + "`, `default@sha256:" + strings.Repeat("b", 12) + "`, `global-override@sha256:" + strings.Repeat("c", 12) + "`"
 	if !strings.Contains(got, want) {
 		t.Fatalf("pipeline config source summary missing:\n%s", got)
 	}
-	if strings.Contains(got, "/home/alvaro") || strings.Contains(got, "repo.yaml") {
-		t.Fatalf("pipeline leaked private machine path:\n%s", got)
+	if strings.Contains(got, "/home/alvaro") || strings.Contains(got, "config.yaml") || strings.Contains(got, "private-owner") {
+		t.Fatalf("pipeline leaked private override path or key:\n%s", got)
 	}
 }
 
 func TestTruncatePipelineSectionKeepsConfigSourcesWhole(t *testing.T) {
 	t.Parallel()
 	configLine := configSourcesSummary([]db.ConfigSource{{
-		Kind:   db.ConfigSourceMachine,
+		Kind:   db.ConfigSourceGlobalOverride,
 		Digest: strings.Repeat("d", 64),
-		Path:   "/private/repo.yaml",
+		Ref:    "owner/project",
+		Path:   "/private/config.yaml",
 	}})
 	withoutSources := pipelineMarkdownForTest("review round 001 - newest update")
 	withSources := strings.Replace(withoutSources, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+configLine, 1)
@@ -330,7 +331,7 @@ func TestTruncatePipelineSectionKeepsConfigSourcesWhole(t *testing.T) {
 	if !strings.Contains(got, strings.TrimSpace(configLine)) {
 		t.Fatalf("one-byte clamp dropped config visibility:\n%s", got)
 	}
-	if strings.Contains(got, "/private/repo.yaml") {
+	if strings.Contains(got, "/private/config.yaml") {
 		t.Fatalf("clamped pipeline leaked private path:\n%s", got)
 	}
 

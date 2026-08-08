@@ -73,54 +73,63 @@ type GlobalConfig struct {
 	// here: a PR body formatter is the same script for every repo on a
 	// machine, while post_worktree is a repo's own install command and stays
 	// repo-only.
-	Hooks    Hooks `yaml:"-"`
-	AutoFix  AutoFixRaw
-	Commit   CommitRaw
-	Intent   IntentRaw
-	Refresh  StepAgentRaw
-	Review   ReviewRaw
-	Build    StepAgentRaw
-	Test     TestRaw
-	Document DocumentRaw
-	Lint     StepAgentRaw
-	PR       StepAgentRaw
-	CI       StepAgentRaw
-	Prompts  PromptConfig
+	Hooks Hooks `yaml:"-"`
+	// Overrides carries machine-local per-repository configuration, keyed by
+	// the repository's `<owner>/<repo>` identity (for example
+	// "scaleapi/scaleapi"). Each entry is a RepoConfig-shaped overlay applied
+	// after the committed pushed/trusted resolution for a matching run, with
+	// the same field-presence semantics as a committed overlay: only
+	// explicitly present fields apply, and explicit empty values clear
+	// committed values. Keys are normalized to lowercase; identity matching is
+	// owned by OverrideForRepoIdentity.
+	Overrides map[string]*RepoConfig `yaml:"-"`
+	AutoFix   AutoFixRaw
+	Commit    CommitRaw
+	Intent    IntentRaw
+	Refresh   StepAgentRaw
+	Review    ReviewRaw
+	Build     StepAgentRaw
+	Test      TestRaw
+	Document  DocumentRaw
+	Lint      StepAgentRaw
+	PR        StepAgentRaw
+	CI        StepAgentRaw
+	Prompts   PromptConfig
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
-	Agent                   agentList           `yaml:"agent"`
-	ACPXPath                string              `yaml:"acpx_path"`
-	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
-	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
-	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
-	CITimeout               string              `yaml:"ci_timeout"`
-	DaemonConnectTimeout    string              `yaml:"daemon_connect_timeout"`
-	ProcessTerminationGrace string              `yaml:"process_termination_grace"`
-	BabysitTimeout          string              `yaml:"babysit_timeout"`
-	StepQuietWarning        string              `yaml:"step_quiet_warning"`
-	LogLevel                string              `yaml:"log_level"`
-	SessionReuse            *bool               `yaml:"session_reuse"`
-	Hooks                   Hooks               `yaml:"hooks"`
-	AutoFix                 AutoFixRaw          `yaml:"auto_fix"`
-	Commit                  CommitRaw           `yaml:"commit"`
-	Intent                  IntentRaw           `yaml:"intent"`
-	Refresh                 *StepAgentRaw       `yaml:"refresh"`
-	LegacyRebase            *StepAgentRaw       `yaml:"rebase"`
-	Review                  ReviewRaw           `yaml:"review"`
-	Build                   StepAgentRaw        `yaml:"build"`
-	Test                    TestRaw             `yaml:"test"`
-	Document                DocumentRaw         `yaml:"document"`
-	Lint                    StepAgentRaw        `yaml:"lint"`
-	PR                      StepAgentRaw        `yaml:"pr"`
-	CI                      StepAgentRaw        `yaml:"ci"`
-	Prompts                 PromptConfig        `yaml:"prompts"`
+	Agent                   agentList              `yaml:"agent"`
+	ACPXPath                string                 `yaml:"acpx_path"`
+	ACPRegistryOverrides    map[string]string      `yaml:"acp_registry_overrides"`
+	AgentPathOverride       map[string]string      `yaml:"agent_path_override"`
+	AgentArgsOverride       map[string][]string    `yaml:"agent_args_override"`
+	CITimeout               string                 `yaml:"ci_timeout"`
+	DaemonConnectTimeout    string                 `yaml:"daemon_connect_timeout"`
+	ProcessTerminationGrace string                 `yaml:"process_termination_grace"`
+	BabysitTimeout          string                 `yaml:"babysit_timeout"`
+	StepQuietWarning        string                 `yaml:"step_quiet_warning"`
+	LogLevel                string                 `yaml:"log_level"`
+	SessionReuse            *bool                  `yaml:"session_reuse"`
+	Hooks                   Hooks                  `yaml:"hooks"`
+	Overrides               map[string]*RepoConfig `yaml:"overrides"`
+	AutoFix                 AutoFixRaw             `yaml:"auto_fix"`
+	Commit                  CommitRaw              `yaml:"commit"`
+	Intent                  IntentRaw              `yaml:"intent"`
+	Refresh                 *StepAgentRaw          `yaml:"refresh"`
+	LegacyRebase            *StepAgentRaw          `yaml:"rebase"`
+	Review                  ReviewRaw              `yaml:"review"`
+	Build                   StepAgentRaw           `yaml:"build"`
+	Test                    TestRaw                `yaml:"test"`
+	Document                DocumentRaw            `yaml:"document"`
+	Lint                    StepAgentRaw           `yaml:"lint"`
+	PR                      StepAgentRaw           `yaml:"pr"`
+	CI                      StepAgentRaw           `yaml:"ci"`
+	Prompts                 PromptConfig           `yaml:"prompts"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {
-	Repo           string            `yaml:"repo"`
 	Agent          types.AgentName   `yaml:"agent"`
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
@@ -369,7 +378,6 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Repo                   string        `yaml:"repo"`
 		Agent                  agentList     `yaml:"agent"`
 		Commands               Commands      `yaml:"commands"`
 		Hooks                  Hooks         `yaml:"hooks"`
@@ -395,7 +403,6 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	c.present = repoConfigPresence(value)
-	c.Repo = strings.TrimSpace(raw.Repo)
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Commands = raw.Commands
@@ -423,9 +430,10 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // OverlayRepoConfig applies only fields explicitly present in override. It is
-// used for machine-local repo config, where omitted fields continue to inherit
-// the already-resolved committed configuration while explicit empty values can
-// deliberately clear commands and agent routes.
+// used for the global config's machine-local per-repo overrides, where omitted
+// fields continue to inherit the already-resolved committed configuration
+// while explicit empty values can deliberately clear commands and agent
+// routes.
 func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if base == nil {
 		base = &RepoConfig{}
@@ -434,9 +442,6 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 		return cloneRepoConfig(base)
 	}
 	out := cloneRepoConfig(base)
-	if override.has("repo") {
-		out.Repo = override.Repo
-	}
 	if override.has("agent") {
 		out.Agent = override.Agent
 		out.Agents = copyAgents(override.Agents)
@@ -626,6 +631,93 @@ func (c *RepoConfig) has(paths ...string) bool {
 		}
 	}
 	return false
+}
+
+// Declares reports whether any of the dotted YAML paths was explicitly
+// present in the parsed source, so callers outside this package can mirror
+// OverlayRepoConfig's explicit-empty-clears semantics (for example the
+// pr-body preview resolving hooks.pr_body from a global override).
+func (c *RepoConfig) Declares(paths ...string) bool {
+	return c.has(paths...)
+}
+
+// NormalizeOverrideKey validates one global-config overrides key and returns
+// its normalized (lowercase) form. A key must be exactly `<owner>/<repo>`:
+// two non-empty path segments and nothing else - no scheme, host, userinfo,
+// whitespace, extra segments, or the clone URL's trailing `.git`, which the
+// remote identities this key is matched against always have stripped - so a
+// malformed binding fails config load loudly instead of silently never
+// matching.
+func NormalizeOverrideKey(key string) (string, error) {
+	if key != strings.TrimSpace(key) {
+		return "", fmt.Errorf("overrides key %q must not have surrounding whitespace", key)
+	}
+	owner, repo, ok := strings.Cut(key, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return "", fmt.Errorf("overrides key %q must be exactly <owner>/<repo>", key)
+	}
+	if strings.HasSuffix(key, ".git") {
+		return "", fmt.Errorf("overrides key %q must not end in .git; use the plain <owner>/<repo> identity", key)
+	}
+	for _, segment := range []string{owner, repo} {
+		if segment == "." || segment == ".." {
+			return "", fmt.Errorf("overrides key %q must be exactly <owner>/<repo>", key)
+		}
+		if strings.ContainsAny(segment, ":@\\?#") ||
+			strings.IndexFunc(segment, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+			return "", fmt.Errorf("overrides key %q must be a plain <owner>/<repo> identity without URL syntax or whitespace", key)
+		}
+	}
+	return strings.ToLower(key), nil
+}
+
+// normalizeGlobalOverrides validates the parsed overrides map: every key must
+// normalize via NormalizeOverrideKey without colliding, and every entry must
+// be a well-formed RepoConfig overlay. The key is the repository binding, so
+// an entry may not also declare the legacy `repo` field.
+func normalizeGlobalOverrides(raw map[string]*RepoConfig) (map[string]*RepoConfig, error) {
+	overrides := make(map[string]*RepoConfig, len(raw))
+	for key, override := range raw {
+		normalized, err := NormalizeOverrideKey(key)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := overrides[normalized]; exists {
+			return nil, fmt.Errorf("overrides declares %q more than once after case normalization", normalized)
+		}
+		if override == nil {
+			return nil, fmt.Errorf("overrides.%s must be a repo-config mapping", key)
+		}
+		if override.has("repo") {
+			return nil, fmt.Errorf("overrides.%s must not declare repo; the overrides key is the repository binding", key)
+		}
+		if err := finalizeRepoConfig(override); err != nil {
+			return nil, fmt.Errorf("overrides.%s: %w", key, err)
+		}
+		overrides[normalized] = override
+	}
+	return overrides, nil
+}
+
+// OverrideForRepoIdentity returns the overrides entry matching a normalized
+// remote identity of the form `host/owner/repo` (the gate package's
+// RemoteIdentity/RegisteredRemoteIdentity output), along with the matched
+// key. Overrides keys are host-agnostic `<owner>/<repo>` identities, so the
+// match compares the identity's path portion; a nested path (for example a
+// GitLab subgroup) can never match a two-segment key.
+func (c *GlobalConfig) OverrideForRepoIdentity(identity string) (*RepoConfig, string, bool) {
+	if len(c.Overrides) == 0 {
+		return nil, "", false
+	}
+	_, path, ok := strings.Cut(identity, "/")
+	if !ok || path == "" {
+		return nil, "", false
+	}
+	override, ok := c.Overrides[strings.ToLower(path)]
+	if !ok {
+		return nil, "", false
+	}
+	return override, strings.ToLower(path), true
 }
 
 func cloneRepoConfig(src *RepoConfig) *RepoConfig {
@@ -1370,6 +1462,19 @@ intent:
 #     Always included in model prompts.
 #   review: |
 #     Review-specific additions.
+
+# Machine-local per-repository overrides, keyed by the repository's
+# <owner>/<repo> identity. Each entry uses the repo-config shape and overlays
+# the effective committed config after the default-branch trust rules,
+# including code-executing fields; explicitly present empty values clear
+# committed values. Repositories without a matching key are unaffected.
+# overrides:
+#   example/project:
+#     commands:
+#       build: "make build"
+#     prompts:
+#       test: |
+#         Repo-specific testing guidance.
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -2120,6 +2225,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		cfg.SessionReuse = *raw.SessionReuse
 	}
 	cfg.Hooks.PRBody = strings.TrimSpace(raw.Hooks.PRBody)
+	if len(raw.Overrides) > 0 {
+		overrides, err := normalizeGlobalOverrides(raw.Overrides)
+		if err != nil {
+			return nil, fmt.Errorf("parse global config: %w", err)
+		}
+		cfg.Overrides = overrides
+	}
 	if raw.AutoFix.CI == nil {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
 	}
@@ -2203,14 +2315,27 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
-	if err := validateCommitRaw(cfg.Commit); err != nil {
+	if err := finalizeRepoConfig(cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+
+	return cfg, nil
+}
+
+// finalizeRepoConfig applies the post-unmarshal normalization every repo-config
+// source shares: commit-template validation, and the auto_fix.ci fallback to
+// the legacy auto_fix.babysit spelling. A committed .no-mistakes.yaml and a
+// global-config overrides entry are the same shape and must be read the same
+// way, so both run through here rather than keeping separate copies that can
+// drift.
+func finalizeRepoConfig(cfg *RepoConfig) error {
+	if err := validateCommitRaw(cfg.Commit); err != nil {
+		return err
 	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
-
-	return cfg, nil
+	return nil
 }
 
 // EffectiveRepoConfig returns the repo config that should drive the pipeline

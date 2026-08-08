@@ -17,7 +17,7 @@ func TestUpdateRunConfigSourcesPersistsOrderedEvidence(t *testing.T) {
 	sources := []ConfigSource{
 		{Kind: ConfigSourceBranch, Digest: "branch-digest", Ref: "abc123"},
 		{Kind: ConfigSourceDefault, Digest: "default-digest", Ref: "main-sha"},
-		{Kind: ConfigSourceMachine, Digest: "machine-digest", Path: "/private/config/repo.yaml"},
+		{Kind: ConfigSourceGlobalOverride, Digest: "global-digest", Ref: "owner/project", Path: "/private/config/config.yaml"},
 	}
 	if err := d.UpdateRunConfigSources(run.ID, sources); err != nil {
 		t.Fatal(err)

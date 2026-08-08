@@ -13,12 +13,19 @@ const (
 	ConfigSourceGlobal  = "global"
 	ConfigSourceBranch  = "branch"
 	ConfigSourceDefault = "default"
+	// ConfigSourceGlobalOverride is a matched machine-local overrides entry
+	// from the global config file; its digest is the global config file's
+	// digest and its ref is the matched <owner>/<repo> key.
+	ConfigSourceGlobalOverride = "global-override"
+	// ConfigSourceMachine is the retired machine-local repo-config file
+	// mechanism. It is kept only so recovery can refuse runs launched by
+	// older binaries instead of silently dropping their launch-time overlay.
 	ConfigSourceMachine = "machine-local"
 )
 
 // ConfigSource binds one effective run-config input to the exact bytes read at
-// launch. Path is private recovery metadata for machine-local config and must
-// not be rendered into public PR text.
+// launch. Path (and, for global overrides, the matched key in Ref) is private
+// recovery metadata and must not be rendered into public PR text.
 type ConfigSource struct {
 	Kind   string `json:"kind"`
 	Digest string `json:"digest"`

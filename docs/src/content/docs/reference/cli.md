@@ -406,7 +406,7 @@ This never creates or updates a pull request. Generation returns a string; publi
 
 Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `what_changed`, which is the drafting agent's own output and is not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block.
 
-The formatter is resolved the same way a run resolves it: `--hook`, then `NM_REPO_CONFIG`, then the repo's `.no-mistakes.yaml`, then `~/.no-mistakes/config.yaml`. The chosen source is reported on stderr.
+The formatter is resolved the same way a run resolves it: `--hook`, then a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry, then the repo's `.no-mistakes.yaml`, then the global `hooks.pr_body` default. The chosen source is reported on stderr.
 
 Like a run, the repo layer is read from your **default branch**, never from the checkout - `hooks.pr_body` executes arbitrary shell, so a preview that honored the working tree would run whatever a contributor's branch declares as soon as you checked it out to look at it. The command does not fetch, so it reads `origin/<default branch>` and falls back to the local branch. It runs the formatter from the repository root, matching the run's worktree root, so a template read by relative path resolves the same way from any subdirectory.
 
@@ -442,7 +442,8 @@ Checks:
 - Agent runners: native binaries `claude`, `codex`, `acli`, `opencode`, `pi`, `copilot`, and `cursor-agent`, plus the optional ACP bridge `acpx`
 - registered Cursor ACP fallback binaries: `cursor-agent` plus `acpx` for `acp:cursor`
 - Effective global agent configuration, reported as `gate validation`; an unavailable configured runner is a failed check because the gate cannot validate without it
-- `machine config`, only when `NM_REPO_CONFIG` is set: the path must be absolute, resolve outside the repository, and point to a readable, parseable config with a `repo:` binding (see [`NM_REPO_CONFIG`](/no-mistakes/reference/environment/#nm_repo_config))
+- `repo overrides`, only when the global config declares [`overrides`](/no-mistakes/reference/global-config/#overrides): lists the configured `<owner>/<repo>` keys and reports whether the current directory's repository matches one
+- `NM_REPO_CONFIG`, only when that retired environment variable is still exported: warns that it is no longer supported and that its contents belong in [`overrides`](/no-mistakes/reference/global-config/#overrides)
 
 Uses indicators: `✓` (available), `–` (not found, optional), `✗` (problem detected).
 

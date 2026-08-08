@@ -199,15 +199,19 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 }
 
 func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) (*config.Config, error) {
-	machineRepoCfg, err := loadMachineRepoConfig(repo, os.LookupEnv)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateRecoveredMachineRepoConfig(run.ConfigSources, machineRepoCfg); err != nil {
-		return nil, err
-	}
 	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceMachine) {
-		cfg, err := loadRecordedRunConfig(ctx, run, workDir, machineRepoCfg)
+		return nil, fmt.Errorf("recovered run was launched with the removed machine-local repo-config file mechanism; abort the run and push again")
+	}
+	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
+	override := resolveGlobalOverride(globalInput, repo)
+	if err := validateRecoveredGlobalOverride(run.ConfigSources, override); err != nil {
+		return nil, err
+	}
+	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceGlobalOverride) {
+		cfg, err := loadRecordedRunConfig(ctx, run, workDir, override)
 		if err != nil {
 			return nil, err
 		}
@@ -217,13 +221,11 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return cfg, nil
 	}
 
-	// Runs launched without NM_REPO_CONFIG retain the historical reload of
-	// non-routing config. Their concrete launch-time agent/model routes are
-	// restored from private run state below before any agent is rebuilt.
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		return nil, fmt.Errorf("load global config: %w", err)
-	}
+	// Runs launched without a matching global override retain the historical
+	// reload of non-routing config. Their concrete launch-time agent/model
+	// routes are restored from private run state below before any agent is
+	// rebuilt.
+	globalCfg := globalInput.Config
 	pushedRepoInput, err := loadRepoConfigInput(filepath.Join(workDir, ".no-mistakes.yaml"), db.ConfigSourceBranch, run.HeadSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
@@ -847,12 +849,6 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	} else {
 		repo = refreshed
 	}
-	machineRepoCfg, err := loadMachineRepoConfig(repo, os.LookupEnv)
-	if err != nil {
-		trackStartFailure("machine_repo_config")
-		return "", err
-	}
-
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -932,6 +928,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}()
 
+	// A malformed global config (including a malformed overrides section) is
+	// recorded on the run rather than refusing run creation: the run row plus
+	// its error is the only feedback a push-triggered pipeline can give, and
+	// the deferred cleanup above still removes the setup worktree.
 	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -939,6 +939,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		return "", fmt.Errorf("load global config: %w", err)
 	}
 	globalCfg := globalInput.Config
+	globalOverride := resolveGlobalOverride(globalInput, repo)
 	pushedRepoInput, err := loadPushedRepoConfigInput(ctx, wtDir, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
@@ -975,9 +976,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		trustedRepoCfg = trustedRepoInput.Config
 	}
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalInput, pushedRepoInput, trustedRepoInput, machineRepoCfg)
-	if machineRepoCfg != nil {
-		slog.Warn("NM_REPO_CONFIG is enabled: honoring machine-local repo configuration", "run_id", run.ID)
+	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalInput, pushedRepoInput, trustedRepoInput, globalOverride)
+	if globalOverride != nil {
+		slog.Warn("global config override is active: honoring machine-local repository configuration", "run_id", run.ID, "override", globalOverride.Key)
 	}
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)

@@ -171,22 +171,6 @@ func serviceProxyEnv() [][2]string {
 	return out
 }
 
-func serviceForwardedEnv() [][2]string {
-	return appendMachineRepoConfigEnv(serviceProxyEnv())
-}
-
-// appendMachineRepoConfigEnv forwards the opt-in exactly as supplied, including
-// an empty value so the daemon can reject an invalid set-but-empty path. Unlike
-// proxy settings, this entry is never inherited from an existing service file:
-// removing NM_REPO_CONFIG must disable the machine-local override.
-func appendMachineRepoConfigEnv(env [][2]string) [][2]string {
-	value, ok := os.LookupEnv(machineRepoConfigEnv)
-	if !ok {
-		return env
-	}
-	return append(env, [2]string{machineRepoConfigEnv, value})
-}
-
 // writeServiceFile renders a generated service definition (systemd unit or
 // launchd plist) via render and writes it with a permission mode that depends
 // on whether proxy values were forwarded into it. When proxy variables are
@@ -204,10 +188,8 @@ func appendMachineRepoConfigEnv(env [][2]string) [][2]string {
 //
 // When the current environment has no proxy variables set but a proxy was
 // already baked into the existing on-disk definition, the proxy is inherited
-// from that file via parseExistingProxyEnv rather than stripped. Machine-local
-// repo config is intentionally not inherited: NM_REPO_CONFIG is an explicit
-// opt-in, and removing it must remove the service entry. parseExistingProxyEnv
-// may be nil for callers that never forward a proxy.
+// from that file via parseExistingProxyEnv rather than stripped.
+// parseExistingProxyEnv may be nil for callers that never forward a proxy.
 //
 // When proxy values are present the content is written to a sibling temp file
 // created at 0600 and atomically renamed over the target, so credential-bearing
@@ -222,7 +204,7 @@ func writeServiceFile(path string, parseExistingProxyEnv func([]byte) [][2]strin
 			proxyEnv = parseExistingProxyEnv(existing)
 		}
 	}
-	content := []byte(render(appendMachineRepoConfigEnv(proxyEnv)))
+	content := []byte(render(proxyEnv))
 	if len(proxyEnv) == 0 {
 		mode := os.FileMode(0o644)
 		if err := os.WriteFile(path, content, mode); err != nil {

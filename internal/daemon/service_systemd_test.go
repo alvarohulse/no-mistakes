@@ -260,19 +260,6 @@ func TestRenderSystemdUnitForwardsProxyEnv(t *testing.T) {
 	}
 }
 
-func TestRenderSystemdUnitForwardsMachineRepoConfig(t *testing.T) {
-	for _, key := range proxyEnvKeys {
-		t.Setenv(key, "")
-	}
-	t.Setenv(machineRepoConfigEnv, "/home/u/.config/no-mistakes/repo.yaml")
-
-	unit := renderSystemdUnit("/usr/local/bin/no-mistakes", paths.WithRoot(t.TempDir()), "/home/u")
-	want := `Environment="NM_REPO_CONFIG=/home/u/.config/no-mistakes/repo.yaml"`
-	if !strings.Contains(unit, want) {
-		t.Fatalf("systemd unit should forward machine repo config, want %q, got:\n%s", want, unit)
-	}
-}
-
 // TestRenderSystemdUnitForwardsEveryProxyEnvKey guards that the renderer and
 // proxyEnvKeys cannot drift apart: every declared key handed to the renderer -
 // both the upper- and lower-case spellings - must reach the unit as its own
