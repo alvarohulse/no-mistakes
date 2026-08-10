@@ -1202,6 +1202,55 @@ func TestAssemblePRBody_DropsTestingEmbedsToFitAzureCap(t *testing.T) {
 	}
 }
 
+// TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap pins the shape of
+// the Azure fallback once the Pipeline section carries full step evidence: a
+// blind tail clamp would cut through a <details> block and take the newest
+// evidence with it, so whole update rounds are shed oldest-first instead.
+func TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper for foo callers"}
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps) // 4000
+
+	rounds := make([]string, 0, 40)
+	for i := 1; i <= 40; i++ {
+		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 200)))
+	}
+
+	got := assemblePRBody(sctx,
+		"## What Changed\n\n- add Bar() helper",
+		"behavior preserved; low risk",
+		"",
+		pipelineMarkdownForTest(rounds...),
+		limit,
+	)
+
+	if scm.PRBodyLen(got) > limit {
+		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
+	}
+	for _, want := range []string{
+		"## Intent",
+		"wanted a Bar() helper",
+		"## What Changed",
+		"## Risk Assessment",
+		"## Pipeline",
+		"earlier update rounds omitted",
+		"review round 040",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("budgeted body dropped required content %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "review round 001") {
+		t.Fatalf("expected the oldest pipeline round to be shed first, got:\n%s", got)
+	}
+	if strings.Count(got, "<details>") != strings.Count(got, "</details>") {
+		t.Fatalf("expected balanced collapsible blocks, got:\n%s", got)
+	}
+	if strings.Contains(got, prTruncationTail()) {
+		t.Fatalf("did not expect a blind clamp when structured omission fits:\n%s", got)
+	}
+}
+
 func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	t.Parallel()
 	// An Intent so long that even Intent + What Changed overruns the cap, with no
@@ -1266,6 +1315,67 @@ func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T)
 	whatChangedIdx := strings.Index(got, "## What Changed")
 	if notesIdx < 0 || whatChangedIdx < 0 || notesIdx > whatChangedIdx {
 		t.Fatalf("expected ## Notes before ## What Changed, got:\n%s", got)
+	}
+}
+
+// TestRedactOutboundPRContent_RedactsRestoredEvidenceSections pins the last
+// gate before a body reaches a hosted PR. Recorded findings, risk rationale,
+// tested commands, and embedded artifact contents are escaped for markup but
+// never for credentials, and a PR description is a permanent public record.
+func TestRedactOutboundPRContent_RedactsRestoredEvidenceSections(t *testing.T) {
+	t.Parallel()
+	body := strings.Join([]string{
+		"## What Changed",
+		"",
+		"- rotate the publisher credential",
+		"",
+		"## Risk Assessment",
+		"",
+		"⚠️ Medium: the old api_key=AKIAIOSFODNN7EXAMPLE0 is still live",
+		"",
+		"## Testing",
+		"",
+		"- `curl -H 'authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz' https://example.com`",
+		"",
+		"## Pipeline",
+		"",
+		"<details>",
+		"<summary>✅ **Test** - passed</summary>",
+		"",
+		"- token ghp_abcdefghijklmnopqrstuvwxyz0123456789 was accepted",
+		"</details>",
+	}, "\n")
+
+	got := redactOutboundPRContent(prContent{Title: "chore: rotate sk-abcdefghijklmnopqrstuvwxyz", Body: body}, 0)
+
+	for _, secret := range []string{
+		"AKIAIOSFODNN7EXAMPLE0",
+		"sk-abcdefghijklmnopqrstuvwxyz",
+		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+	} {
+		if strings.Contains(got.Body, secret) {
+			t.Fatalf("credential %q reached the outbound PR body:\n%s", secret, got.Body)
+		}
+		if strings.Contains(got.Title, secret) {
+			t.Fatalf("credential %q reached the outbound PR title: %q", secret, got.Title)
+		}
+	}
+	for _, want := range []string{"## Risk Assessment", "## Testing", "## Pipeline", "rotate the publisher credential"} {
+		if !strings.Contains(got.Body, want) {
+			t.Fatalf("redaction dropped legitimate content %q:\n%s", want, got.Body)
+		}
+	}
+}
+
+func TestRedactOutboundPRContent_KeepsRedactedBodyWithinHostCap(t *testing.T) {
+	t.Parallel()
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
+	body := strings.Repeat("eyJa.eyJb.eyJc\n", limit/8)
+
+	got := redactOutboundPRContent(prContent{Title: "chore: x", Body: body}, limit)
+
+	if n := scm.PRBodyLen(got.Body); n > limit {
+		t.Fatalf("redacted body = %d units, want <= %d", n, limit)
 	}
 }
 

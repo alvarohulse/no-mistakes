@@ -70,22 +70,31 @@ func writeFinalPRScopeScenario(t *testing.T) string {
 	return path
 }
 
-// TestPRFinalScopeExcludesEarlierStepEvidence reproduces the PR 1272 failure
-// at the closest supported user-visible boundary: a real gate push executes
-// the full pipeline and a GitHub PR creation receives the final body on stdin.
+// TestPRFinalScopeExcludesEarlierStepEvidence guards the PR 1272 failure at the
+// closest supported user-visible boundary: a real gate push executes the full
+// pipeline and a GitHub PR creation receives the final body on stdin.
+//
+// The bug was never that step evidence appears in the PR - the deterministic
+// Risk Assessment, Testing, and Pipeline sections are the point of the body.
+// It was that pre-Document two-file Test evidence read as a claim about the
+// shipped four-file branch. So the invariant this test pins is a section
+// boundary, not a section ban: `## What Changed` is the sole owner of final
+// branch scope and must match the real final diff, while earlier Review and
+// Test output stays inside the evidence sections that name the step it came
+// from. Section ownership is documented in the PR step reference.
 //
 // Reproduction record, before source-level cause assignment:
-//   - Expected behavior: the final PR describes the actual four-file branch
-//     delta; earlier Test evidence is step-scoped, never final PR scope.
-//   - Observed pre-fix: the PR body preserved two-file Test evidence as though
-//     it described the shipped branch after Document added two files.
+//   - Expected behavior: `## What Changed` describes the actual four-file
+//     branch delta; earlier Test evidence stays step-scoped.
+//   - Observed pre-fix: the PR presented two-file Test evidence as though it
+//     described the shipped branch after Document added two files.
 //   - Initiating trigger: a legitimate Document stage commit after Test.
 //   - Masking condition: no later local mutation, or an evidence claim that
 //     happens to match the final diff, leaves no visible contradiction.
 //   - Visible symptom: a reviewer sees an "only final files" two-file claim
-//     in the PR while its branch and PR prompt cover four files.
+//     presented as the branch's scope while it covers four files.
 //   - Earliest divergence from the proven accurate path: the pre-Document Test
-//     target is presented in the later PR body instead of remaining evidence
+//     target is presented as later final scope instead of remaining evidence
 //     for that completed step.
 //   - Relevant history: the merged Firstmate PR #1272 supplied the concrete
 //     two-file final-scope wording that motivated this regression shape.
@@ -172,28 +181,58 @@ func TestPRFinalScopeExcludesEarlierStepEvidence(t *testing.T) {
 	}
 
 	body := createdPRBody(t, readGHStubInvocations(t, ghLog))
-	if strings.Contains(body, "## Testing") {
-		t.Fatalf("final PR body must not present earlier Test evidence as final-scope testing:\n%s", body)
-	}
-	if !strings.Contains(body, "<summary>✅ **Test** - passed</summary>") {
-		t.Fatalf("final PR body must retain the Test step status without its stale evidence:\n%s", body)
-	}
-	if !strings.Contains(body, "<summary>✅ **Review** - completed</summary>") {
-		t.Fatalf("final PR body must retain Review completion without stale risk:\n%s", body)
-	}
-	for _, want := range wantFiles {
+
+	// The deterministic evidence sections must be present and populated: an
+	// empty Pipeline shell is the regression this contract exists to prevent.
+	for _, want := range []string{
+		"## Risk Assessment",
+		"## Testing",
+		"## Pipeline",
+		"<summary>✅ **Test** - passed</summary>",
+		"<summary>⚠️ **Review** - medium risk</summary>",
+		"medium risk because only two source files changed",
+		staleTwoFileEvidence,
+	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("final PR body missing final-diff file %q:\n%s", want, body)
+			t.Fatalf("final PR body missing recorded step evidence %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, staleTwoFileEvidence) {
-		t.Fatalf("earlier two-file Test evidence leaked into final PR scope after Document changed the diff:\n%s", body)
-	}
-	for _, stale := range []string{"medium risk because only two source files changed", "**Review** - medium risk"} {
-		if strings.Contains(body, stale) {
-			t.Fatalf("earlier Review risk leaked into final PR scope as %q:\n%s", stale, body)
+
+	// `## What Changed` is the sole owner of final branch scope: it must cover
+	// the real four-file diff and carry none of the earlier step's narrower
+	// claims about what the change touched.
+	whatChanged := prBodySection(t, body, "## What Changed")
+	for _, want := range wantFiles {
+		if !strings.Contains(whatChanged, want) {
+			t.Fatalf("final-scope What Changed missing final-diff file %q:\n%s", want, whatChanged)
 		}
 	}
+	for _, stale := range []string{staleTwoFileEvidence, "medium risk because only two source files changed"} {
+		if strings.Contains(whatChanged, stale) {
+			t.Fatalf("earlier step evidence %q leaked into final-scope What Changed:\n%s", stale, whatChanged)
+		}
+	}
+
+	// Evidence stays attributed to the step that produced it, so a reviewer
+	// reads the two-file claim as Test's target rather than the branch's scope.
+	if !strings.Contains(prBodySection(t, body, "## Pipeline"), staleTwoFileEvidence) {
+		t.Fatalf("Test evidence must render inside the step-attributed Pipeline section:\n%s", body)
+	}
+}
+
+// prBodySection returns the named `## ` section of a PR body, up to the next
+// top-level heading.
+func prBodySection(t *testing.T, body, heading string) string {
+	t.Helper()
+	start := strings.Index(body, heading+"\n")
+	if start < 0 {
+		t.Fatalf("PR body has no %q section:\n%s", heading, body)
+	}
+	rest := body[start+len(heading):]
+	if next := strings.Index(rest, "\n## "); next >= 0 {
+		rest = rest[:next]
+	}
+	return heading + rest
 }
 
 func createdPRBody(t *testing.T, invocations []ghStubInvocation) string {

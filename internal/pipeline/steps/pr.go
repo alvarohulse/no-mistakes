@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -197,7 +198,7 @@ Final diff paths and statuses:
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
 		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
-		return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
+		return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), bodyLimit), nil
 	}
 
 	var content prContent
@@ -221,18 +222,39 @@ Final diff paths and statuses:
 				} else {
 					content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
 				}
-				return applyPRBodyHook(sctx, records, content, whatChanged, scope), nil
+				return redactOutboundPRContent(applyPRBodyHook(sctx, records, content, whatChanged, scope), bodyLimit), nil
 			}
 		}
 	}
 
 	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
-	return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
+	return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), bodyLimit), nil
+}
+
+// redactOutboundPRContent is the last gate before a title and body leave for a
+// hosted pull request. Every upstream section is escaped for markup but not for
+// credentials: agent findings, risk rationale, recorded test commands, embedded
+// artifact contents, and a pr_body formatter's output all reach here verbatim,
+// and a PR description is a permanent, often public record. Redaction runs
+// after the formatter hook so a hook cannot reintroduce a secret, and the caps
+// are re-applied because a replacement marker is not guaranteed shorter than
+// the credential shape it replaced.
+func redactOutboundPRContent(content prContent, bodyLimit int) prContent {
+	content.Title = intent.RedactSecrets(content.Title)
+	body := intent.RedactSecrets(content.Body)
+	if bodyLimit > 0 {
+		body = scm.ClampPRBody(body, bodyLimit)
+	}
+	if len(body) > maxPullRequestBodyBytes {
+		body = truncateTextAtLineBoundary(body, maxPullRequestBodyBytes, essentialPRBodyTruncationMarker())
+	}
+	content.Body = body
+	return content
 }
 
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) (string, string, string) {
 	summary, riskLine := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy)
-	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
+	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx.Run.ID))
 	configSources := configSourcesSummary(sctx.Run.ConfigSources)
 	if summary == "" || configSources == "" {
 		return summary, riskLine, testingMD
@@ -258,8 +280,6 @@ func unwrapNestedPRBody(body string) string {
 	return body
 }
 
-// appendGeneratedSections appends deterministic sections after the agent's body
-// and applies the PR body length guard.
 // prBodyBudgetPromptSection tells the drafting agent about a host's PR-body
 // character cap so it keeps its "## What Changed" section short. The Intent
 // Risk, Testing, and Pipeline sections are appended deterministically, so the
@@ -273,11 +293,19 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 }
 
 // assemblePRBody composes the final PR body from its sections and keeps it
-// within bodyLimit (0 = unlimited). Optional Testing content supplied by
-// legacy or helper callers is dropped first. Production PR drafting supplies
-// the final-diff What Changed section and compact Pipeline status, then fits
-// Intent into the remaining budget so earlier step evidence cannot displace
-// the final-scope description.
+// within bodyLimit (0 = unlimited), measured the way the host counts it.
+//
+// The shedding order is worst-content-first. Testing goes first: it is the
+// only section that embeds artifact and log file contents and is therefore
+// effectively unbounded, so an Azure DevOps PR sheds log dumps while keeping
+// its Intent, What Changed, Risk, and Pipeline narrative. The agent
+// attribution table goes next, as a complete unit rather than a ragged
+// remnant. Only then does Pipeline evidence shrink, and it shrinks
+// structurally - whole update rounds omitted oldest-first at <details>
+// boundaries, newest evidence retained - because a blind tail cut through a
+// collapsible block both hides the most recent evidence and leaves broken
+// markup. ClampPRBody stays the last-resort backstop for a body whose
+// non-Pipeline sections alone (e.g. an unusually long Intent) still overrun.
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
 	whatChanged = prependNotesSection(whatChanged, sctx)
 	sections := appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD)
@@ -300,7 +328,43 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 			return core
 		}
 	}
+	if fitted := fitPipelineWithinPRBodyLimit(sctx, whatChanged, riskLine, withoutTelemetry, bodyLimit); fitted != "" {
+		return fitted
+	}
 	return prependIntentSectionWithinLimit(sections, sctx, bodyLimit, false)
+}
+
+// fitPipelineWithinPRBodyLimit re-renders the Pipeline section with older
+// update rounds omitted until the whole body fits the host's cap, keeping
+// Intent, What Changed, Risk, and the newest pipeline evidence intact.
+//
+// The structured omission helpers budget in bytes while the host counts
+// PRBodyLen units. UTF-8 never encodes a rune in fewer bytes than UTF-16
+// counts units for it, so spending the unit budget as a byte budget is
+// conservative: it may shed one round more than strictly necessary, never one
+// fewer. Returns "" when no structured rendering fits, leaving the caller's
+// blunt-clamp backstop in charge.
+func fitPipelineWithinPRBodyLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int) string {
+	if pipelineMD == "" || bodyLimit <= 0 {
+		return ""
+	}
+	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", ""), sctx)
+	budget := bodyLimit - scm.PRBodyLen(prefix)
+	if prefix != "" {
+		budget -= scm.PRBodyLen("\n\n")
+	}
+	if budget <= 0 {
+		return ""
+	}
+	truncated := truncatePipelineSection(pipelineMD, budget)
+	if truncated == "" {
+		return ""
+	}
+	candidate := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", truncated), sctx)
+	if scm.PRBodyLen(candidate) > bodyLimit {
+		return ""
+	}
+	return candidate
 }
 
 func prependIntentSectionWithinLimit(body string, sctx *pipeline.StepContext, bodyLimit int, byteLimit bool) string {
@@ -323,17 +387,19 @@ func prependIntentSectionWithinLimit(body string, sctx *pipeline.StepContext, bo
 	if cleaned == "" {
 		return body
 	}
-	intent := "## Intent\n\n" + cleaned
+	intentSection := "## Intent\n\n" + cleaned
 	intentBudget := bodyLimit - bodyLen - separatorLen
 	if intentBudget <= 0 {
 		return body
 	}
 	if byteLimit {
-		return truncateTextAtLineBoundary(intent, intentBudget, essentialPRBodyTruncationMarker()) + "\n\n" + body
+		return truncateTextAtLineBoundary(intentSection, intentBudget, essentialPRBodyTruncationMarker()) + "\n\n" + body
 	}
-	return scm.ClampPRBody(intent, intentBudget) + "\n\n" + body
+	return scm.ClampPRBody(intentSection, intentBudget) + "\n\n" + body
 }
 
+// appendGeneratedSections appends deterministic sections after the agent's body
+// and applies the PR body length guard.
 func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {
 	body = stripGeneratedSections(body)
 	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
@@ -348,22 +414,22 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 		return sections
 	}
 
-	intent := "## Intent\n\n" + cleaned
+	intentSection := "## Intent\n\n" + cleaned
 	separator := "\n\n"
-	if len(intent)+len(separator)+len(sections) <= maxPullRequestBodyBytes {
-		return intent + separator + sections
+	if len(intentSection)+len(separator)+len(sections) <= maxPullRequestBodyBytes {
+		return intentSection + separator + sections
 	}
-	sectionsBudget := maxPullRequestBodyBytes - len(separator) - len(intent)
+	sectionsBudget := maxPullRequestBodyBytes - len(separator) - len(intentSection)
 	if sectionsBudget > 0 {
 		sections = appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, sectionsBudget)
-		return intent + separator + sections
+		return intentSection + separator + sections
 	}
 
 	intentBudget := maxPullRequestBodyBytes - len(separator) - len(sections)
 	if intentBudget <= 0 {
 		return sections
 	}
-	return truncateTextAtLineBoundary(intent, intentBudget, essentialPRBodyTruncationMarker()) + separator + sections
+	return truncateTextAtLineBoundary(intentSection, intentBudget, essentialPRBodyTruncationMarker()) + separator + sections
 }
 
 func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {

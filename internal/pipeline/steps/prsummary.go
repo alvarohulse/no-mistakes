@@ -54,6 +54,11 @@ type testingSummaryOptions struct {
 	summaryParagraph     bool
 	omitOutcome          bool
 	repoRoot             string
+	// evidenceDir is this run's own evidence directory. The temp evidence
+	// root is shared by every run on the machine, so validating against the
+	// root would let one run's agent name another run's artifact and have
+	// its contents published in this PR body.
+	evidenceDir string
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -160,12 +165,13 @@ func BuildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 	return buildTestingSummary(steps, rounds, testingSummaryOptions{includeTestedDetails: true})
 }
 
-func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot string) string {
+func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceDir string) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.compactArtifacts = true
 	opts.summaryParagraph = true
 	opts.omitOutcome = true
 	opts.repoRoot = repoRoot
+	opts.evidenceDir = evidenceDir
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -572,7 +578,7 @@ func artifactFilesystemPath(p string, opts testingSummaryOptions) string {
 	if !filepath.IsAbs(p) {
 		return ""
 	}
-	if _, ok := artifactPathRelativeToRoot(p, testEvidenceRoot()); !ok {
+	if _, ok := artifactPathRelativeToRoot(p, opts.evidenceDir); !ok {
 		return ""
 	}
 	return p
@@ -695,7 +701,7 @@ func sanitizeAbsoluteArtifactPath(clean string, opts testingSummaryOptions) stri
 	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.repoRoot); ok {
 		return cleanedPath
 	}
-	if _, ok := artifactPathRelativeToRoot(cleanedPath, testEvidenceRoot()); ok {
+	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.evidenceDir); ok {
 		return cleanedPath
 	}
 	return ""
@@ -1210,6 +1216,8 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 	writeTestedDetails(b, sr, findings)
 }
 
+// writeTestedDetails lists the commands the test step exercised. It is a no-op
+// for non-test steps.
 func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.Findings) {
 	if sr.StepName != types.StepTest {
 		return
