@@ -160,7 +160,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	// One load feeds both renderings: the built-in Pipeline markdown below and,
 	// when a formatter is configured, the contract that replaces it.
 	records := LoadRunRecords(sctx.DB, sctx.Run.ID)
-	pipelineMD := s.buildPipelineSection(sctx, records)
+	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, records)
 
 	prompt := fmt.Sprintf(`Draft a pull request title and summary for the full branch delta.
 
@@ -196,7 +196,7 @@ Final diff paths and statuses:
 	})
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
+		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
 		return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
 	}
 
@@ -217,26 +217,28 @@ Final diff paths and statuses:
 				// What Changed prose, not the assembled body it ends up in.
 				whatChanged := content.Body
 				if bodyLimit > 0 {
-					content.Body = assemblePRBody(sctx, content.Body, "", "", pipelineMD, bodyLimit)
+					content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
 				} else {
-					content.Body = buildPRBody(content.Body, "", "", pipelineMD, sctx)
+					content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
 				}
 				return applyPRBodyHook(sctx, records, content, whatChanged, scope), nil
 			}
 		}
 	}
 
-	fallback := fallbackPRContent(sctx, finalDiff, pipelineMD, bodyLimit)
+	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
 	return applyPRBodyHook(sctx, records, fallback, fallbackWhatChanged(finalDiff), scope), nil
 }
 
-func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) string {
-	summary := buildPipelineStatusSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy)
+func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) (string, string, string) {
+	summary, riskLine := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy)
+	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
 	configSources := configSourcesSummary(sctx.Run.ConfigSources)
 	if summary == "" || configSources == "" {
-		return summary
+		return summary, riskLine, testingMD
 	}
-	return strings.Replace(summary, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+configSources, 1)
+	summary = strings.Replace(summary, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+configSources, 1)
+	return summary, riskLine, testingMD
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -260,14 +262,14 @@ func unwrapNestedPRBody(body string) string {
 // and applies the PR body length guard.
 // prBodyBudgetPromptSection tells the drafting agent about a host's PR-body
 // character cap so it keeps its "## What Changed" section short. The Intent
-// and Pipeline sections are appended deterministically, so the agent only
-// controls a slice of the budget; this nudge keeps that slice small.
+// Risk, Testing, and Pipeline sections are appended deterministically, so the
+// agent only controls a slice of the budget; this nudge keeps that slice small.
 // Returns "" when the provider has no practical limit (bodyLimit <= 0).
 func prBodyBudgetPromptSection(bodyLimit int) string {
 	if bodyLimit <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Notes, and Pipeline sections are appended automatically. Keep the \"## What Changed\" section to a few short bullet points.", bodyLimit)
+	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Notes, Risk Assessment, Testing, and Pipeline sections are appended automatically. Keep the \"## What Changed\" section to a few short bullet points.", bodyLimit)
 }
 
 // assemblePRBody composes the final PR body from its sections and keeps it
@@ -1138,13 +1140,13 @@ func fallbackWhatChanged(finalDiff string) string {
 	return "## What Changed\n\nFinal changed paths and statuses:\n\n```text\n" + escapeMarkdownFence(diffSummary) + "\n```"
 }
 
-func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, pipelineMD string, bodyLimit int) prContent {
+func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int) prContent {
 	title := "chore: update pull request"
 	body := fallbackWhatChanged(finalDiff)
 	if bodyLimit > 0 {
-		body = assemblePRBody(sctx, body, "", "", pipelineMD, bodyLimit)
+		body = assemblePRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit)
 	} else {
-		body = buildPRBody(body, "", "", pipelineMD, sctx)
+		body = buildPRBody(body, riskLine, testingMD, pipelineMD, sctx)
 	}
 	return prContent{
 		Title: title,
