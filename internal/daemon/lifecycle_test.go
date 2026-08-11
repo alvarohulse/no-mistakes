@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -832,6 +833,93 @@ func TestReadPIDNoFile(t *testing.T) {
 	_, err = ReadPID(p)
 	if err == nil {
 		t.Error("expected error when no PID file")
+	}
+}
+
+// TestStopDetachedDaemonReleasesShutdownConnectionBeforeWaiting pins the
+// ordering that keeps a graceful stop observable. The IPC server finishes
+// serving only once every in-flight connection handler has returned, a handler
+// returns only when its client disconnects, and the daemon's own endpoint and
+// pid-file cleanup runs after that. A stopper that kept its shutdown
+// connection open while polling "has the daemon stopped yet?" would block the
+// disappearance it is polling for, leaving the listener's single endpoint
+// removal as the only signal available - which is exactly what made a Windows
+// sharing violation on that one removal strand `daemon stop` for its whole
+// budget.
+//
+// The health check is stubbed to never report the daemon gone so the test
+// isolates the connection release from however quickly the endpoint file
+// actually disappears on this platform.
+func TestStopDetachedDaemonReleasesShutdownConnectionBeforeWaiting(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	p := paths.WithRoot(tmpDir)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	served := make(chan error, 1)
+	go func() { served <- RunWithResources(p, d) }()
+
+	ready := time.Now().Add(10 * time.Second)
+	for {
+		if alive, err := daemonIsRunningViaIPC(p); err == nil && alive {
+			break
+		}
+		if !time.Now().Before(ready) {
+			t.Fatal("daemon did not become ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "4s")
+	originalHealthCheck := daemonHealthCheck
+	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	defer func() {
+		daemonHealthCheck = originalHealthCheck
+	}()
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- stopDetachedDaemon(p) }()
+
+	var servedErr error
+	exitedWhileWaiting := false
+	select {
+	case servedErr = <-served:
+		exitedWhileWaiting = true
+	case <-time.After(2500 * time.Millisecond):
+	}
+
+	// Let both goroutines finish before reporting anything: the deferred
+	// restore of daemonHealthCheck runs on t.Fatal too, and would otherwise
+	// race the stopper still reading it.
+	select {
+	case <-stopped:
+	case <-time.After(testDaemonStopBudget):
+		t.Error("stopDetachedDaemon did not return")
+	}
+	if !exitedWhileWaiting {
+		select {
+		case servedErr = <-served:
+		case <-time.After(testDaemonStopBudget):
+			t.Error("daemon serve loop never finished")
+		}
+	}
+
+	if servedErr != nil {
+		t.Errorf("daemon serve loop returned an error: %v", servedErr)
+	}
+	if !exitedWhileWaiting {
+		t.Fatal("daemon serve loop did not finish while the stopper was still polling; the shutdown connection is holding it open")
 	}
 }
 

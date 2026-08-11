@@ -174,8 +174,44 @@ func (tl *tokenListener) Accept() (net.Conn, error) {
 
 func (tl *tokenListener) Close() error {
 	tl.closeOnce.Do(func() { close(tl.done) })
-	os.Remove(tl.endpoint)
-	return tl.Listener.Close()
+	// Stop accepting first: a filesystem hiccup on the endpoint file must
+	// never keep the socket answering for a daemon that is going away.
+	err := tl.Listener.Close()
+	removeEndpointFile(tl.endpoint)
+	return err
+}
+
+// removeEndpointFileTimeout bounds how long Close waits out another handle on
+// the endpoint file. The blocking handle is a momentary file read, so this is
+// a generous ceiling rather than an expected cost.
+const removeEndpointFileTimeout = 2 * time.Second
+
+// removeEndpointFile deletes the endpoint file, retrying while Windows still
+// reports it in use.
+//
+// Windows refuses DeleteFile with a sharing violation while any other handle
+// on the file is open without FILE_SHARE_DELETE, and the Go runtime opens
+// files without it (syscall.Open passes FILE_SHARE_READ|FILE_SHARE_WRITE).
+// Every dial reads this file, so a health probe that lands on the instant the
+// daemon closes its listener defeats a single best-effort Remove - and during
+// a shutdown that is the only attempt there is, because the daemon's own
+// end-of-run cleanup cannot run until every in-flight connection handler
+// returns. A surviving endpoint file then makes each later probe report an
+// ambiguous "connect to daemon socket" error instead of "not running", so
+// `daemon stop` burns its whole shutdown budget and fails in the kill-by-PID
+// fallback rather than reporting the graceful stop that actually happened.
+func removeEndpointFile(path string) {
+	deadline := time.Now().Add(removeEndpointFileTimeout)
+	for {
+		err := os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // bufferedConn wraps a net.Conn so that bytes already buffered by a
