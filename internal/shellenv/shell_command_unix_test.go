@@ -417,6 +417,52 @@ func TestCombinedOutputShellCommand_WaitDelayBoundsEscapedPipeHolder(t *testing.
 	}
 }
 
+// TestDefaultShellCommandOutput_WaitDelayBoundsEscapedPipeHolder pins the
+// tighter WaitDelay the login-shell probe installs for itself: when the probed
+// shell leaves behind a descendant that still holds the inherited stdout pipe
+// open, the probe must return on that backstop instead of blocking for as long
+// as the holder runs. Daemon startup waits on this probe, so a wedged read
+// stalls every agent launch behind it (#143).
+//
+// The holder escapes the process group with setsid, which is what makes this
+// deterministic. A shell-backgrounded child stays in the leader's group, so
+// whether it is still holding the pipe after cancellation depends on whether
+// the group SIGTERM raced the shell's fork: win that race and the child dies
+// with the group and never exercises the backstop at all; lose it and the child
+// misses a signal that is only sent once, keeps the group non-empty, and
+// cmd.Cancel deliberately waits out the termination grace before escalating to
+// SIGKILL. The predecessor of this test drove `sleep 1 & wait` through a 20ms
+// deadline and asserted a 500ms ceiling, so it was usually vacuous and failed
+// on macOS CI whenever the shell was slow enough to lose that race.
+func TestDefaultShellCommandOutput_WaitDelayBoundsEscapedPipeHolder(t *testing.T) {
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	// defaultShellCommandOutput builds the command itself, so the helper mode
+	// travels through the inherited environment rather than cmd.Env.
+	t.Setenv("NM_SHELLENV_PIPE_HELPER", "leader")
+	t.Setenv("NM_SHELLENV_PIPE_READY", readyFile)
+
+	started := time.Now()
+	out, err := defaultShellCommandOutput(os.Args[0], "-test.run=^TestShellOutputPipeHelper$")
+	elapsed := time.Since(started)
+
+	escapedPID := parseEscapedPID(t, string(out))
+	t.Cleanup(func() {
+		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+	})
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("defaultShellCommandOutput() error = %v, want %v; output %q", err, exec.ErrWaitDelay, out)
+	}
+	// The holder sleeps far longer than this ceiling, so returning under it can
+	// only mean the probe stopped waiting on the pipe rather than outliving the
+	// process holding it.
+	if elapsed >= 15*time.Second {
+		t.Fatalf("probe returned after %s; want the WaitDelay backstop to bound it", elapsed)
+	}
+	if syscall.Kill(escapedPID, 0) != nil {
+		t.Fatalf("escaped pipe holder %d was gone on return; the probe was not bounded by the backstop", escapedPID)
+	}
+}
+
 func TestShellOutputPipeHelper(t *testing.T) {
 	switch os.Getenv("NM_SHELLENV_PIPE_HELPER") {
 	case "leader":
