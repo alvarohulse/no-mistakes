@@ -244,7 +244,7 @@ func TestBuildTestingSummaryForPR_OmitsRecordedTestDetails(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "## Testing\n\nValidated the CLI doctor path and config loading; both passed.") {
@@ -273,7 +273,7 @@ func TestBuildTestingSummaryForPR_SummarizesBaselineOnlyTests(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "## Testing\n\nCompleted 1 recorded test check.") {
@@ -300,7 +300,7 @@ func TestBuildTestingSummaryForPR_KeepsFailedOutcomeForCompactTestedSummary(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "Completed 1 recorded test check.") {
@@ -321,7 +321,7 @@ func TestBuildTestingSummaryForPR_KeepsOutcomeForArtifactOnlyEvidence(t *testing
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "Outcome:") {
@@ -360,7 +360,7 @@ func TestBuildTestingSummaryForPR_KeepsInlineCodeProseAsPlainText(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if strings.Contains(md, "<code>") {
 		t.Fatalf("prose summary with inline code spans should not be wrapped in <code>, got:\n%s", md)
@@ -452,7 +452,7 @@ func TestBuildTestingSummaryForPR_RendersEvidenceArtifactsCompactly(t *testing.T
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "- Evidence: [Checkout screenshot](https://github.com/example/widgets/blob/abc123/artifacts/checkout.png)") {
@@ -483,7 +483,7 @@ func TestBuildTestingSummaryForPR_RendersLocalTempVisualArtifactPath(t *testing.
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, filepath.Dir(localPath))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	want := "- Evidence: Checkout screenshot (local file: <code>" + html.EscapeString(localPath) + "</code>)"
@@ -509,7 +509,7 @@ func TestBuildTestingSummaryForPR_PreservesCaptionedLocalVisualArtifactPath(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, filepath.Dir(localPath))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	wantSource := "Source: Checkout screenshot (local file: <code>" + html.EscapeString(localPath) + "</code>)"
@@ -536,7 +536,7 @@ func TestBuildTestingSummaryForPR_PrefersArtifactURLOverLocalPath(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, filepath.Dir(localPath))
 
 	if !strings.Contains(md, "- Evidence: [Checkout screenshot](https://example.com/checkout.png)") {
 		t.Fatalf("expected artifact URL to take precedence, got:\n%s", md)
@@ -575,12 +575,19 @@ func TestArtifactPathRelativeToRoot_AllowsSymlinkEquivalentPaths(t *testing.T) {
 	}
 }
 
-// writeTempEvidenceFile creates a uniquely-named file under the temp evidence
-// root (the only absolute location outside the repo that artifact paths may
-// reference) and registers cleanup of its run directory.
+// testRunEvidenceDir is the calling test's own run directory under the temp
+// evidence root - the only absolute location outside the repo that its
+// artifact paths may reference.
+func testRunEvidenceDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(testEvidenceRoot(), "run-"+strings.ReplaceAll(t.Name(), "/", "_"))
+}
+
+// writeTempEvidenceFile creates a uniquely-named file under the calling test's
+// run evidence directory and registers cleanup of that directory.
 func writeTempEvidenceFile(t *testing.T, name string, content []byte) string {
 	t.Helper()
-	runDir := filepath.Join(testEvidenceRoot(), "run-"+strings.ReplaceAll(t.Name(), "/", "_"))
+	runDir := testRunEvidenceDir(t)
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -590,6 +597,39 @@ func writeTempEvidenceFile(t *testing.T, name string, content []byte) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestBuildTestingSummaryForPR_RejectsAnotherRunsEvidenceArtifact pins the run
+// scoping of embedded evidence: the temp evidence root is shared by every run
+// on the machine, so a path naming a sibling run's directory must neither be
+// linked nor have its contents published in this run's PR body.
+func TestBuildTestingSummaryForPR_RejectsAnotherRunsEvidenceArtifact(t *testing.T) {
+	otherRunSecret := "OTHER RUN PRIVATE EVIDENCE"
+	otherRunDir := filepath.Join(testEvidenceRoot(), "run-"+strings.ReplaceAll(t.Name(), "/", "_")+"-other")
+	if err := os.MkdirAll(otherRunDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(otherRunDir) })
+	otherRunPath := filepath.Join(otherRunDir, "leak.txt")
+	if err := os.WriteFile(otherRunPath, []byte(otherRunSecret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Neighbour run log","path":%q}]}`, otherRunPath)
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+	}
+
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
+
+	for _, leaked := range []string{otherRunSecret, otherRunPath, "Neighbour run log"} {
+		if strings.Contains(md, leaked) {
+			t.Fatalf("another run's evidence %q leaked into the PR testing section:\n%s", leaked, md)
+		}
+	}
 }
 
 func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
@@ -603,7 +643,7 @@ func TestBuildTestingSummaryForPR_EmbedsLocalTextEvidenceContent(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if !strings.Contains(md, "<summary>Evidence: Rendered setup wizard screens</summary>") {
@@ -633,7 +673,7 @@ func TestBuildTestingSummaryForPR_PreservesPublicURLForEmbeddedTextEvidence(t *t
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if !strings.Contains(md, "Source: [Wizard log](https://example.com/artifacts/wizard.txt)") {
 		t.Fatalf("expected public URL source to be preserved, got:\n%s", md)
@@ -664,7 +704,7 @@ func TestBuildTestingSummaryForPR_EmbedsRepoTextEvidenceContent(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, testRunEvidenceDir(t))
 	t.Logf("rendered PR testing markdown:\n%s", md)
 
 	if strings.Contains(md, fileBody) || strings.Contains(md, "```text") {
@@ -690,7 +730,7 @@ func TestBuildTestingSummaryForPR_DoesNotEmbedRepoRelativeSecrets(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot)
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", repoRoot, testRunEvidenceDir(t))
 
 	if strings.Contains(md, secret) || strings.Contains(md, "```text") {
 		t.Fatalf("did not expect repo-relative secret content to be embedded, got:\n%s", md)
@@ -709,7 +749,7 @@ func TestBuildTestingSummaryForPR_RendersFileCaptionAsText(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if strings.Contains(md, caption) || strings.Contains(md, "<img src=x") {
 		t.Fatalf("did not expect raw caption markdown/html, got:\n%s", md)
@@ -735,7 +775,7 @@ func TestBuildTestingSummaryForPR_TruncatesLargeTextEvidenceFromMiddle(t *testin
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if !strings.Contains(md, "HEAD-LINE") {
 		t.Fatalf("expected truncated content to keep the head, got:\n%s", md[:min(len(md), 600)])
@@ -766,7 +806,7 @@ func TestBuildTestingSummaryForPR_LimitsTotalEmbeddedTextEvidence(t *testing.T) 
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if !strings.Contains(md, firstBody) || !strings.Contains(md, secondBody) {
 		t.Fatalf("expected earlier evidence to embed before budget is exhausted, got:\n%s", md[:min(len(md), 600)])
@@ -789,7 +829,7 @@ func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
 		"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
 	}
 
-	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir())
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), testRunEvidenceDir(t))
 
 	if !strings.Contains(md, "- Evidence: Binary capture (local file: <code>"+html.EscapeString(localPath)+"</code>)") {
 		t.Fatalf("expected binary evidence to fall back to a local file reference, got:\n%s", md)

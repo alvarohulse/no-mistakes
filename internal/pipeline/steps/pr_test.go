@@ -257,6 +257,13 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	if err := sctx.DB.UpdateStepStatus(reviewStep.ID, types.StepStatusCompleted); err != nil {
 		t.Fatal(err)
 	}
+	cleanFindings := `{"findings":[],"summary":"clean"}`
+	if err := sctx.DB.SetStepFindings(reviewStep.ID, cleanFindings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(reviewStep.ID, 1, "initial", &cleanFindings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
 		RunID:                     sctx.Run.ID,
 		StepName:                  string(types.StepReview),
@@ -278,15 +285,18 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
+	got, _, _ := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	want := "| Step | Agent (via) | Nested agents |\n" +
 		"| --- | --- | --- |\n" +
 		"| Review r1 | codex (harness_cli) | Explore (subagent_tool) |"
 	if !strings.Contains(got, want) {
 		t.Fatalf("pipeline agent telemetry table missing:\n%s", got)
 	}
-	if !strings.Contains(got, "<summary>✅ **Review** - completed</summary>") {
+	if !strings.Contains(got, "<summary>✅ **Review** - passed</summary>") {
 		t.Fatalf("pipeline status missing after telemetry table:\n%s", got)
+	}
+	if !strings.Contains(got, "✅ No issues found.") {
+		t.Fatalf("pipeline step details are empty:\n%s", got)
 	}
 }
 
@@ -306,7 +316,7 @@ func TestPRStep_BuildPipelineSectionIncludesConfigSourcesWithoutPrivatePathOrKey
 		{Kind: db.ConfigSourceGlobalOverride, Digest: strings.Repeat("c", 64), Ref: "private-owner/private-repo", Path: "/home/alvaro/private/config.yaml"},
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
+	got, _, _ := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	want := "Config sources: `branch@sha256:" + strings.Repeat("a", 12) + "`, `default@sha256:" + strings.Repeat("b", 12) + "`, `global-override@sha256:" + strings.Repeat("c", 12) + "`"
 	if !strings.Contains(got, want) {
 		t.Fatalf("pipeline config source summary missing:\n%s", got)
@@ -380,7 +390,7 @@ func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
+	got, _, _ := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	for _, want := range []string{
 		"| Merge r1 | codex (harness_cli) | - |",
 		"<summary>✅ **Merge** - passed</summary>",
@@ -705,8 +715,8 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	if strings.Contains(ghLog, "--title feat: add feature") {
 		t.Fatalf("expected fallback PR title to exclude commit-history scope, got:\n%s", ghLog)
 	}
-	if strings.Contains(ghLog, "touches critical error handling") || strings.Contains(ghLog, "## Risk Assessment") {
-		t.Fatalf("expected fallback PR body to exclude earlier Review rationale, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "## Risk Assessment\n\n⚠️ Medium: touches critical error handling") {
+		t.Fatalf("expected fallback PR body to append risk note under Risk Assessment heading, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "A\tfeature.txt") {
 		t.Fatalf("expected fallback PR body to derive scope from the final diff, got:\n%s", ghLog)
@@ -984,15 +994,15 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	if !strings.Contains(ghLog, "keep branch status readable") {
 		t.Fatalf("expected generated PR body in gh call, got:\n%s", ghLog)
 	}
-	if strings.Contains(ghLog, "touches critical error handling") || strings.Contains(ghLog, "## Risk Assessment") {
-		t.Fatalf("expected final PR body to exclude earlier Review rationale, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "fix footer truncation\n\n## Risk Assessment\n\n⚠️ Medium: touches critical error handling") {
+		t.Fatalf("expected risk note under Risk Assessment heading, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "--title feature") {
 		t.Fatalf("expected PR title to avoid raw branch name, got:\n%s", ghLog)
 	}
 }
 
-func TestPRStep_ExcludesEarlierTestingSectionFromFinalPRScope(t *testing.T) {
+func TestPRStep_AppendsDeterministicValidationSections(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -1050,16 +1060,12 @@ func TestPRStep_ExcludesEarlierTestingSectionFromFinalPRScope(t *testing.T) {
 	}
 	ghLog := string(logData)
 
-	if !strings.Contains(ghLog, "## Pipeline") {
-		t.Fatalf("expected the final PR's pipeline section, got:\n%s", ghLog)
+	wantOrder := "## Risk Assessment\n\n⚠️ Medium: touches critical error handling\n\n## Testing\n\n- 🔧 **Test** - 1 issue found → auto-fixed ✅\n\n## Pipeline"
+	if !strings.Contains(ghLog, wantOrder) {
+		t.Fatalf("expected validation sections before the pipeline, got:\n%s", ghLog)
 	}
-	for _, stale := range []string{"## Testing", "## Risk Assessment", "touches critical error handling"} {
-		if strings.Contains(ghLog, stale) {
-			t.Fatalf("final PR must not append earlier step evidence %q, got:\n%s", stale, ghLog)
-		}
-	}
-	if !strings.Contains(ghLog, "<summary>🔧 **Test** - 1 issue found → auto-fixed ✅</summary>") {
-		t.Fatalf("final PR must retain the Test step status without its step-scoped evidence, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "expected 429 got 200") {
+		t.Fatalf("expected populated Test pipeline details, got:\n%s", ghLog)
 	}
 }
 
@@ -1196,6 +1202,55 @@ func TestAssemblePRBody_DropsTestingEmbedsToFitAzureCap(t *testing.T) {
 	}
 }
 
+// TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap pins the shape of
+// the Azure fallback once the Pipeline section carries full step evidence: a
+// blind tail clamp would cut through a <details> block and take the newest
+// evidence with it, so whole update rounds are shed oldest-first instead.
+func TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper for foo callers"}
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps) // 4000
+
+	rounds := make([]string, 0, 40)
+	for i := 1; i <= 40; i++ {
+		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 200)))
+	}
+
+	got := assemblePRBody(sctx,
+		"## What Changed\n\n- add Bar() helper",
+		"behavior preserved; low risk",
+		"",
+		pipelineMarkdownForTest(rounds...),
+		limit,
+	)
+
+	if scm.PRBodyLen(got) > limit {
+		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
+	}
+	for _, want := range []string{
+		"## Intent",
+		"wanted a Bar() helper",
+		"## What Changed",
+		"## Risk Assessment",
+		"## Pipeline",
+		"earlier update rounds omitted",
+		"review round 040",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("budgeted body dropped required content %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "review round 001") {
+		t.Fatalf("expected the oldest pipeline round to be shed first, got:\n%s", got)
+	}
+	if strings.Count(got, "<details>") != strings.Count(got, "</details>") {
+		t.Fatalf("expected balanced collapsible blocks, got:\n%s", got)
+	}
+	if strings.Contains(got, prTruncationTail()) {
+		t.Fatalf("did not expect a blind clamp when structured omission fits:\n%s", got)
+	}
+}
+
 func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	t.Parallel()
 	// An Intent so long that even Intent + What Changed overruns the cap, with no
@@ -1260,6 +1315,67 @@ func TestAssemblePRBody_PreservesNoteWhenClampingGeneratedSections(t *testing.T)
 	whatChangedIdx := strings.Index(got, "## What Changed")
 	if notesIdx < 0 || whatChangedIdx < 0 || notesIdx > whatChangedIdx {
 		t.Fatalf("expected ## Notes before ## What Changed, got:\n%s", got)
+	}
+}
+
+// TestRedactOutboundPRContent_RedactsRestoredEvidenceSections pins the last
+// gate before a body reaches a hosted PR. Recorded findings, risk rationale,
+// tested commands, and embedded artifact contents are escaped for markup but
+// never for credentials, and a PR description is a permanent public record.
+func TestRedactOutboundPRContent_RedactsRestoredEvidenceSections(t *testing.T) {
+	t.Parallel()
+	body := strings.Join([]string{
+		"## What Changed",
+		"",
+		"- rotate the publisher credential",
+		"",
+		"## Risk Assessment",
+		"",
+		"⚠️ Medium: the old api_key=AKIAIOSFODNN7EXAMPLE0 is still live",
+		"",
+		"## Testing",
+		"",
+		"- `curl -H 'authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz' https://example.com`",
+		"",
+		"## Pipeline",
+		"",
+		"<details>",
+		"<summary>✅ **Test** - passed</summary>",
+		"",
+		"- token ghp_abcdefghijklmnopqrstuvwxyz0123456789 was accepted",
+		"</details>",
+	}, "\n")
+
+	got := redactOutboundPRContent(prContent{Title: "chore: rotate sk-abcdefghijklmnopqrstuvwxyz", Body: body}, 0)
+
+	for _, secret := range []string{
+		"AKIAIOSFODNN7EXAMPLE0",
+		"sk-abcdefghijklmnopqrstuvwxyz",
+		"ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+	} {
+		if strings.Contains(got.Body, secret) {
+			t.Fatalf("credential %q reached the outbound PR body:\n%s", secret, got.Body)
+		}
+		if strings.Contains(got.Title, secret) {
+			t.Fatalf("credential %q reached the outbound PR title: %q", secret, got.Title)
+		}
+	}
+	for _, want := range []string{"## Risk Assessment", "## Testing", "## Pipeline", "rotate the publisher credential"} {
+		if !strings.Contains(got.Body, want) {
+			t.Fatalf("redaction dropped legitimate content %q:\n%s", want, got.Body)
+		}
+	}
+}
+
+func TestRedactOutboundPRContent_KeepsRedactedBodyWithinHostCap(t *testing.T) {
+	t.Parallel()
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
+	body := strings.Repeat("eyJa.eyJb.eyJc\n", limit/8)
+
+	got := redactOutboundPRContent(prContent{Title: "chore: x", Body: body}, limit)
+
+	if n := scm.PRBodyLen(got.Body); n > limit {
+		t.Fatalf("redacted body = %d units, want <= %d", n, limit)
 	}
 }
 
@@ -1694,21 +1810,17 @@ func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
 		"body truncated to keep the PR body within GitHub's 65536-char limit",
 		"## What Changed",
 		"essential summary survives",
-		"## Pipeline",
-		"<summary>✅ **Test** - passed</summary>",
+		"## Risk Assessment",
+		"validates generated PR body length handling",
+		"## Testing",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected created PR body to contain %q, got:\n%s", want, body)
 		}
 	}
-	for _, unwanted := range []string{"## Testing", "## Risk Assessment", "Validated generated PR body length handling.", "validates generated PR body length handling"} {
-		if strings.Contains(body, unwanted) {
-			t.Fatalf("expected created PR body to exclude step-scoped test evidence %q, got:\n%s", unwanted, body)
-		}
-	}
 }
 
-func TestPRStep_BuildPRContentUsesStepStatusWithoutEarlierReviewEvidence(t *testing.T) {
+func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -1749,15 +1861,18 @@ func TestPRStep_BuildPRContentUsesStepStatusWithoutEarlierReviewEvidence(t *test
 	if !strings.Contains(content.Body, "Keep PR creation postable") || !strings.Contains(content.Body, "essential summary survives") {
 		t.Fatalf("expected intent and summary to survive, got:\n%s", content.Body)
 	}
-	if !strings.Contains(content.Body, "<summary>✅ **Review** - completed</summary>") {
-		t.Fatalf("expected compact Review status, got:\n%s", content.Body)
+	if !strings.Contains(content.Body, "earlier update rounds omitted") {
+		t.Fatalf("expected omission marker, got:\n%s", content.Body)
 	}
-	if strings.Contains(content.Body, "review round") || strings.Contains(content.Body, "earlier update rounds omitted") {
-		t.Fatalf("expected earlier Review evidence to remain step-scoped, got:\n%s", content.Body)
+	if strings.Contains(content.Body, "review round 001") {
+		t.Fatalf("expected old pipeline update to be omitted, got:\n%s", content.Body)
+	}
+	if !strings.Contains(content.Body, "review round 140") {
+		t.Fatalf("expected latest pipeline update to be retained, got:\n%s", content.Body)
 	}
 }
 
-func TestPRStep_CreateKeepsIntentAndCompactStatusAfterManyReviewRounds(t *testing.T) {
+func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -1809,14 +1924,15 @@ func TestPRStep_CreateKeepsIntentAndCompactStatusAfterManyReviewRounds(t *testin
 		"Keep PR creation postable.",
 		"intent context line stays visible",
 		"essential summary survives",
-		"<summary>✅ **Review** - completed</summary>",
+		"earlier update rounds omitted",
+		"review round 140",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected final PR body to contain %q", want)
 		}
 	}
-	if strings.Contains(body, "review round") || strings.Contains(body, "earlier update rounds omitted") {
-		t.Fatal("expected Review evidence to remain step-scoped")
+	if strings.Contains(body, "review round 001") {
+		t.Fatal("expected oldest pipeline update to be omitted")
 	}
 }
 
@@ -1833,6 +1949,8 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 	content := fallbackPRContent(
 		sctx,
 		"A\tinternal/pipeline/steps/pr.go",
+		"✅ Low: generated PR body length guard only",
+		"## Testing\n\n- go test ./internal/pipeline/steps",
 		pipelineMarkdownForTest(rounds...),
 		0,
 	)
@@ -1843,6 +1961,8 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 		"Fallback intent survives.",
 		"## What Changed",
 		"internal/pipeline/steps/pr.go",
+		"## Risk Assessment",
+		"## Testing",
 		"earlier update rounds omitted",
 		"review round 140",
 	} {

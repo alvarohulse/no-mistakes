@@ -54,10 +54,19 @@ type testingSummaryOptions struct {
 	summaryParagraph     bool
 	omitOutcome          bool
 	repoRoot             string
+	// evidenceDir is this run's own evidence directory. The temp evidence
+	// root is shared by every run on the machine, so validating against the
+	// root would let one run's agent name another run's artifact and have
+	// its contents published in this PR body.
+	evidenceDir string
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
 func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound) (string, string) {
+	return buildPipelineSummary(steps, rounds, nil, types.RefreshStrategyRebase)
+}
+
+func buildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, strategy types.RefreshStrategy) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -69,7 +78,7 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 			continue
 		}
 		stepRounds := rounds[sr.ID]
-		line, detail := buildStepEntry(sr, stepRounds, types.RefreshStrategyRebase)
+		line, detail := buildStepEntry(sr, stepRounds, strategy)
 		if line != "" && detail != "" {
 			detailBlocks = append(detailBlocks, detail)
 		}
@@ -83,6 +92,7 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 	b.WriteString("## Pipeline\n\n")
 	b.WriteString(noMistakesPRSignature)
 	b.WriteString("\n\n")
+	b.WriteString(agentTelemetryTable(invocations, strategy))
 	for i, detail := range detailBlocks {
 		if i > 0 {
 			b.WriteString("\n")
@@ -92,43 +102,6 @@ func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 
 	riskLine := extractRiskLine(steps, rounds)
 	return b.String(), riskLine
-}
-
-func BuildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
-	return buildPipelineStatusSummary(steps, rounds, nil, types.RefreshStrategyRebase)
-}
-
-func buildPipelineStatusSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, strategy types.RefreshStrategy) string {
-	var statusLines []string
-	for _, sr := range steps {
-		if shouldOmitPipelineStep(sr) {
-			continue
-		}
-		var line string
-		if sr.StepName == types.StepReview && sr.Status == types.StepStatusCompleted {
-			line = "✅ **Review** - completed"
-		} else {
-			line, _ = buildStepEntry(sr, rounds[sr.ID], strategy)
-		}
-		if line != "" {
-			statusLines = append(statusLines, line)
-		}
-	}
-	if len(statusLines) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	b.WriteString("## Pipeline\n\n")
-	b.WriteString(noMistakesPRSignature)
-	b.WriteString("\n\n")
-	b.WriteString(agentTelemetryTable(invocations, strategy))
-	for _, line := range statusLines {
-		b.WriteString("<details>\n<summary>")
-		b.WriteString(line)
-		b.WriteString("</summary>\n</details>\n")
-	}
-	return b.String()
 }
 
 func agentTelemetryTable(invocations []db.AgentInvocation, strategy types.RefreshStrategy) string {
@@ -192,12 +165,13 @@ func BuildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 	return buildTestingSummary(steps, rounds, testingSummaryOptions{includeTestedDetails: true})
 }
 
-func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot string) string {
+func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceDir string) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.compactArtifacts = true
 	opts.summaryParagraph = true
 	opts.omitOutcome = true
 	opts.repoRoot = repoRoot
+	opts.evidenceDir = evidenceDir
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -604,7 +578,7 @@ func artifactFilesystemPath(p string, opts testingSummaryOptions) string {
 	if !filepath.IsAbs(p) {
 		return ""
 	}
-	if _, ok := artifactPathRelativeToRoot(p, testEvidenceRoot()); !ok {
+	if _, ok := artifactPathRelativeToRoot(p, opts.evidenceDir); !ok {
 		return ""
 	}
 	return p
@@ -727,7 +701,7 @@ func sanitizeAbsoluteArtifactPath(clean string, opts testingSummaryOptions) stri
 	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.repoRoot); ok {
 		return cleanedPath
 	}
-	if _, ok := artifactPathRelativeToRoot(cleanedPath, testEvidenceRoot()); ok {
+	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.evidenceDir); ok {
 		return cleanedPath
 	}
 	return ""
@@ -1193,6 +1167,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			} else {
 				b.WriteString("✅ No issues found.\n")
 			}
+			writeTestedDetails(&b, sr, &findings)
 			b.WriteString("\n")
 			continue
 		}
@@ -1223,7 +1198,8 @@ func fixRoundLine(r *db.StepRound) string {
 	return fmt.Sprintf("🔧 Fix: %s", html.EscapeString(summary))
 }
 
-// writeFindingItems renders each finding as a `file:line - description` bullet.
+// writeFindingItems renders each finding as a `file:line - description` bullet,
+// followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings) {
 	for _, f := range findings.Items {
 		emoji := severityEmoji(f.Severity)
@@ -1236,6 +1212,22 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 			loc += "` - "
 		}
 		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, html.EscapeString(f.Description)))
+	}
+	writeTestedDetails(b, sr, findings)
+}
+
+// writeTestedDetails lists the commands the test step exercised. It is a no-op
+// for non-test steps.
+func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.Findings) {
+	if sr.StepName != types.StepTest {
+		return
+	}
+	for _, detail := range findings.Tested {
+		rendered := renderTestedDetail(detail)
+		if rendered == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- %s\n", rendered))
 	}
 }
 

@@ -603,6 +603,14 @@ func stopDetachedDaemon(p *paths.Paths) error {
 	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result); err != nil {
 		return fmt.Errorf("shutdown request: %w", err)
 	}
+	// Release this connection before polling. The IPC server finishes serving
+	// only once every in-flight connection handler has returned, and a handler
+	// returns only when its client disconnects; the daemon's own endpoint and
+	// pid-file cleanup runs after that. Holding the shutdown connection open
+	// across the wait would therefore block the very disappearance we are
+	// waiting to observe, leaving the listener's endpoint removal as the only
+	// signal that the daemon is gone.
+	_ = client.Close()
 	return waitForDaemonStop(p)
 }
 
