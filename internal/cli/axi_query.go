@@ -153,7 +153,7 @@ func configQuietWarning(env *axiEnv) time.Duration {
 }
 
 func startRunHelp() string {
-	return `Run no-mistakes axi run --intent "the user's goal" --yes to validate the current branch; --yes auto-resolves eligible gates but a Test gate created because the agent changed a test file requires explicit approval; optional --pr-note (or --pr-note-file <path> for longer content) injects author text into the PR`
+	return `Run no-mistakes axi run --intent "the user's goal" --yes to validate the current branch; --yes auto-resolves eligible gates; optional --pr-note (or --pr-note-file <path> for longer content) injects author text into the PR`
 }
 
 func noRunLogsHelp() string {

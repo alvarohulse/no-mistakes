@@ -175,17 +175,6 @@ func TestParseFindingsJSON_Action(t *testing.T) {
 	}
 }
 
-func TestParseFindingsJSON_ExplicitApproval(t *testing.T) {
-	raw := `{"findings":[{"severity":"warning","description":"test changed","action":"ask-user","requires_explicit_approval":true}]}`
-	findings, err := ParseFindingsJSON(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !HasExplicitApprovalFindings(findings) {
-		t.Fatal("expected explicit-approval finding to survive JSON parsing")
-	}
-}
-
 func TestParseFindingsJSON_RequiresHumanReviewCompatibility(t *testing.T) {
 	raw := `{"findings":[{"severity":"warning","description":"design choice","requires_human_review":true},{"severity":"error","description":"bug","requires_human_review":false}]}`
 	f, err := ParseFindingsJSON(raw)

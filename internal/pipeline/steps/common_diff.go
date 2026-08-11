@@ -11,21 +11,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
-type testFileChangeKind string
-
-const (
-	testFileCreated  testFileChangeKind = "created"
-	testFileModified testFileChangeKind = "modified"
-	testFileDeleted  testFileChangeKind = "deleted"
-	testFileRenamed  testFileChangeKind = "renamed"
-)
-
-type testFileChange struct {
-	Path         string
-	PreviousPath string
-	Kind         testFileChangeKind
-}
-
 // isTestFile returns true if the file path matches common test file naming patterns.
 func isTestFile(path string) bool {
 	base := filepath.Base(path)
@@ -65,74 +50,33 @@ func isTestFile(path string) bool {
 	return false
 }
 
-// detectTestFileChanges returns test files created, modified, deleted, or
-// renamed in the working tree. A temporary index lets Git compare the combined
-// staged and unstaged state to HEAD without changing the real index.
-func detectTestFileChanges(ctx context.Context, dir string) ([]testFileChange, error) {
-	paths, err := changedWorktreePaths(ctx, dir)
+// detectNewTestFiles returns newly created test files. Existing test files are
+// ordinary source changes and do not receive special handling.
+func detectNewTestFiles(ctx context.Context, dir string) ([]string, error) {
+	scratchDir, err := os.MkdirTemp("", "no-mistakes-new-tests-*")
 	if err != nil {
-		return nil, err
-	}
-	if len(paths) == 0 {
-		return nil, nil
-	}
-
-	scratchDir, err := os.MkdirTemp("", "no-mistakes-test-files-*")
-	if err != nil {
-		return nil, fmt.Errorf("create test-file detection index: %w", err)
+		return nil, fmt.Errorf("create new-test detection index: %w", err)
 	}
 	defer os.RemoveAll(scratchDir)
 
 	indexFile := filepath.Join(scratchDir, "index")
-	pathspecFile := filepath.Join(scratchDir, "paths")
-	if err := os.WriteFile(pathspecFile, []byte(strings.Join(paths, "\x00")+"\x00"), 0o600); err != nil {
-		return nil, fmt.Errorf("write test-file detection paths: %w", err)
-	}
 	if _, err := git.RunWithIndex(ctx, dir, indexFile, "read-tree", "HEAD"); err != nil {
-		return nil, fmt.Errorf("initialize test-file detection index: %w", err)
+		return nil, fmt.Errorf("initialize new-test detection index: %w", err)
 	}
-	if _, err := git.RunWithIndex(ctx, dir, indexFile, "--literal-pathspecs", "add", "--all", "--pathspec-from-file="+pathspecFile, "--pathspec-file-nul"); err != nil {
-		return nil, fmt.Errorf("snapshot working tree for test-file detection: %w", err)
+	if _, err := git.RunWithIndex(ctx, dir, indexFile, "add", "--all"); err != nil {
+		return nil, fmt.Errorf("snapshot working tree for new-test detection: %w", err)
 	}
-	out, err := git.RunWithIndex(ctx, dir, indexFile, "diff", "--cached", "--name-status", "-z", "--diff-filter=AMDR", "--find-renames", "HEAD")
+	out, err := git.RunWithIndex(ctx, dir, indexFile, "diff", "--cached", "--name-only", "-z", "--diff-filter=A", "--find-renames", "HEAD")
 	if err != nil {
-		return nil, fmt.Errorf("list changed test files: %w", err)
+		return nil, fmt.Errorf("list new test files: %w", err)
 	}
-	return parseTestFileChanges(out), nil
-}
 
-func changedWorktreePaths(ctx context.Context, dir string) ([]string, error) {
-	out, err := git.Run(ctx, dir, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--renames")
-	if err != nil {
-		return nil, fmt.Errorf("list changed paths: %w", err)
-	}
 	paths := make(map[string]struct{})
-	records := splitNullRecords(out)
-	for i := 0; i < len(records); i++ {
-		record := records[i]
-		if len(record) < 3 {
-			continue
-		}
-		var path string
-		switch record[0] {
-		case '1':
-			path = lastPorcelainField(record, 9)
-		case '2':
-			path = lastPorcelainField(record, 10)
-		case 'u':
-			path = lastPorcelainField(record, 11)
-		case '?':
-			path = record[2:]
-		}
-		if path != "" {
+	for _, path := range splitNullRecords(out) {
+		if isTestFile(path) {
 			paths[path] = struct{}{}
 		}
-		if record[0] == '2' && i+1 < len(records) {
-			i++
-			paths[records[i]] = struct{}{}
-		}
 	}
-
 	result := make([]string, 0, len(paths))
 	for path := range paths {
 		result = append(result, path)
@@ -141,87 +85,11 @@ func changedWorktreePaths(ctx context.Context, dir string) ([]string, error) {
 	return result, nil
 }
 
-func lastPorcelainField(record string, fields int) string {
-	parts := strings.SplitN(record, " ", fields)
-	if len(parts) != fields {
-		return ""
-	}
-	return parts[fields-1]
-}
-
-func parseTestFileChanges(out string) []testFileChange {
-	records := splitNullRecords(out)
-	changes := make([]testFileChange, 0, len(records)/2)
-	for i := 0; i < len(records); {
-		status := records[i]
-		i++
-		if status == "" {
-			continue
-		}
-		if status[0] == 'R' {
-			if i+1 >= len(records) {
-				break
-			}
-			oldPath, newPath := records[i], records[i+1]
-			i += 2
-			if isTestFile(oldPath) || isTestFile(newPath) {
-				changes = append(changes, testFileChange{Path: newPath, PreviousPath: oldPath, Kind: testFileRenamed})
-			}
-			continue
-		}
-		if i >= len(records) {
-			break
-		}
-		path := records[i]
-		i++
-		if !isTestFile(path) {
-			continue
-		}
-		switch status[0] {
-		case 'A':
-			changes = append(changes, testFileChange{Path: path, Kind: testFileCreated})
-		case 'M':
-			changes = append(changes, testFileChange{Path: path, Kind: testFileModified})
-		case 'D':
-			changes = append(changes, testFileChange{Path: path, Kind: testFileDeleted})
-		}
-	}
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].Path < changes[j].Path
-	})
-	return changes
-}
-
 func splitNullRecords(out string) []string {
 	if out == "" {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
-}
-
-func mergeTestFileChanges(groups ...[]testFileChange) []testFileChange {
-	changes := make(map[string]testFileChange)
-	for _, group := range groups {
-		for _, change := range group {
-			previous, exists := changes[change.Path]
-			if exists && change.Kind == testFileModified && (previous.Kind == testFileCreated || previous.Kind == testFileRenamed) {
-				continue
-			}
-			changes[change.Path] = change
-		}
-	}
-
-	paths := make([]string, 0, len(changes))
-	for path := range changes {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-
-	result := make([]testFileChange, 0, len(paths))
-	for _, path := range paths {
-		result = append(result, changes[path])
-	}
-	return result
 }
 
 // matchIgnorePattern checks if a file path matches an ignore pattern.
