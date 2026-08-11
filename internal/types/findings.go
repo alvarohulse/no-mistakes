@@ -40,16 +40,15 @@ const (
 
 // Finding represents a single review, build, test, lint, or PR comment finding.
 type Finding struct {
-	ID                       string `json:"id,omitempty"`
-	Severity                 string `json:"severity"`
-	File                     string `json:"file,omitempty"`
-	Line                     int    `json:"line,omitempty"`
-	Description              string `json:"description"`
-	Action                   string `json:"action"`
-	Source                   string `json:"source,omitempty"`
-	UserInstructions         string `json:"user_instructions,omitempty"`
-	ReviewScope              string `json:"review_scope,omitempty"`
-	RequiresExplicitApproval bool   `json:"requires_explicit_approval,omitempty"`
+	ID               string `json:"id,omitempty"`
+	Severity         string `json:"severity"`
+	File             string `json:"file,omitempty"`
+	Line             int    `json:"line,omitempty"`
+	Description      string `json:"description"`
+	Action           string `json:"action"`
+	Source           string `json:"source,omitempty"`
+	UserInstructions string `json:"user_instructions,omitempty"`
+	ReviewScope      string `json:"review_scope,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates. Empty everywhere else.
 	Category string `json:"category,omitempty"`
@@ -65,18 +64,17 @@ type TestArtifact struct {
 }
 
 type findingWire struct {
-	ID                       string `json:"id,omitempty"`
-	Severity                 string `json:"severity"`
-	File                     string `json:"file,omitempty"`
-	Line                     int    `json:"line,omitempty"`
-	Description              string `json:"description"`
-	Action                   string `json:"action"`
-	Source                   string `json:"source,omitempty"`
-	UserInstructions         string `json:"user_instructions,omitempty"`
-	ReviewScope              string `json:"review_scope,omitempty"`
-	Category                 string `json:"category,omitempty"`
-	RequiresExplicitApproval bool   `json:"requires_explicit_approval,omitempty"`
-	RequiresHumanReview      *bool  `json:"requires_human_review,omitempty"`
+	ID                  string `json:"id,omitempty"`
+	Severity            string `json:"severity"`
+	File                string `json:"file,omitempty"`
+	Line                int    `json:"line,omitempty"`
+	Description         string `json:"description"`
+	Action              string `json:"action"`
+	Source              string `json:"source,omitempty"`
+	UserInstructions    string `json:"user_instructions,omitempty"`
+	ReviewScope         string `json:"review_scope,omitempty"`
+	Category            string `json:"category,omitempty"`
+	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
@@ -259,18 +257,6 @@ func HasActionableFindings(findings Findings) bool {
 	return false
 }
 
-// HasExplicitApprovalFindings reports whether a safety finding must remain
-// parked until the user or driving agent responds to it directly. Unlike an
-// ordinary ask-user finding, --yes must not resolve one automatically.
-func HasExplicitApprovalFindings(findings Findings) bool {
-	for _, item := range findings.Items {
-		if item.RequiresExplicitApproval {
-			return true
-		}
-	}
-	return false
-}
-
 func summarizeSelectedFindings(count int) string {
 	switch count {
 	case 0:
@@ -351,7 +337,6 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.UserInstructions = wire.UserInstructions
 	f.ReviewScope = wire.ReviewScope
 	f.Category = wire.Category
-	f.RequiresExplicitApproval = wire.RequiresExplicitApproval
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -34,10 +35,6 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	previousTestFileChanges, err := testFileChangesFromPreviousRounds(sctx)
-	if err != nil {
-		return nil, fmt.Errorf("load prior agent test file changes: %w", err)
-	}
 
 	// In fix mode, ask agent to fix test failures first.
 	//
@@ -52,7 +49,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// runtime. Process-group reaping on clean exit (#357) remains the lifecycle
 	// safety net when agents do spawn test workers; it is not a reason to force
 	// a deterministic full-suite commands.test override.
-	var testFileChangesFromFix []testFileChange
+	var newTestsFromFix []string
 	var fixSummary string
 	if sctx.Fixing {
 		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
@@ -95,7 +92,7 @@ Previous test findings to address:
 			FallbackSummary: "fix test failures",
 			AfterAgentRun: func(*agent.Result) error {
 				var err error
-				testFileChangesFromFix, err = detectTestFileChanges(ctx, sctx.WorkDir)
+				newTestsFromFix, err = detectNewTestFiles(ctx, sctx.WorkDir)
 				return err
 			},
 		})
@@ -118,7 +115,6 @@ Previous test findings to address:
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
 
 		if exitCode != 0 {
-			testFileChanges := mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix)
 			findings := Findings{
 				Items: []Finding{{
 					Severity:    "error",
@@ -127,7 +123,6 @@ Previous test findings to address:
 				Summary: projectedOutput,
 				Tested:  tested,
 			}
-			findings.Items = append(findings.Items, testFileChangeFindings(testFileChanges)...)
 			findingsJSON, _ := json.Marshal(findings)
 			return &pipeline.StepOutcome{
 				NeedsApproval: true,
@@ -239,15 +234,11 @@ Rules:
 		needsApproval := hasBlockingFindings(findings.Items)
 		autoFixable := needsApproval
 
-		testFileChanges, err := detectTestFileChanges(ctx, sctx.WorkDir)
+		newTests, err := detectNewTestFiles(ctx, sctx.WorkDir)
 		if err != nil {
-			return nil, fmt.Errorf("detect agent test file changes: %w", err)
+			return nil, fmt.Errorf("detect new agent test files: %w", err)
 		}
-		testFileChanges = mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix, testFileChanges)
-		findings.Items = append(findings.Items, testFileChangeFindings(testFileChanges)...)
-		if len(testFileChanges) > 0 {
-			needsApproval = true
-		}
+		findings.Items = append(findings.Items, newTestFileFindings(mergeNewTestFiles(newTestsFromFix, newTests))...)
 
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
@@ -258,18 +249,16 @@ Rules:
 		}, nil
 	}
 
-	testFileChanges := mergeTestFileChanges(previousTestFileChanges, testFileChangesFromFix)
-	if sctx.Fixing && len(testFileChanges) > 0 {
+	if sctx.Fixing && len(newTestsFromFix) > 0 {
 		findings := Findings{
-			Summary: "tests passed, but agent changed test files",
+			Summary: "tests passed, but agent wrote new test files",
 			Tested:  tested,
 		}
-		findings.Items = testFileChangeFindings(testFileChanges)
+		findings.Items = newTestFileFindings(newTestsFromFix)
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
-			NeedsApproval: true,
-			Findings:      string(findingsJSON),
-			FixSummary:    fixSummary,
+			Findings:   string(findingsJSON),
+			FixSummary: fixSummary,
 		}, nil
 	}
 
@@ -278,76 +267,30 @@ Rules:
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
 }
 
-func testFileChangeFindings(changes []testFileChange) []Finding {
-	findings := make([]Finding, 0, len(changes))
-	for _, change := range changes {
-		description := fmt.Sprintf("new test file written by agent: %s", change.Path)
-		switch change.Kind {
-		case testFileModified:
-			description = fmt.Sprintf("existing test file modified by agent: %s", change.Path)
-		case testFileDeleted:
-			description = fmt.Sprintf("existing test file deleted by agent: %s", change.Path)
-		case testFileRenamed:
-			description = fmt.Sprintf("test file renamed by agent: %s -> %s", change.PreviousPath, change.Path)
-		}
+func newTestFileFindings(paths []string) []Finding {
+	findings := make([]Finding, 0, len(paths))
+	for _, path := range paths {
 		findings = append(findings, Finding{
-			Severity:                 "warning",
-			Action:                   types.ActionAskUser,
-			File:                     change.Path,
-			Description:              description,
-			RequiresExplicitApproval: true,
+			Severity:    "info",
+			Action:      types.ActionNoOp,
+			File:        path,
+			Description: fmt.Sprintf("new test file written by agent: %s", path),
 		})
 	}
 	return findings
 }
 
-func testFileChangesFromPreviousRounds(sctx *pipeline.StepContext) ([]testFileChange, error) {
-	if sctx.DB == nil || sctx.StepResultID == "" {
-		return nil, nil
-	}
-	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
-	if err != nil {
-		return nil, err
-	}
-
-	var changes []testFileChange
-	for _, round := range rounds {
-		if round.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
-		if err != nil {
-			return nil, fmt.Errorf("parse round %d findings: %w", round.Round, err)
-		}
-		for _, finding := range findings.Items {
-			if change, ok := testFileChangeFromFinding(finding); ok {
-				changes = append(changes, change)
-			}
+func mergeNewTestFiles(groups ...[]string) []string {
+	pathSet := make(map[string]struct{})
+	for _, group := range groups {
+		for _, path := range group {
+			pathSet[path] = struct{}{}
 		}
 	}
-	return mergeTestFileChanges(changes), nil
-}
-
-func testFileChangeFromFinding(finding Finding) (testFileChange, bool) {
-	if finding.Severity != "warning" || finding.Action != types.ActionAskUser || finding.File == "" {
-		return testFileChange{}, false
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
 	}
-	if finding.Description == fmt.Sprintf("new test file written by agent: %s", finding.File) {
-		return testFileChange{Path: finding.File, Kind: testFileCreated}, true
-	}
-	if finding.Description == fmt.Sprintf("existing test file modified by agent: %s", finding.File) {
-		return testFileChange{Path: finding.File, Kind: testFileModified}, true
-	}
-	if finding.Description == fmt.Sprintf("existing test file deleted by agent: %s", finding.File) {
-		return testFileChange{Path: finding.File, Kind: testFileDeleted}, true
-	}
-	const renamePrefix = "test file renamed by agent: "
-	renameSuffix := " -> " + finding.File
-	if strings.HasPrefix(finding.Description, renamePrefix) && strings.HasSuffix(finding.Description, renameSuffix) {
-		previousPath := strings.TrimSuffix(strings.TrimPrefix(finding.Description, renamePrefix), renameSuffix)
-		if previousPath != "" {
-			return testFileChange{Path: finding.File, PreviousPath: previousPath, Kind: testFileRenamed}, true
-		}
-	}
-	return testFileChange{}, false
+	sort.Strings(paths)
+	return paths
 }

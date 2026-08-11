@@ -490,9 +490,6 @@ func gateFields(gate stepView) []toon.Field {
 	if gate.Name == string(types.StepReview) {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
-	if gateRequiresExplicitApproval(gate) {
-		gfields = append(gfields, toon.Field{Key: "note", Value: "This Test gate requires explicit approval because the agent changed a test file; --yes does not auto-resolve it."})
-	}
 	rows := make([]findingRow, 0, len(parsed.Items))
 	for _, f := range parsed.Items {
 		rows = append(rows, findingRow{

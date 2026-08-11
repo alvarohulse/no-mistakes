@@ -46,12 +46,6 @@ var canonicalBranchSyncPhrases = []string{
 	"preserved in the local gate",
 }
 
-var canonicalTestFileApprovalPhrases = []string{
-	"changed a test file",
-	"requires explicit approval",
-	"does not auto-resolve it",
-}
-
 var canonicalPostWorktreeParkPhrases = []string{
 	"post-worktree hook",
 	"environment",
@@ -160,37 +154,6 @@ func TestPipelineAgentPrerequisiteGuidance_SyncedAcrossSurfaces(t *testing.T) {
 		normalized := strings.Join(strings.Fields(content), " ")
 		if !strings.Contains(normalized, canonicalPipelineAgentPrerequisite) {
 			t.Errorf("%s is missing the canonical pipeline-agent prerequisite %q", name, canonicalPipelineAgentPrerequisite)
-		}
-	}
-}
-
-func TestTestFileApprovalGuidance_SyncedAcrossSurfaces(t *testing.T) {
-	gate := stepView{
-		Name:   string(types.StepTest),
-		Status: string(types.StepStatusAwaitingApproval),
-		FindingsJSON: findingsJSON(t, []types.Finding{
-			{
-				ID:                       "test-1",
-				Severity:                 "warning",
-				File:                     "behavior_test.go",
-				Action:                   types.ActionAskUser,
-				Description:              "existing test file modified by agent: behavior_test.go",
-				RequiresExplicitApproval: true,
-			},
-		}, "tests passed, but agent changed test files"),
-	}
-	surfaces := map[string]string{
-		"skill body":       skill.Markdown(),
-		"agents guide":     readAgentsGuide(t),
-		"axi run help":     newAxiRunCmd().Long,
-		"axi respond help": newAxiRespondCmd().Long,
-		"gate output":      axiDoc(gateFields(gate)...),
-	}
-	for name, content := range surfaces {
-		for _, phrase := range canonicalTestFileApprovalPhrases {
-			if !strings.Contains(content, phrase) {
-				t.Errorf("%s is missing test-file approval guidance phrase %q", name, phrase)
-			}
 		}
 	}
 }

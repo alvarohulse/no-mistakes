@@ -205,7 +205,6 @@ Then commit follow-up work on top so every pipeline fix commit remains in the br
 
 The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
-A Test gate created because the pipeline agent changed a test file requires explicit approval; `--yes` does not auto-resolve it, so the run parks with the test-file finding visible until the driver responds directly.
 An environmental post-worktree-hook park also stops `--yes`, but it has no step to respond to: follow its help to correct the environment, abort the parked run, and start fresh.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 

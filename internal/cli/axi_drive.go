@@ -88,9 +88,7 @@ func newAxiRunCmd() *cobra.Command {
 			"--yes it blocks until the first approval gate, CI-ready point, or final outcome and\n" +
 			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
-			"accepting the result) until a decision point or outcome. A Test gate\n" +
-			"created because the agent changed a test file requires explicit approval;\n" +
-			"--yes does not auto-resolve it.\n\n" +
+			"accepting the result) until a decision point or outcome.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -545,7 +543,7 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNo
 // pass, streaming step transitions to progress (stderr). When
 // autoApprove is set it resolves each eligible gate and continues; otherwise
 // it returns at the first gate so the caller can surface it for a human/agent
-// decision. A gate with an explicit-approval finding always returns unchanged.
+// decision.
 //
 // Auto-resolution means "agree to fix every finding": a gate with actionable
 // findings is fixed (every finding selected), and the resulting fix_review is
@@ -588,7 +586,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove || gateRequiresExplicitApproval(gate) {
+			if !autoApprove {
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -616,14 +614,6 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, true, nil
 		}
 	}
-}
-
-func gateRequiresExplicitApproval(gate stepView) bool {
-	if gate.Name != string(types.StepTest) {
-		return false
-	}
-	parsed, err := types.ParseFindingsJSON(gate.FindingsJSON)
-	return err == nil && types.HasExplicitApprovalFindings(parsed)
 }
 
 // ciReadyToMerge reports whether the CI step is actively monitoring and its logs
@@ -841,9 +831,7 @@ func newAxiRespondCmd() *cobra.Command {
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
 			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
-			"With --yes, eligible subsequent gates are resolved automatically. A Test\n" +
-			"gate created because the agent changed a test file requires explicit approval;\n" +
-			"--yes does not auto-resolve it.\n\n" +
+			"With --yes, eligible subsequent gates are resolved automatically.\n\n" +
 			"This command does not clear a post-worktree environment park because that\n" +
 			"controller gate has no pipeline step; follow the gate's abort-and-rerun help.\n\n" +
 			preserveGateFixCommitsGuidance,

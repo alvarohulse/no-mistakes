@@ -1874,7 +1874,10 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-new-test-file", "test-agent-new-test-file.txt", "test agent new test file\n", "add test agent new test file")
 	h.PushToGate("test-agent-new-test-file")
-	run := waitForStepStatus(t, h, "test-agent-new-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	run := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("test-agent-new-test-file run status = %s, want completed", run.Status)
+	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-new-test-file run")
@@ -1890,11 +1893,11 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one new test file finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Severity != "warning" {
-		t.Fatalf("new test file finding severity = %q, want warning", item.Severity)
+	if item.Severity != "info" {
+		t.Fatalf("new test file finding severity = %q, want info", item.Severity)
 	}
-	if item.Action != types.ActionAskUser {
-		t.Fatalf("new test file finding action = %q, want ask-user", item.Action)
+	if item.Action != types.ActionNoOp {
+		t.Fatalf("new test file finding action = %q, want no-op", item.Action)
 	}
 	if item.File != "agent_test.py" {
 		t.Fatalf("new test file finding file = %q, want agent_test.py", item.File)
@@ -1902,18 +1905,16 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	if !strings.Contains(item.Description, "new test file written by agent: agent_test.py") {
 		t.Fatalf("new test file finding description = %q", item.Description)
 	}
-	h.Respond(run.ID, types.StepTest, types.ActionAbort)
-	completed := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
-	if completed.Status != types.RunFailed {
-		t.Fatalf("test-agent-new-test-file run status after abort = %s, want failed", completed.Status)
-	}
 }
 
 func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-staged-new-test-file", "test-agent-staged-new-test-file.txt", "test agent staged new test file\n", "add test agent staged new test file")
 	h.PushToGate("test-agent-staged-new-test-file")
-	run := waitForStepStatus(t, h, "test-agent-staged-new-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	run := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("test-agent-staged-new-test-file run status = %s, want completed", run.Status)
+	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-staged-new-test-file run")
@@ -1929,11 +1930,11 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 		t.Fatalf("expected one staged new test file finding, got %+v", findings.Items)
 	}
 	item := findings.Items[0]
-	if item.Severity != "warning" {
-		t.Fatalf("staged new test file finding severity = %q, want warning", item.Severity)
+	if item.Severity != "info" {
+		t.Fatalf("staged new test file finding severity = %q, want info", item.Severity)
 	}
-	if item.Action != types.ActionAskUser {
-		t.Fatalf("staged new test file finding action = %q, want ask-user", item.Action)
+	if item.Action != types.ActionNoOp {
+		t.Fatalf("staged new test file finding action = %q, want no-op", item.Action)
 	}
 	if item.File != "agent_staged_test.go" {
 		t.Fatalf("staged new test file finding file = %q, want agent_staged_test.go", item.File)
@@ -1941,18 +1942,16 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	if !strings.Contains(item.Description, "new test file written by agent: agent_staged_test.go") {
 		t.Fatalf("staged new test file finding description = %q", item.Description)
 	}
-	h.Respond(run.ID, types.StepTest, types.ActionAbort)
-	completed := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
-	if completed.Status != types.RunFailed {
-		t.Fatalf("test-agent-staged-new-test-file run status after abort = %s, want failed", completed.Status)
-	}
 }
 
 func assertTestAgentModifiedTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-modified-test-file", "existing_test.py", "def test_existing():\n    assert False\n", "add existing test")
 	h.PushToGate("test-agent-modified-test-file")
-	run := waitForStepStatus(t, h, "test-agent-modified-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	run := h.WaitForRun("test-agent-modified-test-file", 60*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("test-agent-modified-test-file run status = %s, want completed", run.Status)
+	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-modified-test-file run")
@@ -1964,23 +1963,8 @@ func assertTestAgentModifiedTestFileRun(t *testing.T, h *Harness) {
 	if err != nil {
 		t.Fatalf("parse modified test file findings: %v", err)
 	}
-	if len(findings.Items) != 1 {
-		t.Fatalf("expected one modified test file finding, got %+v", findings.Items)
-	}
-	item := findings.Items[0]
-	if item.Severity != "warning" || item.Action != types.ActionAskUser {
-		t.Fatalf("modified test file finding = severity %q action %q, want warning/ask-user", item.Severity, item.Action)
-	}
-	if item.File != "existing_test.py" {
-		t.Fatalf("modified test file finding path = %q, want existing_test.py", item.File)
-	}
-	if !strings.Contains(item.Description, "existing test file modified by agent: existing_test.py") {
-		t.Fatalf("modified test file finding description = %q", item.Description)
-	}
-	h.Respond(run.ID, types.StepTest, types.ActionAbort)
-	completed := h.WaitForRun("test-agent-modified-test-file", 60*time.Second)
-	if completed.Status != types.RunFailed {
-		t.Fatalf("test-agent-modified-test-file run status after abort = %s, want failed", completed.Status)
+	if len(findings.Items) != 0 {
+		t.Fatalf("expected no modified test file finding, got %+v", findings.Items)
 	}
 }
 
