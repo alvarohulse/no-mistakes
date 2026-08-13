@@ -44,6 +44,7 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 				runID = sctx.Run.ID
 			}
 			slog.Warn("panic during intent extraction", "run_id", runID, "panic", r)
+			recordIntentAbsence(sctx, "extraction_failed", "Intent extraction failed unexpectedly.")
 			outcome = &pipeline.StepOutcome{Skipped: true}
 			err = nil
 		}
@@ -56,6 +57,7 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 		if sctx.Log != nil {
 			sctx.Log("using intent supplied by the agent")
 		}
+		recordIntentEvidence(sctx, db.IntentEvidence{Text: *sctx.Run.Intent, Source: db.RunIntentSourceAgent, Provided: true})
 		return &pipeline.StepOutcome{}, nil
 	}
 
@@ -63,9 +65,11 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 		if sctx != nil && sctx.Log != nil {
 			sctx.Log("intent extraction disabled in config")
 		}
+		recordIntentAbsence(sctx, "inference_disabled", "Intent inference is disabled in configuration.")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	if sctx.DB == nil || sctx.Run == nil || sctx.Repo == nil {
+		recordIntentAbsence(sctx, "extraction_failed", "Intent inference could not start because run context was unavailable.")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
@@ -104,25 +108,30 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 		if errors.Is(runErr, intent.ErrNoMatch) {
 			outcomeLabel = "no_match"
 			sctx.Log("no matching agent transcript found")
+			recordIntentAbsence(sctx, "no_matching_transcript", "No matching agent transcript supplied an intent.")
 			return &pipeline.StepOutcome{Skipped: true}, nil
 		}
 		if errors.Is(runErr, errIntentEmptyDiff) {
 			outcomeLabel = "empty_diff"
 			sctx.Log("no diff between base and head, skipping intent extraction")
+			recordIntentAbsence(sctx, "empty_diff", "The branch diff was empty, so no intent could be inferred.")
 			return &pipeline.StepOutcome{Skipped: true}, nil
 		}
 		if errors.Is(runErr, intent.ErrDisambiguatorCleanup) {
 			outcomeLabel = "error"
 			sctx.Log(fmt.Sprintf("intent extraction failed: %v", runErr))
+			recordIntentAbsence(sctx, "extraction_failed", "Intent extraction failed.")
 			return nil, runErr
 		}
 		slog.Debug("intent: extract failed", "run_id", sctx.Run.ID, "error", runErr)
 		outcomeLabel = "error"
 		sctx.Log(fmt.Sprintf("intent extraction failed: %v", runErr))
+		recordIntentAbsence(sctx, "extraction_failed", "Intent extraction failed.")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	if result == nil {
 		sctx.Log("no intent attached")
+		recordIntentAbsence(sctx, "extraction_failed", "Intent extraction returned no result.")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
@@ -138,6 +147,7 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 	}); dbErr != nil {
 		slog.Warn("intent: persist failed", "run_id", sctx.Run.ID, "error", dbErr)
 		sctx.Log(fmt.Sprintf("intent matched but failed to persist: %v", dbErr))
+		recordIntentAbsence(sctx, "extraction_failed", "The inferred intent could not be persisted.")
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
@@ -153,9 +163,23 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 	sctx.Log(fmt.Sprintf("matched %s session (score %.2f)", result.AgentName, result.Score))
 	sctx.Log("inferred intent:")
 	sctx.Log(intent.RedactSecrets(intent.StripAdversarial(sanitizePromptMultilineText(result.Summary))))
+	recordIntentEvidence(sctx, db.IntentEvidence{Text: result.Summary, Source: result.AgentName, Provided: false})
 
 	slog.Info("intent: attached", "run_id", sctx.Run.ID, "agent", matchedAgent, "score", score)
 	return &pipeline.StepOutcome{}, nil
+}
+
+func recordIntentAbsence(sctx *pipeline.StepContext, code, message string) {
+	recordIntentEvidence(sctx, db.IntentEvidence{Reason: &db.IntentAbsenceReason{Code: code, Message: message}})
+}
+
+func recordIntentEvidence(sctx *pipeline.StepContext, intentEvidence db.IntentEvidence) {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return
+	}
+	if err := sctx.DB.SetStepEvidence(sctx.StepResultID, db.StepEvidence{Intent: &intentEvidence}); err != nil && sctx.LogFile != nil {
+		sctx.LogFile(fmt.Sprintf("warning: could not persist intent evidence: %v", err))
+	}
 }
 
 // errIntentEmptyDiff is returned by defaultRunIntent when the diff between

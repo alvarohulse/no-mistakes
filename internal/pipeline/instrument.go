@@ -136,6 +136,13 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 	}
 	inv.AgentObservationsReported = result.AgentObservationsReported
 	inv.AgentObservations = append([]types.AgentObservation(nil), result.AgentObservations...)
+	if result.AgentObservationsReported {
+		count := result.NestedAgentCount
+		if count == 0 && len(result.AgentObservations) > 0 {
+			count = len(result.AgentObservations)
+		}
+		inv.NestedAgentCount = &count
+	}
 	if result.ModelProvider != "" {
 		provider := result.ModelProvider
 		inv.ModelProvider = &provider
@@ -143,28 +150,38 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 	inv.InputTokens = result.Usage.InputTokens
 	inv.OutputTokens = result.Usage.OutputTokens
 	inv.CacheReadTokens = result.Usage.CacheReadTokens
-
+	usage := result.Usage
 	if result.UsageReported {
-		fresh := agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens)
-		inv.FreshInputTokens = &fresh
+		usage.Reported = true
 	}
+	inputReported := usage.InputIsReported()
+	outputReported := usage.OutputIsReported()
+	cacheReadReported := usage.CacheReadIsReported()
+	cacheCreationReported := result.CacheCreationReported || usage.CacheCreationReported
 
-	if result.CacheCreationReported {
+	if cacheCreationReported {
 		cacheCreation := result.Usage.CacheCreationTokens
 		inv.CacheCreationTokens = &cacheCreation
 	}
+	if inputReported {
+		input := usage.InputTokens
+		var cacheRead *int
+		if cacheReadReported {
+			cacheRead = &usage.CacheReadTokens
+		}
+		_, inv.FreshInputTokens = agent.CanonicalInputMeters(inv.Agent, &input, cacheRead, inv.CacheCreationTokens)
+	}
+	inv.ReportedCostUSD = result.ReportedCostUSD
 
 	// Per-round deltas: for a resumed session whose raw counters are cumulative,
 	// subtract the same session's prior cumulative so the row cannot be mistaken
 	// for per-round usage. Read the prior BEFORE this row is inserted.
-	if result.UsageReported {
-		priorInput, priorOutput, priorCache, _ := a.db.LatestSessionCumulative(a.runID, sessionKey)
-		deltaInput := agent.PerRoundTokens(result.Usage.InputTokens, priorInput, result.SessionUsageCumulative)
-		deltaOutput := agent.PerRoundTokens(result.Usage.OutputTokens, priorOutput, result.SessionUsageCumulative)
-		deltaCache := agent.PerRoundTokens(result.Usage.CacheReadTokens, priorCache, result.SessionUsageCumulative)
-		inv.DeltaInputTokens = &deltaInput
-		inv.DeltaOutputTokens = &deltaOutput
-		inv.DeltaCacheReadTokens = &deltaCache
+	if inputReported || outputReported || cacheReadReported || cacheCreationReported {
+		prior, hasPrior := a.db.LatestSessionCumulativeMeters(a.runID, sessionKey)
+		inv.DeltaInputTokens = perRoundTokenMeter(usage.InputTokens, inputReported, prior.Input, hasPrior, result.SessionUsageCumulative)
+		inv.DeltaOutputTokens = perRoundTokenMeter(usage.OutputTokens, outputReported, prior.Output, hasPrior, result.SessionUsageCumulative)
+		inv.DeltaCacheReadTokens = perRoundTokenMeter(usage.CacheReadTokens, cacheReadReported, prior.CacheRead, hasPrior, result.SessionUsageCumulative)
+		inv.DeltaCacheCreationTokens = perRoundTokenMeter(usage.CacheCreationTokens, cacheCreationReported, prior.CacheCreation, hasPrior, result.SessionUsageCumulative)
 	}
 
 	if result.Metrics != nil {
@@ -198,6 +215,18 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 	if count, ok := countOutputFindings(result.Output); ok {
 		inv.FindingCount = &count
 	}
+}
+
+func perRoundTokenMeter(current int, reported bool, prior *int, hasPrior, cumulative bool) *int {
+	if !reported || (cumulative && hasPrior && prior == nil) {
+		return nil
+	}
+	priorValue := 0
+	if prior != nil {
+		priorValue = *prior
+	}
+	delta := agent.PerRoundTokens(current, priorValue, cumulative)
+	return &delta
 }
 
 // countOutputFindings returns the number of findings in a structured output

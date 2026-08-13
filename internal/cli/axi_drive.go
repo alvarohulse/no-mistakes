@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	toon "github.com/toon-format/toon-go"
 
@@ -28,6 +29,8 @@ import (
 const triggerWaitTimeout = 5 * time.Second
 
 const maxPRNotePushOptionBytes = 16 * 1024
+
+const maxMetadataBytes = 16 * 1024
 
 const maxAggregatePushOptionBytes = 28 * 1024
 
@@ -78,6 +81,7 @@ func newAxiRunCmd() *cobra.Command {
 	var intent string
 	var prNote string
 	var prNoteFile string
+	var metadata string
 	var refreshStrategyValue string
 	var stackedOn string
 
@@ -120,6 +124,13 @@ func newAxiRunCmd() *cobra.Command {
 				return emitError(cmd, 2, "--stacked-on requires a branch")
 			}
 			selection := refreshSelection{Strategy: refreshStrategy, StackedOn: strings.TrimSpace(stackedOn)}
+			var metadataValue *string
+			if cmd.Flags().Changed("metadata") {
+				if err := validateMetadata(metadata); err != nil {
+					return emitError(cmd, 2, err.Error())
+				}
+				metadataValue = &metadata
+			}
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
 				"auto_yes":       autoYes,
 				"has_intent":     strings.TrimSpace(intent) != "",
@@ -137,7 +148,7 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
 						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided, selection, selectionProvided)
+				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided, metadataValue, selection, selectionProvided)
 			})
 		},
 	}
@@ -146,6 +157,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added to the PR Notes section (maximum 16 KiB; applies only to a new run)")
 	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note (maximum 16 KiB)")
+	cmd.Flags().StringVar(&metadata, "metadata", "", "opaque run metadata exposed to subprocesses and PR formatters (maximum 16 KiB; empty clears on rerun)")
 	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy for a new run: rebase or merge (default: trusted config, then rebase)")
 	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; used as the refresh and pull-request base")
 	return cmd
@@ -187,7 +199,20 @@ func prNoteTransportSizeError(size int64) error {
 	return fmt.Errorf("PR note is too large for the push-option transport (%d bytes; maximum %d); shorten --pr-note or trim --pr-note-file", size, maxPRNotePushOptionBytes)
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool, selection refreshSelection, selectionProvided bool) error {
+func validateMetadata(metadata string) error {
+	if !utf8.ValidString(metadata) {
+		return fmt.Errorf("--metadata must be valid UTF-8")
+	}
+	if strings.ContainsRune(metadata, '\x00') {
+		return fmt.Errorf("--metadata cannot contain NUL bytes")
+	}
+	if len(metadata) > maxMetadataBytes {
+		return fmt.Errorf("metadata is too large for the push-option transport (%d bytes; maximum %d); shorten --metadata", len(metadata), maxMetadataBytes)
+	}
+	return nil
+}
+
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool, metadata *string, selection refreshSelection, selectionProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiRunEnv()
 	if err != nil {
@@ -236,6 +261,10 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 2, "a run is already active for this branch; refresh options apply only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the refresh options")
 	}
+	if runID != "" && metadata != nil {
+		return emitError(cmd, 2, "a run is already active for this branch; --metadata applies only when starting a new run",
+			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with metadata")
+	}
 	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
@@ -261,7 +290,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 				`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note, selection)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note, metadata, selection)
 		if err != nil {
 			if ownershipErr, ok := err.(*branchOwnershipError); ok {
 				return emitBranchOwnershipError(cmd, ownershipErr)
@@ -401,7 +430,7 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string, selection refreshSelection) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string, metadata *string, selection refreshSelection) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
 	pushOptions = append(pushOptions, formatRefreshSelectionPushOptions(selection.Strategy, selection.StackedOn)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
@@ -410,8 +439,11 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	if opt := formatPRNotePushOption(prNote); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
-	if strings.TrimSpace(prNote) != "" && !pushOptionsWithinTransport(pushOptions) {
-		return "", fmt.Errorf("combined --intent and --pr-note are too large for the git push-option transport (maximum %d bytes encoded); shorten the PR note or the intent", maxAggregatePushOptionBytes)
+	if metadata != nil {
+		pushOptions = append(pushOptions, formatMetadataPushOption(metadata))
+	}
+	if (strings.TrimSpace(prNote) != "" || metadata != nil) && !pushOptionsWithinTransport(pushOptions) {
+		return "", fmt.Errorf("combined --intent, --pr-note, and --metadata are too large for the git push-option transport (maximum %d bytes encoded); shorten the supplied values", maxAggregatePushOptionBytes)
 	}
 	priorRunIDs, err := runIDsForHead(env.client, env.repo.ID, branch, headSHA)
 	if err != nil {
@@ -442,7 +474,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote, selection), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote, metadata, selection), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -526,7 +558,7 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string, selection refreshSelection) *ipc.RerunParams {
+func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, selection refreshSelection) *ipc.RerunParams {
 	return &ipc.RerunParams{
 		RepoID:          repoID,
 		Branch:          branch,
@@ -535,6 +567,7 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNo
 		StackedOn:       selection.StackedOn,
 		Intent:          intent,
 		PRNote:          prNote,
+		Metadata:        metadata,
 	}
 }
 

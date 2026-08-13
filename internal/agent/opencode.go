@@ -42,7 +42,7 @@ func (a *opencodeAgent) recoverTransientRetry(label string) {
 
 func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	// Start server on first invocation (synchronized)
-	baseURL, err := a.ensureServer(ctx, opts.CWD)
+	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +177,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 			CacheCreationReported:     state.usage.CacheCreationReported,
 			AgentObservations:         state.observations.observations,
 			AgentObservationsReported: true,
+			NestedAgentCount:          state.observations.uniqueCount(),
 		}, nil
 	}
 
@@ -204,6 +205,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	if result != nil {
 		result.AgentObservations = state.observations.observations
 		result.AgentObservationsReported = true
+		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
 }

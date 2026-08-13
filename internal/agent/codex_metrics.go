@@ -87,6 +87,13 @@ func (m *codexMetricsAccumulator) agentObservations() []types.AgentObservation {
 	return m.observations.observations
 }
 
+func (m *codexMetricsAccumulator) nestedAgentCount() int {
+	if m == nil {
+		return 0
+	}
+	return m.observations.uniqueCount()
+}
+
 func (m *codexMetricsAccumulator) metrics() InvocationMetrics {
 	return InvocationMetrics{
 		ModelRoundtrips:  m.modelRoundtrips,

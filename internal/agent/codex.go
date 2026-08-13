@@ -95,7 +95,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = strings.NewReader(opts.Prompt)
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env...)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
@@ -119,12 +119,30 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	var codexErr string
 	var threadID string
 	metrics := newCodexMetricsAccumulator()
+	finalize := func() (*Result, error) {
+		res, err := finalizeTextResult("codex", lastMessage, validationSchema, usage)
+		if res != nil {
+			res.SessionID = threadID
+			res.Resumed = resumeID != ""
+			// Codex reports usage cumulatively across a resumed thread, so the
+			// pipeline must persist per-round deltas instead of these raw counters.
+			res.SessionUsageCumulative = true
+			m := metrics.metrics()
+			res.Metrics = &m
+			res.AgentObservations = metrics.agentObservations()
+			res.AgentObservationsReported = true
+			res.NestedAgentCount = metrics.nestedAgentCount()
+			res.Model, res.ModelProvider = resolveCodexModel(threadID, time.Now())
+		}
+		return res, err
+	}
 	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
 	waitErr := started.wait()
@@ -139,23 +157,11 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		retErr := fmt.Errorf("codex exited: %w: %s", waitErr, detail)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
-	res, err := finalizeTextResult("codex", lastMessage, validationSchema, usage)
-	if res != nil {
-		res.SessionID = threadID
-		res.Resumed = resumeID != ""
-		// codex reports usage cumulatively across a resumed thread and does not
-		// surface cache-creation cost, so mark both so the pipeline records
-		// correct per-round deltas and an honest unknown for cache creation.
-		res.SessionUsageCumulative = true
-		m := metrics.metrics()
-		res.Metrics = &m
-		res.AgentObservations = metrics.agentObservations()
-		res.AgentObservationsReported = true
-		res.Model, res.ModelProvider = resolveCodexModel(threadID, time.Now())
-	}
+	res, err := finalize()
 	emitAgentExited(opts, "codex", pid, err)
 	return res, err
 }
@@ -322,10 +328,11 @@ type codexItem struct {
 }
 
 type codexUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	CachedInputTokens   int `json:"cached_input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	ReasoningOutputToks int `json:"reasoning_output_tokens"`
+	InputTokens         *int `json:"input_tokens"`
+	CachedInputTokens   *int `json:"cached_input_tokens"`
+	CacheWriteTokens    *int `json:"cache_write_input_tokens"`
+	OutputTokens        *int `json:"output_tokens"`
+	ReasoningOutputToks *int `json:"reasoning_output_tokens"`
 }
 
 // parseCodexEvents reads JSONL from the reader and dispatches events.
@@ -381,13 +388,13 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		case "turn.completed":
 			if event.Usage != nil {
-				usage.Add(TokenUsage{
-					InputTokens:     event.Usage.InputTokens,
-					OutputTokens:    event.Usage.OutputTokens,
-					CacheReadTokens: event.Usage.CachedInputTokens,
-					ReasoningTokens: event.Usage.ReasoningOutputToks,
-					Reported:        true,
-				})
+				usage.Add(tokenUsageFromFields(
+					event.Usage.InputTokens,
+					event.Usage.OutputTokens,
+					event.Usage.CachedInputTokens,
+					event.Usage.CacheWriteTokens,
+					event.Usage.ReasoningOutputToks,
+				))
 			}
 		}
 	}

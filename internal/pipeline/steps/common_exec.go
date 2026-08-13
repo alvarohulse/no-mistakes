@@ -247,7 +247,15 @@ func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int
 	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
 		processTerminationGrace = sctx.Config.ProcessTerminationGrace
 	}
-	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr, processTerminationGrace)
+	output, exitCode, err := runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr, processTerminationGrace)
+	var recordedExitCode *int
+	if err == nil {
+		recordedExitCode = &exitCode
+	}
+	if recordErr := sctx.RecordCommand(cmdStr, recordedExitCode, err); recordErr != nil {
+		return "", -1, fmt.Errorf("record command evidence: %w", recordErr)
+	}
+	return output, exitCode, err
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string, processTerminationGrace time.Duration) (string, int, error) {

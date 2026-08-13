@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -67,6 +68,9 @@ func BuildContract(in ContractInput) *prbody.Contract {
 		contract.RunID = in.Run.ID
 		contract.HeadSHA = in.Run.HeadSHA
 		contract.RefreshStrategy = string(in.Run.RefreshStrategy.OrDefault())
+		if in.Run.Metadata != nil {
+			contract.Metadata = *in.Run.Metadata
+		}
 	}
 	if in.Repo != nil {
 		contract.Repo = prbody.Repo{
@@ -264,15 +268,26 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 
 	byStep := make(map[string][]prbody.AgentRun, len(invocations))
 	for _, invocation := range invocations {
+		totalInput, uncachedInput := agent.CanonicalInputMeters(invocation.Agent, invocation.DeltaInputTokens, invocation.DeltaCacheReadTokens, invocation.DeltaCacheCreationTokens)
 		agentRun := prbody.AgentRun{
-			Round:          invocation.Round,
-			Purpose:        invocation.Purpose,
-			Agent:          invocation.Agent,
-			Model:          invocation.Model,
-			InvocationMode: string(invocation.InvocationMode),
-			NestedReported: invocation.AgentObservationsReported,
+			Round:               invocation.Round,
+			Purpose:             invocation.Purpose,
+			Agent:               invocation.Agent,
+			Model:               invocation.Model,
+			InvocationMode:      string(invocation.InvocationMode),
+			NestedReported:      invocation.AgentObservationsReported,
+			NestedCount:         invocation.NestedAgentCount,
+			StartedAt:           invocation.StartedAt,
+			DurationMS:          invocation.DurationMS,
+			InputTokens:         totalInput,
+			OutputTokens:        invocation.DeltaOutputTokens,
+			UncachedInputTokens: uncachedInput,
+			CacheReadTokens:     invocation.DeltaCacheReadTokens,
+			CacheWriteTokens:    invocation.DeltaCacheCreationTokens,
+			ReportedCostUSD:     invocation.ReportedCostUSD,
 		}
 		if invocation.ModelProvider != nil {
+			agentRun.Provider = *invocation.ModelProvider
 			agentRun.Vendor = *invocation.ModelProvider
 		}
 		for _, observation := range invocation.AgentObservations {
@@ -312,8 +327,31 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			Findings:   contractStepFindings(sr, rounds[sr.ID]),
 			Agents:     byStep[string(sr.StepName)],
 		}
+		storedEvidence, err := sr.Evidence()
+		if err == nil {
+			for _, command := range storedEvidence.Commands {
+				if strings.TrimSpace(command.Command) != "" {
+					step.Commands = append(step.Commands, prbody.PipelineCommand{
+						Round: command.Round, Sequence: command.Sequence, Command: command.Command,
+						Outcome: command.Outcome, ExitCode: command.ExitCode,
+					})
+				}
+			}
+			step.Evidence = append(step.Evidence, storedEvidence.Evidence...)
+			step.Explanation = storedEvidence.Explanation
+		}
+		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil && sr.StepName == types.StepTest {
+			step.Evidence = append(step.Evidence, findings.Tested...)
+		}
 		if sr.StepName == types.StepIntent {
-			step.Intent = contractIntentResult(sr, intentText, intentSource, intentProvided)
+			if storedEvidence.Intent != nil {
+				step.Intent = contractStoredIntent(storedEvidence.Intent)
+			} else {
+				step.Intent = contractIntentResult(sr, intentText, intentSource, intentProvided)
+			}
+		}
+		if step.Explanation == "" && len(step.Commands) == 0 && len(step.Evidence) == 0 && (sr.Status == types.StepStatusCompleted || sr.Status == types.StepStatusSkipped) {
+			step.Explanation = contractStepExplanation(sr, len(step.Agents) > 0)
 		}
 		if step.Rounds == 0 {
 			// A step that ran without recording rounds still ran once.
@@ -325,6 +363,28 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 		return nil
 	}
 	return section
+}
+
+func contractStoredIntent(stored *db.IntentEvidence) *prbody.IntentResult {
+	result := &prbody.IntentResult{
+		Text:     cleanedUserIntent(&pipeline.StepContext{UserIntent: stored.Text}),
+		Source:   stored.Source,
+		Provided: stored.Provided,
+	}
+	if stored.Reason != nil {
+		result.Reason = &prbody.IntentReason{Code: stored.Reason.Code, Message: stored.Reason.Message}
+	}
+	return result
+}
+
+func contractStepExplanation(step *db.StepResult, agentRan bool) string {
+	if step.Status == types.StepStatusSkipped {
+		return "Step was skipped by pipeline configuration or an earlier terminal decision."
+	}
+	if agentRan {
+		return "Step completed through the recorded agent invocation."
+	}
+	return "Step completed successfully; no shell command or additional evidence was recorded."
 }
 
 func contractIntentResult(step *db.StepResult, text, source string, provided bool) *prbody.IntentResult {

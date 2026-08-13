@@ -217,7 +217,9 @@ Final diff paths and statuses:
 				content.WhatChanged = stripLeadingSectionHeading(legacyBody, "What Changed")
 				content.WhatChanged = stripLeadingSectionHeading(content.WhatChanged, "Summary")
 			}
-			if content.Title != "" && content.WhatChanged != "" {
+			structuredContent := content.Summary != "" && content.WhatChanged != ""
+			legacyContent := content.Summary == "" && content.WhatChanged != "" && strings.TrimSpace(content.Body) != ""
+			if content.Title != "" && (structuredContent || legacyContent) {
 				originalTitle := content.Title
 				content.Title = conventional.TightenTitle(content.Title)
 				if content.Title != originalTitle {
@@ -247,10 +249,15 @@ func stripLeadingSectionHeading(text, heading string) string {
 		return ""
 	}
 	first := strings.TrimSpace(lines[0])
-	if !strings.HasPrefix(first, "##") {
+	hashes := 0
+	for hashes < len(first) && hashes < 7 && first[hashes] == '#' {
+		hashes++
+	}
+	if hashes == 0 || hashes > 6 || hashes == len(first) || (first[hashes] != ' ' && first[hashes] != '\t') {
 		return strings.TrimSpace(text)
 	}
-	name := strings.TrimSpace(strings.TrimPrefix(first, "##"))
+	name := strings.TrimSpace(first[hashes:])
+	name = strings.TrimSpace(strings.TrimRight(name, "#"))
 	name = strings.TrimRight(name, ":.!? ")
 	if !strings.EqualFold(name, heading) {
 		return strings.TrimSpace(text)

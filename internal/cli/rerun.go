@@ -14,6 +14,7 @@ import (
 func newRerunCmd() *cobra.Command {
 	var refreshStrategyValue string
 	var stackedOn string
+	var metadata string
 	cmd := &cobra.Command{
 		Use:   "rerun",
 		Short: "Rerun the pipeline for the current branch",
@@ -57,6 +58,13 @@ func newRerunCmd() *cobra.Command {
 						return fmt.Errorf("invalid --stacked-on branch: %w", err)
 					}
 				}
+				var metadataValue *string
+				if cmd.Flags().Changed("metadata") {
+					if err := validateMetadata(metadata); err != nil {
+						return err
+					}
+					metadataValue = &metadata
+				}
 
 				if err := daemon.EnsureDaemon(p); err != nil {
 					return fmt.Errorf("start daemon: %w", err)
@@ -74,6 +82,7 @@ func newRerunCmd() *cobra.Command {
 					Branch:          branch,
 					RefreshStrategy: strategy,
 					StackedOn:       stackedOn,
+					Metadata:        metadataValue,
 				}, &result); err != nil {
 					return fmt.Errorf("rerun pipeline: %w", err)
 				}
@@ -85,5 +94,6 @@ func newRerunCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy: rebase or merge (inherited from the prior run when omitted)")
 	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; inherited from the prior run when omitted")
+	cmd.Flags().StringVar(&metadata, "metadata", "", "replace inherited opaque run metadata; pass an empty value to clear it")
 	return cmd
 }

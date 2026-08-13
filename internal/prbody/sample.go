@@ -12,6 +12,11 @@ func Sample() *Contract {
 	exit := 0
 	failExit := 1
 	ms := func(v int64) *int64 { return &v }
+	integer := func(v int) *int { return &v }
+	usd := func(v float64) *float64 { return &v }
+	command := func(round, sequence int, text, outcome string, exitCode *int) PipelineCommand {
+		return PipelineCommand{Round: round, Sequence: sequence, Command: text, Outcome: outcome, ExitCode: exitCode}
+	}
 
 	return &Contract{
 		Version: Version,
@@ -48,7 +53,7 @@ func Sample() *Contract {
 			},
 			Risk: RiskSection{
 				Level:     "medium",
-				Rationale: "Changes a retry path every queued job traverses. The new failure mode is reachable in production, but it is a bounded fail-fast that replaces an unbounded hang, and the exhaustion path is covered by tests.",
+				Rationale: "Changes the `retryBudget` path every queued job traverses. The new failure mode is reachable in production, but it is a **bounded fail-fast** that replaces an unbounded hang, and the exhaustion path is covered by tests.",
 				Scope:     "source-or-external",
 				Reported:  true,
 			},
@@ -74,7 +79,11 @@ func Sample() *Contract {
 						},
 						Agents: []AgentRun{{
 							Round: 1, Purpose: "intent", Agent: "claude", Model: "claude-opus-5",
-							Vendor: "anthropic", InvocationMode: "harness_cli", NestedReported: true,
+							Provider: "anthropic", Vendor: "anthropic", InvocationMode: "harness_cli",
+							StartedAt: 1786500000, DurationMS: 2140,
+							InputTokens: integer(1400), OutputTokens: integer(180), UncachedInputTokens: integer(700),
+							CacheReadTokens: integer(500), CacheWriteTokens: integer(200), ReportedCostUSD: usd(0.08),
+							NestedReported: true, NestedCount: integer(0),
 						}},
 					},
 					{
@@ -82,26 +91,38 @@ func Sample() *Contract {
 						// same step renders as "Merge" under merge.
 						Name: "refresh", Label: "Rebase", Order: 2, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(1180), Rounds: 1,
+						Commands: []PipelineCommand{command(1, 1, "git rebase origin/main", "passed", &exit)},
 					},
 					{
 						Name: "review", Label: "Review", Order: 3, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(311420), Rounds: 2,
 						Findings: StepFindings{Total: 3, BySeverity: map[string]int{"P1": 1, "P2": 2}},
+						Evidence: []string{"Reviewed the complete branch diff against the explicit intent."},
 						Agents: []AgentRun{
 							{
 								Round: 1, Purpose: "review", Agent: "claude", Model: "claude-opus-5",
-								Vendor: "anthropic", InvocationMode: "harness_cli", NestedReported: true,
-								Nested: []NestedAgent{{Identity: "Explore", InvocationMode: "subagent_tool"}},
+								Provider: "anthropic", Vendor: "anthropic", InvocationMode: "harness_cli",
+								StartedAt: 1786500300, DurationMS: 241000,
+								InputTokens: integer(900000), OutputTokens: integer(18000), UncachedInputTokens: integer(120000),
+								CacheReadTokens: integer(730000), CacheWriteTokens: integer(50000), ReportedCostUSD: usd(4.65),
+								NestedReported: true, NestedCount: integer(2),
+								Nested: []NestedAgent{
+									{Identity: "Explore:session-1", InvocationMode: "subagent_tool"},
+									{Identity: "Explore:session-2", InvocationMode: "subagent_tool"},
+								},
 							},
 							{
-								Round: 2, Purpose: "review-fix", Agent: "claude", Model: "claude-opus-5",
-								Vendor: "anthropic", InvocationMode: "harness_cli", NestedReported: true,
+								Round: 2, Purpose: "review-fix", Agent: "cursor", Model: "claude-4.5-sonnet",
+								InvocationMode: "harness_cli", StartedAt: 1786500541, DurationMS: 70420,
+								OutputTokens: integer(6400), UncachedInputTokens: integer(9000),
+								CacheReadTokens: integer(32000), CacheWriteTokens: integer(11000), NestedReported: false,
 							},
 						},
 					},
 					{
 						Name: "build", Label: "Build", Order: 4, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(48310), Rounds: 1,
+						Commands: []PipelineCommand{command(1, 1, "go build ./cmd/...", "passed", &exit)},
 					},
 					{
 						// A step that failed, auto-fixed, and passed on the
@@ -110,22 +131,33 @@ func Sample() *Contract {
 						Name: "test", Label: "Test", Order: 5, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(602750), Rounds: 2,
 						Findings: StepFindings{Total: 1, BySeverity: map[string]int{"P0": 1}},
+						Commands: []PipelineCommand{
+							command(1, 1, "go test ./internal/scheduler/...", "failed", &failExit),
+							command(2, 1, "go test ./internal/scheduler/...", "passed", &exit),
+						},
+						Evidence: []string{"Scheduler regression suite passed after repairing the exhausted-budget assertion."},
 						Agents: []AgentRun{{
 							Round: 2, Purpose: "test-evidence", Agent: "codex", Model: "gpt-5.6-sol",
-							Vendor: "openai", InvocationMode: "harness_cli", NestedReported: false,
+							Provider: "openai", Vendor: "openai", InvocationMode: "harness_cli",
+							StartedAt: 1786500620, DurationMS: 178300,
+							InputTokens: integer(93000), OutputTokens: integer(12400), UncachedInputTokens: integer(13000),
+							CacheReadTokens: integer(72000), CacheWriteTokens: integer(8000), NestedReported: false,
 						}},
 					},
 					{
-						Name: "document", Label: "Document", Order: 6, Status: "completed",
-						ExitCode: &exit, DurationMS: ms(94120), Rounds: 1,
+						Name: "document", Label: "Document", Order: 6, Status: "skipped",
+						DurationMS: ms(12), Rounds: 1,
+						Explanation: "No documentation-owned behavior changed.",
 					},
 					{
 						Name: "lint", Label: "Lint", Order: 7, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(21870), Rounds: 1,
+						Commands: []PipelineCommand{command(1, 1, "golangci-lint run ./...", "passed", &exit)},
 					},
 					{
 						Name: "push", Label: "Push", Order: 8, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(3410), Rounds: 1,
+						Commands: []PipelineCommand{command(1, 1, "git push origin you/eng-4471-bound-the-retry-window", "passed", &exit)},
 					},
 					{
 						Name: "pr", Label: "PR", Order: 9, Status: "running",

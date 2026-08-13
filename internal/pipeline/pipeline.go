@@ -3,12 +3,20 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const maxCommandEvidenceBytes = 8 * 1024
+
+const commandEvidenceTruncationMarker = "… [command truncated]"
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
@@ -50,7 +58,12 @@ type StepContext struct {
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
-	Env          []string // extra environment variables for subprocesses (used in tests)
+	Round        int
+	// PlannedCommand is retained across repair rounds so an unconfigured
+	// command gate reruns the exact command selected before the failure.
+	PlannedCommand  string
+	commandSequence int
+	Env             []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an
@@ -69,9 +82,34 @@ type StepContext struct {
 	// Sessions manages the run's durable review-loop agent sessions
 	// (reviewer and fixer roles). nil runs every invocation cold.
 	Sessions *RunSessions
-	// Shared carries in-memory run-scoped results one step hands to a later
-	// step in the same run (e.g. the combined document+lint pass).
-	Shared *RunShared
+}
+
+func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) error {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return nil
+	}
+	outcome := db.CommandOutcomePassed
+	if runErr != nil {
+		outcome = db.CommandOutcomeError
+	} else if exitCode != nil && *exitCode != 0 {
+		outcome = db.CommandOutcomeFailed
+	}
+	sctx.commandSequence++
+	display := boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(command))))
+	return sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
+		Round: sctx.Round, Sequence: sctx.commandSequence, Command: display, Outcome: outcome, ExitCode: exitCode,
+	})
+}
+
+func boundedCommandDisplay(command string) string {
+	if len(command) <= maxCommandEvidenceBytes {
+		return command
+	}
+	end := maxCommandEvidenceBytes - len(commandEvidenceTruncationMarker)
+	for end > 0 && !utf8.ValidString(command[:end]) {
+		end--
+	}
+	return command[:end] + commandEvidenceTruncationMarker
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,

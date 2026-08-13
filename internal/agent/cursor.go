@@ -107,7 +107,7 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(workspace, repo, resumeID)...)
 	cmd.Dir = workspace
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = gitSafeEnv(workspace)
+	cmd.Env = gitSafeEnv(workspace, opts.Env...)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	started, err := startNativeAgentCommand(cmd, a.processTerminationGrace)
@@ -128,6 +128,24 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	metrics := newCursorMetricsAccumulator()
 	parsed, parseErr := parseCursorEvents(ctx, started.stdout, opts.OnChunk, metrics.onEvent)
+	finalize := func() (*Result, error) {
+		if parsed == nil {
+			return nil, nil
+		}
+		res, err := finalizeTextResult("cursor", parsed.Text, opts.JSONSchema, parsed.Usage)
+		if res != nil {
+			res.SessionID = parsed.SessionID
+			res.Resumed = resumeID != ""
+			res.Model = a.model
+			if res.Model == "" {
+				res.Model = sanitizeModelToken(parsed.Model)
+			}
+			res.CacheCreationReported = parsed.Usage.CacheCreationReported
+			m := metrics.metrics()
+			res.Metrics = &m
+		}
+		return res, err
+	}
 	if parseErr != nil {
 		parseErr = started.waitAfterParseError(parseErr)
 		stderrWG.Wait()
@@ -138,32 +156,38 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 		// wrapping it reports a stream-format failure for an ordinary abort.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			emitAgentExited(opts, "cursor", pid, ctxErr)
-			return nil, ctxErr
+			res, _ := finalize()
+			return res, ctxErr
 		}
 		retErr := fmt.Errorf("cursor parse events: %w", parseErr)
 		emitAgentExited(opts, "cursor", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		emitAgentExited(opts, "cursor", pid, ctxErr)
-		return nil, ctxErr
+		res, _ := finalize()
+		return res, ctxErr
 	}
 	if waitErr != nil && (parsed == nil || !parsed.Terminal) && cursorCancellationExit(waitErr) {
 		emitAgentExited(opts, "cursor", pid, context.Canceled)
-		return nil, context.Canceled
+		res, _ := finalize()
+		return res, context.Canceled
 	}
 	if waitErr != nil {
 		retErr := fmt.Errorf("cursor exited: %w: %s", waitErr, cursorProcessErrorOutput(stderrBuf, parsed))
 		emitAgentExited(opts, "cursor", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 	if parsed == nil || !parsed.Terminal {
 		retErr := fmt.Errorf("cursor returned no result event")
 		emitAgentExited(opts, "cursor", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 	if parsed.IsError || parsed.Subtype != "success" {
 		detail := cursorProcessErrorOutput(nil, parsed)
@@ -174,21 +198,11 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 			retErr = fmt.Errorf("cursor error: subtype=%s", parsed.Subtype)
 		}
 		emitAgentExited(opts, "cursor", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
-	res, err := finalizeTextResult("cursor", parsed.Text, opts.JSONSchema, parsed.Usage)
-	if res != nil {
-		res.SessionID = parsed.SessionID
-		res.Resumed = resumeID != ""
-		res.Model = a.model
-		if res.Model == "" {
-			res.Model = sanitizeModelToken(parsed.Model)
-		}
-		res.CacheCreationReported = parsed.Usage.CacheCreationReported
-		m := metrics.metrics()
-		res.Metrics = &m
-	}
+	res, err := finalize()
 	emitAgentExited(opts, "cursor", pid, err)
 	return res, err
 }

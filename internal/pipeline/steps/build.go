@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -68,7 +67,10 @@ func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {
 	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
 	configuredCommand := sctx.Config.Commands.Build
 	if configuredCommand == "" {
-		configuredCommand = "not configured; inspect the repository for its build or compile command"
+		configuredCommand = sctx.PlannedCommand
+		if configuredCommand == "" {
+			configuredCommand = "not configured; the pipeline will reuse its read-only planned command after repair"
+		}
 	}
 	prompt := fmt.Sprintf(`Fix the unresolved build or compile failure in this repository.
 
@@ -107,61 +109,33 @@ Rules:
 }
 
 func (s *BuildStep) executeAgentBuild(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
-	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
-	sctx.Log("no build command configured, asking agent to compile the change...")
-	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
-		Prompt: fmt.Sprintf(`Verify that this repository builds or compiles successfully.
-
-Context:
-- branch: %s
-- base commit: %s
-- target commit: %s
-
-Task:
-- Examine the repository, detect and run the appropriate build or compile command.
-- Exercise the smallest build surface that establishes the changed production code compiles.
-- Report only unresolved build or compile failures. Do not report successful builds or other non-actionable information.
-
-Rules:
+	if sctx.PlannedCommand == "" {
+		sctx.Log("no build command configured, asking agent to plan one...")
+		command, err := planPipelineCommand(sctx, s.Name(), `Examine the repository and return the exact build or compile command that exercises the smallest surface establishing the changed production code compiles.
 - Do NOT run tests.
-- Do NOT run linters, formatters, or static analysis tools unless they are an inseparable part of the repository's canonical build command.
-- Do NOT update documentation.
-- Do NOT modify source files during this verification pass.
-- Before finishing, remove transient build outputs or caches created in the working tree so they are not committed and pushed.
-- If no meaningful build or compile command exists, return an ask-user finding that explains what you inspected and why the Build gate cannot be established.
-- Return structured findings with severity, description, and action, plus a non-empty "tested" array containing every build or compile command you ran.
-- Set action to "auto-fix" for objective build failures that can be safely fixed, "ask-user" when the build cannot be established, and "no-op" only for informational context attached to an actionable result.%s`,
-			sctx.Run.Branch,
-			baseSHA,
-			sctx.Run.HeadSHA,
-			historySection,
-		),
-		CWD:        sctx.WorkDir,
-		JSONSchema: buildFindingsSchema,
-		OnChunk:    sctx.LogChunk,
-	})
+- Do NOT run linters, formatters, or static analysis unless inseparable from the canonical build.
+- Do NOT update documentation.`)
+		if err != nil {
+			return buildNotEstablishedOutcome(err.Error()), nil
+		}
+		sctx.PlannedCommand = command
+	}
+	if sctx.PlannedCommand == "" {
+		return buildNotEstablishedOutcome("build planner found no meaningful build or compile command"), nil
+	}
+	sctx.Log(fmt.Sprintf("running planned build: %s", sctx.PlannedCommand))
+	output, exitCode, err := runStepShellCommand(sctx, sctx.PlannedCommand)
 	if err != nil {
-		return nil, fmt.Errorf("agent run build: %w", err)
+		return nil, fmt.Errorf("run planned build command: %w", err)
 	}
-
-	var findings Findings
-	if result.Output == nil {
-		return buildNotEstablishedOutcome("build agent returned no structured result"), nil
-	}
-	if err := json.Unmarshal(result.Output, &findings); err != nil {
-		return buildNotEstablishedOutcome("build agent returned an invalid structured result"), nil
-	}
-	if len(findings.Tested) == 0 {
-		return buildNotEstablishedOutcome("build agent did not report any build or compile command"), nil
+	projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepBuild)
+	findings := Findings{Tested: []string{sctx.PlannedCommand}}
+	if exitCode != 0 {
+		findings.Items = []Finding{{Severity: "error", Description: fmt.Sprintf("build failed with exit code %d", exitCode), Action: types.ActionAutoFix}}
+		findings.Summary = projectedOutput
 	}
 	findingsJSON, _ := json.Marshal(findings)
-	needsApproval := hasBlockingFindings(findings.Items)
-	return &pipeline.StepOutcome{
-		NeedsApproval: needsApproval,
-		AutoFixable:   needsApproval,
-		Findings:      string(findingsJSON),
-	}, nil
+	return &pipeline.StepOutcome{NeedsApproval: exitCode != 0, AutoFixable: exitCode != 0, Findings: string(findingsJSON), ExitCode: exitCode}, nil
 }
 
 func buildNotEstablishedOutcome(description string) *pipeline.StepOutcome {

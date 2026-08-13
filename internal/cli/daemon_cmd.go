@@ -115,6 +115,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			metadata, err := parseMetadataPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			gatePath, err := normalizeNotifyGatePath(gate)
 			if err != nil {
 				return err
@@ -142,6 +146,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				StackedOn:       stackedOn,
 				Intent:          intent,
 				PRNote:          prNote,
+				Metadata:        metadata,
 			}, &result)
 		},
 	}
@@ -297,6 +302,35 @@ func parsePRNotePushOptions(options []string) (string, error) {
 		note = string(decoded)
 	}
 	return note, nil
+}
+
+const metadataPushOptionPrefix = "no-mistakes.metadata="
+
+func formatMetadataPushOption(metadata *string) string {
+	if metadata == nil {
+		return ""
+	}
+	return metadataPushOptionPrefix + base64.StdEncoding.EncodeToString([]byte(*metadata))
+}
+
+func parseMetadataPushOptions(options []string) (*string, error) {
+	var metadata *string
+	for _, option := range options {
+		encoded, ok := strings.CutPrefix(option, metadataPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("decode metadata push option: %w", err)
+		}
+		value := string(decoded)
+		if err := validateMetadata(value); err != nil {
+			return nil, fmt.Errorf("validate metadata push option: %w", err)
+		}
+		metadata = &value
+	}
+	return metadata, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
