@@ -1,9 +1,14 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -23,14 +28,40 @@ type commandPlan struct {
 	Command *string `json:"command"`
 }
 
-func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task string) (string, error) {
-	beforeHead, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
+func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task string) (_ string, retErr error) {
+	headSHA, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("inspect HEAD before %s planning: %w", step, err)
 	}
-	beforeStatus, err := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+	plannerRoot, err := os.MkdirTemp("", "no-mistakes-command-plan-*")
 	if err != nil {
-		return "", fmt.Errorf("inspect worktree before %s planning: %w", step, err)
+		return "", fmt.Errorf("create %s command planning directory: %w", step, err)
+	}
+	plannerDir := filepath.Join(plannerRoot, "worktree")
+	if err := git.WorktreeAdd(sctx.Ctx, sctx.WorkDir, plannerDir, headSHA); err != nil {
+		_ = os.RemoveAll(plannerRoot)
+		return "", fmt.Errorf("create detached %s command planning worktree: %w", step, err)
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cleanupErr := git.WorktreeRemove(cleanupCtx, sctx.WorkDir, plannerDir)
+		removeErr := os.RemoveAll(plannerRoot)
+		if cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove detached %s command planning worktree: %w", step, cleanupErr))
+		}
+		if removeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove %s command planning directory: %w", step, removeErr))
+		}
+	}()
+
+	beforeHead, err := git.Run(sctx.Ctx, plannerDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("inspect detached HEAD before %s planning: %w", step, err)
+	}
+	beforeStatus, err := git.Run(sctx.Ctx, plannerDir, "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("inspect detached worktree before %s planning: %w", step, err)
 	}
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
@@ -51,7 +82,7 @@ Rules:
 - Do not modify any file.
 - Return JSON containing only a single "command" string.
 - Return an empty command only when no meaningful %s command exists.%s%s`, step.DisplayName(sctx.Run.RefreshStrategy), sctx.Run.Branch, baseSHA, sctx.Run.HeadSHA, task, step, userIntentPromptSection(sctx), configuredPromptSection(sctx, step)),
-		CWD:        sctx.WorkDir,
+		CWD:        plannerDir,
 		JSONSchema: commandPlanSchema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    string(step) + "-plan",
@@ -62,11 +93,11 @@ Rules:
 	// The integrity check runs before the agent's own error is reported: a
 	// planner that both wrote to the worktree and failed must surface as a
 	// violated read-only pass, not as a plain agent failure that hides it.
-	afterHead, headErr := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
+	afterHead, headErr := git.Run(sctx.Ctx, plannerDir, "rev-parse", "HEAD")
 	if headErr != nil {
 		return "", fmt.Errorf("inspect HEAD after %s planning: %w", step, headErr)
 	}
-	afterStatus, statusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+	afterStatus, statusErr := git.Run(sctx.Ctx, plannerDir, "status", "--porcelain")
 	if statusErr != nil {
 		return "", fmt.Errorf("inspect worktree after %s planning: %w", step, statusErr)
 	}
