@@ -43,6 +43,7 @@ func writePipelineOwnedPRScenario(t *testing.T) string {
       risk_scope: pipeline-owned-delivery
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low
@@ -78,6 +79,7 @@ func writeExternalPRScenario(t *testing.T) string {
       risk_scope: source-or-external
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low

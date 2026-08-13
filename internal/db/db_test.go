@@ -76,7 +76,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"refresh_strategy", "stacked_on", "resolved_agent_routing_json", "submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at"} {
+	for _, column := range []string{"refresh_strategy", "stacked_on", "resolved_agent_routing_json", "submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at", "metadata"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -84,9 +84,73 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "step_rounds", "reviewed_head_sha") {
 		t.Fatal("step_rounds.reviewed_head_sha column missing from fresh schema")
 	}
-	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "evidence_json"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
+		}
+	}
+	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd"} {
+		if !hasColumn(t, d, "agent_invocations", column) {
+			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
+		}
+	}
+}
+
+func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE runs (
+			id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+			head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+			pr_url TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+		);
+		CREATE TABLE step_results (
+			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL,
+			step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', exit_code INTEGER,
+			duration_ms INTEGER, log_path TEXT, findings_json TEXT, error TEXT,
+			started_at INTEGER, completed_at INTEGER
+		);
+		CREATE TABLE agent_invocations (
+			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL, round INTEGER NOT NULL,
+			purpose TEXT NOT NULL, agent TEXT NOT NULL, invocation_mode TEXT NOT NULL DEFAULT 'harness_cli',
+			agent_observations_json TEXT, model TEXT, model_provider TEXT, session_mode TEXT NOT NULL,
+			session_key TEXT, fallback_reason TEXT, started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL,
+			duration_ms INTEGER NOT NULL, subprocess_wait_ms INTEGER, exit_status TEXT NOT NULL,
+			failure_category TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
+			cache_creation_tokens INTEGER, fresh_input_tokens INTEGER, reasoning_tokens INTEGER,
+			delta_input_tokens INTEGER, delta_output_tokens INTEGER, delta_cache_read_tokens INTEGER,
+			model_roundtrips INTEGER, tool_calls INTEGER, tool_wait_calls INTEGER,
+			tool_test_lint_calls INTEGER, tool_edit_calls INTEGER, tool_read_calls INTEGER,
+			tool_git_calls INTEGER, tool_other_calls INTEGER, workload_files INTEGER,
+			workload_lines INTEGER, finding_count INTEGER
+		);
+	`)
+	if err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	for table, columns := range map[string][]string{
+		"runs":              {"metadata"},
+		"step_results":      {"evidence_json"},
+		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd"},
+	} {
+		for _, column := range columns {
+			if !hasColumn(t, database, table, column) {
+				t.Fatalf("%s.%s was not migrated", table, column)
+			}
 		}
 	}
 }
@@ -136,6 +200,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if run.ResolvedAgentRouting != nil {
 		t.Fatalf("legacy run gained resolved routing snapshot: %q", *run.ResolvedAgentRouting)
+	}
+	if run.Metadata != nil {
+		t.Fatalf("legacy run gained metadata: %q", *run.Metadata)
 	}
 }
 

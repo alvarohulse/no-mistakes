@@ -493,6 +493,59 @@ func TestRerunPersistsExplicitRefreshSelectionAndInheritsPriorSelection(t *testi
 	}
 }
 
+func TestRerunInheritsOpaqueMetadataUnlessExplicitlyCleared(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	_, headSHA := setupTestGitRepo(t, p, d, "metadata-rerun-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	metadata := "  resolves TEAM-123\nnot json: [still opaque]  "
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:     p.RepoDir("metadata-rerun-repo"),
+		Ref:      "refs/heads/main",
+		Old:      "0000000000000000000000000000000000000000",
+		New:      headSHA,
+		Metadata: &metadata,
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, first.RunID)
+
+	var inherited ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "metadata-rerun-repo", Branch: "main"}, &inherited); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, inherited.RunID)
+	inheritedRun, err := d.GetRun(inherited.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inheritedRun.Metadata == nil || *inheritedRun.Metadata != metadata {
+		t.Fatalf("inherited metadata = %v, want %q", inheritedRun.Metadata, metadata)
+	}
+
+	empty := ""
+	var cleared ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "metadata-rerun-repo", Branch: "main", Metadata: &empty}, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, cleared.RunID)
+	clearedRun, err := d.GetRun(cleared.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clearedRun.Metadata == nil || *clearedRun.Metadata != "" {
+		t.Fatalf("cleared metadata = %v, want explicit empty string", clearedRun.Metadata)
+	}
+}
+
 func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)

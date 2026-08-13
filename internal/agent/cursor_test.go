@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -48,9 +49,25 @@ func TestParseCursorEvents_UsesTerminalResultAndCamelCaseUsage(t *testing.T) {
 	if parsed == nil || parsed.Text != "done" || parsed.SessionID != "session-1" || parsed.Model != "GPT-5.6 Sol" {
 		t.Fatalf("parsed result = %+v", parsed)
 	}
-	wantUsage := TokenUsage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 80, CacheCreationTokens: 5, Reported: true, CacheCreationReported: true}
+	wantUsage := TokenUsage{
+		InputTokens: 120, OutputTokens: 30, CacheReadTokens: 80, CacheCreationTokens: 5,
+		Reported: true, MeterPresenceReported: true, InputReported: true, OutputReported: true,
+		CacheReadReported: true, CacheCreationReported: true,
+	}
 	if parsed.Usage != wantUsage {
 		t.Fatalf("usage = %+v, want %+v", parsed.Usage, wantUsage)
+	}
+}
+
+func TestParseCursorEvents_PreservesMissingCacheMeters(t *testing.T) {
+	events := `{"type":"result","subtype":"success","result":"done","usage":{"inputTokens":120,"outputTokens":30}}
+`
+	parsed, err := parseCursorEvents(context.Background(), strings.NewReader(events), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Usage.InputReported || !parsed.Usage.OutputReported || parsed.Usage.CacheReadReported || parsed.Usage.CacheCreationReported {
+		t.Fatalf("usage presence = %+v", parsed.Usage)
 	}
 }
 
@@ -78,6 +95,39 @@ func TestCursorAgent_ReportsAgentAttempts(t *testing.T) {
 	if !a.ReportsAgentAttempts() {
 		t.Fatal("Cursor must report each retry attempt")
 	}
+}
+
+func TestCursorAgent_ExitFailureRetainsParsedUsage(t *testing.T) {
+	t.Setenv("NM_CURSOR_FAILURE_HELPER", "1")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &cursorAgent{bin: executable, extraArgs: []string{"-test.run=^TestCursorFailureHelper$", "--"}}
+
+	var result *Result
+	_, err = agent.Run(context.Background(), RunOpts{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
+	})
+	if err == nil {
+		t.Fatal("expected cursor failure")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 120 || result.Usage.OutputTokens != 30 || result.Usage.CacheReadTokens != 80 || result.Usage.CacheCreationTokens != 5 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+}
+
+func TestCursorFailureHelper(t *testing.T) {
+	if os.Getenv("NM_CURSOR_FAILURE_HELPER") == "" {
+		return
+	}
+	_, _ = os.Stdout.WriteString(`{"type":"system","subtype":"init","session_id":"session-1","model":"cursor-model"}` + "\n")
+	_, _ = os.Stdout.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"partial","session_id":"session-1","usage":{"inputTokens":120,"outputTokens":30,"cacheReadTokens":80,"cacheWriteTokens":5}}` + "\n")
+	os.Exit(1)
 }
 
 func TestCursorAgent_ContainmentPromptTargetsAbsoluteRepo(t *testing.T) {

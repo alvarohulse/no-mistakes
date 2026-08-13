@@ -40,6 +40,28 @@ func TestStartServerWithPort_DetectsEarlyExit(t *testing.T) {
 	}
 }
 
+func TestStartServerWithPort_PropagatesExtraEnvironment(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+
+	metadata := "opaque\nvalue"
+	_, err = startServerWithPort(
+		context.Background(),
+		"test",
+		sh,
+		[]string{"-c", "[ \"$NM_METADATA\" = 'opaque\nvalue' ] || exit 42"},
+		t.TempDir(),
+		"/healthcheck",
+		1,
+		"NM_METADATA="+metadata,
+	)
+	if err == nil || !strings.Contains(err.Error(), "status 0") {
+		t.Fatalf("managed server did not receive exact metadata environment: %v", err)
+	}
+}
+
 // TestDefaultHealthTimeout pins the cold-start budget for a freshly spawned
 // managed server. Bumped to 60s to absorb opencode boots of 15s+ when the
 // host is under load.

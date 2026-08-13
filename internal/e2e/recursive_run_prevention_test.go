@@ -30,8 +30,8 @@ func TestGateStepCannotStartRecursivePipeline(t *testing.T) {
 		expectedPhase string
 		completes     bool
 	}{
-		{name: "claude", agent: "claude", executable: "claude", expectedPhase: "document", completes: true},
-		{name: "codex", agent: "codex", executable: "codex", expectedPhase: "document", completes: true},
+		{name: "claude", agent: "claude", executable: "claude", expectedPhase: "lint", completes: true},
+		{name: "codex", agent: "codex", executable: "codex", expectedPhase: "lint", completes: true},
 		{name: "rovodev", agent: "rovodev", executable: "rovodev", expectedPhase: "review"},
 		{name: "opencode", agent: "opencode", executable: "opencode", expectedPhase: "review", completes: true},
 		{name: "pi", agent: "pi", executable: "pi", expectedPhase: "review"},
@@ -216,29 +216,29 @@ func installRecursiveIncidentAgent(t *testing.T, h *Harness, agentName, executab
 		execAgent = fmt.Sprintf(`printf '%%s' "$prompt" | exec %s "$@"`, shellQuote(filepath.Join(realDir, executable)))
 	case "cursor":
 		promptSource = `cat >/dev/null
-prompt="combined documentation and lint housekeeping pass"`
+prompt="Select the exact shell command the Lint pipeline step should execute."`
 		probeGuard = `previous=""
 for arg in "$@"; do
   if [ "$previous" = "--add-dir" ]; then cd "$arg" || exit 1; fi
   previous="$arg"
 done`
 	case "opencode":
-		promptSource = `prompt="combined documentation and lint housekeeping pass"`
+		promptSource = `prompt="Select the exact shell command the Lint pipeline step should execute."`
 	case "rovodev":
 		probeGuard = `case "$*" in
   "rovodev --help") exit 0 ;;
 esac`
-		promptSource = `prompt="combined documentation and lint housekeeping pass"`
+		promptSource = `prompt="Select the exact shell command the Lint pipeline step should execute."`
 	default:
 		if !completes {
-			promptSource = `prompt="combined documentation and lint housekeeping pass"`
+			promptSource = `prompt="Select the exact shell command the Lint pipeline step should execute."`
 		}
 	}
 	script := fmt.Sprintf(`#!/bin/sh
 %s
 %s
 case "$prompt" in
-  *"combined documentation and lint housekeeping pass"*)
+  *"Select the exact shell command the Lint pipeline step should execute."*)
     if mkdir "$NM_HOME/recursive-incident-claimed" 2>/dev/null; then
       git switch -c incident-recursive-child >/dev/null 2>&1
       run_attempt() {

@@ -25,6 +25,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 			{Identity: "thread:0123456789abcdef", InvocationMode: types.AgentInvocationModeSubagentTool},
 		},
 		AgentObservationsReported: true,
+		NestedAgentCount:          intPtr(2),
 		SessionMode:               InvocationModeResumed,
 		SessionKey:                "abcd1234abcd1234",
 		StartedAt:                 1_700_000_000,
@@ -35,6 +36,8 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		OutputTokens:              200,
 		CacheReadTokens:           800,
 		CacheCreationTokens:       intPtr(50),
+		DeltaCacheCreationTokens:  intPtr(50),
+		ReportedCostUSD:           float64Ptr(1.25),
 	}
 	if _, err := d.InsertAgentInvocation(inv); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -55,6 +58,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
 	}
+	if back.DeltaCacheCreationTokens == nil || *back.DeltaCacheCreationTokens != 50 || back.ReportedCostUSD == nil || *back.ReportedCostUSD != 1.25 {
+		t.Fatalf("cache-write/cost readback = %v/%v", back.DeltaCacheCreationTokens, back.ReportedCostUSD)
+	}
 	if back.InvocationMode != types.AgentInvocationModeHarnessCLI {
 		t.Fatalf("invocation mode = %q, want harness_cli", back.InvocationMode)
 	}
@@ -64,9 +70,40 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	if !back.AgentObservationsReported {
 		t.Fatal("agent observations should be reported")
 	}
+	if back.NestedAgentCount == nil || *back.NestedAgentCount != 2 {
+		t.Fatalf("nested agent count = %v, want 2", back.NestedAgentCount)
+	}
 }
 
-func intPtr(v int) *int { return &v }
+func TestLatestSessionCumulativeSkipsAttemptsWithoutUsage(t *testing.T) {
+	d, _, run := openSessionTestDB(t)
+	usage := AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
+		SessionMode: InvocationModeResumed, SessionKey: "session", StartedAt: 1, CompletedAt: 2,
+		ExitStatus: "ok", InputTokens: 1000, OutputTokens: 100, CacheReadTokens: 600,
+		CacheCreationTokens: intPtr(20), DeltaInputTokens: intPtr(1000), DeltaOutputTokens: intPtr(100),
+		DeltaCacheReadTokens: intPtr(600), DeltaCacheCreationTokens: intPtr(20),
+	}
+	if _, err := d.InsertAgentInvocation(usage); err != nil {
+		t.Fatal(err)
+	}
+	failed := AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex",
+		SessionMode: InvocationModeResumed, SessionKey: "session", StartedAt: 3, CompletedAt: 4,
+		ExitStatus: "error",
+	}
+	if _, err := d.InsertAgentInvocation(failed); err != nil {
+		t.Fatal(err)
+	}
+
+	input, output, cacheRead, cacheWrite, found := d.LatestSessionCumulativeWithCacheCreation(run.ID, "session")
+	if !found || input != 1000 || output != 100 || cacheRead != 600 || cacheWrite != 20 {
+		t.Fatalf("latest usage = %d/%d/%d/%d found=%t", input, output, cacheRead, cacheWrite, found)
+	}
+}
+
+func intPtr(v int) *int             { return &v }
+func float64Ptr(v float64) *float64 { return &v }
 
 // TestAgentInvocations_NullableFidelityFieldsRoundTrip proves the session-
 // fidelity columns survive an insert/read cycle both when populated and when
@@ -83,6 +120,7 @@ func TestAgentInvocations_NullableFidelityFieldsRoundTrip(t *testing.T) {
 		ExitStatus: "ok", InputTokens: 2500, OutputTokens: 250, CacheReadTokens: 1800,
 		CacheCreationTokens: intPtr(0), FreshInputTokens: intPtr(700), ReasoningTokens: intPtr(9),
 		DeltaInputTokens: intPtr(1500), DeltaOutputTokens: intPtr(150), DeltaCacheReadTokens: intPtr(1200),
+		DeltaCacheCreationTokens: intPtr(25), ReportedCostUSD: float64Ptr(2.5),
 		ModelRoundtrips: intPtr(4), ToolCalls: intPtr(3),
 		ToolWaitCalls: intPtr(0), ToolTestLintCalls: intPtr(1), ToolEditCalls: intPtr(1),
 		ToolReadCalls: intPtr(1), ToolGitCalls: intPtr(0), ToolOtherCalls: intPtr(0),
@@ -113,6 +151,8 @@ func TestAgentInvocations_NullableFidelityFieldsRoundTrip(t *testing.T) {
 		f.SubprocessWaitMS == nil || *f.SubprocessWaitMS != 1200 ||
 		f.CacheCreationTokens == nil || *f.CacheCreationTokens != 0 ||
 		f.DeltaInputTokens == nil || *f.DeltaInputTokens != 1500 ||
+		f.DeltaCacheCreationTokens == nil || *f.DeltaCacheCreationTokens != 25 ||
+		f.ReportedCostUSD == nil || *f.ReportedCostUSD != 2.5 ||
 		f.ToolTestLintCalls == nil || *f.ToolTestLintCalls != 1 ||
 		f.FindingCount == nil || *f.FindingCount != 2 {
 		t.Fatalf("full row lost a fidelity field: %+v", f)
@@ -125,6 +165,8 @@ func TestAgentInvocations_NullableFidelityFieldsRoundTrip(t *testing.T) {
 		"CacheCreation":    m.CacheCreationTokens == nil,
 		"FreshInput":       m.FreshInputTokens == nil,
 		"DeltaInput":       m.DeltaInputTokens == nil,
+		"DeltaCacheWrite":  m.DeltaCacheCreationTokens == nil,
+		"ReportedCost":     m.ReportedCostUSD == nil,
 		"ModelRoundtrips":  m.ModelRoundtrips == nil,
 		"ToolCalls":        m.ToolCalls == nil,
 		"WorkloadFiles":    m.WorkloadFiles == nil,

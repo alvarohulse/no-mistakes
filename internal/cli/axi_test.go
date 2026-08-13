@@ -597,7 +597,8 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", refreshSelection{
+	metadata := "resolves TEAM-123"
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", &metadata, refreshSelection{
 		Strategy:  types.RefreshStrategyMerge,
 		StackedOn: "feature/dependency",
 	})
@@ -606,6 +607,9 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if params.PRNote != "author note" {
 		t.Fatalf("PRNote = %q, want %q", params.PRNote, "author note")
+	}
+	if params.Metadata == nil || *params.Metadata != metadata {
+		t.Fatalf("Metadata = %v, want %q", params.Metadata, metadata)
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
@@ -624,6 +628,9 @@ func TestRunCommandsExposeRefreshSelectionFlags(t *testing.T) {
 			if cmd.Flags().Lookup(flag) == nil {
 				t.Errorf("%s is missing --%s", name, flag)
 			}
+		}
+		if cmd.Flags().Lookup("metadata") == nil {
+			t.Errorf("%s is missing --metadata", name)
 		}
 	}
 }
@@ -981,7 +988,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, refreshSelection{}, false); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, nil, refreshSelection{}, false); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()

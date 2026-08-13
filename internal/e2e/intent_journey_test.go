@@ -212,6 +212,7 @@ func writeIntentScenario(t *testing.T) string {
       summary: "user wanted Bar() helper added"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low

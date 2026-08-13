@@ -132,6 +132,68 @@ func TestBuildPipelineSummary_SkippedStep(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_RendersStoredCommandEvidenceAndExplanation(t *testing.T) {
+	t.Parallel()
+	exitCode := 0
+	evidence, err := db.EncodeStepEvidence(db.StepEvidence{
+		Commands:    []db.CommandEvidence{{Round: 1, Sequence: 1, Command: "go build ./...", Outcome: db.CommandOutcomePassed, ExitCode: &exitCode}},
+		Explanation: "The step used the repository build target.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := []*db.StepResult{{ID: "build", StepName: types.StepBuild, Status: types.StepStatusCompleted, EvidenceJSON: &evidence}}
+
+	md, _ := BuildPipelineSummary(steps, map[string][]*db.StepRound{"build": {}})
+
+	for _, want := range []string{"`go build ./...`", "round 1", "passed (exit 0)", "The step used the repository build target."} {
+		if !strings.Contains(md, want) {
+			t.Errorf("pipeline summary missing %q:\n%s", want, md)
+		}
+	}
+}
+
+func TestBuildPipelineSummary_RendersStoredIntentEvidence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		intent   *db.IntentEvidence
+		contains []string
+	}{
+		{
+			name: "explicit intent",
+			intent: &db.IntentEvidence{
+				Text: "Keep `AlertMessage.close` stable.", Source: "agent", Provided: true,
+			},
+			contains: []string{"Keep `AlertMessage.close` stable.", "Source: `agent`", "Provided: `true`"},
+		},
+		{
+			name: "unavailable intent",
+			intent: &db.IntentEvidence{Reason: &db.IntentAbsenceReason{
+				Code: "inference_disabled", Message: "Intent inference is disabled.",
+			}},
+			contains: []string{"Intent inference is disabled.", "Reason: `inference_disabled`"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			evidence, err := db.EncodeStepEvidence(db.StepEvidence{Intent: test.intent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := []*db.StepResult{{ID: "intent", StepName: types.StepIntent, Status: types.StepStatusCompleted, EvidenceJSON: &evidence}}
+
+			md, _ := BuildPipelineSummary(steps, map[string][]*db.StepRound{"intent": {}})
+
+			for _, want := range test.contains {
+				if !strings.Contains(md, want) {
+					t.Errorf("pipeline summary missing %q:\n%s", want, md)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildPipelineSummary_ExcludesPushPRCI(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{

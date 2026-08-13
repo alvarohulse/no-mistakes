@@ -2356,6 +2356,43 @@ func TestPRStep_PromptRequestsDistinctHeadingFreeMarkdownSections(t *testing.T) 
 	}
 }
 
+func TestPRStep_NormalizesAgentSectionHeadingsBeforeAssembly(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(prContent{
+				Title:       "feat: add bar",
+				Summary:     "### Summary\n\nUse `Bar.Close` for cleanup.",
+				WhatChanged: "### What changed\n\n- call `Bar.Close`",
+			})
+			return &agent.Result{Output: payload}, err
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if strings.Count(body, "Summary") != 1 || strings.Count(strings.ToLower(body), "what changed") != 1 {
+		t.Fatalf("agent headings were duplicated during assembly:\n%s", body)
+	}
+	for _, want := range []string{"## Summary", "## What Changed", "`Bar.Close`"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("assembled body missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestPRStep_FallbackUsesDistinctSummaryAndWhatChanged(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -2391,6 +2428,37 @@ func TestPRStep_FallbackUsesDistinctSummaryAndWhatChanged(t *testing.T) {
 	}
 	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "fallback intent text") {
 		t.Fatalf("stored intent leaked into fallback PR body:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_FallsBackWhenAgentOmitsSummary(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete draft","what_changed":"- agent-only change"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+	if !strings.Contains(ghLog, "## Summary\n\nUpdates the branch with the final recorded changes.") {
+		t.Fatalf("agent output without a summary did not use the complete fallback:\n%s", ghLog)
+	}
+	if strings.Contains(ghLog, "agent-only change") {
+		t.Fatalf("incomplete agent output leaked into the PR body:\n%s", ghLog)
 	}
 }
 

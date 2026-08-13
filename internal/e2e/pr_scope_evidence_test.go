@@ -36,7 +36,7 @@ func writeFinalPRScopeScenario(t *testing.T) string {
         - "` + staleTwoFileEvidence + `"
       testing_summary: "Focused validation passed at the test step target commit."
       artifacts: []
-  - match: "Perform the combined documentation and lint housekeeping pass for this change."
+  - match: "Keep the project documentation accurate for this change."
     text: "documentation updated"
     edits:
       - path: "docs/flag.md"
@@ -46,7 +46,11 @@ func writeFinalPRScopeScenario(t *testing.T) string {
     structured:
       findings: []
       summary: "update flag documentation"
-  - match: "Draft a pull request title and summary for the full branch delta."
+  - match: "Select the exact shell command the Lint pipeline step should execute."
+    text: "planned lint command"
+    structured:
+      command: "true"
+  - match: "Draft a pull request title, self-contained summary, and What Changed content for the full branch delta."
     text: "full four-file PR summary"
     structured:
       title: "feat: add example flag"
@@ -57,6 +61,7 @@ func writeFinalPRScopeScenario(t *testing.T) string {
         - Add documentation in ` + "`docs/flag.md`" + ` and ` + "`docs/reference.md`" + `.
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low
@@ -173,7 +178,7 @@ func TestPRFinalScopeExcludesEarlierStepEvidence(t *testing.T) {
 	if !strings.Contains(testPrompt, "target commit: "+preDocumentHead) {
 		t.Fatalf("Test evidence was not bound to its pre-Document target %s:\n%s", preDocumentHead, testPrompt)
 	}
-	prPrompt := findInvocationContaining(h.AgentInvocations(), "Draft a pull request title and summary for the full branch delta.")
+	prPrompt := findInvocationContaining(h.AgentInvocations(), "Draft a pull request title, self-contained summary, and What Changed content for the full branch delta.")
 	for _, want := range append([]string{"target commit: " + run.HeadSHA}, wantFiles...) {
 		if !strings.Contains(prPrompt, want) {
 			t.Fatalf("final PR drafting prompt missing %q:\n%s", want, prPrompt)

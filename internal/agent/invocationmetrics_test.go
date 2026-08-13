@@ -161,17 +161,48 @@ func TestModelTimeMS(t *testing.T) {
 	}
 }
 
-func TestFreshInputTokens(t *testing.T) {
-	cases := []struct{ input, cache, want int }{
-		{1000, 0, 1000},
-		{1000, 800, 200},
-		{1000, 1000, 0},
-		{1000, 1200, 0},
+func TestCanonicalInputMeters(t *testing.T) {
+	input, cacheRead, cacheWrite := 1000, 700, 100
+	zero := 0
+	tests := []struct {
+		name               string
+		agent              string
+		read, write        *int
+		wantTotal, wantRaw *int
+	}{
+		{name: "claude components", agent: "claude", read: &cacheRead, write: &cacheWrite, wantTotal: intPointer(1800), wantRaw: intPointer(1000)},
+		{name: "codex inclusive", agent: "codex", read: &cacheRead, write: &cacheWrite, wantTotal: intPointer(1000), wantRaw: intPointer(200)},
+		{name: "cursor cached total unknown", agent: "cursor", read: &zero, write: &cacheWrite, wantRaw: intPointer(1000)},
+		{name: "cursor uncached total known", agent: "cursor", read: &zero, write: &zero, wantTotal: intPointer(1000), wantRaw: intPointer(1000)},
+		{name: "unknown preserves raw total", agent: "other", read: &cacheRead, write: &cacheWrite, wantTotal: intPointer(1000)},
 	}
-	for _, tc := range cases {
-		if got := FreshInputTokens(tc.input, tc.cache); got != tc.want {
-			t.Fatalf("FreshInputTokens(%d,%d) = %d, want %d", tc.input, tc.cache, got, tc.want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			total, raw := CanonicalInputMeters(tc.agent, &input, tc.read, tc.write)
+			assertOptionalInt(t, "total", total, tc.wantTotal)
+			assertOptionalInt(t, "uncached", raw, tc.wantRaw)
+		})
+	}
+	t.Run("codex inconsistent split is unknown", func(t *testing.T) {
+		cacheWrite := 400
+		total, uncached := CanonicalInputMeters("codex", &input, &cacheRead, &cacheWrite)
+		assertOptionalInt(t, "total", total, &input)
+		assertOptionalInt(t, "uncached", uncached, nil)
+	})
+}
+
+func intPointer(value int) *int { return &value }
+
+func assertOptionalInt(t *testing.T, name string, got, want *int) {
+	t.Helper()
+	if got == nil || want == nil {
+		if got != nil || want != nil {
+			t.Fatalf("%s = %v, want %v", name, got, want)
 		}
+		return
+	}
+	if *got != *want {
+		t.Fatalf("%s = %d, want %d", name, *got, *want)
 	}
 }
 

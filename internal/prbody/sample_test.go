@@ -42,6 +42,59 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	if intent := s.Pipeline.Steps[0].Intent; intent == nil || intent.Text == "" || !intent.Provided {
 		t.Errorf("sample intent result is incomplete: %+v", intent)
 	}
+
+	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
+	var completeTelemetry, supportedNested, unsupportedNested bool
+	for _, step := range s.Pipeline.Steps {
+		if _, ok := commandSteps[step.Name]; ok {
+			commandSteps[step.Name] = len(step.Commands) > 0
+			for _, command := range step.Commands {
+				if command.Round < 1 || command.Sequence < 1 || command.Command == "" || command.Outcome == "" {
+					t.Errorf("sample command evidence is incomplete: %+v", command)
+				}
+			}
+		}
+		if (step.Status == "completed" || step.Status == "skipped") && step.Intent == nil && len(step.Commands) == 0 && len(step.Evidence) == 0 && step.Explanation == "" {
+			t.Errorf("sample successful/skipped step %q has no evidence or explanation", step.Name)
+		}
+		for _, run := range step.Agents {
+			if run.NestedReported {
+				supportedNested = true
+				if run.NestedCount == nil {
+					t.Errorf("sample supported nested-agent row has no exact count: %+v", run)
+				}
+			}
+			if (run.Agent == "claude" || run.Agent == "codex") && run.InputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil {
+				want := *run.UncachedInputTokens + *run.CacheReadTokens + *run.CacheWriteTokens
+				if *run.InputTokens != want {
+					t.Errorf("sample %s input total = %d, want canonical meter sum %d", run.Agent, *run.InputTokens, want)
+				}
+			}
+			if run.Agent == "cursor" && run.InputTokens != nil && ((run.CacheReadTokens != nil && *run.CacheReadTokens > 0) || (run.CacheWriteTokens != nil && *run.CacheWriteTokens > 0)) {
+				t.Errorf("sample Cursor input total is populated despite ambiguous cache-inclusive semantics: %+v", run)
+			}
+			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
+				completeTelemetry = true
+			}
+			if !run.NestedReported {
+				unsupportedNested = true
+			}
+		}
+	}
+	for step, populated := range commandSteps {
+		if !populated {
+			t.Errorf("sample %s step has no command evidence", step)
+		}
+	}
+	if !completeTelemetry {
+		t.Error("sample has no fully populated telemetry row")
+	}
+	if !supportedNested {
+		t.Error("sample does not exercise supported nested-agent telemetry")
+	}
+	if !unsupportedNested {
+		t.Error("sample does not exercise unsupported nested-agent telemetry")
+	}
 }
 
 // TestSamplePipelineCoversTheWholePipeline keeps the sample honest as the

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
@@ -98,7 +99,7 @@ func TestLintStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 	}
 }
 
-func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T) {
+func TestLintStep_NoConfiguredLintPlansReadOnlyThenExecutesInPipeline(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -108,8 +109,7 @@ func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
-			os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"format code"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":"git diff --check"}`)}, nil
 		},
 	}
 
@@ -121,7 +121,7 @@ func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T
 		t.Fatal(err)
 	}
 	if outcome.NeedsApproval {
-		t.Error("expected no approval when agent fixed no-config lint issues")
+		t.Error("expected no approval when the planned lint command passes")
 	}
 	if outcome.AutoFixable {
 		t.Error("expected no auto-fix loop when no unresolved lint issues remain")
@@ -132,38 +132,33 @@ func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after lint fix commit, got %q", status)
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): format code" {
-		t.Fatalf("last commit message = %q", got)
+	if !strings.Contains(ag.calls[0].Prompt, "read-only command-planning pass") {
+		t.Fatalf("planner prompt is not read-only: %s", ag.calls[0].Prompt)
 	}
 }
 
-func TestLintStep_NoConfiguredLint_RejectsOversizedSummaryWithoutStaging(t *testing.T) {
+func TestLintStep_NoConfiguredLintRejectsPlannerWorktreeMutation(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	output, err := json.Marshal(map[string]any{
-		"findings": []any{},
-		"summary":  strings.Repeat("x", 4097),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
 			if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
 				return nil, err
 			}
-			return &agent.Result{Output: output}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
-	if _, err := (&LintStep{}).Execute(sctx); err == nil {
-		t.Fatal("LintStep.Execute() accepted an oversized summary")
-	} else if !strings.Contains(err.Error(), "rejected commit summary") {
-		t.Fatalf("LintStep.Execute() error = %v, want rejected commit summary", err)
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "modified the worktree") {
+		t.Fatalf("outcome = %+v, want planner mutation decision gate", outcome)
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
 		t.Fatalf("staged files after summary error = %q, want none", got)
@@ -173,14 +168,34 @@ func TestLintStep_NoConfiguredLint_RejectsOversizedSummaryWithoutStaging(t *test
 	}
 }
 
-func TestLintStep_NoConfiguredLint_UnresolvedFindingsNeedApprovalWithoutAutoFixLoop(t *testing.T) {
+func TestLintStep_NoConfiguredLintRejectsPlannerWithoutCommandField(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":123}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "invalid structured result") {
+		t.Fatalf("outcome = %+v, want invalid planner result decision gate", outcome)
+	}
+}
+
+func TestLintStep_NoConfiguredLintCommandFailureEntersRepairLoop(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"prettier still fails","action":"auto-fix"}],"summary":"lint still fails"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":"exit 1"}`)}, nil
 		},
 	}
 
@@ -194,10 +209,17 @@ func TestLintStep_NoConfiguredLint_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 	if !outcome.NeedsApproval {
 		t.Error("expected approval for unresolved no-config lint findings")
 	}
-	if outcome.AutoFixable {
-		t.Error("expected unresolved no-config lint findings not to auto-fix again")
+	if !outcome.AutoFixable {
+		t.Error("expected failed planned lint command to enter repair loop")
 	}
-	if !strings.Contains(ag.calls[0].Prompt, "only unresolved") {
-		t.Error("expected no-config lint prompt to report only unresolved issues")
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAutoFix {
+		t.Fatalf("lint failure findings = %+v, want one auto-fix finding", findings.Items)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "Do not run the selected command") {
+		t.Error("expected no-config lint prompt to remain a planner")
 	}
 }

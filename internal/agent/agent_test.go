@@ -731,6 +731,17 @@ func TestFinalizeTextResult_WithSchemaRejectsAmbiguousFencedJSON(t *testing.T) {
 	}
 }
 
+func TestFinalizeTextResult_ParseFailureRetainsUsage(t *testing.T) {
+	usage := TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true}
+	result, err := finalizeTextResult("codex", "not structured JSON", json.RawMessage(`{"type":"object"}`), usage)
+	if err == nil {
+		t.Fatal("expected parse failure")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 100 || result.Usage.OutputTokens != 20 {
+		t.Fatalf("partial result = %+v, want incurred usage", result)
+	}
+}
+
 func TestFencedJSONCandidates_IgnoreBackticksInsideJSONString(t *testing.T) {
 	text := "review complete\n```json\n{\"summary\":\"quoted ```snippet``` in markdown\",\"findings\":[]}\n```\npostlude"
 

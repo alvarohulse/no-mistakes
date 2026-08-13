@@ -40,6 +40,7 @@ func configurableFixCommitScenario(t *testing.T) string {
       risk_rationale: "the unsafe value needs a guard"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low

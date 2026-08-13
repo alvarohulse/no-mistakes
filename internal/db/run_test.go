@@ -117,6 +117,36 @@ func TestInsertRunWithPRNote_PersistsAtomically(t *testing.T) {
 	}
 }
 
+func TestInsertRunWithOptionsPersistsOpaqueMetadataExactly(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/metadata", "git@github.com:user/metadata.git", "main")
+	metadata := "  resolves TEAM-123\nnot json: [still opaque]  "
+
+	run, err := d.InsertRunWithOptions(repo.ID, "feature", "abc", "def", RunOptions{Metadata: &metadata})
+	if err != nil {
+		t.Fatalf("insert run with metadata: %v", err)
+	}
+	if run.Metadata == nil || *run.Metadata != metadata {
+		t.Fatalf("returned metadata = %v, want %q", run.Metadata, metadata)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Metadata == nil || *got.Metadata != metadata {
+		t.Fatalf("persisted metadata = %v, want %q", got.Metadata, metadata)
+	}
+
+	empty := ""
+	cleared, err := d.InsertRunWithOptions(repo.ID, "feature-clear", "aaa", "bbb", RunOptions{Metadata: &empty})
+	if err != nil {
+		t.Fatalf("insert cleared metadata: %v", err)
+	}
+	if cleared.Metadata == nil || *cleared.Metadata != "" {
+		t.Fatalf("cleared metadata = %v, want explicit empty string", cleared.Metadata)
+	}
+}
+
 func TestInsertRunWithOptions_PersistsRefreshSelection(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/repo-refresh-options", "git@example.com:repo.git", "main")

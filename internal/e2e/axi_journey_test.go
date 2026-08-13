@@ -42,6 +42,7 @@ func axiScenario(t *testing.T) string {
       risk_rationale: "warning requires human review"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low
@@ -76,6 +77,7 @@ func testFileChangeScenario(t *testing.T) string {
       artifacts: []
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low
@@ -151,6 +153,7 @@ func branchSyncScenario(t *testing.T) string {
       risk_rationale: "the unsafe value needs a guard"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low

@@ -256,6 +256,35 @@ exit 1
 	}
 }
 
+func TestCodexAgent_ExitFailureRetainsParsedUsage(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":30}}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial\"}}",
+		"echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":80,\"cache_write_input_tokens\":5,\"output_tokens\":30}}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	var result *Result
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
+	})
+	if err == nil {
+		t.Fatal("expected codex failure")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 120 || result.Usage.OutputTokens != 30 || result.Usage.CacheReadTokens != 80 || result.Usage.CacheCreationTokens != 5 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+}
+
 func TestCodexAgent_RunAcceptsNormalizedNullableFields(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCodex(t, dir, `#!/bin/sh
@@ -356,7 +385,7 @@ func TestCodexOutputSchemaRequiresAllPropertiesAndMakesOptionalNullable(t *testi
 func TestParseCodexEvents_AgentMessage(t *testing.T) {
 	events := strings.Join([]string{
 		`{"type":"item.completed","item":{"type":"agent_message","text":"{\"success\":true,\"summary\":\"done\"}"}}`,
-		`{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":100}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":50,"cache_write_input_tokens":25,"output_tokens":100}}`,
 		"",
 	}, "\n")
 
@@ -388,6 +417,9 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 	if usage.CacheReadTokens != 50 {
 		t.Errorf("expected cache read tokens 50, got %d", usage.CacheReadTokens)
 	}
+	if usage.CacheCreationTokens != 25 || !usage.CacheCreationReported {
+		t.Errorf("expected 25 reported cache write tokens, got %+v", usage)
+	}
 }
 
 func TestParseCodexEvents_CollectsNestedAgentInvocations(t *testing.T) {
@@ -409,6 +441,19 @@ func TestParseCodexEvents_CollectsNestedAgentInvocations(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(metrics.agentObservations(), want) {
 		t.Fatalf("agent observations = %+v, want %+v", metrics.agentObservations(), want)
+	}
+}
+
+func TestParseCodexEvents_PreservesMissingCacheMeters(t *testing.T) {
+	events := `{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}
+`
+	var usage TokenUsage
+	var lastMessage string
+	if err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !usage.InputReported || !usage.OutputReported || usage.CacheReadReported || usage.CacheCreationReported {
+		t.Fatalf("usage presence = %+v", usage)
 	}
 }
 

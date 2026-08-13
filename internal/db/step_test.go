@@ -1,10 +1,40 @@
 package db
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestStepEvidenceRoundTripsCommandsAndRejectsOversizedPayloads(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/evidence", "git@github.com:user/evidence.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepBuild)
+	exitCode := 0
+	evidence := StepEvidence{Commands: []CommandEvidence{{
+		Round: 1, Sequence: 1, Command: "make build", Outcome: CommandOutcomePassed, ExitCode: &exitCode,
+	}}}
+
+	if err := d.SetStepEvidence(step.ID, evidence); err != nil {
+		t.Fatalf("set step evidence: %v", err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := got.Evidence()
+	if err != nil {
+		t.Fatalf("decode step evidence: %v", err)
+	}
+	if len(decoded.Commands) != 1 || decoded.Commands[0].Command != "make build" || decoded.Commands[0].ExitCode == nil || *decoded.Commands[0].ExitCode != 0 {
+		t.Fatalf("evidence = %+v", decoded)
+	}
+	if err := d.SetStepEvidence(step.ID, StepEvidence{Explanation: strings.Repeat("x", MaxStepEvidenceBytes+1)}); err == nil {
+		t.Fatal("oversized step evidence was accepted")
+	}
+}
 
 func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 	d := openTestDB(t)
