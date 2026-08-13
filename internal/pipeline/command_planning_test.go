@@ -309,6 +309,39 @@ func TestCommandPlanningWorkspaceForcesOriginName(t *testing.T) {
 	}
 }
 
+func TestCommandPlanningWorkspaceCloneIgnoresTemplateHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook execution is platform-specific")
+	}
+	sourceDir := newCommandPlanningRepo(t)
+	templateDir := t.TempDir()
+	hooksDir := filepath.Join(templateDir, "hooks")
+	if err := os.Mkdir(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(t.TempDir(), "reference-transaction-ran")
+	hook := fmt.Sprintf("#!/bin/sh\nprintf triggered > %q\n", filepath.ToSlash(sentinelPath))
+	if err := os.WriteFile(filepath.Join(hooksDir, "reference-transaction"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "init.templateDir")
+	t.Setenv("GIT_CONFIG_VALUE_0", templateDir)
+
+	plannerDir, err := newCommandPlanningWorkspaceForTest(t, sourceDir).Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
+		t.Fatalf("template reference-transaction hook executed during planner creation: %v", err)
+	}
+	if entries, err := os.ReadDir(commandPlanningEffectiveHooksDir(t, plannerDir)); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("template hooks survived planner creation: %v", entries)
+	}
+}
+
 func newCommandPlanningRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

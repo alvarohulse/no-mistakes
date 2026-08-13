@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -220,6 +221,126 @@ func TestPlanPipelineCommandRejectsControllerMetadataMutation(t *testing.T) {
 				t.Fatalf("planner with mutated controller metadata was not discarded: %v", err)
 			}
 		})
+	}
+}
+
+func TestPlanPipelineCommandIsolatesAmbientGitConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook execution is platform-specific")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	hooksDir := t.TempDir()
+	sentinelPath := filepath.Join(t.TempDir(), "ambient-hook-ran")
+	hook := fmt.Sprintf("#!/bin/sh\nprintf triggered > %q\n", filepath.ToSlash(sentinelPath))
+	if err := os.WriteFile(filepath.Join(hooksDir, "reference-transaction"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://example.invalid/ambient.git")
+	t.Setenv("GIT_CONFIG_KEY_1", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_1", hooksDir)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			remote := exec.CommandContext(ctx, "git", "config", "--get", "remote.origin.url")
+			remote.Dir = opts.CWD
+			remote.Env = append(os.Environ(), opts.Env...)
+			if output, err := remote.Output(); err == nil {
+				return nil, fmt.Errorf("planner inherited ambient remote: %s", strings.TrimSpace(string(output)))
+			}
+			hooks := exec.CommandContext(ctx, "git", "config", "--get", "core.hooksPath")
+			hooks.Dir = opts.CWD
+			hooks.Env = append(os.Environ(), opts.Env...)
+			output, err := hooks.Output()
+			if err != nil {
+				return nil, fmt.Errorf("inspect planner hooks path: %w", err)
+			}
+			if got := strings.TrimSpace(string(output)); got != filepath.Join(opts.CWD, ".git", "hooks") {
+				return nil, fmt.Errorf("planner hooks path = %q, want isolated repository hooks", got)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
+		t.Fatalf("ambient Git hook executed during planner lifecycle: %v", err)
+	}
+}
+
+func TestPlanPipelineCommandRejectsUninitializedSubmoduleMutation(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	submoduleDir := t.TempDir()
+	gitCmd(t, submoduleDir, "init")
+	gitCmd(t, submoduleDir, "config", "user.email", "test@example.com")
+	gitCmd(t, submoduleDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(submoduleDir, "dependency.txt"), []byte("dependency\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, submoduleDir, "add", "dependency.txt")
+	gitCmd(t, submoduleDir, "commit", "-m", "initial dependency")
+	gitCmd(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", submoduleDir, "dependency")
+	gitCmd(t, dir, "commit", "-am", "add dependency")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	plannerDir := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerDir = opts.CWD
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, os.WriteFile(filepath.Join(opts.CWD, "dependency", "mutated.txt"), []byte("mutation\n"), 0o644)
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepTest, "Select test."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want gitlink mutation refusal", err)
+	}
+	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
+		t.Fatalf("planner with mutated uninitialized submodule was not discarded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dependency", "mutated.txt")); !os.IsNotExist(err) {
+		t.Fatalf("planner submodule mutation reached source: %v", err)
+	}
+}
+
+func TestPlanPipelineCommandRejectsNestedGitRepository(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	trackedDir := filepath.Join(dir, "nested")
+	if err := os.Mkdir(trackedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(trackedDir, "tracked.txt"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "nested/tracked.txt")
+	gitCmd(t, dir, "commit", "-m", "add tracked directory")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	plannerDir := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerDir = opts.CWD
+			if _, err := gitutil.Run(ctx, opts.CWD, "init", "nested"); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want nested-repository refusal", err)
+	}
+	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
+		t.Fatalf("planner with nested Git repository was not discarded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(trackedDir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("nested planner repository reached source: %v", err)
 	}
 }
 
