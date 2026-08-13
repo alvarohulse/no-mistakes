@@ -26,21 +26,17 @@ type commandPlan struct {
 }
 
 func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task string) (string, error) {
-	sourceSnapshot, err := captureCommandPlanningSnapshot(sctx.Ctx, sctx.WorkDir)
-	if err != nil {
-		return "", fmt.Errorf("inspect pipeline worktree before %s planning: %w", step, err)
-	}
-	defer sourceSnapshot.cleanup()
 	plannerDir, err := sctx.CommandPlanning.Prepare(sctx.Ctx)
 	if err != nil {
 		return "", fmt.Errorf("prepare %s command planning workspace: %w", step, err)
 	}
-
-	plannerSnapshot, err := captureCommandPlanningSnapshot(sctx.Ctx, plannerDir)
+	plannerBefore, err := inspectCommandPlanningFingerprint(sctx.Ctx, plannerDir)
 	if err != nil {
-		return "", fmt.Errorf("inspect detached worktree before %s planning: %w", step, err)
+		return "", errors.Join(
+			fmt.Errorf("inspect command planning workspace before %s planning: %w", step, err),
+			sctx.CommandPlanning.Discard(),
+		)
 	}
-	defer plannerSnapshot.cleanup()
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
 		Prompt: fmt.Sprintf(`Select the exact shell command the %s pipeline step should execute.
@@ -70,33 +66,22 @@ Rules:
 	// violated read-only pass, not as a plain agent failure that hides it.
 	integrityCtx, cancelIntegrity := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelIntegrity()
-	afterPlanner, plannerSnapshotErr := inspectCommandPlanningSnapshot(integrityCtx, plannerDir)
-	if plannerSnapshotErr != nil {
-		return "", errors.Join(
-			fmt.Errorf("inspect detached worktree after %s planning: %w", step, plannerSnapshotErr),
-			plannerSnapshot.restore(integrityCtx, plannerDir),
-			sourceSnapshot.restore(integrityCtx, sctx.WorkDir),
+	plannerAfter, inspectErr := inspectCommandPlanningFingerprint(integrityCtx, plannerDir)
+	if inspectErr != nil {
+		integrityErr := errors.Join(
+			fmt.Errorf("%s command planner violated the read-only pass; integrity inspection failed: %w", step, inspectErr),
+			sctx.CommandPlanning.Discard(),
 		)
+		if err != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
+		}
+		return "", integrityErr
 	}
-	afterSource, sourceSnapshotErr := inspectCommandPlanningSnapshot(integrityCtx, sctx.WorkDir)
-	if sourceSnapshotErr != nil {
-		return "", errors.Join(
-			fmt.Errorf("inspect pipeline worktree after %s planning: %w", step, sourceSnapshotErr),
-			plannerSnapshot.restore(integrityCtx, plannerDir),
-			sourceSnapshot.restore(integrityCtx, sctx.WorkDir),
+	if !plannerBefore.equal(plannerAfter) {
+		integrityErr := errors.Join(
+			fmt.Errorf("%s command planner modified its workspace during a read-only pass", step),
+			sctx.CommandPlanning.Discard(),
 		)
-	}
-	sourceMutated := !sourceSnapshot.equal(afterSource)
-	plannerMutated := !plannerSnapshot.equal(afterPlanner)
-	if sourceMutated || plannerMutated {
-		var integrityErr error
-		if sourceMutated {
-			integrityErr = errors.Join(integrityErr, sourceSnapshot.restore(integrityCtx, sctx.WorkDir))
-		}
-		if plannerMutated {
-			integrityErr = errors.Join(integrityErr, plannerSnapshot.restore(integrityCtx, plannerDir))
-		}
-		integrityErr = errors.Join(fmt.Errorf("%s command planner modified the worktree during a read-only pass", step), integrityErr)
 		if err != nil {
 			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
 		}

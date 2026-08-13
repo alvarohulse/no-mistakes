@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+const commandPlanningCleanupTimeout = 30 * time.Second
 
 // CommandPlanningWorkspace is a lazy, run-scoped checkout used only for
 // read-only Build, Test, and Lint command selection.
@@ -34,9 +38,9 @@ func NewCommandPlanningWorkspace(p *paths.Paths, _ *config.Config, run *db.Run, 
 	}
 }
 
-// Prepare returns a planning checkout at the pipeline worktree's current HEAD.
-// Prepared state is copied from the primary worktree, where the trusted hook
-// has already run, and refreshed whenever the pipeline advances HEAD.
+// Prepare returns a private planning clone at the pipeline worktree's current
+// committed HEAD. The clone borrows Git objects locally but never shares refs,
+// index, worktree metadata, remotes, or uncommitted source state.
 func (w *CommandPlanningWorkspace) Prepare(ctx context.Context) (string, error) {
 	if w == nil {
 		return "", fmt.Errorf("command planning workspace is unavailable")
@@ -46,139 +50,165 @@ func (w *CommandPlanningWorkspace) Prepare(ctx context.Context) (string, error) 
 		return "", fmt.Errorf("inspect pipeline HEAD for command planning: %w", err)
 	}
 	if w.created {
-		if headSHA != w.headSHA {
-			if err := w.refresh(ctx, headSHA); err != nil {
-				return "", err
+		if _, err := os.Stat(w.dir); os.IsNotExist(err) {
+			w.created = false
+			w.headSHA = ""
+		} else if err != nil {
+			return "", fmt.Errorf("inspect command planning workspace: %w", err)
+		} else {
+			if headSHA != w.headSHA {
+				if err := w.refresh(ctx, headSHA); err != nil {
+					return "", errors.Join(err, w.Discard())
+				}
 			}
+			return w.dir, nil
 		}
-		return w.dir, nil
-	}
-	adopted, err := w.adoptExisting(ctx)
-	if err != nil {
-		return "", err
-	}
-	if adopted {
-		w.created = true
-		if err := w.refresh(ctx, headSHA); err != nil {
-			return "", errors.Join(err, w.Close(context.Background()))
-		}
-		return w.dir, nil
 	}
 
+	if err := w.Discard(); err != nil {
+		return "", fmt.Errorf("discard preserved command planning workspace: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(w.dir), 0o755); err != nil {
 		return "", fmt.Errorf("create command planning workspace parent: %w", err)
 	}
-	if err := git.WorktreeAdd(ctx, w.sourceDir, w.dir, headSHA); err != nil {
-		return "", fmt.Errorf("create command planning workspace: %w", err)
+	if _, err := git.Run(ctx, w.sourceDir, "clone", "--shared", "--no-checkout", "--no-tags", w.sourceDir, w.dir); err != nil {
+		return "", errors.Join(fmt.Errorf("create command planning workspace: %w", err), w.Discard())
 	}
 	w.created = true
-	w.headSHA = headSHA
-	if err := w.copyPreparedState(ctx); err != nil {
-		return "", errors.Join(err, w.Close(context.Background()))
+	if err := w.initialize(ctx, headSHA); err != nil {
+		return "", errors.Join(err, w.Discard())
 	}
+	w.headSHA = headSHA
 	return w.dir, nil
 }
 
-func (w *CommandPlanningWorkspace) adoptExisting(ctx context.Context) (bool, error) {
-	info, err := os.Lstat(w.dir)
-	if os.IsNotExist(err) {
-		return false, nil
+func (w *CommandPlanningWorkspace) initialize(ctx context.Context, headSHA string) error {
+	hooksDir := filepath.Join(w.dir, ".git", "no-mistakes-hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return fmt.Errorf("create empty command planning hooks directory: %w", err)
 	}
+	if _, err := git.Run(ctx, w.dir, "config", "--local", "core.hooksPath", hooksDir); err != nil {
+		return fmt.Errorf("disable command planning Git hooks: %w", err)
+	}
+	if _, err := git.Run(ctx, w.dir, "remote", "remove", "origin"); err != nil {
+		return fmt.Errorf("remove command planning source remote: %w", err)
+	}
+	if _, err := git.Run(ctx, w.dir, "checkout", "--detach", "--force", headSHA); err != nil {
+		return fmt.Errorf("checkout command planning HEAD: %w", err)
+	}
+	refs, err := git.Run(ctx, w.dir, "for-each-ref", "--format=%(refname)")
 	if err != nil {
-		return false, fmt.Errorf("inspect preserved command planning workspace: %w", err)
+		return fmt.Errorf("list command planning refs: %w", err)
 	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("preserved command planning workspace is not a directory")
+	for _, ref := range strings.Split(refs, "\n") {
+		if ref == "" {
+			continue
+		}
+		if _, err := git.Run(ctx, w.dir, "update-ref", "-d", ref); err != nil {
+			return fmt.Errorf("remove command planning ref %s: %w", ref, err)
+		}
 	}
-
-	expectedRoot, err := canonicalCommandPlanningPath(w.dir)
-	if err != nil {
-		return false, fmt.Errorf("resolve preserved command planning workspace: %w", err)
-	}
-	worktreeRoot, err := git.Run(ctx, w.dir, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return false, fmt.Errorf("inspect preserved command planning workspace: %w", err)
-	}
-	worktreeRoot, err = canonicalCommandPlanningPath(worktreeRoot)
-	if err != nil {
-		return false, fmt.Errorf("resolve preserved command planning worktree root: %w", err)
-	}
-	if worktreeRoot != expectedRoot {
-		return false, fmt.Errorf("refuse to adopt command planning workspace with root %q", worktreeRoot)
-	}
-
-	sourceCommonDir, err := commandPlanningCommonDir(ctx, w.sourceDir)
-	if err != nil {
-		return false, fmt.Errorf("inspect pipeline git common directory: %w", err)
-	}
-	plannerCommonDir, err := commandPlanningCommonDir(ctx, w.dir)
-	if err != nil {
-		return false, fmt.Errorf("inspect preserved planner git common directory: %w", err)
-	}
-	if plannerCommonDir != sourceCommonDir {
-		return false, fmt.Errorf("refuse to adopt command planning workspace from another repository")
-	}
-	return true, nil
+	return nil
 }
 
 func (w *CommandPlanningWorkspace) refresh(ctx context.Context, headSHA string) error {
 	if _, err := git.Run(ctx, w.dir, "checkout", "--detach", "--force", headSHA); err != nil {
 		return fmt.Errorf("refresh command planning workspace: %w", err)
 	}
-	if err := w.copyPreparedState(ctx); err != nil {
-		return fmt.Errorf("refresh prepared command planning workspace: %w", err)
+	if _, err := git.Run(ctx, w.dir, "clean", "-ffdx"); err != nil {
+		return fmt.Errorf("clean refreshed command planning workspace: %w", err)
 	}
 	w.headSHA = headSHA
 	return nil
 }
 
-func commandPlanningCommonDir(ctx context.Context, worktreeDir string) (string, error) {
-	commonDir, err := git.Run(ctx, worktreeDir, "rev-parse", "--git-common-dir")
+// Discard removes the workspace with a cleanup context independent of the
+// planner invocation. It remains usable after cancellation or inspection
+// timeout and forces the next Prepare call to create a fresh clone.
+func (w *CommandPlanningWorkspace) Discard() error {
+	ctx, cancel := context.WithTimeout(context.Background(), commandPlanningCleanupTimeout)
+	defer cancel()
+	return w.Close(ctx)
+}
+
+// Close removes the run-scoped planning clone. It is safe before Prepare and
+// after a successful close.
+func (w *CommandPlanningWorkspace) Close(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+	if err := w.removeLegacyWorktree(ctx); err != nil {
+		return err
+	}
+	permissionErr := makeCommandPlanningDirectoriesWritable(ctx, w.dir)
+	removeErr := os.RemoveAll(w.dir)
+	if removeErr == nil {
+		w.created = false
+		w.headSHA = ""
+	}
+	return errors.Join(permissionErr, removeErr)
+}
+
+func (w *CommandPlanningWorkspace) removeLegacyWorktree(ctx context.Context) error {
+	gitPath := filepath.Join(w.dir, ".git")
+	info, err := os.Lstat(gitPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect command planning Git metadata: %w", err)
+	}
+	if info.IsDir() {
+		return nil
+	}
+	sourceCommonDir, err := commandPlanningCommonDir(ctx, w.sourceDir)
+	if err != nil {
+		return fmt.Errorf("inspect pipeline Git common directory: %w", err)
+	}
+	plannerCommonDir, err := commandPlanningCommonDir(ctx, w.dir)
+	if err != nil {
+		return fmt.Errorf("inspect legacy planner Git common directory: %w", err)
+	}
+	if plannerCommonDir != sourceCommonDir {
+		return nil
+	}
+	if err := git.WorktreeRemove(ctx, w.sourceDir, w.dir); err != nil {
+		return fmt.Errorf("unregister legacy command planning worktree: %w", err)
+	}
+	return nil
+}
+
+func commandPlanningCommonDir(ctx context.Context, workDir string) (string, error) {
+	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
 	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeDir, commonDir)
+		commonDir = filepath.Join(workDir, commonDir)
 	}
-	return canonicalCommandPlanningPath(commonDir)
-}
-
-func canonicalCommandPlanningPath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
+	absolute, err := filepath.Abs(commonDir)
 	if err != nil {
 		return "", err
 	}
 	return filepath.EvalSymlinks(absolute)
 }
 
-func (w *CommandPlanningWorkspace) copyPreparedState(ctx context.Context) error {
-	if err := copyPreparedWorkspace(ctx, w.sourceDir, w.dir); err != nil {
-		return fmt.Errorf("copy prepared pipeline worktree: %w", err)
-	}
-	return nil
-}
-
-// Close removes the run-scoped planning worktree. It is safe before Prepare
-// and after a successful close.
-func (w *CommandPlanningWorkspace) Close(ctx context.Context) error {
-	if w == nil {
+func makeCommandPlanningDirectoriesWritable(ctx context.Context, root string) error {
+	if _, err := os.Lstat(root); os.IsNotExist(err) {
 		return nil
+	} else if err != nil {
+		return err
 	}
-	if !w.created {
-		adopted, err := w.adoptExisting(ctx)
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !adopted {
-			return nil
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		w.created = true
-	}
-	permissionErr := makePreparedDirectoriesWritable(ctx, w.dir)
-	worktreeErr := git.WorktreeRemove(ctx, w.sourceDir, w.dir)
-	removeErr := os.RemoveAll(w.dir)
-	if worktreeErr == nil {
-		w.created = false
-	}
-	return errors.Join(permissionErr, worktreeErr, removeErr)
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
 }
