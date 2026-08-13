@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -262,6 +264,93 @@ func TestExecutor_ResumeFatalReconcileErrorFailsRun(t *testing.T) {
 	}
 	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
 		t.Fatalf("recovered steps after fatal reconciliation = %+v", steps)
+	}
+}
+
+func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := newCommandPlanningRepo(t)
+	preparedDir := filepath.Join(workDir, "prepared-output")
+	if err := os.Mkdir(preparedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(preparedDir, "cache.bin"), []byte("before restart\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preRestart := NewCommandPlanningWorkspace(p, nil, run, repo, workDir)
+	plannerDir, err := preRestart.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "before restart\n")
+
+	if err := os.WriteFile(filepath.Join(preparedDir, "cache.bin"), []byte("after restart\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "next.txt"), []byte("advanced head\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commandPlanningGit(t, workDir, "add", "next.txt")
+	commandPlanningGit(t, workDir, "commit", "-m", "advance while parked")
+
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	gateResult, err := database.InsertStepResult(run.ID, types.StepRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(gateResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"waiting","action":"ask-user"}],"summary":"waiting"}`
+	if err := database.SetStepFindings(gateResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(gateResult.ID, 1, "initial", &findings, nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(gateResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepResult(run.ID, types.StepBuild); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gate := &reconcilingApprovalStep{name: types.StepRefresh}
+	gate.resolved.Store(true)
+	plannerRan := false
+	planningStep := &adaptiveCallStep{
+		name: types.StepBuild,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			prepared, err := sctx.CommandPlanning.Prepare(sctx.Ctx)
+			if err != nil {
+				return nil, err
+			}
+			if prepared != plannerDir {
+				t.Fatalf("prepared planner dir = %q, want preserved %q", prepared, plannerDir)
+			}
+			assertFileContent(t, filepath.Join(prepared, "next.txt"), "advanced head\n")
+			assertFileContent(t, filepath.Join(prepared, "prepared-output", "cache.bin"), "after restart\n")
+			plannerRan = true
+			return &StepOutcome{}, nil
+		},
+	}
+
+	executor := NewExecutor(database, p, nil, nil, []Step{gate, planningStep}, nil)
+	if err := executor.Resume(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if !plannerRan {
+		t.Fatal("recovered pipeline did not run command planning")
 	}
 }
 
