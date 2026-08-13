@@ -161,8 +161,18 @@ func (w *CommandPlanningWorkspace) copyPreparedState(ctx context.Context) error 
 // Close removes the run-scoped planning worktree. It is safe before Prepare
 // and after a successful close.
 func (w *CommandPlanningWorkspace) Close(ctx context.Context) error {
-	if w == nil || !w.created {
+	if w == nil {
 		return nil
+	}
+	if !w.created {
+		adopted, err := w.adoptExisting(ctx)
+		if err != nil {
+			return err
+		}
+		if !adopted {
+			return nil
+		}
+		w.created = true
 	}
 	permissionErr := makePreparedDirectoriesWritable(ctx, w.dir)
 	worktreeErr := git.WorktreeRemove(ctx, w.sourceDir, w.dir)
