@@ -27,7 +27,7 @@ What you do not get is PR automation and CI monitoring.
 
 | Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps |
 |---|---|---|---|---|
-| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
+| **PR** (create/adopt) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
 | **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same env vars | `az` CLI |
 | **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
 | **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
@@ -38,7 +38,7 @@ What you do not get is PR automation and CI monitoring.
 Once the host is wired up, `no-mistakes` can keep owning the branch after it
 pushes to the configured target:
 
-- create or update the PR automatically
+- create a PR or adopt and, when necessary, retarget an existing PR without replacing its body
 - keep polling hosted CI until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses
 - fetch failing job logs for the CI auto-fix loop
 - on GitHub, GitLab, and Azure DevOps, watch mergeability and fix merge conflicts when possible

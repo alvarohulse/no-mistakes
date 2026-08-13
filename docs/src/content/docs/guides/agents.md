@@ -8,7 +8,7 @@ It is not runner-free.
 Every validation run requires a supported native agent binary (including `agent: cursor`) or an explicit `acp:<target>` through `acpx`.
 The default `agent: auto` setting picks the first supported native agent and selects the registered `acp:cursor` target only when no native agent is runnable.
 
-The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, build detection, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
+The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, command planning, evidence testing, documentation, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
 A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
 If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
@@ -67,12 +67,12 @@ The optional trusted `hooks.post_worktree` post-worktree hook is different: it i
 | Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
 | Review | No | Requires agent judgment and structured findings. |
 | Build with `commands.build` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
-| Build without `commands.build` | No | Requires the agent to detect and run a meaningful build or compile command. |
+| Build without `commands.build` | No | Requires a read-only agent plan; the pipeline executes the selected build or compile command. |
 | Test with `commands.test` | No, as part of a full gate | The command is deterministic, but the gate refuses before steps start rather than presenting command-only validation as a complete pass. |
-| Test without `commands.test`, or evidence validation with user intent | No | Requires the agent to discover checks and gather end-to-end evidence. |
+| Test without `commands.test`, or evidence validation with user intent | No | Requires a read-only targeted-command plan plus end-to-end evidence gathering. |
 | Document | No | Requires the agent to discover and update documentation gaps. |
 | Lint with `commands.lint` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
-| Lint without `commands.lint` and all fix rounds | No | The document step performs the initial combined housekeeping pass, and an agent is still needed for fallback assessment or code changes. |
+| Lint without `commands.lint` and all fix rounds | No | Requires a read-only agent plan; the pipeline executes it and reruns it after any repair. |
 | Push, PR, and CI as part of a gate | No | They run only after the required validation steps, and PR or CI paths may invoke the agent themselves. |
 
 ### Antigravity and Gemini setups

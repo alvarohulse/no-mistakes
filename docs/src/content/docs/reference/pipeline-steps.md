@@ -10,6 +10,7 @@ intent → refresh → review → build → test → document → lint → push 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
+Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, and nullable exit code; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
@@ -27,10 +28,10 @@ This is best-effort context, and when available it is included in refresh fixes,
 - Uses run-supplied intent verbatim and skips transcript-based inference, even when `intent.enabled` is false
 - Runs transcript-based inference only when `intent.enabled` is true
 - Matches local agent transcripts against non-deleted changed files when present, falling back to all changed files for all-deletion diffs, may use the configured pipeline agent to disambiguate plausible matches, and summarizes the likely author intent with that agent
-- Stores the derived summary, source, session ID, and match score on the run
+- Stores the selected text and provenance for later prompts, and records the PR-facing result only on the Intent pipeline step as `{text, source, provided}`
 - Logs accepted candidate diagnostics, including source, session, CWD, score, confidence, overlap, decision, and acceptance reason
 - Logs the matched source, score, and sanitized inferred intent when a transcript matches
-- Skips instead of failing when disabled, no matching transcript is found, the diff is empty, extraction errors, or persistence fails
+- Records a structured absence reason when disabled, skipped, no matching transcript is found, the diff is empty, or extraction fails
 
 This step does not block the pipeline for missing transcripts, summarization that exceeds the five-minute extraction cap, or other extraction failures, which are reported as skipped outcomes.
 It can fail the run only if cleanup fails after the disambiguation agent leaves worktree side effects.
@@ -100,7 +101,7 @@ Compiles the changed production code before behavioral testing begins. [`command
 
 **Behavior:**
 - If `commands.build` is set, runs it visibly through the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) in the managed process group. A non-zero exit produces an actionable `error` finding with bounded compiler output; the complete output stays in the Build step log.
-- If `commands.build` is empty, asks the routed Build agent to inspect the repository, detect and run the appropriate build or compile command, and report only unresolved compilation findings. The agent must report at least one command it ran; an empty, missing, or malformed structured result parks instead of silently passing.
+- If `commands.build` is empty, asks the routed Build agent for one exact command in a read-only planning pass, executes and records that command itself, and parks when the planner returns no usable command. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 - Build agents are explicitly told not to run tests, linters, formatters, static analysis, or documentation work, except when static analysis or formatting is inseparable from the repository's canonical build command.
 
 **Approval:** objective compile failures use `action: auto-fix` and enter the normal fix loop while attempts remain. A build that cannot be established uses `action: ask-user` and parks for a decision. `action: no-op` findings are informational only.
@@ -117,7 +118,8 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 
 **Behavior:**
 - If `commands.test` is set in repo config: runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
-- If `commands.test` is empty, or user intent is available after the baseline command passes: the agent validates the change with the **smallest relevant** evidence-oriented tests or manual checks, returning structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). Both the normal evidence agent and the Test-repair agent are instructed not to run the complete repository test suite; a generic driver instruction asking for broad or full-suite confirmation does not override that product boundary. For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
+- If `commands.test` is empty, first asks the routed Test agent for one exact targeted command in a read-only planning pass, then executes and records it. After it passes, the agent gathers non-shell evidence and artifacts. A failure enters repair and the pipeline reruns the same planned command.
+- When user intent is available after a configured baseline command passes, the same evidence-oriented agent follow-up runs. Evidence agents return structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). Both evidence and repair agents are instructed not to run the complete repository test suite; a generic driver instruction asking for broad or full-suite confirmation does not override that product boundary. For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
 - "Do not run everything" is not "run nothing": when no targeted check can establish the intent, the agent must write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
 - The step records the exact tests and checks it exercised in a `tested` array, may include a short natural-language `testing_summary`, and includes an `artifacts` array for reviewer-visible evidence; `path` artifacts may be repository-relative paths or absolute paths under the temporary `no-mistakes-evidence/<runID>` directory, `url` artifacts must be externally visible, and `content` artifacts should be short logs or command output shown directly in the PR.
 - By default, evidence is stored under the temporary `no-mistakes-evidence/<runID>` directory. With `test.evidence.store_in_repo: true`, evidence is stored under `<test.evidence.dir>/<branch-slug>` inside the worktree, staged during push, and published with the branch. Unsafe, symlinked, or Git-ignored evidence directories fall back to temporary storage for that run.
@@ -140,7 +142,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Asks the agent to find every documentation gap, update docs or doc comments for all gaps it can resolve, verify its edits, and commit any documentation changes under the placement policy
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository
-- When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
+- Documentation and lint remain separate responsibilities; the Document prompt never runs linters or formatters
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
@@ -155,15 +157,14 @@ Runs linters and static analysis.
 
 **Behavior:**
 - If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
-- If `commands.lint` is empty: consumes lint-category findings from the document step's combined housekeeping pass, avoiding a second cold agent invocation. If no usable combined result exists, the lint step detects appropriate linters/formatters, applies safe fixes, reruns the relevant checks, commits any agent changes, and returns structured findings only for unresolved issues.
+- If `commands.lint` is empty: asks the routed Lint agent for one exact formatter, linter, or static-analysis command in a read-only planning pass, executes and records it, and parks when no meaningful command can be established. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 
 **Approval:** lint findings with `action: ask-user` pause for approval.
 `action: auto-fix` findings stay eligible for the fix loop when `commands.lint` is configured.
 `action: no-op` findings are informational only.
-Combined-pass lint findings use the same gate: `error` and `warning` findings pause for a decision, while `info` findings do not.
 
 **Auto-fix:** when `commands.lint` is configured, the lint step follows the same pattern as test - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then lint re-runs.
-When `commands.lint` is empty, unresolved findings from the combined pass pause for approval instead of starting another automatic lint/fix loop, because the agent already attempted safe fixes during housekeeping.
+Unconfigured and configured lint failures use the same repair loop and command rerun behavior.
 
 **Default auto-fix limit:** `3`.
 
@@ -196,7 +197,7 @@ This step never requires approval - it runs automatically after review, build, t
 
 ## PR
 
-Creates or updates a pull request.
+Creates a pull request or adopts the existing one for the branch.
 
 **Skipped when:**
 - The branch is the default branch
@@ -209,15 +210,15 @@ Creates or updates a pull request.
 
 **Behavior:**
 - Checks for an existing PR on the branch
-- If one exists, updates it. If not, creates a new one.
+- If one exists, discovers it and may retarget its base, but never replaces its body. If none exists, creates a new one.
 - Targets the run's `--stacked-on` branch when set; otherwise targets the repository default branch
 - If an existing PR targets a different base, retargets it once during the update; matching bases are not sent again
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
 - For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
 - PR title: agent-generated from the final branch delta with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. If drafting fails, the fallback uses the neutral title `chore: update pull request` rather than inferring scope from earlier commits.
-- The PR stage exclusively owns the complete branch-scope description. It drafts `## What Changed` from the actual final diff after local mutating stages finish, and its fallback lists the final changed paths and statuses.
-- PR body includes a `## Intent` section when user intent is available, an operator-supplied `## Notes` section when `axi run --pr-note` or `--pr-note-file` was used, the final-diff `## What Changed`, and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections from recorded step results and rounds. Only `## What Changed` describes the complete final branch scope; the deterministic sections remain evidence for the commit each step inspected. Auto-fix results in `## Pipeline` render as an issue → fix → verification narrative using captured fix summaries, re-check success text, and any still-open findings; Test details also list the recorded commands.
-- Pipeline entries label `refresh` as `Rebase` or `Merge`. A compact attribution table lists each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents. Unreported nested attribution renders as `-`, while a supported stream that observed no nested agents renders as `none`. When a machine-local config override (a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry) is active, the Pipeline section adds a compact `Config sources:` line of generic source kinds and short digest prefixes, never machine paths or override keys.
+- One PR agent invocation receives the explicit or inferred intent plus the final diff and returns separate heading-free `summary` and `what_changed` GFM fragments with the title. Code identifiers must use backticks; the renderer inserts the section headings exactly once.
+- The built-in PR body includes `## Summary`, optional operator-supplied `## Notes`, final-diff `## What Changed`, and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections. PR-facing intent provenance lives on the Intent pipeline result instead of a duplicate body section. Only `## What Changed` describes the complete final branch scope; deterministic sections remain evidence for the commit each step inspected.
+- Pipeline entries label `refresh` as `Rebase` or `Merge`, render stored command/evidence details for successful steps, and omit PR and CI because those steps are incomplete when the body is created. Contract v3 also supplies one telemetry record per invocation/round: agent, model, provider, start time, duration, nullable token/cache meters, nested-agent observations, and nullable CLI-reported USD cost. Formatter layout and API-price estimation remain formatter-owned.
 - Generated PR bodies are capped at 63,488 bytes, leaving a 2 KB safety buffer below GitHub's 65,536-character body limit.
 - Under body caps, the attribution table is removed as a complete unit before older Pipeline update rounds are omitted at clean boundaries. The newest update is kept when possible, and omission or truncation is marked explicitly.
 - Intent, `## What Changed`, risk, and testing sections are kept ahead of Pipeline history; if those sections or the newest Pipeline update are still too large, the PR step truncates at line or section boundaries and adds an explicit marker.
