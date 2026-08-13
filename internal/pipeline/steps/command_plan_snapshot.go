@@ -14,15 +14,16 @@ import (
 )
 
 type commandPlanningSnapshot struct {
-	headSHA   string
-	headRef   string
-	status    string
-	indexTree string
-	indexPath string
-	indexMode os.FileMode
-	indexData []byte
-	backupDir string
-	files     map[string]commandPlanningFile
+	headSHA     string
+	headRef     string
+	status      string
+	indexTree   string
+	indexPath   string
+	indexMode   os.FileMode
+	indexData   []byte
+	backupDir   string
+	files       map[string]commandPlanningFile
+	directories map[string]os.FileMode
 }
 
 type commandPlanningFile struct {
@@ -61,13 +62,18 @@ func readCommandPlanningSnapshot(ctx context.Context, workDir string, backup boo
 	if err != nil {
 		return nil, err
 	}
+	directories, err := commandPlanningDirectoryModes(ctx, workDir)
+	if err != nil {
+		return nil, err
+	}
 
 	snapshot := &commandPlanningSnapshot{
-		headSHA:   headSHA,
-		headRef:   headRef,
-		status:    status,
-		indexTree: indexTree,
-		files:     make(map[string]commandPlanningFile, len(paths)),
+		headSHA:     headSHA,
+		headRef:     headRef,
+		status:      status,
+		indexTree:   indexTree,
+		files:       make(map[string]commandPlanningFile, len(paths)),
+		directories: directories,
 	}
 	if backup {
 		snapshot.backupDir, err = os.MkdirTemp("", "nm-command-plan-snapshot-*")
@@ -115,12 +121,17 @@ func (s *commandPlanningSnapshot) captureIndex(ctx context.Context, workDir stri
 }
 
 func (s *commandPlanningSnapshot) equal(other *commandPlanningSnapshot) bool {
-	if s == nil || other == nil || s.headSHA != other.headSHA || s.headRef != other.headRef || s.status != other.status || s.indexTree != other.indexTree || len(s.files) != len(other.files) {
+	if s == nil || other == nil || s.headSHA != other.headSHA || s.headRef != other.headRef || s.status != other.status || s.indexTree != other.indexTree || len(s.files) != len(other.files) || len(s.directories) != len(other.directories) {
 		return false
 	}
 	for path, expected := range s.files {
 		actual, ok := other.files[path]
 		if !ok || expected != actual {
+			return false
+		}
+	}
+	for path, expected := range s.directories {
+		if actual, ok := other.directories[path]; !ok || expected != actual {
 			return false
 		}
 	}
@@ -143,6 +154,9 @@ func (s *commandPlanningSnapshot) restore(ctx context.Context, workDir string) e
 			return fmt.Errorf("restore planning branch HEAD: %w", err)
 		}
 	}
+	if err := makeCommandPlanningDirectoriesWritable(ctx, workDir); err != nil {
+		return fmt.Errorf("prepare planner-created files for removal: %w", err)
+	}
 	if _, err := git.Run(ctx, workDir, "clean", "-ffdx"); err != nil {
 		return fmt.Errorf("remove planner-created files: %w", err)
 	}
@@ -162,6 +176,30 @@ func (s *commandPlanningSnapshot) restore(ctx context.Context, workDir string) e
 			return err
 		}
 	}
+	directories := make([]string, 0, len(s.directories))
+	for path := range s.directories {
+		directories = append(directories, path)
+	}
+	sort.Strings(directories)
+	for _, path := range directories {
+		fullPath, err := commandPlanningPath(workDir, path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(fullPath, 0o700); err != nil {
+			return fmt.Errorf("restore snapshot directory %s: %w", path, err)
+		}
+	}
+	for index := len(directories) - 1; index >= 0; index-- {
+		path := directories[index]
+		fullPath, err := commandPlanningPath(workDir, path)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(fullPath, s.directories[path].Perm()); err != nil {
+			return fmt.Errorf("restore snapshot directory mode %s: %w", path, err)
+		}
+	}
 	return nil
 }
 
@@ -178,6 +216,12 @@ func (s *commandPlanningSnapshot) restoreFile(ctx context.Context, workDir, path
 	}
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 		return fmt.Errorf("create parent for restored path %s: %w", path, err)
+	}
+	if file.mode.IsDir() {
+		if err := os.Mkdir(fullPath, 0o700); err != nil {
+			return fmt.Errorf("restore snapshot directory %s: %w", path, err)
+		}
+		return nil
 	}
 	if file.mode&os.ModeSymlink != 0 {
 		if err := os.Symlink(file.linkTarget, fullPath); err != nil {
@@ -206,8 +250,8 @@ func commandPlanningMutablePaths(ctx context.Context, workDir string) ([]string,
 	commands := [][]string{
 		{"diff", "--name-only", "-z"},
 		{"diff", "--cached", "--name-only", "-z"},
-		{"ls-files", "--others", "--exclude-standard", "-z"},
-		{"ls-files", "--others", "--ignored", "--exclude-standard", "-z"},
+		{"ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "-z"},
+		{"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"},
 	}
 	for _, args := range commands {
 		output, err := git.Run(ctx, workDir, args...)
@@ -216,7 +260,9 @@ func commandPlanningMutablePaths(ctx context.Context, workDir string) ([]string,
 		}
 		for _, path := range strings.Split(output, "\x00") {
 			if path != "" {
-				paths[path] = struct{}{}
+				if err := addCommandPlanningPath(workDir, strings.TrimSuffix(path, "/"), paths); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -226,6 +272,86 @@ func commandPlanningMutablePaths(ctx context.Context, workDir string) ([]string,
 	}
 	sort.Strings(ordered)
 	return ordered, nil
+}
+
+func addCommandPlanningPath(workDir, path string, paths map[string]struct{}) error {
+	fullPath, err := commandPlanningPath(workDir, path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(fullPath)
+	if os.IsNotExist(err) {
+		paths[path] = struct{}{}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect mutable path %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		paths[path] = struct{}{}
+		return nil
+	}
+	return filepath.WalkDir(fullPath, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(workDir, current)
+		if err != nil {
+			return err
+		}
+		paths[filepath.ToSlash(relative)] = struct{}{}
+		return nil
+	})
+}
+
+func commandPlanningDirectoryModes(ctx context.Context, workDir string) (map[string]os.FileMode, error) {
+	modes := make(map[string]os.FileMode)
+	err := filepath.WalkDir(workDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == filepath.Join(workDir, ".git") && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		if path == workDir || !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(workDir, path)
+		if err != nil {
+			return err
+		}
+		modes[filepath.ToSlash(relative)] = info.Mode()
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect command-planning directory modes: %w", err)
+	}
+	return modes, nil
+}
+
+func makeCommandPlanningDirectoriesWritable(ctx context.Context, workDir string) error {
+	return filepath.WalkDir(workDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == filepath.Join(workDir, ".git") && entry.IsDir() {
+			return filepath.SkipDir
+		}
+		if path != workDir && entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
 }
 
 func captureCommandPlanningFile(ctx context.Context, workDir, backupDir, path string) (commandPlanningFile, error) {
@@ -242,6 +368,8 @@ func captureCommandPlanningFile(ctx context.Context, workDir, backupDir, path st
 	}
 	file := commandPlanningFile{exists: true, mode: info.Mode()}
 	switch {
+	case info.IsDir():
+		return file, nil
 	case info.Mode().IsRegular():
 		file.digest, err = digestCommandPlanningFile(ctx, fullPath)
 		if err == nil && backupDir != "" {
