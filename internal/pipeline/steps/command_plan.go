@@ -37,6 +37,14 @@ func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task s
 			sctx.CommandPlanning.Discard(),
 		)
 	}
+	sourceBefore, err := captureCommandPlanningSource(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return "", errors.Join(
+			fmt.Errorf("snapshot pipeline worktree before %s command planning: %w", step, err),
+			sctx.CommandPlanning.Discard(),
+		)
+	}
+	defer sourceBefore.Close()
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
 		Prompt: fmt.Sprintf(`Select the exact shell command the %s pipeline step should execute.
@@ -57,6 +65,7 @@ Rules:
 - Return JSON containing only a single "command" string.
 - Return an empty command only when no meaningful %s command exists.%s%s`, step.DisplayName(sctx.Run.RefreshStrategy), sctx.Run.Branch, baseSHA, sctx.Run.HeadSHA, task, step, userIntentPromptSection(sctx), configuredPromptSection(sctx, step)),
 		CWD:        plannerDir,
+		Env:        append(append([]string(nil), sctx.Env...), pipeline.CommandPlanningGitEnv()...),
 		JSONSchema: commandPlanSchema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    string(step) + "-plan",
@@ -67,11 +76,26 @@ Rules:
 	integrityCtx, cancelIntegrity := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancelIntegrity()
 	plannerAfter, inspectErr := inspectCommandPlanningFingerprint(integrityCtx, plannerDir)
-	if inspectErr != nil {
-		integrityErr := errors.Join(
-			fmt.Errorf("%s command planner violated the read-only pass; integrity inspection failed: %w", step, inspectErr),
-			sctx.CommandPlanning.Discard(),
-		)
+	sourceChanged, sourceInspectErr := sourceBefore.Changed(integrityCtx)
+	sourceViolation := sourceInspectErr != nil || sourceChanged
+	var sourceRestoreErr error
+	if sourceViolation {
+		sourceRestoreErr = sourceBefore.Restore()
+	}
+	if inspectErr != nil || sourceViolation {
+		var integrityErr error
+		if inspectErr != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("%s command planner violated the read-only pass; planner integrity inspection failed: %w", step, inspectErr))
+		}
+		if sourceInspectErr != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("%s command planner violated the read-only pass; pipeline worktree integrity inspection failed: %w", step, sourceInspectErr))
+		} else if sourceChanged {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("%s command planner modified the pipeline worktree during a read-only pass", step))
+		}
+		if sourceRestoreErr != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("restore pipeline worktree after %s command planning: %w", step, sourceRestoreErr))
+		}
+		integrityErr = errors.Join(integrityErr, sctx.CommandPlanning.Discard())
 		if err != nil {
 			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
 		}

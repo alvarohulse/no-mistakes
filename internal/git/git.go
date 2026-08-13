@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +41,24 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	return runInDir(ctx, dir, args...)
 }
 
+// RunWithEnv executes Git with extra environment entries appended after the
+// process environment, so explicit caller values win. It preserves Run's
+// bare-repository handling.
+func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnv(ctx, dir, extraEnv, args...)
+}
+
+// RunWithEnvInput is RunWithEnv with stdin supplied by the caller.
+func RunWithEnvInput(ctx context.Context, dir string, extraEnv []string, input []byte, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnvInput(ctx, dir, extraEnv, input, args...)
+}
+
 // RunWithIndex executes Git with indexFile as its index without changing the
 // repository's real index. Callers use this for read-only working-tree
 // snapshots that need Git's normal staging and rename semantics.
@@ -68,9 +87,16 @@ func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 // runInDirEnv is runInDir with extra environment variables appended (last wins)
 // so callers can redirect GIT_INDEX_FILE / GIT_WORK_TREE for scratch operations.
 func runInDirEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	return runInDirEnvInput(ctx, dir, extraEnv, nil, args...)
+}
+
+func runInDirEnvInput(ctx context.Context, dir string, extraEnv []string, input []byte, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(NonInteractiveEnv(dir), extraEnv...)
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {

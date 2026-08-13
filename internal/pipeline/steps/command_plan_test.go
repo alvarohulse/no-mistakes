@@ -371,6 +371,79 @@ func TestPlanPipelineCommandDiscardsWorktreeMutation(t *testing.T) {
 	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "feature code\n")
 }
 
+func TestPlanPipelineCommandRestoresDirectSourceMutation(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("planner bypass\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want direct-source read-only violation", err)
+	}
+	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "feature code\n")
+}
+
+func TestPlanPipelineCommandRestoresHiddenDirtySourceMutation(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "update-index", "--assume-unchanged", "feature.txt")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("prepared hidden change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexFlags := gitCmd(t, dir, "ls-files", "-v", "-z")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("planner bypass\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want hidden direct-source read-only violation", err)
+	}
+	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "prepared hidden change\n")
+	if got := gitCmd(t, dir, "ls-files", "-v", "-z"); got != indexFlags {
+		t.Fatalf("source index flags = %q, want %q", got, indexFlags)
+	}
+}
+
+func TestPlanPipelineCommandPreservesConcurrentSharedGitState(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if _, err := gitutil.Run(ctx, dir, "branch", "concurrent-update", "HEAD"); err != nil {
+				return nil, err
+			}
+			if _, err := gitutil.Run(ctx, dir, "config", "--local", "concurrent.preserved", "true"); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err != nil {
+		t.Fatalf("planPipelineCommand() error = %v, want concurrent shared state preserved", err)
+	}
+	if got := gitCmd(t, dir, "config", "--local", "--get", "concurrent.preserved"); got != "true" {
+		t.Fatalf("concurrent config = %q, want true", got)
+	}
+	if _, err := gitutil.Run(context.Background(), dir, "show-ref", "--verify", "refs/heads/concurrent-update"); err != nil {
+		t.Fatalf("concurrent ref was removed: %v", err)
+	}
+}
+
 func TestPlanPipelineCommandCancellationUsesIndependentCleanup(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -50,7 +50,7 @@ func (w *CommandPlanningWorkspace) Prepare(ctx context.Context) (string, error) 
 	if w == nil {
 		return "", fmt.Errorf("command planning workspace is unavailable")
 	}
-	headSHA, err := git.Run(ctx, w.sourceDir, "rev-parse", "HEAD")
+	headSHA, err := runIsolatedCommandPlanningGit(ctx, w.sourceDir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("inspect pipeline HEAD for command planning: %w", err)
 	}
@@ -87,7 +87,7 @@ func (w *CommandPlanningWorkspace) Prepare(ctx context.Context) (string, error) 
 		return "", fmt.Errorf("claim command planning workspace path: %w", err)
 	}
 	w.ownsPath = true
-	if _, err := git.Run(ctx, w.sourceDir, "clone", "--origin=origin", "--shared", "--no-checkout", "--no-tags", w.sourceDir, w.dir); err != nil {
+	if _, err := runCommandPlanningGitWithEmptyHooks(ctx, w.sourceDir, "clone", "--origin=origin", "--shared", "--no-checkout", "--no-tags", w.sourceDir, w.dir); err != nil {
 		return "", errors.Join(fmt.Errorf("create command planning workspace: %w", err), w.Discard())
 	}
 	if err := w.writeOwnershipMarker(ctx); err != nil {
@@ -102,13 +102,13 @@ func (w *CommandPlanningWorkspace) Prepare(ctx context.Context) (string, error) 
 }
 
 func (w *CommandPlanningWorkspace) initialize(ctx context.Context, headSHA string) error {
-	if _, err := git.Run(ctx, w.dir, "remote", "remove", "origin"); err != nil {
+	if _, err := runCommandPlanningGitWithEmptyHooks(ctx, w.dir, "remote", "remove", "origin"); err != nil {
 		return fmt.Errorf("remove command planning source remote: %w", err)
 	}
 	if _, err := runCommandPlanningGitWithEmptyHooks(ctx, w.dir, "checkout", "--detach", "--force", headSHA); err != nil {
 		return fmt.Errorf("checkout command planning HEAD: %w", err)
 	}
-	refs, err := git.Run(ctx, w.dir, "for-each-ref", "--format=%(refname)")
+	refs, err := runIsolatedCommandPlanningGit(ctx, w.dir, "for-each-ref", "--format=%(refname)")
 	if err != nil {
 		return fmt.Errorf("list command planning refs: %w", err)
 	}
@@ -116,7 +116,7 @@ func (w *CommandPlanningWorkspace) initialize(ctx context.Context, headSHA strin
 		if ref == "" {
 			continue
 		}
-		if _, err := git.Run(ctx, w.dir, "update-ref", "-d", ref); err != nil {
+		if _, err := runCommandPlanningGitWithEmptyHooks(ctx, w.dir, "update-ref", "-d", ref); err != nil {
 			return fmt.Errorf("remove command planning ref %s: %w", ref, err)
 		}
 	}
@@ -124,7 +124,7 @@ func (w *CommandPlanningWorkspace) initialize(ctx context.Context, headSHA strin
 		return err
 	}
 	hooksDir := commandPlanningHooksDir(w.dir)
-	if _, err := git.Run(ctx, w.dir, "config", "--local", "core.hooksPath", hooksDir); err != nil {
+	if _, err := runIsolatedCommandPlanningGit(ctx, w.dir, "config", "--local", "core.hooksPath", hooksDir); err != nil {
 		return fmt.Errorf("isolate command planning Git hooks: %w", err)
 	}
 	return nil
@@ -134,7 +134,7 @@ func (w *CommandPlanningWorkspace) refresh(ctx context.Context, headSHA string) 
 	if _, err := runCommandPlanningGitWithEmptyHooks(ctx, w.dir, "checkout", "--detach", "--force", headSHA); err != nil {
 		return fmt.Errorf("refresh command planning workspace: %w", err)
 	}
-	if _, err := git.Run(ctx, w.dir, "clean", "-ffdx"); err != nil {
+	if _, err := runIsolatedCommandPlanningGit(ctx, w.dir, "clean", "-ffdx"); err != nil {
 		return fmt.Errorf("clean refreshed command planning workspace: %w", err)
 	}
 	w.headSHA = headSHA
@@ -211,7 +211,7 @@ func (w *CommandPlanningWorkspace) removeLegacyWorktree(ctx context.Context) (bo
 	if plannerCommonDir != sourceCommonDir {
 		return false, fmt.Errorf("refuse to remove command planning path linked to another repository")
 	}
-	if err := git.WorktreeRemove(ctx, w.sourceDir, w.dir); err != nil {
+	if _, err := runIsolatedCommandPlanningGit(ctx, w.sourceDir, "worktree", "remove", "--force", w.dir); err != nil {
 		return false, fmt.Errorf("unregister legacy command planning worktree: %w", err)
 	}
 	return true, nil
@@ -222,7 +222,7 @@ func (w *CommandPlanningWorkspace) validateReusable(ctx context.Context) error {
 		return err
 	}
 	hooksDir := commandPlanningHooksDir(w.dir)
-	configuredHooksDir, err := git.Run(ctx, w.dir, "config", "--local", "--get", "core.hooksPath")
+	configuredHooksDir, err := runIsolatedCommandPlanningGit(ctx, w.dir, "config", "--local", "--get", "core.hooksPath")
 	if err != nil {
 		return fmt.Errorf("inspect command planning hooks configuration: %w", err)
 	}
@@ -297,7 +297,7 @@ func (w *CommandPlanningWorkspace) ownershipMarkerPath() string {
 }
 
 func commandPlanningCommonDir(ctx context.Context, workDir string) (string, error) {
-	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
+	commonDir, err := runIsolatedCommandPlanningGit(ctx, workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
@@ -337,7 +337,23 @@ func runCommandPlanningGitWithEmptyHooks(ctx context.Context, workDir string, ar
 	}
 	defer os.RemoveAll(hooksDir)
 	gitArgs := append([]string{"-c", "core.hooksPath=" + hooksDir}, args...)
-	return git.Run(ctx, workDir, gitArgs...)
+	return git.RunWithEnv(ctx, workDir, CommandPlanningGitEnv(), gitArgs...)
+}
+
+func runIsolatedCommandPlanningGit(ctx context.Context, workDir string, args ...string) (string, error) {
+	return git.RunWithEnv(ctx, workDir, CommandPlanningGitEnv(), args...)
+}
+
+// CommandPlanningGitEnv removes ambient Git configuration from command
+// planning controller and agent subprocesses while preserving repository-local
+// config in the isolated clone.
+func CommandPlanningGitEnv() []string {
+	return []string{
+		"GIT_CONFIG_COUNT=0",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+	}
 }
 
 func makeCommandPlanningDirectoriesWritable(ctx context.Context, root string) error {
