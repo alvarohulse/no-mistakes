@@ -595,6 +595,134 @@ func TestCommandPlanningIgnoredSnapshotSkipsLargeRootWithinBudget(t *testing.T) 
 	}
 }
 
+func TestCommandPlanningIgnoredSnapshotBoundsDiscoveryOutput(t *testing.T) {
+	dir, _, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 256 {
+		name := fmt.Sprintf("ignored-%03d-with-an-intentionally-long-discovery-name.log", i)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("ignored\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	output, truncated, err := gitutil.RunWithEnvOutputLimit(context.Background(), dir, pipeline.CommandPlanningGitEnv(), commandPlanningIgnoredDiscoveryMaxBytes,
+		"status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=normal", "--ignore-submodules=none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(output) != commandPlanningIgnoredDiscoveryMaxBytes {
+		t.Fatalf("ignored discovery output = %d bytes/truncated=%t, want capped at %d", len(output), truncated, commandPlanningIgnoredDiscoveryMaxBytes)
+	}
+
+	snapshot, err := captureCommandPlanningIgnoredSnapshot(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.truncated {
+		t.Fatal("ignored snapshot did not retain discovery truncation")
+	}
+	for _, root := range snapshot.roots {
+		if !strings.HasSuffix(root.path, ".log") {
+			t.Fatalf("ignored snapshot parsed an incomplete NUL record as %q", root.path)
+		}
+	}
+}
+
+func TestPlanPipelineCommandRestoresSmallIgnoredStateAfterLargeCreatedRoot(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("a-cache/\nz-state/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore planner state")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	stateDir := filepath.Join(dir, "z-state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(stateDir, "state.txt")
+	if err := os.WriteFile(statePath, []byte("prepared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(dir, "a-cache")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.Mkdir(cacheDir, 0o755); err != nil {
+				return nil, err
+			}
+			for i := range 256 {
+				path := filepath.Join(cacheDir, fmt.Sprintf("cache-%03d.bin", i))
+				if err := os.WriteFile(path, []byte("cache\n"), 0o644); err != nil {
+					return nil, err
+				}
+			}
+			if err := os.WriteFile(statePath, []byte("planner rewrite\n"), 0o600); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want ignored-state read-only violation", err)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("large planner-created ignored root survived restore: %v", err)
+	}
+	assertCommandPlanningFileContent(t, statePath, "prepared\n")
+}
+
+func TestPlanPipelineCommandRestoresSmallIgnoredStateAfterExistingLargeRootFailure(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("a-cache/\nz-state/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore planner state")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	cacheDir := filepath.Join(dir, "a-cache")
+	if err := os.Mkdir(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 256 {
+		path := filepath.Join(cacheDir, fmt.Sprintf("cache-%03d.bin", i))
+		if err := os.WriteFile(path, []byte("cache\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stateDir := filepath.Join(dir, "z-state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(stateDir, "state.txt")
+	if err := os.WriteFile(statePath, []byte("prepared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.RemoveAll(cacheDir); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(statePath, []byte("planner rewrite\n"), 0o600); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepBuild, "Select build.")
+	if err == nil || !strings.Contains(err.Error(), "a-cache exceeded the restore budget") {
+		t.Fatalf("planPipelineCommand() error = %v, want oversized existing-root restore failure", err)
+	}
+	assertCommandPlanningFileContent(t, statePath, "prepared\n")
+}
+
 func TestPlanPipelineCommandPreservesConcurrentSharedGitState(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{

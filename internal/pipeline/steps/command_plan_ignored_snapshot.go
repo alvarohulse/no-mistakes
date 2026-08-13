@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	commandPlanningIgnoredDiscoveryMaxBytes = 8 * 1024
 	commandPlanningIgnoredMaxRoots          = 64
 	commandPlanningIgnoredMaxEntries        = 512
 	commandPlanningIgnoredMaxEntriesPerRoot = 128
@@ -64,13 +65,17 @@ func captureCommandPlanningIgnoredSnapshot(ctx context.Context, workDir string) 
 }
 
 func commandPlanningIgnoredRoots(ctx context.Context, workDir string) ([]string, bool, error) {
-	output, err := git.RunWithEnv(ctx, workDir, pipeline.CommandPlanningGitEnv(),
+	output, outputTruncated, err := git.RunWithEnvOutputLimit(ctx, workDir, pipeline.CommandPlanningGitEnv(), commandPlanningIgnoredDiscoveryMaxBytes,
 		"status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=normal", "--ignore-submodules=none")
 	if err != nil {
 		return nil, false, fmt.Errorf("list ignored command planning source paths: %w", err)
 	}
 	paths := make([]string, 0)
-	for _, record := range strings.Split(output, "\x00") {
+	records := strings.Split(output, "\x00")
+	if outputTruncated && !strings.HasSuffix(output, "\x00") {
+		records = records[:len(records)-1]
+	}
+	for _, record := range records {
 		if !strings.HasPrefix(record, "!! ") {
 			continue
 		}
@@ -83,7 +88,7 @@ func commandPlanningIgnoredRoots(ctx context.Context, workDir string) ([]string,
 	sort.Strings(paths)
 	paths = compactCommandPlanningIgnoredRoots(paths)
 	if len(paths) <= commandPlanningIgnoredMaxRoots {
-		return paths, false, nil
+		return paths, outputTruncated, nil
 	}
 	return paths[:commandPlanningIgnoredMaxRoots], true, nil
 }
@@ -267,20 +272,33 @@ func (s commandPlanningIgnoredSnapshot) restore(ctx context.Context, workDir str
 		ordered = append(ordered, path)
 	}
 	sort.Strings(ordered)
+	var restoreErr error
 	for _, path := range ordered {
 		beforeRoot, hadBefore := before[path]
 		afterRoot, hasAfter := after[path]
+		if !hadBefore && hasAfter && afterRoot.skipped {
+			cleanPath, err := commandPlanningTrackedPath(path)
+			if err != nil {
+				restoreErr = errors.Join(restoreErr, err)
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(workDir, cleanPath)); err != nil {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("remove new oversized ignored command planning source root %s: %w", path, err))
+			}
+			continue
+		}
 		if (hadBefore && beforeRoot.skipped) || (hasAfter && afterRoot.skipped) {
 			if hadBefore && hasAfter && beforeRoot.skipped && afterRoot.skipped {
 				continue
 			}
-			return fmt.Errorf("ignored command planning source root %s exceeded the restore budget", path)
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("ignored command planning source root %s exceeded the restore budget", path))
+			continue
 		}
 		if err := restoreCommandPlanningIgnoredRoot(workDir, beforeRoot, hadBefore, afterRoot, hasAfter); err != nil {
-			return err
+			restoreErr = errors.Join(restoreErr, err)
 		}
 	}
-	return nil
+	return restoreErr
 }
 
 func restoreCommandPlanningIgnoredRoot(workDir string, before commandPlanningIgnoredRoot, hadBefore bool, after commandPlanningIgnoredRoot, hasAfter bool) error {

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,6 +103,27 @@ func TestRunWithIndexDoesNotModifyRepositoryIndex(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("repository index changed: %q", got)
+	}
+}
+
+func TestRunWithEnvOutputLimitBoundsGitOutput(t *testing.T) {
+	dir := initTestRepo(t)
+	writeFile(t, filepath.Join(dir, ".gitignore"), "*.log\n")
+	for i := range 64 {
+		writeFile(t, filepath.Join(dir, fmt.Sprintf("ignored-%03d-with-a-long-name.log", i)), "ignored\n")
+	}
+
+	const limit = 128
+	output, truncated, err := RunWithEnvOutputLimit(context.Background(), dir, nil, limit,
+		"status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=normal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("RunWithEnvOutputLimit() did not report truncated output")
+	}
+	if len(output) != limit {
+		t.Fatalf("bounded output length = %d, want %d", len(output), limit)
 	}
 }
 
