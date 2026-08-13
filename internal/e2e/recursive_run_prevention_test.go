@@ -251,6 +251,7 @@ case "$prompt" in
         } >>"$NM_INCIDENT_LOG" 2>&1
       }
       run_id=$(basename "$PWD")
+      run_id=${run_id%-command-plan}
       run_attempt readonly-status no-mistakes axi status --run "$run_id"
       run_attempt readonly-logs no-mistakes axi logs --run "$run_id" --step document
       run_attempt readonly-help no-mistakes axi run --help
