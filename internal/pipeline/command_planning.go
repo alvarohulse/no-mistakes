@@ -122,7 +122,7 @@ func (w *CommandPlanningWorkspace) adoptExisting(ctx context.Context) (bool, err
 }
 
 func (w *CommandPlanningWorkspace) refresh(ctx context.Context, headSHA string) error {
-	if _, err := git.Run(ctx, w.dir, "reset", "--hard", headSHA); err != nil {
+	if _, err := git.Run(ctx, w.dir, "checkout", "--detach", "--force", headSHA); err != nil {
 		return fmt.Errorf("refresh command planning workspace: %w", err)
 	}
 	if err := w.copyPreparedState(ctx); err != nil {
