@@ -144,8 +144,8 @@ func TestLintStep_NoConfiguredLintRejectsPlannerWorktreeMutation(t *testing.T) {
 
 	ag := &mockAgent{
 		name: "test",
-		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
-			if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
 				return nil, err
 			}
 			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
@@ -157,7 +157,7 @@ func TestLintStep_NoConfiguredLintRejectsPlannerWorktreeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "modified the worktree") {
+	if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "read-only") {
 		t.Fatalf("outcome = %+v, want planner mutation decision gate", outcome)
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
