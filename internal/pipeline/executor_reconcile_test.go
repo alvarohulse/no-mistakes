@@ -284,6 +284,7 @@ func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "before restart\n")
+	commandPlanningGit(t, plannerDir, "checkout", "-b", "planner-mutation")
 
 	if err := os.WriteFile(filepath.Join(preparedDir, "cache.bin"), []byte("after restart\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -340,6 +341,9 @@ func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
 			}
 			assertFileContent(t, filepath.Join(prepared, "next.txt"), "advanced head\n")
 			assertFileContent(t, filepath.Join(prepared, "prepared-output", "cache.bin"), "after restart\n")
+			if branch := commandPlanningGit(t, prepared, "rev-parse", "--abbrev-ref", "HEAD"); branch != "HEAD" {
+				t.Fatalf("adopted planner branch = %q, want detached HEAD", branch)
+			}
 			plannerRan = true
 			return &StepOutcome{}, nil
 		},
