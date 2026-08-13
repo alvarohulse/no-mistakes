@@ -258,15 +258,46 @@ func TestPlanPipelineCommandRestoresExistingIgnoredMutation(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("prepared ignored\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	nestedGitDir := filepath.Join(cacheDir, ".git")
+	if err := os.Mkdir(nestedGitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourceMetadataPath := filepath.Join(nestedGitDir, "config")
+	if err := os.WriteFile(sourceMetadataPath, []byte("prepared metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(cacheDir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(cacheDir, 0o700) })
+	}
 	plannerPath := ""
+	plannerMetadataPath := ""
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			plannerPath = filepath.Join(opts.CWD, "prepared-cache", "cache.bin")
+			plannerCacheDir := filepath.Join(opts.CWD, "prepared-cache")
+			plannerPath = filepath.Join(plannerCacheDir, "cache.bin")
+			plannerMetadataPath = filepath.Join(opts.CWD, "prepared-cache", ".git", "config")
+			if runtime.GOOS != "windows" {
+				if err := os.Chmod(cacheDir, 0o700); err != nil {
+					return nil, err
+				}
+				if err := os.Chmod(plannerCacheDir, 0o700); err != nil {
+					return nil, err
+				}
+			}
 			if err := os.WriteFile(sourcePath, []byte("source mutation\n"), 0o644); err != nil {
 				return nil, err
 			}
+			if err := os.WriteFile(sourceMetadataPath, []byte("source metadata mutation\n"), 0o600); err != nil {
+				return nil, err
+			}
 			if err := os.WriteFile(plannerPath, []byte("planner mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(plannerMetadataPath, []byte("planner metadata mutation\n"), 0o600); err != nil {
 				return nil, err
 			}
 			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
@@ -279,6 +310,15 @@ func TestPlanPipelineCommandRestoresExistingIgnoredMutation(t *testing.T) {
 	}
 	assertCommandPlanningFileContent(t, sourcePath, "prepared ignored\n")
 	assertCommandPlanningFileContent(t, plannerPath, "prepared ignored\n")
+	assertCommandPlanningFileContent(t, sourceMetadataPath, "prepared metadata\n")
+	assertCommandPlanningFileContent(t, plannerMetadataPath, "prepared metadata\n")
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(cacheDir); err != nil {
+			t.Fatal(err)
+		} else if got := info.Mode().Perm(); got != 0o500 {
+			t.Fatalf("restored ignored directory mode = %o, want 500", got)
+		}
+	}
 }
 
 type commandPlanningProbeStep struct {
