@@ -54,7 +54,8 @@ type Executor struct {
 	onEvent EventFunc
 
 	// sessions manages this run's durable review-loop agent sessions.
-	sessions *RunSessions
+	sessions        *RunSessions
+	commandPlanning *CommandPlanningWorkspace
 
 	mu          sync.Mutex
 	approvalCh  chan approvalResponse // buffered channel for approval responses
@@ -166,7 +167,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 
-	e.initializeRunScopes(run.ID)
+	e.initializeRunScopes(run, repo, workDir)
+	defer e.closeCommandPlanningWorkspace()
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -239,10 +241,19 @@ func (e *Executor) recordSkipExplanation(stepResultID, explanation string) {
 	}
 }
 
-func (e *Executor) initializeRunScopes(runID string) {
+func (e *Executor) initializeRunScopes(run *db.Run, repo *db.Repo, workDir string) {
 	reviewAgent := e.agents.AgentForStep(types.StepReview)
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && reviewAgent != nil
-	e.sessions = NewRunSessions(e.db, runID, reviewAgent, sessionsEnabled)
+	e.sessions = NewRunSessions(e.db, run.ID, reviewAgent, sessionsEnabled)
+	e.commandPlanning = NewCommandPlanningWorkspace(e.paths, e.config, run, repo, workDir)
+}
+
+func (e *Executor) closeCommandPlanningWorkspace() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := e.commandPlanning.Close(ctx); err != nil {
+		slog.Warn("failed to remove command planning workspace", "error", err)
+	}
 }
 
 type stepExecutionState struct {
@@ -326,7 +337,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
-	e.initializeRunScopes(run.ID)
+	e.initializeRunScopes(run, repo, workDir)
+	defer e.closeCommandPlanningWorkspace()
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -784,6 +796,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		IntentSource:     userIntentSource,
 		PRNote:           prNote,
 		Sessions:         e.sessions,
+		CommandPlanning:  e.commandPlanning,
 		Fixing:           state.fixing,
 		PreviousFindings: state.previousFindings,
 		PlannedCommand:   state.plannedCommand,

@@ -82,7 +82,8 @@ type StepContext struct {
 	PRNote string
 	// Sessions manages the run's durable review-loop agent sessions
 	// (reviewer and fixer roles). nil runs every invocation cold.
-	Sessions *RunSessions
+	Sessions        *RunSessions
+	CommandPlanning *CommandPlanningWorkspace
 }
 
 // RecordCommand appends one primary step command to the run's bounded

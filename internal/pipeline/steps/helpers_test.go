@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -146,17 +147,28 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 	}
 	t.Cleanup(func() { database.Close() })
 
+	run := &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "refs/heads/feature", HeadSHA: headSHA, BaseSHA: baseSHA}
+	repo := &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"}
+	cfg := &config.Config{Agent: types.AgentClaude, Commands: cmds}
+	commandPlanning := pipeline.NewCommandPlanningWorkspace(paths.WithRoot(t.TempDir()), cfg, run, repo, workDir)
+	t.Cleanup(func() {
+		if err := commandPlanning.Close(context.Background()); err != nil {
+			t.Errorf("close command planning workspace: %v", err)
+		}
+	})
+
 	return &pipeline.StepContext{
-		Ctx:      context.Background(),
-		Run:      &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "refs/heads/feature", HeadSHA: headSHA, BaseSHA: baseSHA},
-		Repo:     &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"},
-		WorkDir:  workDir,
-		Agent:    ag,
-		Config:   &config.Config{Agent: types.AgentClaude, Commands: cmds},
-		DB:       database,
-		Log:      func(s string) {},
-		LogChunk: func(s string) {},
-		LogFile:  func(s string) {},
+		Ctx:             context.Background(),
+		Run:             run,
+		Repo:            repo,
+		WorkDir:         workDir,
+		Agent:           ag,
+		Config:          cfg,
+		DB:              database,
+		CommandPlanning: commandPlanning,
+		Log:             func(s string) {},
+		LogChunk:        func(s string) {},
+		LogFile:         func(s string) {},
 	}
 }
 

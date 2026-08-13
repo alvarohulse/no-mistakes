@@ -28,32 +28,23 @@ type commandPlan struct {
 	Command *string `json:"command"`
 }
 
-func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task string) (_ string, retErr error) {
+func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task string) (string, error) {
 	headSHA, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("inspect HEAD before %s planning: %w", step, err)
 	}
-	plannerRoot, err := os.MkdirTemp("", "no-mistakes-command-plan-*")
+	sourceStatus, err := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
 	if err != nil {
-		return "", fmt.Errorf("create %s command planning directory: %w", step, err)
+		return "", fmt.Errorf("inspect pipeline worktree before %s planning: %w", step, err)
 	}
-	plannerDir := filepath.Join(plannerRoot, "worktree")
-	if err := git.WorktreeAdd(sctx.Ctx, sctx.WorkDir, plannerDir, headSHA); err != nil {
-		_ = os.RemoveAll(plannerRoot)
-		return "", fmt.Errorf("create detached %s command planning worktree: %w", step, err)
+	sourceUntracked, err := untrackedPaths(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return "", fmt.Errorf("inspect untracked pipeline files before %s planning: %w", step, err)
 	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		cleanupErr := git.WorktreeRemove(cleanupCtx, sctx.WorkDir, plannerDir)
-		removeErr := os.RemoveAll(plannerRoot)
-		if cleanupErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("remove detached %s command planning worktree: %w", step, cleanupErr))
-		}
-		if removeErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("remove %s command planning directory: %w", step, removeErr))
-		}
-	}()
+	plannerDir, err := sctx.CommandPlanning.Prepare(sctx.Ctx)
+	if err != nil {
+		return "", fmt.Errorf("prepare %s command planning workspace: %w", step, err)
+	}
 
 	beforeHead, err := git.Run(sctx.Ctx, plannerDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -101,7 +92,31 @@ Rules:
 	if statusErr != nil {
 		return "", fmt.Errorf("inspect worktree after %s planning: %w", step, statusErr)
 	}
-	if beforeHead != afterHead || beforeStatus != afterStatus {
+	afterSourceHead, sourceHeadErr := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
+	if sourceHeadErr != nil {
+		return "", fmt.Errorf("inspect pipeline HEAD after %s planning: %w", step, sourceHeadErr)
+	}
+	afterSourceStatus, sourceStatusErr := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain")
+	if sourceStatusErr != nil {
+		return "", fmt.Errorf("inspect pipeline worktree after %s planning: %w", step, sourceStatusErr)
+	}
+	sourceMutated := headSHA != afterSourceHead || sourceStatus != afterSourceStatus
+	if sourceMutated {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if restoreErr := restorePlanningWorktree(cleanupCtx, sctx.WorkDir, headSHA, sourceUntracked); restoreErr != nil {
+			return "", errors.Join(fmt.Errorf("%s command planner modified the pipeline worktree during a read-only pass", step), restoreErr)
+		}
+	}
+	plannerMutated := beforeHead != afterHead || beforeStatus != afterStatus
+	if plannerMutated {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if restoreErr := sctx.CommandPlanning.Restore(cleanupCtx); restoreErr != nil {
+			return "", errors.Join(fmt.Errorf("%s command planner modified the planning worktree during a read-only pass", step), restoreErr)
+		}
+	}
+	if sourceMutated || plannerMutated {
 		return "", fmt.Errorf("%s command planner modified the worktree during a read-only pass", step)
 	}
 	if err != nil {
@@ -118,4 +133,37 @@ Rules:
 		}
 	}
 	return command, nil
+}
+
+func untrackedPaths(ctx context.Context, workDir string) (map[string]struct{}, error) {
+	output, err := git.Run(ctx, workDir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]struct{})
+	for _, path := range strings.Split(output, "\x00") {
+		if path != "" {
+			paths[path] = struct{}{}
+		}
+	}
+	return paths, nil
+}
+
+func restorePlanningWorktree(ctx context.Context, workDir, headSHA string, preservedUntracked map[string]struct{}) error {
+	if _, err := git.Run(ctx, workDir, "reset", "--hard", headSHA); err != nil {
+		return fmt.Errorf("restore planning worktree HEAD: %w", err)
+	}
+	currentUntracked, err := untrackedPaths(ctx, workDir)
+	if err != nil {
+		return fmt.Errorf("inspect planning worktree during restore: %w", err)
+	}
+	for path := range currentUntracked {
+		if _, preserve := preservedUntracked[path]; preserve {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(workDir, filepath.FromSlash(path))); err != nil {
+			return fmt.Errorf("remove planner-created file %s: %w", path, err)
+		}
+	}
+	return nil
 }

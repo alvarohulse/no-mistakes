@@ -4,16 +4,99 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	gitutil "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExecutorReusesPreparedCommandPlanningWorkspace(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, nil, dir, baseSHA, headSHA, config.Commands{})
+	counterPath := filepath.Join(t.TempDir(), "post-worktree-count.txt")
+	hook := fmt.Sprintf("echo prepared >> %q; echo prepared > planner-prepared.txt", counterPath)
+	if runtime.GOOS == "windows" {
+		hook = fmt.Sprintf("echo prepared>>%q & echo prepared>planner-prepared.txt", counterPath)
+	}
+
+	plannerDirs := make([]string, 0, 2)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerDirs = append(plannerDirs, opts.CWD)
+			if _, err := os.Stat(filepath.Join(opts.CWD, "planner-prepared.txt")); err != nil {
+				return nil, fmt.Errorf("planner workspace was not prepared: %w", err)
+			}
+			plannerHead := gitCmd(t, opts.CWD, "rev-parse", "HEAD")
+			pipelineHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			if plannerHead != pipelineHead {
+				return nil, fmt.Errorf("planner HEAD = %s, want pipeline HEAD %s", plannerHead, pipelineHead)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	root := t.TempDir()
+	plannerPath := paths.WithRoot(root).WorktreeDir(sctx.Repo.ID, sctx.Run.ID+"-command-plan")
+	cfg := &config.Config{Agent: types.AgentClaude, Hooks: config.Hooks{PostWorktree: hook}}
+	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(root), cfg, ag, []pipeline.Step{
+		&commandPlanningProbeStep{name: types.StepBuild, after: func(context *pipeline.StepContext) error {
+			if err := os.WriteFile(filepath.Join(context.WorkDir, "after-build.txt"), []byte("new head\n"), 0o644); err != nil {
+				return err
+			}
+			if _, err := gitutil.Run(context.Ctx, context.WorkDir, "add", "after-build.txt"); err != nil {
+				return err
+			}
+			_, err := gitutil.Run(context.Ctx, context.WorkDir, "commit", "-m", "advance pipeline head")
+			return err
+		}},
+		&commandPlanningProbeStep{name: types.StepLint},
+	}, nil)
+
+	if err := executor.Execute(sctx.Ctx, sctx.Run, sctx.Repo, dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(plannerDirs) != 2 || plannerDirs[0] != plannerPath || plannerDirs[1] != plannerPath {
+		t.Fatalf("planner workspaces = %v, want shared managed path %q", plannerDirs, plannerPath)
+	}
+	counter, err := os.ReadFile(counterPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(counter), "prepared"); got != 1 {
+		t.Fatalf("post-worktree hook executions = %d, want 1", got)
+	}
+	if _, err := os.Stat(plannerPath); !os.IsNotExist(err) {
+		t.Fatalf("planner workspace survived executor cleanup: %v", err)
+	}
+}
+
+type commandPlanningProbeStep struct {
+	name  types.StepName
+	after func(*pipeline.StepContext) error
+}
+
+func (s *commandPlanningProbeStep) Name() types.StepName { return s.name }
+
+func (s *commandPlanningProbeStep) Execute(context *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if _, err := planPipelineCommand(context, s.name, "Select command."); err != nil {
+		return nil, err
+	}
+	if s.after != nil {
+		if err := s.after(context); err != nil {
+			return nil, err
+		}
+	}
+	return &pipeline.StepOutcome{}, nil
+}
 
 func TestPlanPipelineCommandRejectsCommittedMutation(t *testing.T) {
 	t.Parallel()
@@ -44,8 +127,11 @@ func TestPlanPipelineCommandRejectsCommittedMutation(t *testing.T) {
 	if plannerDir == dir {
 		t.Fatal("planner ran in the pipeline worktree")
 	}
-	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
-		t.Fatalf("planner worktree survived: %v", err)
+	if _, err := os.Stat(plannerDir); err != nil {
+		t.Fatalf("shared planner worktree missing after restore: %v", err)
+	}
+	if got := gitCmd(t, plannerDir, "status", "--porcelain"); got != "" {
+		t.Fatalf("shared planner worktree was not restored: %q", got)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("pipeline HEAD = %s, want %s", got, headSHA)
@@ -78,8 +164,11 @@ func TestPlanPipelineCommandContainsUncommittedMutations(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "modified the worktree") {
 		t.Fatalf("planPipelineCommand() error = %v, want uncommitted-mutation refusal", err)
 	}
-	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
-		t.Fatalf("planner worktree survived: %v", err)
+	if _, err := os.Stat(plannerDir); err != nil {
+		t.Fatalf("shared planner worktree missing after restore: %v", err)
+	}
+	if got := gitCmd(t, plannerDir, "status", "--porcelain"); got != "" {
+		t.Fatalf("shared planner worktree was not restored: %q", got)
 	}
 	content, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
 	if err != nil {
@@ -113,8 +202,11 @@ func TestPlanPipelineCommandContainsMutationWhenAgentFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "modified the worktree") {
 		t.Fatalf("planPipelineCommand() error = %v, want mutation refusal before agent error", err)
 	}
-	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
-		t.Fatalf("planner worktree survived: %v", err)
+	if _, err := os.Stat(plannerDir); err != nil {
+		t.Fatalf("shared planner worktree missing after restore: %v", err)
+	}
+	if got := gitCmd(t, plannerDir, "status", "--porcelain"); got != "" {
+		t.Fatalf("shared planner worktree was not restored: %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "planner-error.txt")); !os.IsNotExist(err) {
 		t.Fatalf("failed planner mutation reached pipeline worktree: %v", err)
