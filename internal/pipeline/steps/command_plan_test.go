@@ -383,6 +383,72 @@ func TestPlanPipelineCommandRejectsCommittedMutation(t *testing.T) {
 	}
 }
 
+func TestPlanPipelineCommandRestoresIndexFlagMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	plannerDir := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerDir = opts.CWD
+			if _, err := gitutil.Run(ctx, opts.CWD, "update-index", "--assume-unchanged", "feature.txt"); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want index flag mutation refusal", err)
+	}
+	if got := gitCmd(t, plannerDir, "ls-files", "-v", "feature.txt"); strings.HasPrefix(got, "h ") {
+		t.Fatalf("planner assume-unchanged flag survived restore: %q", got)
+	}
+}
+
+func TestPlanPipelineCommandRestoresInitializedSubmoduleMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	submoduleRepo := t.TempDir()
+	gitCmd(t, submoduleRepo, "init")
+	gitCmd(t, submoduleRepo, "config", "user.email", "test@example.com")
+	gitCmd(t, submoduleRepo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(submoduleRepo, "dependency.txt"), []byte("prepared submodule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, submoduleRepo, "add", "dependency.txt")
+	gitCmd(t, submoduleRepo, "commit", "-m", "initial dependency")
+	gitCmd(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", submoduleRepo, "dependency")
+	gitCmd(t, dir, "commit", "-am", "add dependency")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	sourcePath := filepath.Join(dir, "dependency", "dependency.txt")
+	plannerPath := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerPath = filepath.Join(opts.CWD, "dependency", "dependency.txt")
+			if _, err := gitutil.Run(ctx, opts.CWD, "status", "--porcelain"); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(sourcePath, []byte("source mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(plannerPath, []byte("planner mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepTest, "Select test."); err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want submodule mutation refusal", err)
+	}
+	assertCommandPlanningFileContent(t, sourcePath, "prepared submodule\n")
+	assertCommandPlanningFileContent(t, plannerPath, "prepared submodule\n")
+}
+
 func TestPlanPipelineCommandContainsUncommittedMutations(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
