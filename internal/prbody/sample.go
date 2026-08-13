@@ -1,5 +1,77 @@
 package prbody
 
+// SampleForVersion returns the sample contract for one supported version, or
+// nil when the version is not supported. Formatter authors are told to accept
+// both v2 and v3 during a producer rollout, so both shapes have to be
+// reachable from a single command rather than only the newest one.
+func SampleForVersion(version int) *Contract {
+	switch version {
+	case 2:
+		return SampleV2()
+	case Version:
+		return Sample()
+	default:
+		return nil
+	}
+}
+
+// SupportedVersions lists the contract versions this build can emit and read,
+// newest first.
+func SupportedVersions() []int { return []int{Version, 2} }
+
+// IsSupportedVersion reports whether a decoded contract's version is one this
+// build understands.
+func IsSupportedVersion(version int) bool {
+	for _, supported := range SupportedVersions() {
+		if version == supported {
+			return true
+		}
+	}
+	return false
+}
+
+// SampleV2 returns the version 2 shape of the same sample run: intent lives in
+// its own top-level section, and none of the version 3 additions are present.
+// It is derived from Sample so the two cannot drift apart.
+func SampleV2() *Contract {
+	contract := Sample()
+	contract.Version = 2
+	contract.Metadata = ""
+
+	if pipeline := contract.Sections.Pipeline; pipeline != nil {
+		for i := range pipeline.Steps {
+			step := &pipeline.Steps[i]
+			if step.Intent != nil {
+				contract.Sections.Intent = &IntentSection{
+					Text:          step.Intent.Text,
+					Source:        step.Intent.Source,
+					Authoritative: step.Intent.Provided,
+					Trusted:       false,
+				}
+			}
+			step.Intent = nil
+			step.Commands = nil
+			step.Evidence = nil
+			step.Explanation = ""
+			for j := range step.Agents {
+				run := &step.Agents[j]
+				run.Provider = ""
+				run.StartedAt = 0
+				run.DurationMS = 0
+				run.InputTokens = nil
+				run.OutputTokens = nil
+				run.UncachedInputTokens = nil
+				run.CacheReadTokens = nil
+				run.CacheWriteTokens = nil
+				run.ReportedCostUSD = nil
+				run.NestedCount = nil
+			}
+		}
+	}
+	contract.Sections.Summary = nil
+	return contract
+}
+
 // Sample returns a contract that exercises every section.
 //
 // This is deliberately not a transcript of a real run. A sample built to be

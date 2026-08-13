@@ -396,12 +396,13 @@ The field definitions and their local/remote split are owned by [the environment
 Render a pull request body through the [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter and print it.
 
 ```sh
-no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+no-mistakes pr-body [--sample [--sample-version <2|3>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
 ```
 
 | Flag               | Type     | Default    | Description                                                     |
 | ------------------ | -------- | ---------- | --------------------------------------------------------------- |
 | `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
+| `--sample-version` | `int`    | `3`        | Contract version `--sample` emits (`2` or `3`)                    |
 | `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
 | `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
 | `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
@@ -409,7 +410,7 @@ no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-co
 
 This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
 
-Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `what_changed`, which is the drafting agent's own output and is not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block.
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block.
 
 The formatter is resolved the same way a run resolves it: `--hook`, then a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry, then the repo's `.no-mistakes.yaml`, then the global `hooks.pr_body` default. The chosen source is reported on stderr.
 

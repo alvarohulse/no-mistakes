@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -25,11 +26,12 @@ const repoConfigFileName = ".no-mistakes.yaml"
 
 func newPRBodyCmd() *cobra.Command {
 	var (
-		sample      bool
-		runID       string
-		contractIn  string
-		contractOut bool
-		hook        string
+		sample        bool
+		sampleVersion int
+		runID         string
+		contractIn    string
+		contractOut   bool
+		hook          string
 	)
 
 	cmd := &cobra.Command{
@@ -44,6 +46,7 @@ formatter impossible to iterate on.
 Pick one source of contract data:
 
   --sample           a built-in contract that exercises every section
+  --sample-version   which contract version --sample emits
   --run <id>         a stored run's real contract
   --contract-file    a contract JSON file, or - for stdin
 
@@ -63,6 +66,9 @@ With no source, the latest run for the current repository is used.
 			if sources > 1 {
 				return fmt.Errorf("pick one of --sample, --run, or --contract-file")
 			}
+			if cmd.Flags().Changed("sample-version") && !sample {
+				return fmt.Errorf("--sample-version applies only to --sample")
+			}
 
 			ctx := cmd.Context()
 			_, d, err := openResources()
@@ -72,7 +78,7 @@ With no source, the latest run for the current repository is used.
 			defer d.Close()
 
 			local := resolveLocalRepo(d)
-			contract, err := resolvePRBodyContract(ctx, cmd, d, local, sample, runID, contractIn)
+			contract, err := resolvePRBodyContract(ctx, cmd, d, local, sample, sampleVersion, runID, contractIn)
 			if err != nil {
 				return err
 			}
@@ -118,6 +124,7 @@ With no source, the latest run for the current repository is used.
 	}
 
 	cmd.Flags().BoolVar(&sample, "sample", false, "use the built-in sample contract")
+	cmd.Flags().IntVar(&sampleVersion, "sample-version", prbody.Version, "contract version --sample emits (2 or 3)")
 	cmd.Flags().StringVar(&runID, "run", "", "use a stored run's contract")
 	cmd.Flags().StringVar(&contractIn, "contract-file", "", "read the contract from a JSON file ('-' for stdin)")
 	cmd.Flags().BoolVar(&contractOut, "print-contract", false, "print the contract JSON instead of running the formatter")
@@ -125,9 +132,13 @@ With no source, the latest run for the current repository is used.
 	return cmd
 }
 
-func resolvePRBodyContract(ctx context.Context, cmd *cobra.Command, d *db.DB, local localRepo, sample bool, runID, contractIn string) (*prbody.Contract, error) {
+func resolvePRBodyContract(ctx context.Context, cmd *cobra.Command, d *db.DB, local localRepo, sample bool, sampleVersion int, runID, contractIn string) (*prbody.Contract, error) {
 	if sample {
-		return prbody.Sample(), nil
+		contract := prbody.SampleForVersion(sampleVersion)
+		if contract == nil {
+			return nil, fmt.Errorf("unsupported --sample-version %d; supported versions are %s", sampleVersion, joinVersions(prbody.SupportedVersions()))
+		}
+		return contract, nil
 	}
 	if contractIn != "" {
 		return readContractFile(cmd, contractIn)
@@ -180,17 +191,28 @@ func readContractFile(cmd *cobra.Command, path string) (*prbody.Contract, error)
 	if err := json.Unmarshal(data, &contract); err != nil {
 		return nil, fmt.Errorf("parse contract: %w", err)
 	}
-	if contract.Version != prbody.Version {
-		return nil, fmt.Errorf("contract version %d, expected %d", contract.Version, prbody.Version)
+	// A formatter under a v2-to-v3 rollout has to be testable against both
+	// shapes, so a still-supported older contract is read rather than refused.
+	if !prbody.IsSupportedVersion(contract.Version) {
+		return nil, fmt.Errorf("contract version %d, expected one of %s", contract.Version, joinVersions(prbody.SupportedVersions()))
 	}
 	return &contract, nil
 }
 
+func joinVersions(versions []int) string {
+	parts := make([]string, 0, len(versions))
+	for _, version := range versions {
+		parts = append(parts, strconv.Itoa(version))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // storedRunContract rebuilds a completed run's contract from the database.
 //
-// The What Changed section is not stored - it is the drafting agent's output,
-// which lives only in the assembled body - so it is absent here. Every other
-// section is reconstructed exactly as the pr step would have built it.
+// The Summary and What Changed sections are not stored - they are the drafting
+// agent's output, which lives only in the assembled body - so they are absent
+// here. Every other section is reconstructed exactly as the pr step would have
+// built it.
 func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID string) (*prbody.Contract, error) {
 	repo := local.repo
 	if repo == nil {

@@ -191,6 +191,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 					Code: "step_skipped", Message: "Intent extraction was skipped by pipeline configuration.",
 				}}})
 			}
+			e.recordSkipExplanation(sr.ID, "Step was skipped before the run started because it was named in the run's skip list.")
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
@@ -205,6 +206,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			// Mark all subsequent steps as skipped
 			for _, remaining := range e.steps[i+1:] {
 				rsr := stepRecords[remaining.Name()]
+				e.recordSkipExplanation(rsr.ID, fmt.Sprintf("Step did not run because the %s step ended the run first.", step.Name().DisplayName(run.RefreshStrategy)))
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
 					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
 				}
@@ -222,6 +224,19 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return nil
+}
+
+// recordSkipExplanation persists why a step was skipped so PR rendering can
+// state the actual provenance - skip list, user decision, terminal outcome, or
+// the step's own precondition - instead of one generic sentence for all four.
+// Best-effort: skip provenance is evidence, never a gate.
+func (e *Executor) recordSkipExplanation(stepResultID, explanation string) {
+	if e.db == nil || stepResultID == "" {
+		return
+	}
+	if err := e.db.SetStepEvidenceExplanation(stepResultID, explanation); err != nil {
+		slog.Warn("failed to record step skip explanation", "step_result", stepResultID, "err", err)
+	}
 }
 
 func (e *Executor) initializeRunScopes(runID string) {
@@ -420,6 +435,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	case types.ActionSkip:
+		e.recordSkipExplanation(gate.stepResult.ID, "Step was skipped by the user at its approval gate.")
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
 		}
@@ -571,6 +587,7 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
 		}
+		e.recordSkipExplanation(results[index].ID, "Step did not run because an earlier step ended the run.")
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
 		}
@@ -656,7 +673,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if run != nil && run.PRNote != nil {
 		prNote = *run.PRNote
 	}
-	var metadataEnv []string
+	// Always overridden, never inherited: the daemon is long-lived and may have
+	// been started from a shell that exports NM_METADATA, so a run without
+	// metadata must actively clear it rather than leak another value in.
+	metadataEnv := []string{"NM_METADATA="}
 	metadataPrompt := ""
 	if run != nil && run.Metadata != nil {
 		metadataEnv = []string{"NM_METADATA=" + *run.Metadata}
@@ -887,6 +907,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// are acceptable and don't block the pipeline.
 			skipRemaining = outcome.SkipRemaining
 			stepSkipped = outcome.Skipped
+			if stepSkipped && strings.TrimSpace(outcome.SkipReason) != "" {
+				e.recordSkipExplanation(sr.ID, strings.TrimSpace(outcome.SkipReason))
+			}
 			break
 		}
 
@@ -971,6 +994,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		case types.ActionSkip:
 			// Skip - mark step skipped and return (not an error)
+			e.recordSkipExplanation(sr.ID, "Step was skipped by the user at its approval gate.")
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 				return false, fmt.Errorf("complete step %s (skip): %w", stepName, err)
 			}

@@ -268,12 +268,19 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, err
 	}
 	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
-	args = append(args, "--title", content.Title, "--body-file", "-")
+	if content.Title != "" {
+		args = append(args, "--title", content.Title)
+	}
+	if content.Body != "" {
+		args = append(args, "--body-file", "-")
+	}
 	if strings.TrimSpace(content.Base) != "" {
 		args = append(args, "--base", content.Base)
 	}
 	cmd := h.cmd(ctx, "gh", args...)
-	cmd.Stdin = strings.NewReader(content.Body)
+	if content.Body != "" {
+		cmd.Stdin = strings.NewReader(content.Body)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
 	}

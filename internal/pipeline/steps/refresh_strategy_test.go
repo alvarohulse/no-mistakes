@@ -216,16 +216,19 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evidence.Commands) != 2 {
-		t.Fatalf("merge command evidence = %+v, want failed merge and successful continuation", evidence.Commands)
+	if len(evidence.Commands) != 1 {
+		t.Fatalf("merge command evidence = %+v, want only the merge the pipeline itself ran", evidence.Commands)
 	}
 	failed := evidence.Commands[0]
 	if failed.Command != "git merge --no-edit origin/dependency" || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
 		t.Fatalf("failed merge evidence = %+v", failed)
 	}
-	continued := evidence.Commands[1]
-	if continued.Command != "git merge --continue" || continued.Outcome != db.CommandOutcomePassed || continued.ExitCode == nil || *continued.ExitCode != 0 {
-		t.Fatalf("continued merge evidence = %+v", continued)
+	// The agent, not the pipeline, ran the continuation, and it may have taken
+	// several commands or none. Recording a synthetic `git merge --continue`
+	// would publish a command that never ran; the verified fact is that no
+	// merge remained in progress afterwards.
+	if len(evidence.Evidence) != 1 || !strings.Contains(evidence.Evidence[0], "origin/dependency") {
+		t.Fatalf("merge continuation evidence = %+v, want one observed-completion note", evidence.Evidence)
 	}
 }
 

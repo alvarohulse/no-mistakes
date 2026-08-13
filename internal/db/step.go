@@ -170,6 +170,42 @@ func (d *DB) AppendStepCommandEvidence(id string, command CommandEvidence) error
 	return d.SetStepEvidence(id, evidence)
 }
 
+// AppendStepEvidenceNote records one non-shell observation for a step, for
+// work the pipeline verified but did not itself execute as a command.
+func (d *DB) AppendStepEvidenceNote(id, note string) error {
+	step, err := d.GetStepResult(id)
+	if err != nil {
+		return err
+	}
+	if step == nil {
+		return fmt.Errorf("append step evidence note: step not found")
+	}
+	evidence, err := step.Evidence()
+	if err != nil {
+		return err
+	}
+	evidence.Evidence = append(evidence.Evidence, note)
+	return d.SetStepEvidence(id, evidence)
+}
+
+// SetStepEvidenceExplanation records why a step produced no command or
+// evidence output, without discarding anything already recorded.
+func (d *DB) SetStepEvidenceExplanation(id, explanation string) error {
+	step, err := d.GetStepResult(id)
+	if err != nil {
+		return err
+	}
+	if step == nil {
+		return fmt.Errorf("set step evidence explanation: step not found")
+	}
+	evidence, err := step.Evidence()
+	if err != nil {
+		return err
+	}
+	evidence.Explanation = explanation
+	return d.SetStepEvidence(id, evidence)
+}
+
 // UpdateStepStatus updates a step's status.
 func (d *DB) UpdateStepStatus(id string, status types.StepStatus) error {
 	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, status, now(), fmt.Sprintf("status: %s", status), id)

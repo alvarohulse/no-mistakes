@@ -102,7 +102,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// New branch: regular push (no force needed).
 		pushRan = true
 		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
-			_ = sctx.RecordCommand(pushCommand, nil, err)
+			sctx.RecordCommand(pushCommand, nil, err)
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	case decision.upToDate:
@@ -113,15 +113,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		pushRan = true
 		pushCommand = fmt.Sprintf("git push --force-with-lease=%s:%s %s %s:%s", ref, decision.remoteSHA, pushURL, headBeingPushed, ref)
 		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
-			_ = sctx.RecordCommand(pushCommand, nil, err)
+			sctx.RecordCommand(pushCommand, nil, err)
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
 	}
 	if pushRan {
 		zero := 0
-		if err := sctx.RecordCommand(pushCommand, &zero, nil); err != nil {
-			return nil, err
-		}
+		sctx.RecordCommand(pushCommand, &zero, nil)
 	}
 	verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
 	if err != nil || verifiedRemote != headBeingPushed {

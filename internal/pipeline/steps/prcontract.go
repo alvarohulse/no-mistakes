@@ -350,7 +350,7 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 				step.Intent = contractIntentResult(sr, intentText, intentSource, intentProvided)
 			}
 		}
-		if step.Explanation == "" && len(step.Commands) == 0 && len(step.Evidence) == 0 && (sr.Status == types.StepStatusCompleted || sr.Status == types.StepStatusSkipped) {
+		if step.Explanation == "" && step.Intent == nil && len(step.Commands) == 0 && len(step.Evidence) == 0 && (sr.Status == types.StepStatusCompleted || sr.Status == types.StepStatusSkipped) {
 			step.Explanation = contractStepExplanation(sr, len(step.Agents) > 0)
 		}
 		if step.Rounds == 0 {
@@ -377,9 +377,12 @@ func contractStoredIntent(stored *db.IntentEvidence) *prbody.IntentResult {
 	return result
 }
 
+// contractStepExplanation is the last resort for a step that recorded nothing.
+// Skip provenance is persisted at each skip site, so this must not claim a
+// cause it cannot know.
 func contractStepExplanation(step *db.StepResult, agentRan bool) string {
 	if step.Status == types.StepStatusSkipped {
-		return "Step was skipped by pipeline configuration or an earlier terminal decision."
+		return "Step was skipped and recorded no further detail."
 	}
 	if agentRan {
 		return "Step completed through the recorded agent invocation."

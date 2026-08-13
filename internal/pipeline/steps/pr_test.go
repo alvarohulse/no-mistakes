@@ -118,6 +118,10 @@ func TestPRStep_RetargetsExistingPRToStackedBase(t *testing.T) {
 	if !strings.Contains(logText, "pr edit 42") || !strings.Contains(logText, "--base dependency") {
 		t.Fatalf("existing PR was not retargeted to dependency:\n%s", logText)
 	}
+	editLine := lineContaining(logText, "pr edit")
+	if strings.Contains(editLine, "--title") || strings.Contains(editLine, "--body") {
+		t.Fatalf("retarget rewrote the adopted PR title or body: %s", editLine)
+	}
 }
 
 func TestPRStep_DoesNotRetargetMatchingStackedBase(t *testing.T) {

@@ -58,6 +58,38 @@ func TestExecutorExposesOpaqueMetadataExactlyToSubprocessesAndSanitizedToPrompts
 	}
 }
 
+// A run with no metadata must still pin NM_METADATA. The daemon is long-lived
+// and may have been started from a shell that exports it, and an inherited
+// value would silently reach every command and agent the run launches.
+func TestExecutorClearsAmbientMetadataForRunsWithoutIt(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	run.Metadata = nil
+	capture := &routedTestAgent{name: "capture"}
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if len(sctx.Env) != 1 || sctx.Env[0] != "NM_METADATA=" {
+				t.Fatalf("step environment = %#v, want a cleared NM_METADATA", sctx.Env)
+			}
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "review the change"}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	exec := NewExecutorWithAgentRoutes(database, p, &config.Config{}, AgentRoutes{Default: capture}, []Step{step}, nil)
+
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if len(capture.lastOpts.Env) != 1 || capture.lastOpts.Env[0] != "NM_METADATA=" {
+		t.Fatalf("agent environment = %#v, want a cleared NM_METADATA", capture.lastOpts.Env)
+	}
+	if strings.Contains(capture.lastOpts.Prompt, "NM_METADATA") {
+		t.Fatalf("agent prompt carries a metadata section for a run without metadata:\n%s", capture.lastOpts.Prompt)
+	}
+}
+
 func (a *routedTestAgent) Close() error { return nil }
 
 func TestExecutor_RoutesEachStepAndAttributesActualAgent(t *testing.T) {

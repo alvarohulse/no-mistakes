@@ -67,12 +67,8 @@ func TestExecutor_CommandSequenceRestartsForEachRound(t *testing.T) {
 		name: types.StepLint,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
-			if err := sctx.RecordCommand("first", &zero, nil); err != nil {
-				return nil, err
-			}
-			if err := sctx.RecordCommand("second", &zero, nil); err != nil {
-				return nil, err
-			}
+			sctx.RecordCommand("first", &zero, nil)
+			sctx.RecordCommand("second", &zero, nil)
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
@@ -117,9 +113,7 @@ func TestStepContext_RecordCommandBoundsAndRedactsDisplayText(t *testing.T) {
 	command := "curl https://user:secret@example.com/" + strings.Repeat("🧪", maxCommandEvidenceBytes)
 	sctx := &StepContext{DB: database, StepResultID: step.ID, Round: 1}
 	zero := 0
-	if err := sctx.RecordCommand(command, &zero, nil); err != nil {
-		t.Fatalf("record command: %v", err)
-	}
+	sctx.RecordCommand(command, &zero, nil)
 	stored, err := database.GetStepResult(step.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -574,5 +568,67 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("executor timed out")
+	}
+}
+
+// Skip provenance has to be persisted where it is known. Every skipped step
+// otherwise renders with one generic sentence that guesses at a cause, and a
+// step named in the run's skip list, a step that skipped itself, and a step
+// that never ran because the run ended are three different facts.
+func TestExecutor_RecordsDistinctSkipProvenance(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	preSkipped := &adaptiveCallStep{
+		name: types.StepDocument,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			t.Fatal("pre-skipped step executed")
+			return nil, nil
+		},
+	}
+	selfSkipped := &adaptiveCallStep{
+		name: types.StepLint,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{Skipped: true, SkipReason: "Lint had nothing to check."}, nil
+		},
+	}
+	terminal := &adaptiveCallStep{
+		name: types.StepPush,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{SkipRemaining: true}, nil
+		},
+	}
+	trailing := &adaptiveCallStep{
+		name: types.StepPR,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			t.Fatal("trailing step executed after a terminal outcome")
+			return nil, nil
+		},
+	}
+
+	executor := NewExecutor(database, paths, &config.Config{}, nil, []Step{preSkipped, selfSkipped, terminal, trailing}, nil)
+	executor.SetSkippedSteps([]types.StepName{types.StepDocument})
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explanations := map[types.StepName]string{}
+	for _, sr := range steps {
+		evidence, err := sr.Evidence()
+		if err != nil {
+			t.Fatal(err)
+		}
+		explanations[sr.StepName] = evidence.Explanation
+	}
+	for step, want := range map[types.StepName]string{
+		types.StepDocument: "skip list",
+		types.StepLint:     "Lint had nothing to check.",
+		types.StepPR:       "ended the run",
+	} {
+		if !strings.Contains(explanations[step], want) {
+			t.Errorf("%s explanation = %q, want it to mention %q", step, explanations[step], want)
+		}
 	}
 }

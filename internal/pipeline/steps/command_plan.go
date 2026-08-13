@@ -56,9 +56,12 @@ Rules:
 		OnChunk:    sctx.LogChunk,
 		Purpose:    string(step) + "-plan",
 	})
-	if err != nil {
+	if err != nil && sctx.Ctx.Err() != nil {
 		return "", fmt.Errorf("agent plan %s command: %w", step, err)
 	}
+	// The integrity check runs before the agent's own error is reported: a
+	// planner that both wrote to the worktree and failed must surface as a
+	// violated read-only pass, not as a plain agent failure that hides it.
 	afterHead, headErr := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD")
 	if headErr != nil {
 		return "", fmt.Errorf("inspect HEAD after %s planning: %w", step, headErr)
@@ -69,6 +72,9 @@ Rules:
 	}
 	if beforeHead != afterHead || beforeStatus != afterStatus {
 		return "", fmt.Errorf("%s command planner modified the worktree during a read-only pass", step)
+	}
+	if err != nil {
+		return "", fmt.Errorf("agent plan %s command: %w", step, err)
 	}
 	var plan commandPlan
 	if len(result.Output) == 0 || json.Unmarshal(result.Output, &plan) != nil || plan.Command == nil {

@@ -252,9 +252,7 @@ func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int
 	if err == nil {
 		recordedExitCode = &exitCode
 	}
-	if recordErr := sctx.RecordCommand(cmdStr, recordedExitCode, err); recordErr != nil {
-		return "", -1, fmt.Errorf("record command evidence: %w", recordErr)
-	}
+	sctx.RecordCommand(cmdStr, recordedExitCode, err)
 	return output, exitCode, err
 }
 

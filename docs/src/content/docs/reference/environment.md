@@ -165,9 +165,9 @@ Opaque metadata supplied for the current run.
 |         |                                      |
 | ------- | ------------------------------------ |
 | Type    | `string`                             |
-| Default | unset when the run has no metadata   |
+| Default | empty when the run has no metadata   |
 
-[`axi run --metadata`](/no-mistakes/reference/cli/#no-mistakes-axi-run) stores one bounded UTF-8 string exactly and does not parse it as JSON, keys, or associations. Pipeline commands and agent subprocesses receive that exact value as `NM_METADATA`; agent prompts receive a sanitized copy clearly marked as untrusted data; and PR body contract v3 exposes the original string to formatters. An explicitly empty value is preserved as `NM_METADATA=` and clears inherited metadata on rerun.
+[`axi run --metadata`](/no-mistakes/reference/cli/#no-mistakes-axi-run) stores one bounded UTF-8 string exactly and does not parse it as JSON, keys, or associations. Pipeline commands and agent subprocesses receive that exact value as `NM_METADATA`; agent prompts receive a sanitized copy clearly marked as untrusted data; and PR body contract v3 exposes the original string to formatters. An explicitly empty value is preserved as `NM_METADATA=` and clears inherited metadata on rerun. A run with no metadata also sets `NM_METADATA=`, so a value exported into the daemon's own environment can never reach a run that did not ask for it.
 
 Metadata is non-secret input. Secret-like text is redacted only in prompt and display projections, not from the exact persisted or environment value.
 

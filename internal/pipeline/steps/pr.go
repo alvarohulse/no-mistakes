@@ -68,17 +68,17 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	if branch == sctx.Repo.DefaultBranch {
 		sctx.Log(fmt.Sprintf("skipping PR creation on default branch %s", branch))
-		return &pipeline.StepOutcome{Skipped: true}, nil
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: fmt.Sprintf("No pull request was opened because the run is on the default branch %s.", branch)}, nil
 	}
 	provider := scm.DetectProviderContext(ctx, sctx.Repo.UpstreamURL)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
-		return &pipeline.StepOutcome{Skipped: true}, nil
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: "No pull request was opened: " + skipReason + "."}, nil
 	}
 	if err := host.Available(ctx); err != nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
-		return &pipeline.StepOutcome{Skipped: true}, nil
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: fmt.Sprintf("No pull request was opened because the provider host was unavailable: %v.", err)}, nil
 	}
 
 	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)

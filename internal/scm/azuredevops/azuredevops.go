@@ -216,15 +216,20 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 			return nil, err
 		}
 	}
-	if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
-		args := []string{"repos", "pr", "update", "--id", id,
-			"--title", content.Title,
-			"--description", descArg,
+	if content.Title != "" || content.Body != "" {
+		if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
+			args := []string{"repos", "pr", "update", "--id", id}
+			if content.Title != "" {
+				args = append(args, "--title", content.Title)
+			}
+			if content.Body != "" {
+				args = append(args, "--description", descArg)
+			}
+			args = append(args, h.orgArgs()...)
+			return append(args, "--output", "json")
+		}); err != nil {
+			return nil, fmt.Errorf("az repos pr update: %w", err)
 		}
-		args = append(args, h.orgArgs()...)
-		return append(args, "--output", "json")
-	}); err != nil {
-		return nil, fmt.Errorf("az repos pr update: %w", err)
 	}
 	if strings.TrimSpace(content.Base) != "" {
 		pr.Base = strings.TrimSpace(content.Base)

@@ -93,6 +93,12 @@ type PR struct {
 }
 
 // PRContent is the title + body for creating or updating a PR.
+//
+// Create requires Title and Body. Update is a partial write: an empty field
+// leaves the hosted value untouched, so a base-only retarget must not carry
+// content. Without that rule every backend would submit the empty strings
+// verbatim and erase a pull request's title and body, which the pipeline
+// never rewrites after creation.
 type PRContent struct {
 	Title string
 	Body  string
@@ -176,6 +182,7 @@ type Host interface {
 	// FindPR returns the open PR for the source branch, or nil if none exists.
 	FindPR(ctx context.Context, branch, base string) (*PR, error)
 	CreatePR(ctx context.Context, branch, base string, content PRContent) (*PR, error)
+	// UpdatePR applies only the non-empty fields of content; see PRContent.
 	UpdatePR(ctx context.Context, pr *PR, content PRContent) (*PR, error)
 
 	GetPRState(ctx context.Context, pr *PR) (PRState, error)

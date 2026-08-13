@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -84,9 +85,14 @@ type StepContext struct {
 	Sessions *RunSessions
 }
 
-func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) error {
+// RecordCommand appends one primary step command to the run's bounded
+// evidence. It is observability, never a gate: the write is best-effort
+// because it happens after the command already ran, so a busy database or an
+// oversized evidence blob must not abort a step whose remote branch, worktree,
+// or commit history has already moved.
+func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) {
 	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
-		return nil
+		return
 	}
 	outcome := db.CommandOutcomePassed
 	if runErr != nil {
@@ -96,9 +102,26 @@ func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr err
 	}
 	sctx.commandSequence++
 	display := boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(command))))
-	return sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
+	if err := sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
 		Round: sctx.Round, Sequence: sctx.commandSequence, Command: display, Outcome: outcome, ExitCode: exitCode,
-	})
+	}); err != nil {
+		slog.Warn("failed to record step command evidence", "step_result", sctx.StepResultID, "err", err)
+	}
+}
+
+// RecordEvidence appends one non-shell observation the step verified itself.
+// It shares RecordCommand's best-effort contract: evidence never gates a step.
+func (sctx *StepContext) RecordEvidence(note string) {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return
+	}
+	note = boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(note))))
+	if note == "" {
+		return
+	}
+	if err := sctx.DB.AppendStepEvidenceNote(sctx.StepResultID, note); err != nil {
+		slog.Warn("failed to record step evidence", "step_result", sctx.StepResultID, "err", err)
+	}
 }
 
 func boundedCommandDisplay(command string) string {
@@ -131,7 +154,11 @@ type StepOutcome struct {
 	ExitCode      int    // process exit code (0 = success)
 	PRURL         string // PR/MR URL if this step created or found one
 	Skipped       bool   // mark the step as skipped without failing the run
-	SkipRemaining bool   // skip all subsequent steps (e.g. empty diff after refresh)
+	// SkipReason explains a self-determined Skipped outcome in one sentence.
+	// It is recorded as the step's evidence explanation so a rendered PR states
+	// why the step did not run rather than guessing at its provenance.
+	SkipReason    string
+	SkipRemaining bool // skip all subsequent steps (e.g. empty diff after refresh)
 	// FixSummary, when non-empty, is the agent's one-line commit summary for
 	// the fix attempt performed during this round. Steps populate it in fix
 	// mode so the executor can persist it on the round record and later
