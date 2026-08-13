@@ -127,9 +127,9 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 - Missing evidence for user intent can be reported as a warning with `action: ask-user`.
 - If the agent creates a new test file, the step records an informational finding with `action: no-op`; it does not require approval. Modifying, deleting, or renaming an existing test file receives no special finding or gate.
 
-**Approval:** test findings with `action: ask-user` pause for approval, including missing-evidence warnings for user intent. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
+**Approval:** test findings with `action: ask-user` pause for approval, including missing-evidence warnings for user intent and a targeted command plan that could not be established. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
 
-**Auto-fix:** the agent receives the previous test findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles. Repair mode reproduces the specific failure, applies a root-cause fix, and re-runs only focused verification - not a complete-suite confirmation - then the step's configured baseline (if any) and evidence path run again.
+**Auto-fix:** the agent receives the previous test findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles. Repair mode reproduces the specific failure, applies a root-cause fix, and re-runs only focused verification - not a complete-suite confirmation - then the step's baseline command (configured or the same previously planned one) and the evidence path run again.
 
 **Default auto-fix limit:** `3`.
 
@@ -159,12 +159,11 @@ Runs linters and static analysis.
 - If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
 - If `commands.lint` is empty: asks the routed Lint agent for one exact formatter, linter, or static-analysis command in a read-only planning pass, executes and records it, and parks when no meaningful command can be established. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 
-**Approval:** lint findings with `action: ask-user` pause for approval.
-`action: auto-fix` findings stay eligible for the fix loop when `commands.lint` is configured.
+**Approval:** lint findings with `action: ask-user` pause for approval, including a command plan that could not be established.
+`action: auto-fix` findings stay eligible for the fix loop.
 `action: no-op` findings are informational only.
 
-**Auto-fix:** when `commands.lint` is configured, the lint step follows the same pattern as test - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then lint re-runs.
-Unconfigured and configured lint failures use the same repair loop and command rerun behavior.
+**Auto-fix:** the lint step follows the same pattern as test, whether the command was configured or planned - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then the same lint command re-runs.
 
 **Default auto-fix limit:** `3`.
 
@@ -218,7 +217,7 @@ Creates a pull request or adopts the existing one for the branch.
 - PR title: agent-generated from the final branch delta with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. If drafting fails, the fallback uses the neutral title `chore: update pull request` rather than inferring scope from earlier commits.
 - One PR agent invocation receives the explicit or inferred intent plus the final diff and returns separate heading-free `summary` and `what_changed` GFM fragments with the title. Code identifiers must use backticks; the renderer inserts the section headings exactly once.
 - The built-in PR body includes `## Summary`, optional operator-supplied `## Notes`, final-diff `## What Changed`, and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections. PR-facing intent provenance lives on the Intent pipeline result instead of a duplicate body section. Only `## What Changed` describes the complete final branch scope; deterministic sections remain evidence for the commit each step inspected.
-- Pipeline entries label `refresh` as `Rebase` or `Merge`, render stored command/evidence details for successful steps, and omit PR and CI because those steps are incomplete when the body is created. Contract v3 also supplies one telemetry record per invocation/round: agent, model, provider, start time, duration, nullable token/cache meters, nested-agent observations, and nullable CLI-reported USD cost. Formatter layout and API-price estimation remain formatter-owned.
+- Pipeline entries label `refresh` as `Rebase` or `Merge`, render stored command/evidence details for successful steps, and omit PR and CI because those steps are incomplete when the body is created. The built-in body opens the section with a compact attribution table listing each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents; unreported nested attribution renders as `-`, while a supported stream that observed none renders as `none`. Contract v3 supplies a richer per-invocation/round telemetry record instead: agent, model, provider, start time, duration, nullable token/cache meters, nested-agent observations, and nullable CLI-reported USD cost. Formatter layout and API-price estimation remain formatter-owned.
 - Generated PR bodies are capped at 63,488 bytes, leaving a 2 KB safety buffer below GitHub's 65,536-character body limit.
 - Under body caps, the attribution table is removed as a complete unit before older Pipeline update rounds are omitted at clean boundaries. The newest update is kept when possible, and omission or truncation is marked explicitly.
 - `## Summary`, `## Notes`, `## What Changed`, risk, and testing sections are kept ahead of Pipeline history; if the whole body still overruns after Pipeline history has been shed, a final clamp trims it and adds an explicit marker.

@@ -44,8 +44,8 @@ type AgentInvocation struct {
 	StepName string
 	Round    int
 	// Purpose is the pipeline duty served: review, review-fix,
-	// test-evidence, housekeeping, document, lint, pr, intent, or a
-	// step-derived default.
+	// review-adversary, test-evidence, document, pr, intent, a
+	// `<step>-plan` read-only command plan, or a step-derived default.
 	Purpose string
 	Agent   string
 	// InvocationMode is how the top-level adapter was invoked. Pipeline agent

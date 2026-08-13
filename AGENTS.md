@@ -148,7 +148,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Build Verification (`internal/pipeline/steps/build.go`)**
 
-- Build is a first-class post-Review gate before Test. `commands.build` is trusted code-executing config; when empty, the routed Build agent must run and report a meaningful compile command. Build repair rounds make the smallest root-cause fix, commit through the shared fix path, and never take over tests, lint, or documentation. Regression: `internal/pipeline/steps/build_test.go`; E2E coverage lives in `TestUserJourney`.
+- Build is a first-class post-Review gate before Test. `commands.build` is trusted code-executing config; when empty, the Agent-Planned Command Gates rule below owns the read-only plan the pipeline then executes. Build repair rounds make the smallest root-cause fix, commit through the shared fix path, and never take over tests, lint, or documentation. Regression: `internal/pipeline/steps/build_test.go`; E2E coverage lives in `TestUserJourney`.
 
 **Local Test Is Targeted Validation (`internal/pipeline/steps/test.go`)**
 

@@ -343,14 +343,14 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // The shedding order is worst-content-first. Testing goes first: it is the
 // only section that embeds artifact and log file contents and is therefore
 // effectively unbounded, so an Azure DevOps PR sheds log dumps while keeping
-// its Intent, What Changed, Risk, and Pipeline narrative. The agent
+// its Summary, Notes, What Changed, Risk, and Pipeline narrative. The agent
 // attribution table goes next, as a complete unit rather than a ragged
 // remnant. Only then does Pipeline evidence shrink, and it shrinks
 // structurally - whole update rounds omitted oldest-first at <details>
 // boundaries, newest evidence retained - because a blind tail cut through a
 // collapsible block both hides the most recent evidence and leaves broken
 // markup. ClampPRBody stays the last-resort backstop for a body whose
-// non-Pipeline sections alone (e.g. an unusually long Intent) still overrun.
+// non-Pipeline sections alone (e.g. an unusually long Summary) still overrun.
 func assemblePRBody(sctx *pipeline.StepContext, narrative, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
 	narrative = prependNotesSection(narrative, sctx)
 	sections := appendGeneratedSections(narrative, riskLine, testingMD, pipelineMD)
@@ -380,8 +380,8 @@ func assemblePRBody(sctx *pipeline.StepContext, narrative, riskLine, testingMD, 
 }
 
 // fitPipelineWithinPRBodyLimit re-renders the Pipeline section with older
-// update rounds omitted until the whole body fits the host's cap, keeping
-// Intent, What Changed, Risk, and the newest pipeline evidence intact.
+// update rounds omitted until the whole body fits the host's cap, keeping the
+// Summary/Notes/What Changed narrative, Risk, and the newest pipeline evidence intact.
 //
 // The structured omission helpers budget in bytes while the host counts
 // PRBodyLen units. UTF-8 never encodes a rune in fewer bytes than UTF-16

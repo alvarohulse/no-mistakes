@@ -125,7 +125,7 @@ The pipeline runs these steps in order:
 4. **Build** - compile the changed production code
 5. **Test** - baseline tests plus evidence checks when intent is known
 6. **Document** - updates docs and reports unresolved gaps
-7. **Lint** - your linters (configured command or agent-detected)
+7. **Lint** - your linters (configured command, or one the agent plans when none is configured)
 8. **Push** - to the configured push target
 9. **PR** - create or adopt the pull request
 10. **CI** - poll CI, watch PR mergeability, auto-fix failures
