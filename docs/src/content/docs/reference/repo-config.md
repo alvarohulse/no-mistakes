@@ -294,7 +294,7 @@ Broad regression belongs in remote CI and remains mandatory before a PR is ready
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
-When empty, the agent selects one exact focused test command in a read-only planning pass; the pipeline executes and records it, then an evidence agent gathers non-shell evidence and artifacts. A repair round reruns the same planned command. When user intent is available, the evidence agent may also run after a configured baseline succeeds, still under the same targeted-validation contract.
+When empty, the agent selects one exact focused test command in a read-only planning pass; the pipeline executes and records it, then an evidence agent gathers evidence and artifacts, running further focused checks itself when the planned command alone does not demonstrate the intent. A repair round reruns the same planned command. When user intent is available, the evidence agent may also run after a configured baseline succeeds, still under the same targeted-validation contract.
 
 ### commands.lint
 

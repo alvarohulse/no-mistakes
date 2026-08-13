@@ -170,7 +170,7 @@ Safest local verification sequence after non-trivial changes:
 
 **Agent-Planned Command Gates**
 
-- When `commands.build`, `commands.test`, or `commands.lint` is empty, the routed step agent selects one exact command in a read-only planning pass; the pipeline executes and records it, then reuses the same plan after a repair. A missing or invalid plan parks instead of silently passing. Test remains targeted local validation and gathers non-shell evidence after the planned command succeeds.
+- When `commands.build`, `commands.test`, or `commands.lint` is empty, the routed step agent selects one exact command in a read-only planning pass; the pipeline executes and records it, then reuses the same plan after a repair. A missing or invalid plan parks instead of silently passing. Test remains targeted local validation: after the planned command succeeds, its evidence agent gathers intent evidence and artifacts and may run further focused checks itself, never the complete suite.
 - Document is a separate documentation-only pass. Its prompt enforces the placement policy (one owner per fact, stale duplicates become pointers, no AGENTS.md postmortems, scope limited to docs the change made stale). Do not reintroduce exhaustive-corpus-sweep language; it caused doc commits in 90 of 121 audited PRs. Contract test: `TestDocumentStep_PromptAppliesPlacementPolicy`; behavior tests: `internal/pipeline/steps/housekeeping_test.go`.
 
 **Telemetry Shape**
