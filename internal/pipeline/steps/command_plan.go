@@ -30,6 +30,7 @@ func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task s
 	if err != nil {
 		return "", fmt.Errorf("inspect pipeline worktree before %s planning: %w", step, err)
 	}
+	defer sourceSnapshot.cleanup()
 	plannerDir, err := sctx.CommandPlanning.Prepare(sctx.Ctx)
 	if err != nil {
 		return "", fmt.Errorf("prepare %s command planning workspace: %w", step, err)
@@ -39,6 +40,7 @@ func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task s
 	if err != nil {
 		return "", fmt.Errorf("inspect detached worktree before %s planning: %w", step, err)
 	}
+	defer plannerSnapshot.cleanup()
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
 		Prompt: fmt.Sprintf(`Select the exact shell command the %s pipeline step should execute.
@@ -63,38 +65,42 @@ Rules:
 		OnChunk:    sctx.LogChunk,
 		Purpose:    string(step) + "-plan",
 	})
-	if err != nil && sctx.Ctx.Err() != nil {
-		return "", fmt.Errorf("agent plan %s command: %w", step, err)
-	}
 	// The integrity check runs before the agent's own error is reported: a
 	// planner that both wrote to the worktree and failed must surface as a
 	// violated read-only pass, not as a plain agent failure that hides it.
-	afterPlanner, plannerSnapshotErr := captureCommandPlanningSnapshot(sctx.Ctx, plannerDir)
+	integrityCtx, cancelIntegrity := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelIntegrity()
+	afterPlanner, plannerSnapshotErr := inspectCommandPlanningSnapshot(integrityCtx, plannerDir)
 	if plannerSnapshotErr != nil {
-		return "", fmt.Errorf("inspect detached worktree after %s planning: %w", step, plannerSnapshotErr)
+		return "", errors.Join(
+			fmt.Errorf("inspect detached worktree after %s planning: %w", step, plannerSnapshotErr),
+			plannerSnapshot.restore(integrityCtx, plannerDir),
+			sourceSnapshot.restore(integrityCtx, sctx.WorkDir),
+		)
 	}
-	afterSource, sourceSnapshotErr := captureCommandPlanningSnapshot(sctx.Ctx, sctx.WorkDir)
+	afterSource, sourceSnapshotErr := inspectCommandPlanningSnapshot(integrityCtx, sctx.WorkDir)
 	if sourceSnapshotErr != nil {
-		return "", fmt.Errorf("inspect pipeline worktree after %s planning: %w", step, sourceSnapshotErr)
+		return "", errors.Join(
+			fmt.Errorf("inspect pipeline worktree after %s planning: %w", step, sourceSnapshotErr),
+			plannerSnapshot.restore(integrityCtx, plannerDir),
+			sourceSnapshot.restore(integrityCtx, sctx.WorkDir),
+		)
 	}
 	sourceMutated := !sourceSnapshot.equal(afterSource)
-	if sourceMutated {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if restoreErr := sourceSnapshot.restore(cleanupCtx, sctx.WorkDir); restoreErr != nil {
-			return "", errors.Join(fmt.Errorf("%s command planner modified the pipeline worktree during a read-only pass", step), restoreErr)
-		}
-	}
 	plannerMutated := !plannerSnapshot.equal(afterPlanner)
-	if plannerMutated {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if restoreErr := plannerSnapshot.restore(cleanupCtx, plannerDir); restoreErr != nil {
-			return "", errors.Join(fmt.Errorf("%s command planner modified the planning worktree during a read-only pass", step), restoreErr)
-		}
-	}
 	if sourceMutated || plannerMutated {
-		return "", fmt.Errorf("%s command planner modified the worktree during a read-only pass", step)
+		var integrityErr error
+		if sourceMutated {
+			integrityErr = errors.Join(integrityErr, sourceSnapshot.restore(integrityCtx, sctx.WorkDir))
+		}
+		if plannerMutated {
+			integrityErr = errors.Join(integrityErr, plannerSnapshot.restore(integrityCtx, plannerDir))
+		}
+		integrityErr = errors.Join(fmt.Errorf("%s command planner modified the worktree during a read-only pass", step), integrityErr)
+		if err != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
+		}
+		return "", integrityErr
 	}
 	if err != nil {
 		return "", fmt.Errorf("agent plan %s command: %w", step, err)
