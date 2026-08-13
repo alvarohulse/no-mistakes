@@ -75,7 +75,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 }
 
-func TestLatestSessionCumulativeSkipsAttemptsWithoutUsage(t *testing.T) {
+func TestLatestSessionCumulativePreservesUnknownImmediatePrior(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	usage := AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
@@ -96,9 +96,12 @@ func TestLatestSessionCumulativeSkipsAttemptsWithoutUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	input, output, cacheRead, cacheWrite, found := d.LatestSessionCumulativeWithCacheCreation(run.ID, "session")
-	if !found || input != 1000 || output != 100 || cacheRead != 600 || cacheWrite != 20 {
-		t.Fatalf("latest usage = %d/%d/%d/%d found=%t", input, output, cacheRead, cacheWrite, found)
+	meters, found := d.LatestSessionCumulativeMeters(run.ID, "session")
+	if !found {
+		t.Fatal("latest session invocation not found")
+	}
+	if meters.Input != nil || meters.Output != nil || meters.CacheRead != nil || meters.CacheCreation != nil {
+		t.Fatalf("latest unknown usage became known: %+v", meters)
 	}
 }
 

@@ -340,6 +340,34 @@ func TestPerfRecording_ResumedSessionDoesNotInferNewlyAppearingCacheMeters(t *te
 	}
 }
 
+func TestPerfRecording_ResumedSessionDoesNotSkipUnknownUsageRound(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	round := 0
+	wrapped := &perfRecordingAgent{
+		inner: &intermittentCumulativeUsageAgent{}, db: database, runID: run.ID,
+		stepName: types.StepReview, round: func() int { return round },
+	}
+	sessions := NewRunSessions(database, run.ID, wrapped, true)
+	for round = 1; round <= 3; round++ {
+		if _, err := sessions.Run(context.Background(), wrapped, SessionRoleReviewer, agent.RunOpts{Purpose: "review"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 3 {
+		t.Fatalf("invocations = %d, want 3", len(invs))
+	}
+	if invs[1].DeltaInputTokens != nil || invs[1].DeltaOutputTokens != nil {
+		t.Fatalf("round 2 unknown usage became known: %+v", invs[1])
+	}
+	if invs[2].DeltaInputTokens != nil || invs[2].DeltaOutputTokens != nil {
+		t.Fatalf("round 3 absorbed usage from the unknown round: %+v", invs[2])
+	}
+}
+
 type partialUsageAgent struct{}
 
 func (*partialUsageAgent) Name() string { return "codex" }
@@ -376,6 +404,28 @@ func (a *partialCumulativeAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 		Usage: usage, UsageReported: true, CacheCreationReported: usage.CacheCreationReported,
 		SessionUsageCumulative: true,
 	}, nil
+}
+
+type intermittentCumulativeUsageAgent struct{ calls int }
+
+func (a *intermittentCumulativeUsageAgent) Name() string                { return "codex" }
+func (a *intermittentCumulativeUsageAgent) Close() error                { return nil }
+func (a *intermittentCumulativeUsageAgent) SupportsSessionResume() bool { return true }
+func (a *intermittentCumulativeUsageAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	result := &agent.Result{
+		SessionID: "intermittent-session", Resumed: opts.Session != nil,
+		SessionUsageCumulative: true,
+	}
+	if a.calls == 2 {
+		return result, nil
+	}
+	result.Usage = agent.TokenUsage{
+		InputTokens: 100 * a.calls, OutputTokens: 20 * a.calls, Reported: true,
+		MeterPresenceReported: true, InputReported: true, OutputReported: true,
+	}
+	result.UsageReported = true
+	return result, nil
 }
 
 type noUsageAgent struct{}
