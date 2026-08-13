@@ -14,16 +14,18 @@ import (
 )
 
 type commandPlanningSnapshot struct {
-	headSHA     string
-	headRef     string
-	status      string
-	indexTree   string
-	indexPath   string
-	indexMode   os.FileMode
-	indexData   []byte
-	backupDir   string
-	files       map[string]commandPlanningFile
-	directories map[string]os.FileMode
+	headSHA      string
+	headRef      string
+	status       string
+	indexTree    string
+	indexFlags   string
+	indexPath    string
+	indexMode    os.FileMode
+	indexData    []byte
+	backupDir    string
+	retainBackup bool
+	files        map[string]commandPlanningFile
+	directories  map[string]os.FileMode
 }
 
 type commandPlanningFile struct {
@@ -50,13 +52,17 @@ func readCommandPlanningSnapshot(ctx context.Context, workDir string, backup boo
 	if err != nil {
 		return nil, fmt.Errorf("inspect HEAD attachment: %w", err)
 	}
-	status, err := git.Run(ctx, workDir, "status", "--porcelain=v1", "-z")
+	status, err := git.Run(ctx, workDir, "status", "--porcelain=v1", "-z", "--ignore-submodules=all")
 	if err != nil {
 		return nil, fmt.Errorf("inspect Git status: %w", err)
 	}
 	indexTree, err := git.Run(ctx, workDir, "write-tree")
 	if err != nil {
 		return nil, fmt.Errorf("inspect Git index: %w", err)
+	}
+	indexFlags, err := git.Run(ctx, workDir, "ls-files", "-v", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("inspect Git index flags: %w", err)
 	}
 	paths, err := commandPlanningMutablePaths(ctx, workDir)
 	if err != nil {
@@ -72,6 +78,7 @@ func readCommandPlanningSnapshot(ctx context.Context, workDir string, backup boo
 		headRef:     headRef,
 		status:      status,
 		indexTree:   indexTree,
+		indexFlags:  indexFlags,
 		files:       make(map[string]commandPlanningFile, len(paths)),
 		directories: directories,
 	}
@@ -121,7 +128,7 @@ func (s *commandPlanningSnapshot) captureIndex(ctx context.Context, workDir stri
 }
 
 func (s *commandPlanningSnapshot) equal(other *commandPlanningSnapshot) bool {
-	if s == nil || other == nil || s.headSHA != other.headSHA || s.headRef != other.headRef || s.status != other.status || s.indexTree != other.indexTree || len(s.files) != len(other.files) || len(s.directories) != len(other.directories) {
+	if s == nil || other == nil || s.headSHA != other.headSHA || s.headRef != other.headRef || s.status != other.status || s.indexTree != other.indexTree || s.indexFlags != other.indexFlags || len(s.files) != len(other.files) || len(s.directories) != len(other.directories) {
 		return false
 	}
 	for path, expected := range s.files {
@@ -138,10 +145,16 @@ func (s *commandPlanningSnapshot) equal(other *commandPlanningSnapshot) bool {
 	return true
 }
 
-func (s *commandPlanningSnapshot) restore(ctx context.Context, workDir string) error {
+func (s *commandPlanningSnapshot) restore(ctx context.Context, workDir string) (retErr error) {
 	if s == nil || s.backupDir == "" {
 		return fmt.Errorf("command-planning snapshot has no restorable backup")
 	}
+	defer func() {
+		if retErr != nil {
+			s.retainBackup = true
+			retErr = fmt.Errorf("%w; recovery backup retained at %s", retErr, s.backupDir)
+		}
+	}()
 	if s.headRef == "HEAD" {
 		if _, err := git.Run(ctx, workDir, "checkout", "--detach", "--force", s.headSHA); err != nil {
 			return fmt.Errorf("restore detached planning HEAD: %w", err)
@@ -240,16 +253,29 @@ func (s *commandPlanningSnapshot) restoreFile(ctx context.Context, workDir, path
 }
 
 func (s *commandPlanningSnapshot) cleanup() {
-	if s != nil && s.backupDir != "" {
+	if s != nil && s.backupDir != "" && !s.retainBackup {
 		_ = os.RemoveAll(s.backupDir)
 	}
 }
 
 func commandPlanningMutablePaths(ctx context.Context, workDir string) ([]string, error) {
 	paths := make(map[string]struct{})
+	staged, err := git.Run(ctx, workDir, "ls-files", "--stage", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("inspect command-planning submodules: %w", err)
+	}
+	for _, record := range strings.Split(staged, "\x00") {
+		metadata, path, ok := strings.Cut(record, "\t")
+		if !ok || !strings.HasPrefix(metadata, "160000 ") {
+			continue
+		}
+		if err := addCommandPlanningPath(workDir, path, paths); err != nil {
+			return nil, err
+		}
+	}
 	commands := [][]string{
-		{"diff", "--name-only", "-z"},
-		{"diff", "--cached", "--name-only", "-z"},
+		{"diff", "--ignore-submodules=all", "--name-only", "-z"},
+		{"diff", "--cached", "--ignore-submodules=all", "--name-only", "-z"},
 		{"ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "-z"},
 		{"ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory", "-z"},
 	}

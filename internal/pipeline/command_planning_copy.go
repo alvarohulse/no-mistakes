@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 func copyPreparedWorkspace(ctx context.Context, sourceDir, targetDir string) error {
@@ -62,6 +64,24 @@ func copyPreparedWorkspace(ctx context.Context, sourceDir, targetDir string) err
 		}
 		if err := copyPreparedPath(ctx, filepath.Join(sourceRoot, entry.Name()), filepath.Join(targetRoot, entry.Name())); err != nil {
 			return err
+		}
+	}
+	return removeCopiedSubmoduleMetadata(ctx, sourceRoot, targetRoot)
+}
+
+func removeCopiedSubmoduleMetadata(ctx context.Context, sourceRoot, targetRoot string) error {
+	output, err := git.Run(ctx, sourceRoot, "ls-files", "--stage", "-z")
+	if err != nil {
+		return fmt.Errorf("inspect prepared submodules: %w", err)
+	}
+	for _, record := range strings.Split(output, "\x00") {
+		metadata, path, ok := strings.Cut(record, "\t")
+		if !ok || !strings.HasPrefix(metadata, "160000 ") {
+			continue
+		}
+		gitPath := filepath.Join(targetRoot, filepath.FromSlash(path), ".git")
+		if err := removePreparedPath(ctx, gitPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove copied submodule metadata %s: %w", path, err)
 		}
 	}
 	return nil
