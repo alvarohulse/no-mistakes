@@ -459,7 +459,8 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 }
 
 // skipWorktreeCleanup reports whether the worktree directory for runID must
-// be left alone during startup cleanup. It is the active-run guard that
+// be left alone during startup cleanup. Command-planning worktrees inherit
+// their parent run's lifecycle. This is the active-run guard that
 // makes cleanup safe even if the singleton lock were ever bypassed: a
 // worktree is never removed while its run is still pending or running -
 // only terminal-run leftovers or directories with no matching run row at
@@ -469,6 +470,9 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 // "no matching run" directory is never one whose insert simply hasn't landed
 // yet - it is safe to remove immediately.
 func skipWorktreeCleanup(d *db.DB, runID string) (bool, string) {
+	if parentRunID, ok := paths.CommandPlanParentRunID(runID); ok {
+		runID = parentRunID
+	}
 	run, err := d.GetRun(runID)
 	if err != nil {
 		return true, fmt.Sprintf("failed to look up run %s: %v", runID, err)
