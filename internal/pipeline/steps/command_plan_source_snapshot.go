@@ -22,12 +22,14 @@ type commandPlanningSourceSnapshot struct {
 	indexFile   string
 	fingerprint commandPlanningSourceFingerprint
 	files       []commandPlanningSourceFile
+	ignored     commandPlanningIgnoredSnapshot
 }
 
 type commandPlanningSourceFingerprint struct {
 	worktreeTree string
 	indexFlags   string
 	files        string
+	ignored      string
 }
 
 type commandPlanningSourceFile struct {
@@ -75,11 +77,12 @@ func (s *commandPlanningSourceSnapshot) capture(ctx context.Context) error {
 		return err
 	}
 
-	fingerprint, err := s.inspect(ctx, s.indexFile)
+	fingerprint, ignored, err := s.inspect(ctx, s.indexFile)
 	if err != nil {
 		return err
 	}
 	s.fingerprint = fingerprint
+	s.ignored = ignored
 	return nil
 }
 
@@ -95,7 +98,7 @@ func (s *commandPlanningSourceSnapshot) Changed(ctx context.Context) (bool, erro
 	if err := s.stageWorktree(ctx, indexFile); err != nil {
 		return false, err
 	}
-	fingerprint, err := s.inspect(ctx, indexFile)
+	fingerprint, _, err := s.inspect(ctx, indexFile)
 	if err != nil {
 		return false, err
 	}
@@ -128,6 +131,9 @@ func (s *commandPlanningSourceSnapshot) Restore() error {
 		if err := file.restore(); err != nil {
 			restoreErr = errors.Join(restoreErr, err)
 		}
+	}
+	if err := s.ignored.restore(ctx, s.workDir); err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore ignored command planning source state: %w", err))
 	}
 	if restoreErr != nil {
 		return restoreErr
@@ -170,7 +176,7 @@ func (s *commandPlanningSourceSnapshot) stageWorktree(ctx context.Context, index
 	return nil
 }
 
-func (s *commandPlanningSourceSnapshot) inspect(ctx context.Context, indexFile string) (commandPlanningSourceFingerprint, error) {
+func (s *commandPlanningSourceSnapshot) inspect(ctx context.Context, indexFile string) (commandPlanningSourceFingerprint, commandPlanningIgnoredSnapshot, error) {
 	var fingerprint commandPlanningSourceFingerprint
 	commands := []struct {
 		name   string
@@ -187,7 +193,7 @@ func (s *commandPlanningSourceSnapshot) inspect(ctx context.Context, indexFile s
 		}
 		output, err := git.RunWithEnv(ctx, s.workDir, env, command.args...)
 		if err != nil {
-			return commandPlanningSourceFingerprint{}, fmt.Errorf("inspect command planning source %s: %w", command.name, err)
+			return commandPlanningSourceFingerprint{}, commandPlanningIgnoredSnapshot{}, fmt.Errorf("inspect command planning source %s: %w", command.name, err)
 		}
 		*command.target = output
 	}
@@ -195,12 +201,17 @@ func (s *commandPlanningSourceSnapshot) inspect(ctx context.Context, indexFile s
 	for _, file := range s.files {
 		current, err := captureCommandPlanningSourceFile(file.path)
 		if err != nil {
-			return commandPlanningSourceFingerprint{}, fmt.Errorf("inspect command planning source metadata %s: %w", file.path, err)
+			return commandPlanningSourceFingerprint{}, commandPlanningIgnoredSnapshot{}, fmt.Errorf("inspect command planning source metadata %s: %w", file.path, err)
 		}
 		currentFiles = append(currentFiles, current)
 	}
 	fingerprint.files = commandPlanningSourceFilesFingerprint(currentFiles)
-	return fingerprint, nil
+	ignored, err := captureCommandPlanningIgnoredSnapshot(ctx, s.workDir)
+	if err != nil {
+		return commandPlanningSourceFingerprint{}, commandPlanningIgnoredSnapshot{}, err
+	}
+	fingerprint.ignored = ignored.fingerprint()
+	return fingerprint, ignored, nil
 }
 
 func commandPlanningSourceGitPath(ctx context.Context, workDir, name string) (string, error) {

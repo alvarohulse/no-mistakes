@@ -273,6 +273,76 @@ func TestPlanPipelineCommandIsolatesAmbientGitConfig(t *testing.T) {
 	}
 }
 
+func TestPlanPipelineCommandRestartsPersistentAgentAroundPlannerEnvironment(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &plannerServerLifecycleAgent{}
+	if _, err := ag.Run(context.Background(), agent.RunOpts{CWD: dir, Env: []string{"PRESTARTED=true"}}); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err != nil {
+		t.Fatal(err)
+	}
+	if ag.closeCalls != 2 {
+		t.Fatalf("agent Close calls = %d, want one before and one after planning", ag.closeCalls)
+	}
+	if len(ag.serverStarts) != 2 {
+		t.Fatalf("managed server starts = %d, want prestarted and planner servers", len(ag.serverStarts))
+	}
+	plannerEnv := strings.Join(ag.serverStarts[1], "\n")
+	for _, want := range pipeline.CommandPlanningGitEnv() {
+		if !strings.Contains(plannerEnv, want) {
+			t.Fatalf("planner server environment missing %q: %v", want, ag.serverStarts[1])
+		}
+	}
+	if ag.serverEnv != nil {
+		t.Fatalf("planner server survived command planning: %v", ag.serverEnv)
+	}
+
+	if _, err := ag.Run(context.Background(), agent.RunOpts{CWD: dir, Env: []string{"AFTER=true"}}); err != nil {
+		t.Fatal(err)
+	}
+	afterEnv := strings.Join(ag.serverStarts[2], "\n")
+	if strings.Contains(afterEnv, "GIT_CONFIG_NOSYSTEM=1") {
+		t.Fatalf("planner environment leaked into later managed server: %v", ag.serverStarts[2])
+	}
+}
+
+func TestPlanPipelineCommandPreservesRunAndPostCloseErrors(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	runErr := errors.New("planner run failed")
+	closeErr := errors.New("planner close failed")
+	ag := &plannerLifecycleErrorAgent{
+		runErr:    runErr,
+		closeErrs: []error{nil, closeErr},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepBuild, "Select build.")
+	if !errors.Is(err, runErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("planPipelineCommand() error = %v, want run and post-close errors", err)
+	}
+	if ag.runCalls != 1 || ag.closeCalls != 2 {
+		t.Fatalf("agent lifecycle = %d runs/%d closes, want 1 run/2 closes", ag.runCalls, ag.closeCalls)
+	}
+}
+
+func TestPlanPipelineCommandStopsWhenPreCloseFails(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	closeErr := errors.New("pre-planner close failed")
+	ag := &plannerLifecycleErrorAgent{closeErrs: []error{closeErr}}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepBuild, "Select build.")
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("planPipelineCommand() error = %v, want pre-close error", err)
+	}
+	if ag.runCalls != 0 || ag.closeCalls != 1 {
+		t.Fatalf("agent lifecycle = %d runs/%d closes, want 0 runs/1 close", ag.runCalls, ag.closeCalls)
+	}
+}
+
 func TestPlanPipelineCommandRejectsUninitializedSubmoduleMutation(t *testing.T) {
 	dir, baseSHA, _ := setupGitRepo(t)
 	submoduleDir := t.TempDir()
@@ -414,6 +484,114 @@ func TestPlanPipelineCommandRestoresHiddenDirtySourceMutation(t *testing.T) {
 	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "prepared hidden change\n")
 	if got := gitCmd(t, dir, "ls-files", "-v", "-z"); got != indexFlags {
 		t.Fatalf("source index flags = %q, want %q", got, indexFlags)
+	}
+}
+
+func TestPlanPipelineCommandRestoresSmallIgnoredSourceMutations(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("prepared-output/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore prepared output")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	preparedDir := filepath.Join(dir, "prepared-output")
+	if err := os.Mkdir(preparedDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	preparedPath := filepath.Join(preparedDir, "hook-state.txt")
+	if err := os.WriteFile(preparedPath, []byte("hook prepared\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(preparedPath, []byte("planner rewrite\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.Chmod(preparedPath, 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(preparedDir, "planner-created.txt"), []byte("created\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want ignored-state read-only violation", err)
+	}
+	assertCommandPlanningFileContent(t, preparedPath, "hook prepared\n")
+	info, err := os.Stat(preparedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0o600 {
+		t.Fatalf("restored ignored file mode = %o, want 600", got)
+	}
+	if _, err := os.Stat(filepath.Join(preparedDir, "planner-created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("planner-created ignored file survived restore: %v", err)
+	}
+}
+
+func TestPlanPipelineCommandRemovesCreatedIgnoredDirectory(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("planner-cache/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore planner cache")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	createdDir := filepath.Join(dir, "planner-cache")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.MkdirAll(filepath.Join(createdDir, "nested"), 0o755); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(createdDir, "nested", "created.txt"), []byte("created\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want ignored-directory read-only violation", err)
+	}
+	if _, err := os.Stat(createdDir); !os.IsNotExist(err) {
+		t.Fatalf("planner-created ignored directory survived restore: %v", err)
+	}
+}
+
+func TestCommandPlanningIgnoredSnapshotSkipsLargeRootWithinBudget(t *testing.T) {
+	dir, _, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "node_modules")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 256 {
+		path := filepath.Join(root, fmt.Sprintf("package-%03d.txt", i))
+		if err := os.WriteFile(path, []byte("dependency\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := captureCommandPlanningIgnoredSnapshot(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.roots) != 1 || snapshot.roots[0].path != "node_modules" || !snapshot.roots[0].skipped {
+		t.Fatalf("large ignored snapshot = %+v, want one budget-skipped root", snapshot.roots)
+	}
+	if len(snapshot.roots[0].entries) != 0 {
+		t.Fatalf("large ignored root retained %d partial entries", len(snapshot.roots[0].entries))
 	}
 }
 
@@ -560,6 +738,51 @@ func TestPlanPipelineCommandPersistsPrivateCommandSeparatelyFromEvidence(t *test
 type commandPlanningProbeStep struct {
 	name  types.StepName
 	after func(*pipeline.StepContext) error
+}
+
+type plannerServerLifecycleAgent struct {
+	serverEnv    []string
+	serverStarts [][]string
+	closeCalls   int
+}
+
+type plannerLifecycleErrorAgent struct {
+	runErr     error
+	closeErrs  []error
+	runCalls   int
+	closeCalls int
+}
+
+func (*plannerServerLifecycleAgent) Name() string { return "managed" }
+
+func (a *plannerServerLifecycleAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if a.serverEnv == nil {
+		a.serverEnv = append([]string(nil), opts.Env...)
+		a.serverStarts = append(a.serverStarts, append([]string(nil), opts.Env...))
+	}
+	return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+}
+
+func (a *plannerServerLifecycleAgent) Close() error {
+	a.closeCalls++
+	a.serverEnv = nil
+	return nil
+}
+
+func (*plannerLifecycleErrorAgent) Name() string { return "lifecycle-error" }
+
+func (a *plannerLifecycleErrorAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	a.runCalls++
+	return nil, a.runErr
+}
+
+func (a *plannerLifecycleErrorAgent) Close() error {
+	index := a.closeCalls
+	a.closeCalls++
+	if index >= len(a.closeErrs) {
+		return nil
+	}
+	return a.closeErrs[index]
 }
 
 func (s *commandPlanningProbeStep) Name() types.StepName { return s.name }

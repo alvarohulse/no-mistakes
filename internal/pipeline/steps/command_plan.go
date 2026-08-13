@@ -46,8 +46,18 @@ func planPipelineCommand(sctx *pipeline.StepContext, step types.StepName, task s
 	}
 	defer sourceBefore.Close()
 	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
-		Prompt: fmt.Sprintf(`Select the exact shell command the %s pipeline step should execute.
+	if err := sctx.Agent.Close(); err != nil {
+		return "", fmt.Errorf("reset agent before planning %s command: %w", step, err)
+	}
+	var result *agent.Result
+	var agentRunErr error
+	var agentCloseErr error
+	func() {
+		defer func() {
+			agentCloseErr = sctx.Agent.Close()
+		}()
+		result, agentRunErr = sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
+			Prompt: fmt.Sprintf(`Select the exact shell command the %s pipeline step should execute.
 
 Context:
 - branch: %s
@@ -64,12 +74,20 @@ Rules:
 - Do not modify any file.
 - Return JSON containing only a single "command" string.
 - Return an empty command only when no meaningful %s command exists.%s%s`, step.DisplayName(sctx.Run.RefreshStrategy), sctx.Run.Branch, baseSHA, sctx.Run.HeadSHA, task, step, userIntentPromptSection(sctx), configuredPromptSection(sctx, step)),
-		CWD:        plannerDir,
-		Env:        append(append([]string(nil), sctx.Env...), pipeline.CommandPlanningGitEnv()...),
-		JSONSchema: commandPlanSchema,
-		OnChunk:    sctx.LogChunk,
-		Purpose:    string(step) + "-plan",
-	})
+			CWD:        plannerDir,
+			Env:        append(append([]string(nil), sctx.Env...), pipeline.CommandPlanningGitEnv()...),
+			JSONSchema: commandPlanSchema,
+			OnChunk:    sctx.LogChunk,
+			Purpose:    string(step) + "-plan",
+		})
+	}()
+	var agentErr error
+	if agentRunErr != nil {
+		agentErr = errors.Join(agentErr, agentRunErr)
+	}
+	if agentCloseErr != nil {
+		agentErr = errors.Join(agentErr, fmt.Errorf("close agent after %s command planning: %w", step, agentCloseErr))
+	}
 	// The integrity check runs before the agent's own error is reported: a
 	// planner that both wrote to the worktree and failed must surface as a
 	// violated read-only pass, not as a plain agent failure that hides it.
@@ -96,8 +114,8 @@ Rules:
 			integrityErr = errors.Join(integrityErr, fmt.Errorf("restore pipeline worktree after %s command planning: %w", step, sourceRestoreErr))
 		}
 		integrityErr = errors.Join(integrityErr, sctx.CommandPlanning.Discard())
-		if err != nil {
-			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
+		if agentErr != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, agentErr))
 		}
 		return "", integrityErr
 	}
@@ -106,13 +124,13 @@ Rules:
 			fmt.Errorf("%s command planner modified its workspace during a read-only pass", step),
 			sctx.CommandPlanning.Discard(),
 		)
-		if err != nil {
-			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, err))
+		if agentErr != nil {
+			integrityErr = errors.Join(integrityErr, fmt.Errorf("agent plan %s command: %w", step, agentErr))
 		}
 		return "", integrityErr
 	}
-	if err != nil {
-		return "", fmt.Errorf("agent plan %s command: %w", step, err)
+	if agentErr != nil {
+		return "", fmt.Errorf("agent plan %s command: %w", step, agentErr)
 	}
 	var plan commandPlan
 	if len(result.Output) == 0 || json.Unmarshal(result.Output, &plan) != nil || plan.Command == nil {
