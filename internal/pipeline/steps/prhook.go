@@ -40,7 +40,7 @@ func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prC
 		return content
 	}
 
-	contract := buildPRBodyContract(sctx, records, whatChanged, content.Title, scope)
+	contract := buildPRBodyContract(sctx, records, content.Summary, whatChanged, content.Title, scope)
 	result, err := prbody.RunHook(sctx.Ctx, prbody.HookOptions{
 		Command:  hook,
 		Dir:      sctx.WorkDir,

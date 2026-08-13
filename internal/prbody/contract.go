@@ -11,7 +11,7 @@ package prbody
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
 // pipeline treats a non-zero exit as "use the built-in body" and says so.
-const Version = 2
+const Version = 3
 
 // Contract is the complete payload written to the formatter's stdin.
 //
@@ -45,6 +45,9 @@ type Contract struct {
 	// Title is the drafted conventional-commit PR title. The formatter owns
 	// the body only - returning a title has no effect.
 	Title string `json:"title"`
+	// Metadata is opaque operator-supplied context. no-mistakes does not parse
+	// or assign structure to it; formatters may interpret it for their own use.
+	Metadata string `json:"metadata,omitempty"`
 
 	Commits  []Commit `json:"commits,omitempty"`
 	Sections Sections `json:"sections"`
@@ -65,7 +68,10 @@ type Commit struct {
 
 // Sections holds the body's raw material.
 type Sections struct {
+	// Intent is retained only so callers can decode a version 2 contract. Version
+	// 3 producers leave it empty and report intent on the Intent pipeline step.
 	Intent      *IntentSection   `json:"intent,omitempty"`
+	Summary     *TextSection     `json:"summary,omitempty"`
 	Notes       NotesSection     `json:"notes"`
 	WhatChanged *TextSection     `json:"what_changed,omitempty"`
 	Risk        RiskSection      `json:"risk"`
@@ -161,14 +167,31 @@ type PipelineStep struct {
 	// Label is the display name for this run's settings: `refresh` renders as
 	// "Rebase" or "Merge" depending on the strategy, so a formatter should
 	// print Label and key off Name.
-	Label      string       `json:"label"`
-	Order      int          `json:"order"`
-	Status     string       `json:"status"`
-	ExitCode   *int         `json:"exit_code,omitempty"`
-	DurationMS *int64       `json:"duration_ms,omitempty"`
-	Rounds     int          `json:"rounds"`
-	Findings   StepFindings `json:"findings"`
-	Agents     []AgentRun   `json:"agents,omitempty"`
+	Label      string        `json:"label"`
+	Order      int           `json:"order"`
+	Status     string        `json:"status"`
+	ExitCode   *int          `json:"exit_code,omitempty"`
+	DurationMS *int64        `json:"duration_ms,omitempty"`
+	Rounds     int           `json:"rounds"`
+	Findings   StepFindings  `json:"findings"`
+	Agents     []AgentRun    `json:"agents,omitempty"`
+	Intent     *IntentResult `json:"intent,omitempty"`
+}
+
+// IntentResult is the Intent step's structured result. Provided distinguishes
+// an explicit --intent from a transcript inference; Reason explains why no
+// text was available without forcing a formatter to scrape step logs.
+type IntentResult struct {
+	Text     string        `json:"text,omitempty"`
+	Source   string        `json:"source,omitempty"`
+	Provided bool          `json:"provided"`
+	Reason   *IntentReason `json:"reason,omitempty"`
+}
+
+// IntentReason is a stable machine-readable absence reason plus display text.
+type IntentReason struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // StepFindings counts a step's final findings.

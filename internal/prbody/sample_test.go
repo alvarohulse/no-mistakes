@@ -12,10 +12,14 @@ import (
 // contract has to populate all of it.
 func TestSampleExercisesEverySection(t *testing.T) {
 	t.Parallel()
-	s := Sample().Sections
+	sample := Sample()
+	s := sample.Sections
 
-	if s.Intent == nil || s.Intent.Text == "" {
-		t.Error("sample has no intent")
+	if sample.Metadata == "" {
+		t.Error("sample has no metadata")
+	}
+	if s.Summary == nil || s.Summary.Text == "" {
+		t.Error("sample has no summary")
 	}
 	if !s.Notes.Supplied || s.Notes.Text == "" {
 		t.Error("sample has no author note")
@@ -34,6 +38,9 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if s.Pipeline == nil || len(s.Pipeline.Steps) == 0 || len(s.Pipeline.ConfigSources) == 0 {
 		t.Fatal("sample pipeline is incomplete")
+	}
+	if intent := s.Pipeline.Steps[0].Intent; intent == nil || intent.Text == "" || !intent.Provided {
+		t.Errorf("sample intent result is incomplete: %+v", intent)
 	}
 }
 

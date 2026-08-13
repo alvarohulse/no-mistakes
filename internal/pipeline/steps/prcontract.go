@@ -36,6 +36,7 @@ type ContractInput struct {
 	Note string
 
 	Title       string
+	Summary     string
 	WhatChanged string
 	Branch      string
 	BaseBranch  string
@@ -83,13 +84,8 @@ func BuildContract(in ContractInput) *prbody.Contract {
 		contract.Sections.Notes.Supplied = true
 	}
 
-	if intentText := strings.TrimSpace(in.Intent); intentText != "" {
-		contract.Sections.Intent = &prbody.IntentSection{
-			Text:          intentText,
-			Source:        in.IntentSource,
-			Authoritative: in.IntentAuthoritative,
-			Trusted:       false,
-		}
+	if summary := strings.TrimSpace(in.Summary); summary != "" {
+		contract.Sections.Summary = &prbody.TextSection{Text: summary}
 	}
 
 	if trimmed := strings.TrimSpace(in.WhatChanged); trimmed != "" {
@@ -98,7 +94,7 @@ func BuildContract(in ContractInput) *prbody.Contract {
 
 	contract.Sections.Risk = contractRisk(in.Steps, in.Rounds)
 	contract.Sections.Testing = contractTesting(in.Steps, in.Rounds)
-	contract.Sections.Pipeline = contractPipeline(in.Steps, in.Rounds, in.Invocations, in.Run)
+	contract.Sections.Pipeline = contractPipeline(in.Steps, in.Rounds, in.Invocations, in.Run, strings.TrimSpace(in.Intent), in.IntentSource, in.IntentAuthoritative)
 	return contract
 }
 
@@ -136,7 +132,7 @@ func LoadRunRecords(d *db.DB, runID string) RunRecords {
 }
 
 // buildPRBodyContract assembles the contract for a live run.
-func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, whatChanged, title string, scope prBodyScope) *prbody.Contract {
+func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, summary, whatChanged, title string, scope prBodyScope) *prbody.Contract {
 	return BuildContract(ContractInput{
 		Run:                 sctx.Run,
 		Repo:                sctx.Repo,
@@ -149,6 +145,7 @@ func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, whatCha
 		IntentAuthoritative: intentSourceIsAuthoritative(sctx),
 		Note:                cleanedPRNote(sctx),
 		Title:               title,
+		Summary:             summary,
 		WhatChanged:         whatChanged,
 		Branch:              scope.branch,
 		BaseBranch:          scope.baseBranch,
@@ -256,7 +253,7 @@ func finalStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) *types.Fin
 	return nil
 }
 
-func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, run *db.Run) *prbody.PipelineSection {
+func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, run *db.Run, intentText, intentSource string, intentProvided bool) *prbody.PipelineSection {
 	if len(steps) == 0 {
 		return nil
 	}
@@ -315,6 +312,9 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			Findings:   contractStepFindings(sr, rounds[sr.ID]),
 			Agents:     byStep[string(sr.StepName)],
 		}
+		if sr.StepName == types.StepIntent {
+			step.Intent = contractIntentResult(sr, intentText, intentSource, intentProvided)
+		}
 		if step.Rounds == 0 {
 			// A step that ran without recording rounds still ran once.
 			step.Rounds = 1
@@ -325,6 +325,19 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 		return nil
 	}
 	return section
+}
+
+func contractIntentResult(step *db.StepResult, text, source string, provided bool) *prbody.IntentResult {
+	if text != "" {
+		return &prbody.IntentResult{Text: text, Source: source, Provided: provided}
+	}
+	code := "no_matching_transcript"
+	message := "No matching agent transcript supplied an intent."
+	if step != nil && step.Status == types.StepStatusSkipped {
+		code = "step_skipped"
+		message = "Intent extraction was skipped."
+	}
+	return &prbody.IntentResult{Reason: &prbody.IntentReason{Code: code, Message: message}}
 }
 
 func contractStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) prbody.StepFindings {

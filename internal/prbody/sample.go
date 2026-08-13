@@ -29,16 +29,14 @@ func Sample() *Contract {
 		Provider:        "github",
 		BodyLimit:       0,
 		Title:           "fix(scheduler): bound the retry window",
+		Metadata:        "resolves ENG-4471\ncontributes to ENG-4520",
 		Commits: []Commit{
 			{SHA: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", Subject: "fix(scheduler): bound the retry window"},
 			{SHA: "9f2c1ad7e5b04c8e1a6f3d90b27c4e8815d6a3f1", Subject: "test(scheduler): cover the exhausted-budget path"},
 		},
 		Sections: Sections{
-			Intent: &IntentSection{
-				Text:          "Retries on a saturated queue never stop, so one poisoned job pins a worker until the pod is cycled. Bound the window and surface exhaustion instead of retrying forever.",
-				Source:        "agent",
-				Authoritative: true,
-				Trusted:       false,
+			Summary: &TextSection{
+				Text: "Bounds scheduler retries so one poisoned job cannot pin a worker indefinitely. Exhausted jobs now fail explicitly through `scheduler.retry.exhausted`.",
 			},
 			Notes: NotesSection{
 				Text:     "Deliberately not touching the dead-letter path in this PR - it needs the queue-depth metric first, tracked separately.",
@@ -69,6 +67,11 @@ func Sample() *Contract {
 					{
 						Name: "intent", Label: "Intent", Order: 1, Status: "completed",
 						ExitCode: &exit, DurationMS: ms(2140), Rounds: 1,
+						Intent: &IntentResult{
+							Text:     "Retries on a saturated queue never stop, so one poisoned job pins a worker until the pod is cycled. Bound the window and surface exhaustion instead of retrying forever.",
+							Source:   "agent",
+							Provided: true,
+						},
 						Agents: []AgentRun{{
 							Round: 1, Purpose: "intent", Agent: "claude", Model: "claude-opus-5",
 							Vendor: "anthropic", InvocationMode: "harness_cli", NestedReported: true,
