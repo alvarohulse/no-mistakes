@@ -179,6 +179,9 @@ func TestParseCopilotEvents_FinalMessageAndUsage(t *testing.T) {
 	if usage.OutputTokens != 7 {
 		t.Errorf("output tokens = %d, want 7 (3+4)", usage.OutputTokens)
 	}
+	if !usage.MeterPresenceReported || !usage.OutputReported || usage.InputReported || usage.CacheReadReported || usage.CacheCreationReported {
+		t.Fatalf("usage presence = %+v, want output-only reporting", usage)
+	}
 	if exitCode != 0 {
 		t.Errorf("exit code = %d, want 0", exitCode)
 	}

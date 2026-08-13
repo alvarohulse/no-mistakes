@@ -237,7 +237,7 @@ type copilotEventData struct {
 	DeltaContent string `json:"deltaContent,omitempty"`
 	// assistant.message
 	Content      string `json:"content,omitempty"`
-	OutputTokens int    `json:"outputTokens,omitempty"`
+	OutputTokens *int   `json:"outputTokens,omitempty"`
 	// error / abort events
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -286,7 +286,7 @@ func parseCopilotEvents(
 			if event.Data == nil {
 				continue
 			}
-			usage.Add(TokenUsage{OutputTokens: event.Data.OutputTokens, Reported: true})
+			usage.Add(tokenUsageFromFields(nil, event.Data.OutputTokens, nil, nil, nil))
 			if event.Data.Content != "" && messages != nil {
 				*messages = append(*messages, event.Data.Content)
 			}

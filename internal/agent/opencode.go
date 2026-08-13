@@ -101,6 +101,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 			if mr.err != nil {
 				return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 			}
+			foldOpencodeMessageResponse(state, mr.resp)
 		default:
 		}
 		a.abortSession(baseURL, sessionID)
@@ -113,59 +114,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 	}
 
-	// Update usage and text from message response
-	responseText := ""
-	responseFinalText := ""
-	if mr.resp != nil && mr.resp.Info != nil {
-		streamedText := state.lastText
-		streamedFinalText := state.lastFinalText
-		emitResponseChunk := func(chunk string) {
-			if opts.OnChunk == nil || chunk == "" {
-				return
-			}
-			state.emitSeparatorIfNeeded()
-			opts.OnChunk(chunk)
-			state.hasEmittedText = true
-		}
-		if mr.resp.Info.Role == "assistant" && mr.resp.Info.Tokens != nil {
-			state.usageByMsg[mr.resp.Info.ID] = opencodeTokensToUsage(mr.resp.Info.Tokens)
-			state.usage = accumulateUsage(state.usageByMsg)
-		}
-		for _, part := range mr.resp.Parts {
-			state.observeOpencodeTool(part.ID, part.Type, part.Tool, part.State)
-			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
-				continue
-			}
-			responseText += part.Text
-			if part.Metadata != nil && part.Metadata.OpenAI != nil && part.Metadata.OpenAI.Phase == "final_answer" {
-				responseFinalText += part.Text
-			}
-		}
-		if responseText != "" {
-			state.lastText = responseText
-		}
-		if responseFinalText != "" {
-			state.lastFinalText = responseFinalText
-		}
-		if responseFinalText != "" {
-			responseText = responseFinalText
-		}
-		if opts.OnChunk != nil && responseText != "" {
-			streamedResponseText := streamedText
-			if streamedFinalText != "" {
-				streamedResponseText = streamedFinalText
-			}
-			switch {
-			case !state.hasEmittedText:
-				emitResponseChunk(responseText)
-			case streamedResponseText == "":
-				emitResponseChunk(responseText)
-			case strings.HasPrefix(responseText, streamedResponseText):
-				suffix := responseText[len(streamedResponseText):]
-				emitResponseChunk(suffix)
-			}
-		}
-	}
+	foldOpencodeMessageResponse(state, mr.resp)
 
 	// Prefer structured output from response
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
@@ -201,6 +150,61 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
+}
+
+func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {
+	responseText := ""
+	responseFinalText := ""
+	if response != nil && response.Info != nil {
+		streamedText := state.lastText
+		streamedFinalText := state.lastFinalText
+		emitResponseChunk := func(chunk string) {
+			if state.onChunk == nil || chunk == "" {
+				return
+			}
+			state.emitSeparatorIfNeeded()
+			state.onChunk(chunk)
+			state.hasEmittedText = true
+		}
+		if response.Info.Role == "assistant" && response.Info.Tokens != nil {
+			state.usageByMsg[response.Info.ID] = opencodeTokensToUsage(response.Info.Tokens)
+			state.usage = accumulateUsage(state.usageByMsg)
+		}
+		for _, part := range response.Parts {
+			state.observeOpencodeTool(part.ID, part.Type, part.Tool, part.State)
+			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+			responseText += part.Text
+			if part.Metadata != nil && part.Metadata.OpenAI != nil && part.Metadata.OpenAI.Phase == "final_answer" {
+				responseFinalText += part.Text
+			}
+		}
+		if responseText != "" {
+			state.lastText = responseText
+		}
+		if responseFinalText != "" {
+			state.lastFinalText = responseFinalText
+		}
+		if responseFinalText != "" {
+			responseText = responseFinalText
+		}
+		if state.onChunk != nil && responseText != "" {
+			streamedResponseText := streamedText
+			if streamedFinalText != "" {
+				streamedResponseText = streamedFinalText
+			}
+			switch {
+			case !state.hasEmittedText:
+				emitResponseChunk(responseText)
+			case streamedResponseText == "":
+				emitResponseChunk(responseText)
+			case strings.HasPrefix(responseText, streamedResponseText):
+				suffix := responseText[len(streamedResponseText):]
+				emitResponseChunk(suffix)
+			}
+		}
+	}
 }
 
 func opencodePartialResult(state *opencodeStreamState) *Result {
