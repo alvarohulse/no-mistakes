@@ -330,20 +330,28 @@ func TestCopilotAgent_RunParsesJSONOutput(t *testing.T) {
 func TestCopilotAgent_RunReportsErrorOnNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCopilot(t, dir, []string{
+		`{"type":"assistant.message","data":{"content":"partial","outputTokens":9}}`,
 		`{"type":"error","data":{"message":"not authenticated"}}`,
 		`{"type":"result","exitCode":1}`,
 	}, 1)
 
 	ca := &copilotAgent{bin: bin}
+	var result *Result
 	_, err := ca.Run(context.Background(), RunOpts{
 		Prompt: "do work",
 		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
 	})
 	if err == nil {
 		t.Fatal("expected error on non-zero exit")
 	}
 	if !strings.Contains(err.Error(), "not authenticated") {
 		t.Fatalf("error = %v, want copilot error detail", err)
+	}
+	if result == nil || !result.UsageReported || result.Usage.OutputTokens != 9 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
 	}
 }
 

@@ -100,19 +100,27 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 
 	var usage TokenUsage
 	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, &usage)
+	partialResult := func() *Result {
+		resultUsage := usage
+		if resultUsage.OutputTokens == 0 {
+			resultUsage.OutputTokens = estimateAcpxTokens(len(text))
+		}
+		result, _ := finalizeTextResult(a.Name(), text, opts.JSONSchema, resultUsage)
+		return result
+	}
 	if err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("acpx parse events: %w", err)
 		emitAgentExited(opts, a.Name(), pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if waitErr != nil {
 		retErr := fmt.Errorf("acpx exited: %w: %s", waitErr, acpxProcessErrorOutput(stderrBuf, stdoutErr))
 		emitAgentExited(opts, a.Name(), pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = estimateAcpxTokens(len(text))

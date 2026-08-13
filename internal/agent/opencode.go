@@ -99,18 +99,18 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		select {
 		case mr := <-msgCh:
 			if mr.err != nil {
-				return nil, fmt.Errorf("opencode message: %w", mr.err)
+				return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 			}
 		default:
 		}
 		a.abortSession(baseURL, sessionID)
-		return nil, fmt.Errorf("opencode events: %w", err)
+		return opencodePartialResult(state), fmt.Errorf("opencode events: %w", err)
 	}
 
 	// Wait for message response
 	mr := <-msgCh
 	if mr.err != nil {
-		return nil, fmt.Errorf("opencode message: %w", mr.err)
+		return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 	}
 
 	// Update usage and text from message response
@@ -169,16 +169,9 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 
 	// Prefer structured output from response
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
-		return &Result{
-			Output:                    mr.resp.Info.Structured,
-			Text:                      state.lastText,
-			Usage:                     state.usage,
-			UsageReported:             state.usage.Reported,
-			CacheCreationReported:     state.usage.CacheCreationReported,
-			AgentObservations:         state.observations.observations,
-			AgentObservationsReported: true,
-			NestedAgentCount:          state.observations.uniqueCount(),
-		}, nil
+		result := opencodePartialResult(state)
+		result.Output = mr.resp.Info.Structured
+		return result, nil
 	}
 
 	// Surface opencode's StructuredOutputError directly. When the model
@@ -192,7 +185,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		if mr.resp.Info.Error.Retries != nil {
 			retries = *mr.resp.Info.Error.Retries
 		}
-		return nil, fmt.Errorf("opencode structured output failed after %d internal retries: %s",
+		return opencodePartialResult(state), fmt.Errorf("opencode structured output failed after %d internal retries: %s",
 			retries, mr.resp.Info.Error.Message)
 	}
 
@@ -208,6 +201,21 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
+}
+
+func opencodePartialResult(state *opencodeStreamState) *Result {
+	if state == nil {
+		return nil
+	}
+	return &Result{
+		Text:                      state.lastText,
+		Usage:                     state.usage,
+		UsageReported:             state.usage.Reported,
+		CacheCreationReported:     state.usage.CacheCreationReported,
+		AgentObservations:         state.observations.observations,
+		AgentObservationsReported: true,
+		NestedAgentCount:          state.observations.uniqueCount(),
+	}
 }
 
 func (a *opencodeAgent) Close() error {

@@ -35,6 +35,40 @@ printf '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_me
 	return path
 }
 
+func writeFailingStubAcpx(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "acpx")
+	script := `#!/bin/sh
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"usage_update","inputTokens":31,"outputTokens":9,"cacheReadTokens":6,"cacheWriteTokens":2}}}'
+printf '%s\n' '{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","text":"partial"}}}'
+echo "acpx failed" >&2
+exit 1
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAcpxAgent_ExitFailureRetainsParsedUsage(t *testing.T) {
+	dir := t.TempDir()
+	agent := &acpxAgent{bin: writeFailingStubAcpx(t, dir), target: "fixture"}
+	var result *Result
+	_, err := agent.Run(context.Background(), RunOpts{
+		Prompt: "review this change",
+		CWD:    dir,
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
+	})
+	if err == nil {
+		t.Fatal("expected acpx failure")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 31 || result.Usage.OutputTokens != 9 || result.Usage.CacheReadTokens != 6 || result.Usage.CacheCreationTokens != 2 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+}
+
 // TestAcpxAgent_Run_CursorSpawnsContainedDefaultCommand proves the explicit
 // Cursor ACP path keeps its registered default command while forcing project
 // instruction discovery into a clean primary workspace.

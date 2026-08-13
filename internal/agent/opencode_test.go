@@ -493,7 +493,7 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 			// opencode signals structured-output failure via
 			// info.error.name = "StructuredOutputError". The body
 			// intentionally omits info.structured.
-			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","error":{"name":"StructuredOutputError","message":"Model did not produce structured output","retries":2}},"parts":[{"type":"text","text":"Now I need to find the failing test. The only failing test is foo."}]}`)
+			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","error":{"name":"StructuredOutputError","message":"Model did not produce structured output","retries":2},"tokens":{"input":17,"output":5,"cache":{"read":3,"write":2}}},"parts":[{"id":"task-1","type":"tool","tool":"task","state":{"status":"completed","input":{"subagent_type":"explore"}}},{"type":"text","text":"Now I need to find the failing test. The only failing test is foo."}]}`)
 
 		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusOK)
@@ -509,16 +509,23 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 		server: &managedServer{port: mustParsePort(server.URL)},
 	}
 
-	result, err := a.Run(context.Background(), RunOpts{
+	var result *Result
+	_, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "fix the failing tests",
 		CWD:        t.TempDir(),
 		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
 	})
 	if err == nil {
-		t.Fatalf("expected error, got result %+v", result)
+		t.Fatal("expected error")
 	}
-	if result != nil {
-		t.Fatalf("expected nil result on error, got %+v", result)
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 5 {
+		t.Fatalf("partial result = %+v, want incurred usage", result)
+	}
+	if !result.AgentObservationsReported || result.NestedAgentCount != 1 {
+		t.Fatalf("partial nested-agent telemetry = %+v", result)
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "structured output failed") {

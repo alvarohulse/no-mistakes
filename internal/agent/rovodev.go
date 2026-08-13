@@ -77,7 +77,8 @@ func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	if err != nil {
 		// Best-effort cancel on error
 		a.cancelSession(baseURL, sessionID)
-		return nil, err
+		result, _ := finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
+		return result, err
 	}
 
 	return finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
