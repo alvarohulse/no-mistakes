@@ -240,7 +240,6 @@ esac`
 case "$prompt" in
   *"Select the exact shell command the Lint pipeline step should execute."*)
     if mkdir "$NM_HOME/recursive-incident-claimed" 2>/dev/null; then
-      git switch -c incident-recursive-child >/dev/null 2>&1
       run_attempt() {
         label="$1"
         shift
