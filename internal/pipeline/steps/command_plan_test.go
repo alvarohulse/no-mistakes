@@ -170,6 +170,59 @@ func TestPlanPipelineCommandContainsPrivateConfigAndIndexMutations(t *testing.T)
 	}
 }
 
+func TestPlanPipelineCommandRejectsControllerMetadataMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(context.Context, string) error
+	}{
+		{
+			name: "hook",
+			mutate: func(ctx context.Context, dir string) error {
+				hooksDir, err := gitutil.Run(ctx, dir, "config", "--local", "--get", "core.hooksPath")
+				if err != nil || hooksDir == "" {
+					hooksDir = filepath.Join(dir, ".git", "hooks")
+				} else if !filepath.IsAbs(hooksDir) {
+					hooksDir = filepath.Join(dir, hooksDir)
+				}
+				if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(hooksDir, "post-checkout"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+			},
+		},
+		{
+			name: "ownership marker",
+			mutate: func(_ context.Context, dir string) error {
+				return os.WriteFile(filepath.Join(dir, ".git", "no-mistakes-command-planner"), []byte("mutated\n"), 0o644)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			plannerDir := ""
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					plannerDir = opts.CWD
+					if err := test.mutate(ctx, opts.CWD); err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+				},
+			}
+			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+				t.Fatalf("planPipelineCommand() error = %v, want controller-metadata refusal", err)
+			}
+			if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
+				t.Fatalf("planner with mutated controller metadata was not discarded: %v", err)
+			}
+		})
+	}
+}
+
 func TestPlanPipelineCommandDiscardsWorktreeMutation(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	plannerDir := ""
