@@ -144,8 +144,8 @@ func TestLintStep_NoConfiguredLintRejectsPlannerWorktreeMutation(t *testing.T) {
 
 	ag := &mockAgent{
 		name: "test",
-		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
-			if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
 				return nil, err
 			}
 			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
@@ -165,6 +165,9 @@ func TestLintStep_NoConfiguredLintRejectsPlannerWorktreeMutation(t *testing.T) {
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("HEAD after summary error = %q, want %q", got, headSHA)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "lint-fix.txt")); !os.IsNotExist(err) {
+		t.Fatalf("planner mutation reached pipeline worktree: %v", err)
 	}
 }
 
