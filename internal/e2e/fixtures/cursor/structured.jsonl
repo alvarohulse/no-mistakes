@@ -1,31 +1,31 @@
-{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/tmp/recordcursor-4223271445/workspace","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","model":"Opus 4.8 300K Extra High","permissionMode":"default"}
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"First read /tmp/recordcursor-4223271445/repo/probe.txt with the file-read tool. After reading it, Reply with ONLY this JSON literal and nothing else: {\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}"}]},"session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0"}
-{"type":"thinking","subtype":"delta","text":"I","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158201}
-{"type":"thinking","subtype":"delta","text":"'ll read","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158204}
-{"type":"thinking","subtype":"delta","text":" through","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158227}
-{"type":"thinking","subtype":"delta","text":" the file now","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158255}
-{"type":"thinking","subtype":"delta","text":".","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158279}
-{"type":"thinking","subtype":"completed","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158334}
-{"type":"tool_call","subtype":"started","call_id":"toolu_vrtx_017GkY1c8woodG5zNi3Fq4sh","tool_call":{"readToolCall":{"args":{"path":"/tmp/recordcursor-4223271445/repo/probe.txt"}},"hookAdditionalContexts":[],"toolCallId":"toolu_vrtx_017GkY1c8woodG5zNi3Fq4sh","startedAtMs":"1786597158331"},"model_call_id":"eb1931d0-08d1-4104-8b40-baedf5953931-0-4zqe","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158398}
-{"type":"tool_call","subtype":"completed","call_id":"toolu_vrtx_017GkY1c8woodG5zNi3Fq4sh","tool_call":{"readToolCall":{"args":{"path":"/tmp/recordcursor-4223271445/repo/probe.txt"},"result":{"success":{"content":"FIXTURE_REPO_ACCESS\n","isEmpty":false,"exceededLimit":false,"totalLines":2,"fileSize":20,"path":"/tmp/recordcursor-4223271445/repo/probe.txt","readRange":{"startLine":1,"endLine":2},"relatedCursorRulePaths":[],"relatedCursorRules":[]}}},"hookAdditionalContexts":[],"toolCallId":"toolu_vrtx_017GkY1c8woodG5zNi3Fq4sh","startedAtMs":"1786597158331","completedAtMs":"1786597158474"},"model_call_id":"eb1931d0-08d1-4104-8b40-baedf5953931-0-4zqe","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597158533}
-{"type":"thinking","subtype":"delta","text":"I","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160700}
-{"type":"thinking","subtype":"delta","text":" see","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160701}
-{"type":"thinking","subtype":"delta","text":" the","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160735}
-{"type":"thinking","subtype":"delta","text":" file","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160756}
-{"type":"thinking","subtype":"delta","text":" contains a","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160791}
-{"type":"thinking","subtype":"delta","text":" fixture","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160811}
-{"type":"thinking","subtype":"delta","text":" reference","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160836}
-{"type":"thinking","subtype":"delta","text":",","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160865}
-{"type":"thinking","subtype":"delta","text":" and","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160890}
-{"type":"thinking","subtype":"delta","text":" the","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160917}
-{"type":"thinking","subtype":"delta","text":" user wants me to respond with a","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160956}
-{"type":"thinking","subtype":"delta","text":" specific JSON literal. This","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597160981}
-{"type":"thinking","subtype":"delta","text":" looks","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161042}
-{"type":"thinking","subtype":"delta","text":" like a straight","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161042}
-{"type":"thinking","subtype":"delta","text":"forward test case,","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161064}
-{"type":"thinking","subtype":"delta","text":" so","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161079}
-{"type":"thinking","subtype":"delta","text":" I'll provide the requested JSON","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161110}
-{"type":"thinking","subtype":"delta","text":" response.","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161135}
-{"type":"thinking","subtype":"completed","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","timestamp_ms":1786597161168}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"{\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}"}]},"session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0"}
-{"type":"result","subtype":"success","duration_ms":9563,"duration_api_ms":9563,"is_error":false,"result":"{\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}","session_id":"aad48eb6-8bd3-4185-947f-1437b1fd5ce0","request_id":"eb1931d0-08d1-4104-8b40-baedf5953931","usage":{"inputTokens":4,"outputTokens":237,"cacheReadTokens":40305,"cacheWriteTokens":40445}}
+{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/fixture/cursor/structured/workspace","session_id":"fixture-cursor-structured-session","model":"Opus 4.8 300K Extra High","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"First read /fixture/cursor/structured/repo/probe.txt with the file-read tool. After reading it, Reply with ONLY this JSON literal and nothing else: {\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}"}]},"session_id":"fixture-cursor-structured-session"}
+{"type":"thinking","subtype":"delta","text":"I","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":"'ll read","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" through","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" the file now","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":".","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"completed","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"tool_call","subtype":"started","call_id":"fixture-cursor-structured-tool","tool_call":{"readToolCall":{"args":{"path":"/fixture/cursor/structured/repo/probe.txt"}},"hookAdditionalContexts":[],"toolCallId":"fixture-cursor-structured-tool","startedAtMs":"100000"},"model_call_id":"fixture-cursor-structured-call-0-4zqe","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"tool_call","subtype":"completed","call_id":"fixture-cursor-structured-tool","tool_call":{"readToolCall":{"args":{"path":"/fixture/cursor/structured/repo/probe.txt"},"result":{"success":{"content":"FIXTURE_REPO_ACCESS\n","isEmpty":false,"exceededLimit":false,"totalLines":2,"fileSize":20,"path":"/fixture/cursor/structured/repo/probe.txt","readRange":{"startLine":1,"endLine":2},"relatedCursorRulePaths":[],"relatedCursorRules":[]}}},"hookAdditionalContexts":[],"toolCallId":"fixture-cursor-structured-tool","startedAtMs":"100000","completedAtMs":"100000"},"model_call_id":"fixture-cursor-structured-call-0-4zqe","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":"I","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" see","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" the","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" file","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" contains a","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" fixture","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" reference","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":",","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" and","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" the","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" user wants me to respond with a","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" specific JSON literal. This","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" looks","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" like a straight","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":"forward test case,","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" so","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" I'll provide the requested JSON","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"delta","text":" response.","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"thinking","subtype":"completed","session_id":"fixture-cursor-structured-session","timestamp_ms":100000}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"{\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}"}]},"session_id":"fixture-cursor-structured-session"}
+{"type":"result","subtype":"success","duration_ms":9563,"duration_api_ms":9563,"is_error":false,"result":"{\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}","session_id":"fixture-cursor-structured-session","request_id":"fixture-cursor-structured-call","usage":{"inputTokens":4,"outputTokens":237,"cacheReadTokens":40305,"cacheWriteTokens":40445}}

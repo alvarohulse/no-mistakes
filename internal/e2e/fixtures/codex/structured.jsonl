@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"019ff97c-df61-7ea0-b2cb-edecfbce9645"}
+{"type":"thread.started","thread_id":"fixture-codex-structured-thread"}
 {"type":"turn.started"}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"findings\":[],\"risk_level\":\"low\",\"risk_rationale\":\"no risks\",\"summary\":\"ok\"}"}}
 {"type":"turn.completed","usage":{"input_tokens":14028,"cached_input_tokens":0,"cache_write_input_tokens":14025,"output_tokens":25,"reasoning_output_tokens":0}}

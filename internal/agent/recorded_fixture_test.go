@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -67,6 +68,35 @@ func TestRecordedCursorStreamTelemetry(t *testing.T) {
 	}
 	if metrics.metrics().ToolCalls != 1 {
 		t.Fatalf("metrics = %+v", metrics.metrics())
+	}
+}
+
+func TestRecordedAgentFixturesAreScrubbed(t *testing.T) {
+	t.Parallel()
+	patterns := map[string]*regexp.Regexp{
+		"recording temporary path": regexp.MustCompile(`/tmp/record(?:claude|codex|cursor)-[^\s"/]+`),
+		"UUID":                     regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
+		"provider-generated ID":    regexp.MustCompile(`\b(?:msg|req|toolu)_[A-Za-z0-9_-]+`),
+		"recording wall clock":     regexp.MustCompile(`20(?:2[4-9]|[3-9][0-9])-[0-9]{2}-[0-9]{2}T`),
+		"millisecond wall clock":   regexp.MustCompile(`"(?:timestamp_ms|startedAtMs|completedAtMs)":"?1[0-9]{12}`),
+		"second wall clock":        regexp.MustCompile(`"(?:resetsAt|overageResetsAt)":1[0-9]{9}`),
+	}
+	for _, agentName := range []string{"claude", "codex", "cursor"} {
+		paths, err := filepath.Glob(filepath.Join("..", "e2e", "fixtures", agentName, "*.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range paths {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, pattern := range patterns {
+				if match := pattern.Find(contents); match != nil {
+					t.Errorf("%s contains %s %q", path, name, match)
+				}
+			}
+		}
 	}
 }
 
