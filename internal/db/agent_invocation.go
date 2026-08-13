@@ -58,7 +58,10 @@ type AgentInvocation struct {
 	// evidence.
 	AgentObservations         []types.AgentObservation
 	AgentObservationsReported bool
-	Model                     string
+	// NestedAgentCount is the exact unique child count when the adapter reports
+	// nesting. Nil means unsupported; a non-nil zero means supported and none.
+	NestedAgentCount *int
+	Model            string
 	// ModelProvider is the provider that served the model (openai, anthropic,
 	// ...). Nil when the adapter cannot report it.
 	ModelProvider *string
@@ -83,8 +86,8 @@ type AgentInvocation struct {
 	// provider does not surface it (codex), distinguishing "not reported" from a
 	// genuine zero.
 	CacheCreationTokens *int
-	// FreshInputTokens is InputTokens minus CacheReadTokens: the non-cached
-	// portion of this invocation's input. Nil when no usage was reported.
+	// FreshInputTokens is the adapter's canonical uncached-input meter. Nil
+	// when the CLI's cache relationship is not verified.
 	FreshInputTokens *int
 	// ReasoningTokens is the model's hidden-reasoning output tokens, when the
 	// provider reports them. Nil when not reported.
@@ -97,9 +100,12 @@ type AgentInvocation struct {
 	// raw counters are cumulative: current cumulative minus the same session's
 	// prior cumulative. For cold/started/fallback rows they equal the raw
 	// counters. Nil when no usage was reported.
-	DeltaInputTokens     *int
-	DeltaOutputTokens    *int
-	DeltaCacheReadTokens *int
+	DeltaInputTokens         *int
+	DeltaOutputTokens        *int
+	DeltaCacheReadTokens     *int
+	DeltaCacheCreationTokens *int
+	// ReportedCostUSD is the cost emitted by the agent CLI, when available.
+	ReportedCostUSD *float64
 	// ModelRoundtrips is the count of model-authored items (messages + tool
 	// calls) - a live-stream proxy for productive model round-trips. Nil when
 	// the adapter reported no activity metrics.
@@ -127,19 +133,19 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, model, model_provider,
+const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 	fresh_input_tokens, reasoning_tokens,
-	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens,
+	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens, delta_cache_creation_tokens, reported_cost_usd,
 	model_roundtrips, tool_calls,
 	tool_wait_calls, tool_test_lint_calls, tool_edit_calls, tool_read_calls, tool_git_calls, tool_other_calls,
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-	?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
 	?, ?,
@@ -162,12 +168,12 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	_, err = d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.Model, inv.ModelProvider,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
 		inv.FreshInputTokens, inv.ReasoningTokens,
-		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
 		inv.ModelRoundtrips, inv.ToolCalls,
 		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
 		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
@@ -208,12 +214,12 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
 	var observationsJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.Model, &inv.ModelProvider,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
 		&inv.FreshInputTokens, &inv.ReasoningTokens,
-		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens,
+		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens, &inv.DeltaCacheCreationTokens, &inv.ReportedCostUSD,
 		&inv.ModelRoundtrips, &inv.ToolCalls,
 		&inv.ToolWaitCalls, &inv.ToolTestLintCalls, &inv.ToolEditCalls, &inv.ToolReadCalls, &inv.ToolGitCalls, &inv.ToolOtherCalls,
 		&inv.WorkloadFiles, &inv.WorkloadLines, &inv.FindingCount,
@@ -252,20 +258,52 @@ func encodeAgentObservations(inv AgentInvocation) (*string, error) {
 // (cold, started, or a fresh fallback), in which case the current counters are
 // already per-round.
 func (d *DB) LatestSessionCumulative(runID, sessionKey string) (input, output, cacheRead int, found bool) {
-	if sessionKey == "" {
-		return 0, 0, 0, false
+	input, output, cacheRead, _, found = d.LatestSessionCumulativeWithCacheCreation(runID, sessionKey)
+	return
+}
+
+func (d *DB) LatestSessionCumulativeWithCacheCreation(runID, sessionKey string) (input, output, cacheRead, cacheCreation int, found bool) {
+	meters, found := d.LatestSessionCumulativeMeters(runID, sessionKey)
+	if !found {
+		return 0, 0, 0, 0, false
 	}
+	value := func(meter *int) int {
+		if meter == nil {
+			return 0
+		}
+		return *meter
+	}
+	return value(meters.Input), value(meters.Output), value(meters.CacheRead), value(meters.CacheCreation), true
+}
+
+type SessionCumulativeMeters struct {
+	Input         *int
+	Output        *int
+	CacheRead     *int
+	CacheCreation *int
+}
+
+func (d *DB) LatestSessionCumulativeMeters(runID, sessionKey string) (SessionCumulativeMeters, bool) {
+	if sessionKey == "" {
+		return SessionCumulativeMeters{}, false
+	}
+	var meters SessionCumulativeMeters
 	err := d.sql.QueryRow(
-		`SELECT input_tokens, output_tokens, cache_read_tokens
+		`SELECT CASE WHEN delta_input_tokens IS NOT NULL THEN input_tokens END,
+		        CASE WHEN delta_output_tokens IS NOT NULL THEN output_tokens END,
+		        CASE WHEN delta_cache_read_tokens IS NOT NULL THEN cache_read_tokens END,
+		        CASE WHEN delta_cache_creation_tokens IS NOT NULL THEN cache_creation_tokens END
 		 FROM agent_invocations
 		 WHERE run_id = ? AND session_key = ?
+		   AND (delta_input_tokens IS NOT NULL OR delta_output_tokens IS NOT NULL
+		        OR delta_cache_read_tokens IS NOT NULL OR delta_cache_creation_tokens IS NOT NULL)
 		 ORDER BY started_at DESC, id DESC LIMIT 1`,
 		runID, sessionKey,
-	).Scan(&input, &output, &cacheRead)
+	).Scan(&meters.Input, &meters.Output, &meters.CacheRead, &meters.CacheCreation)
 	if err != nil {
-		return 0, 0, 0, false
+		return SessionCumulativeMeters{}, false
 	}
-	return input, output, cacheRead, true
+	return meters, true
 }
 
 // AgentInvocationAggregate summarizes invocations for one purpose, powering

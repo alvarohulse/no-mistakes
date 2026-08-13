@@ -107,18 +107,38 @@ func ModelTimeMS(durationMS, subprocessWaitMS int64) int64 {
 	return durationMS - subprocessWaitMS
 }
 
-// FreshInputTokens is the non-cached portion of an invocation's reported input:
-// the input tokens that were not served from the provider's prompt cache. It is
-// the honest per-invocation cost signal, separated from cache reads. It never
-// goes negative.
-func FreshInputTokens(inputTokens, cacheReadTokens int) int {
-	if cacheReadTokens <= 0 {
-		return inputTokens
+// CanonicalInputMeters maps each verified CLI token contract onto comparable
+// total and uncached input meters. A nil return means the stream does not prove
+// that meter; ambiguous cache relationships are never guessed.
+func CanonicalInputMeters(agentName string, inputTokens, cacheReadTokens, cacheWriteTokens *int) (total, uncached *int) {
+	if inputTokens == nil {
+		return nil, nil
 	}
-	if cacheReadTokens >= inputTokens {
-		return 0
+	value := func(n int) *int { return &n }
+	switch strings.ToLower(strings.TrimSpace(agentName)) {
+	case "claude":
+		uncached = value(*inputTokens)
+		if cacheReadTokens != nil && cacheWriteTokens != nil {
+			total = value(*inputTokens + *cacheReadTokens + *cacheWriteTokens)
+		}
+	case "codex":
+		total = value(*inputTokens)
+		if cacheReadTokens != nil && cacheWriteTokens != nil {
+			fresh := *inputTokens - *cacheReadTokens - *cacheWriteTokens
+			if fresh < 0 {
+				return total, nil
+			}
+			uncached = value(fresh)
+		}
+	case "cursor":
+		uncached = value(*inputTokens)
+		if cacheReadTokens != nil && cacheWriteTokens != nil && *cacheReadTokens == 0 && *cacheWriteTokens == 0 {
+			total = value(*inputTokens)
+		}
+	default:
+		total = value(*inputTokens)
 	}
-	return inputTokens - cacheReadTokens
+	return total, uncached
 }
 
 // PerRoundTokens converts a token counter into the per-round amount for one

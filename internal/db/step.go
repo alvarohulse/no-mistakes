@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -18,6 +19,7 @@ type StepResult struct {
 	DurationMS     *int64
 	LogPath        *string
 	FindingsJSON   *string
+	EvidenceJSON   *string
 	Error          *string
 	StartedAt      *int64
 	CompletedAt    *int64
@@ -27,7 +29,65 @@ type StepResult struct {
 	AutoFixLimit   *int
 }
 
-const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, evidence_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+
+const MaxStepEvidenceBytes = 64 * 1024
+
+const (
+	CommandOutcomePassed = "passed"
+	CommandOutcomeFailed = "failed"
+	CommandOutcomeError  = "error"
+)
+
+// StepEvidence is bounded, structured evidence retained for PR formatters.
+type StepEvidence struct {
+	Commands    []CommandEvidence `json:"commands,omitempty"`
+	Evidence    []string          `json:"evidence,omitempty"`
+	Intent      *IntentEvidence   `json:"intent,omitempty"`
+	Explanation string            `json:"explanation,omitempty"`
+}
+
+type CommandEvidence struct {
+	Round    int    `json:"round"`
+	Sequence int    `json:"sequence"`
+	Command  string `json:"command"`
+	Outcome  string `json:"outcome"`
+	ExitCode *int   `json:"exit_code"`
+}
+
+type IntentEvidence struct {
+	Text     string               `json:"text,omitempty"`
+	Source   string               `json:"source,omitempty"`
+	Provided bool                 `json:"provided"`
+	Reason   *IntentAbsenceReason `json:"reason,omitempty"`
+}
+
+type IntentAbsenceReason struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func EncodeStepEvidence(evidence StepEvidence) (string, error) {
+	encoded, err := json.Marshal(evidence)
+	if err != nil {
+		return "", fmt.Errorf("encode step evidence: %w", err)
+	}
+	if len(encoded) > MaxStepEvidenceBytes {
+		return "", fmt.Errorf("step evidence exceeds %d bytes", MaxStepEvidenceBytes)
+	}
+	return string(encoded), nil
+}
+
+func (s *StepResult) Evidence() (StepEvidence, error) {
+	if s == nil || s.EvidenceJSON == nil {
+		return StepEvidence{}, nil
+	}
+	var evidence StepEvidence
+	if err := json.Unmarshal([]byte(*s.EvidenceJSON), &evidence); err != nil {
+		return StepEvidence{}, fmt.Errorf("decode step evidence: %w", err)
+	}
+	return evidence, nil
+}
 
 // InsertStepResult creates a new step result record.
 func (d *DB) InsertStepResult(runID string, stepName types.StepName) (*StepResult, error) {
@@ -53,7 +113,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+stepResultColumns+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -75,12 +135,39 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
 	}
 	return steps, rows.Err()
+}
+
+func (d *DB) SetStepEvidence(id string, evidence StepEvidence) error {
+	encoded, err := EncodeStepEvidence(evidence)
+	if err != nil {
+		return err
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET evidence_json = ? WHERE id = ?`, encoded, id); err != nil {
+		return fmt.Errorf("set step evidence: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) AppendStepCommandEvidence(id string, command CommandEvidence) error {
+	step, err := d.GetStepResult(id)
+	if err != nil {
+		return err
+	}
+	if step == nil {
+		return fmt.Errorf("append step command evidence: step not found")
+	}
+	evidence, err := step.Evidence()
+	if err != nil {
+		return err
+	}
+	evidence.Commands = append(evidence.Commands, command)
+	return d.SetStepEvidence(id, evidence)
 }
 
 // UpdateStepStatus updates a step's status.

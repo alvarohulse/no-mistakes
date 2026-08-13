@@ -46,6 +46,7 @@ func ConfiguredModel(a Agent) ModelIdentity {
 type RunOpts struct {
 	Prompt      string
 	CWD         string
+	Env         []string             // extra subprocess environment entries (optional)
 	JSONSchema  json.RawMessage      // structured output schema (optional)
 	OnChunk     func(text string)    // streaming text callback (optional)
 	OnLifecycle func(LifecycleEvent) // native agent lifecycle callback (optional)
@@ -227,6 +228,8 @@ type Result struct {
 	// ModelProvider is the provider that served the model (e.g. "openai",
 	// "anthropic"), when the adapter can report it. Instrumentation only.
 	ModelProvider string
+	// ReportedCostUSD is the invocation cost reported by the CLI, when exposed.
+	ReportedCostUSD *float64
 	// Provider is the adapter provider that served this invocation. It lets
 	// fallback wrappers persist a session against the provider that minted it.
 	Provider string
@@ -236,6 +239,7 @@ type Result struct {
 	// adapter that exposes no nested-agent evidence.
 	AgentObservations         []types.AgentObservation
 	AgentObservationsReported bool
+	NestedAgentCount          int
 	// Metrics is the bounded per-invocation activity evidence the adapter
 	// extracted from its event stream (round-trips, tool calls + categories,
 	// subprocess wait time). Nil means the adapter reported nothing, which is
@@ -243,8 +247,8 @@ type Result struct {
 	Metrics *InvocationMetrics
 	// CacheCreationReported reports whether Usage.CacheCreationTokens is a
 	// meaningful value. Adapters whose provider does not surface cache-creation
-	// cost (codex) leave it false so the field is recorded as unknown instead of
-	// a fabricated zero.
+	// usage leave it false so the field is recorded as unknown instead of a
+	// fabricated zero.
 	CacheCreationReported bool
 	// SessionUsageCumulative reports that Usage accumulates across a resumed
 	// durable session, so round N's counters include rounds 1..N-1. The pipeline
@@ -258,11 +262,52 @@ type TokenUsage struct {
 	OutputTokens        int
 	CacheReadTokens     int
 	CacheCreationTokens int
+	// MeterPresenceReported means the adapter preserved field presence rather
+	// than decoding absent meters as zero. The individual flags then
+	// distinguish a reported zero from an unavailable meter.
+	MeterPresenceReported bool
+	InputReported         bool
+	OutputReported        bool
+	CacheReadReported     bool
 	// ReasoningTokens is the output tokens the model spent on hidden reasoning,
 	// when the provider reports it separately. Zero when not reported.
 	ReasoningTokens       int
 	Reported              bool
 	CacheCreationReported bool
+}
+
+func tokenUsageFromFields(input, output, cacheRead, cacheWrite, reasoning *int) TokenUsage {
+	value := func(field *int) int {
+		if field == nil {
+			return 0
+		}
+		return *field
+	}
+	return TokenUsage{
+		InputTokens:           value(input),
+		OutputTokens:          value(output),
+		CacheReadTokens:       value(cacheRead),
+		CacheCreationTokens:   value(cacheWrite),
+		ReasoningTokens:       value(reasoning),
+		Reported:              input != nil || output != nil || cacheRead != nil || cacheWrite != nil || reasoning != nil,
+		MeterPresenceReported: true,
+		InputReported:         input != nil,
+		OutputReported:        output != nil,
+		CacheReadReported:     cacheRead != nil,
+		CacheCreationReported: cacheWrite != nil,
+	}
+}
+
+func (u TokenUsage) InputIsReported() bool {
+	return u.InputReported || (u.Reported && !u.MeterPresenceReported)
+}
+
+func (u TokenUsage) OutputIsReported() bool {
+	return u.OutputReported || (u.Reported && !u.MeterPresenceReported)
+}
+
+func (u TokenUsage) CacheReadIsReported() bool {
+	return u.CacheReadReported || (u.Reported && !u.MeterPresenceReported)
 }
 
 // InvocationWorkload is the bounded size of the change an invocation works
@@ -294,19 +339,23 @@ type Options struct {
 }
 
 func finalizeTextResult(agentName, text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
+	result := &Result{
+		Text: text, Usage: usage, UsageReported: usage.Reported,
+		CacheCreationReported: usage.CacheCreationReported,
+	}
 	if text == "" {
-		return nil, fmt.Errorf("%s returned no text output", agentName)
+		return result, fmt.Errorf("%s returned no text output", agentName)
 	}
 	if len(schema) == 0 {
-		return &Result{Text: text, Usage: usage, UsageReported: usage.Reported, CacheCreationReported: usage.CacheCreationReported}, nil
+		return result, nil
 	}
 
 	output, err := parseStructuredTextOutput(text, schema)
 	if err != nil {
-		return nil, fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text))
+		return result, fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text))
 	}
-
-	return &Result{Output: output, Text: text, Usage: usage, UsageReported: usage.Reported, CacheCreationReported: usage.CacheCreationReported}, nil
+	result.Output = output
+	return result, nil
 }
 
 // outputSnippet returns a trimmed, length-capped excerpt of agent output for
@@ -809,13 +858,32 @@ func (u TokenUsage) Total() int {
 
 // Add accumulates another usage into this one.
 func (u *TokenUsage) Add(other TokenUsage) {
+	hadUsage := u.Reported
+	hadExactPresence := u.MeterPresenceReported
+	hadCacheCreation := u.CacheCreationReported
 	u.InputTokens += other.InputTokens
 	u.OutputTokens += other.OutputTokens
 	u.CacheReadTokens += other.CacheReadTokens
 	u.CacheCreationTokens += other.CacheCreationTokens
 	u.ReasoningTokens += other.ReasoningTokens
-	u.Reported = u.Reported || other.Reported
-	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
+	u.Reported = hadUsage || other.Reported
+	if other.MeterPresenceReported {
+		if !hadUsage {
+			u.MeterPresenceReported = true
+			u.InputReported = other.InputReported
+			u.OutputReported = other.OutputReported
+			u.CacheReadReported = other.CacheReadReported
+		} else if u.MeterPresenceReported {
+			u.InputReported = u.InputReported && other.InputReported
+			u.OutputReported = u.OutputReported && other.OutputReported
+			u.CacheReadReported = u.CacheReadReported && other.CacheReadReported
+		}
+	}
+	if other.MeterPresenceReported && hadUsage && hadExactPresence {
+		u.CacheCreationReported = hadCacheCreation && other.CacheCreationReported
+	} else {
+		u.CacheCreationReported = hadCacheCreation || other.CacheCreationReported
+	}
 }
 
 // New creates an agent by name with the given binary path.
