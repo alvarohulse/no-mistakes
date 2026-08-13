@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -355,6 +356,60 @@ func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
 	}
 	if !plannerRan {
 		t.Fatal("recovered pipeline did not run command planning")
+	}
+}
+
+func TestExecutorResumeRemovesUnusedPreservedCommandPlanningWorkspace(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := newCommandPlanningRepo(t)
+	preRestart := NewCommandPlanningWorkspace(p, nil, run, repo, workDir)
+	plannerDir, err := preRestart.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worktrees := commandPlanningGit(t, workDir, "worktree", "list", "--porcelain"); !strings.Contains(worktrees, plannerDir) {
+		t.Fatalf("preserved planner %q is not registered:\n%s", plannerDir, worktrees)
+	}
+
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	gateResult, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(gateResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"waiting","action":"ask-user"}],"summary":"waiting"}`
+	if err := database.SetStepFindings(gateResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(gateResult.ID, 1, "initial", &findings, nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(gateResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gate := &reconcilingApprovalStep{name: types.StepCI}
+	gate.resolved.Store(true)
+	executor := NewExecutor(database, p, nil, nil, []Step{gate}, nil)
+	if err := executor.Resume(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
+		t.Fatalf("preserved planner still exists after Resume: %v", err)
+	}
+	if worktrees := commandPlanningGit(t, workDir, "worktree", "list", "--porcelain"); strings.Contains(worktrees, plannerDir) {
+		t.Fatalf("preserved planner %q remains registered:\n%s", plannerDir, worktrees)
 	}
 }
 
