@@ -295,8 +295,6 @@ func (d *DB) LatestSessionCumulativeMeters(runID, sessionKey string) (SessionCum
 		        CASE WHEN delta_cache_creation_tokens IS NOT NULL THEN cache_creation_tokens END
 		 FROM agent_invocations
 		 WHERE run_id = ? AND session_key = ?
-		   AND (delta_input_tokens IS NOT NULL OR delta_output_tokens IS NOT NULL
-		        OR delta_cache_read_tokens IS NOT NULL OR delta_cache_creation_tokens IS NOT NULL)
 		 ORDER BY started_at DESC, id DESC LIMIT 1`,
 		runID, sessionKey,
 	).Scan(&meters.Input, &meters.Output, &meters.CacheRead, &meters.CacheCreation)
