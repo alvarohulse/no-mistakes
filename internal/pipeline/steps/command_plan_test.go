@@ -206,6 +206,81 @@ func TestPlanPipelineCommandRestoresExistingPlannerUntrackedMutation(t *testing.
 	}
 }
 
+func TestPlanPipelineCommandRestoresExistingTrackedMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sourcePath := filepath.Join(dir, "feature.txt")
+	if err := os.WriteFile(sourcePath, []byte("prepared tracked\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourcePath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plannerPath := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerPath = filepath.Join(opts.CWD, "feature.txt")
+			if err := os.WriteFile(sourcePath, []byte("source mutation\n"), 0o600); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(plannerPath, []byte("planner mutation\n"), 0o600); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want tracked mutation refusal", err)
+	}
+	assertCommandPlanningFileContent(t, sourcePath, "prepared tracked\n")
+	assertCommandPlanningFileContent(t, plannerPath, "prepared tracked\n")
+	if info, err := os.Stat(sourcePath); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("restored source mode = %o, want 640", got)
+	}
+}
+
+func TestPlanPipelineCommandRestoresExistingIgnoredMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("prepared-cache/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(dir, "prepared-cache")
+	if err := os.Mkdir(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(cacheDir, "cache.bin")
+	if err := os.WriteFile(sourcePath, []byte("prepared ignored\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plannerPath := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerPath = filepath.Join(opts.CWD, "prepared-cache", "cache.bin")
+			if err := os.WriteFile(sourcePath, []byte("source mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(plannerPath, []byte("planner mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepTest, "Select test."); err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want ignored mutation refusal", err)
+	}
+	assertCommandPlanningFileContent(t, sourcePath, "prepared ignored\n")
+	assertCommandPlanningFileContent(t, plannerPath, "prepared ignored\n")
+}
+
 type commandPlanningProbeStep struct {
 	name  types.StepName
 	after func(*pipeline.StepContext) error
@@ -340,6 +415,39 @@ func TestPlanPipelineCommandContainsMutationWhenAgentFails(t *testing.T) {
 	}
 }
 
+func TestPlanPipelineCommandRestoresMutationWhenAgentIsCancelled(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	preparedPath := filepath.Join(dir, "prepared.txt")
+	if err := os.WriteFile(preparedPath, []byte("prepared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	plannerPath := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerPath = filepath.Join(opts.CWD, "prepared.txt")
+			if err := os.WriteFile(preparedPath, []byte("source mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(plannerPath, []byte("planner mutation\n"), 0o644); err != nil {
+				return nil, err
+			}
+			cancel()
+			return nil, ctx.Err()
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Ctx = ctx
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); !errors.Is(err, context.Canceled) {
+		t.Fatalf("planPipelineCommand() error = %v, want context cancellation", err)
+	}
+	assertCommandPlanningFileContent(t, preparedPath, "prepared\n")
+	assertCommandPlanningFileContent(t, plannerPath, "prepared\n")
+}
+
 func TestPlanPipelineCommandPersistsPrivateCommandSeparatelyFromEvidence(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -374,5 +482,16 @@ func TestPlanPipelineCommandPersistsPrivateCommandSeparatelyFromEvidence(t *test
 	}
 	if step.EvidenceJSON != nil && strings.Contains(*step.EvidenceJSON, command) {
 		t.Fatal("private planned command leaked into public evidence")
+	}
+}
+
+func assertCommandPlanningFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(content); got != want {
+		t.Fatalf("%s content = %q, want %q", path, got, want)
 	}
 }
