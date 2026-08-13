@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktreehook"
 )
 
 func TestExecutorReusesPreparedCommandPlanningWorkspace(t *testing.T) {
@@ -26,6 +27,10 @@ func TestExecutorReusesPreparedCommandPlanningWorkspace(t *testing.T) {
 	hook := fmt.Sprintf("echo prepared >> %q; echo prepared > planner-prepared.txt", counterPath)
 	if runtime.GOOS == "windows" {
 		hook = fmt.Sprintf("echo prepared>>%q & echo prepared>planner-prepared.txt", counterPath)
+	}
+	cfg := &config.Config{Agent: types.AgentClaude, Hooks: config.Hooks{PostWorktree: hook}}
+	if err := worktreehook.Run(sctx.Ctx, dir, cfg); err != nil {
+		t.Fatalf("prepare pipeline worktree: %v", err)
 	}
 
 	plannerDirs := make([]string, 0, 2)
@@ -45,8 +50,7 @@ func TestExecutorReusesPreparedCommandPlanningWorkspace(t *testing.T) {
 		},
 	}
 	root := t.TempDir()
-	plannerPath := paths.WithRoot(root).WorktreeDir(sctx.Repo.ID, sctx.Run.ID+"-command-plan")
-	cfg := &config.Config{Agent: types.AgentClaude, Hooks: config.Hooks{PostWorktree: hook}}
+	plannerPath := paths.WithRoot(root).WorktreeDir(sctx.Repo.ID, paths.CommandPlanWorktreeID(sctx.Run.ID))
 	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(root), cfg, ag, []pipeline.Step{
 		&commandPlanningProbeStep{name: types.StepBuild, after: func(context *pipeline.StepContext) error {
 			if err := os.WriteFile(filepath.Join(context.WorkDir, "after-build.txt"), []byte("new head\n"), 0o644); err != nil {
@@ -76,6 +80,129 @@ func TestExecutorReusesPreparedCommandPlanningWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(plannerPath); !os.IsNotExist(err) {
 		t.Fatalf("planner workspace survived executor cleanup: %v", err)
+	}
+}
+
+func TestPlanPipelineCommandRestoresExistingSourceUntrackedMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	preparedPath := filepath.Join(dir, "prepared.txt")
+	if err := os.WriteFile(preparedPath, []byte("prepared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(preparedPath, []byte("mutated\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepBuild, "Select build.")
+	if err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want source mutation refusal", err)
+	}
+	content, readErr := os.ReadFile(preparedPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != "prepared\n" {
+		t.Fatalf("prepared source content = %q, want restored content", content)
+	}
+}
+
+func TestPlanPipelineCommandRestoresSourceUntrackedModeAndSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	scriptPath := filepath.Join(dir, "prepared.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\n"), 0o751); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(scriptPath, 0o751); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "target-a"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "target-b"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "prepared-link")
+	if err := os.Symlink("target-a", linkPath); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.Chmod(scriptPath, 0o600); err != nil {
+				return nil, err
+			}
+			if err := os.Remove(linkPath); err != nil {
+				return nil, err
+			}
+			if err := os.Symlink("target-b", linkPath); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepBuild, "Select build.")
+	if err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want source mutation refusal", err)
+	}
+	info, statErr := os.Stat(scriptPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o751 {
+		t.Fatalf("prepared script mode = %o, want 751", got)
+	}
+	target, readErr := os.Readlink(linkPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if target != "target-a" {
+		t.Fatalf("prepared symlink target = %q, want target-a", target)
+	}
+}
+
+func TestPlanPipelineCommandRestoresExistingPlannerUntrackedMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "prepared.txt"), []byte("prepared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plannerDir := ""
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			plannerDir = opts.CWD
+			if err := os.WriteFile(filepath.Join(opts.CWD, "prepared.txt"), []byte("mutated\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	_, err := planPipelineCommand(sctx, types.StepTest, "Select test.")
+	if err == nil || !strings.Contains(err.Error(), "modified the worktree") {
+		t.Fatalf("planPipelineCommand() error = %v, want planner mutation refusal", err)
+	}
+	content, readErr := os.ReadFile(filepath.Join(plannerDir, "prepared.txt"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(content) != "prepared\n" {
+		t.Fatalf("prepared planner content = %q, want restored content", content)
 	}
 }
 

@@ -108,7 +108,7 @@ func TestIntentJourney(t *testing.T) {
 	// pass the right CWD. The fakeagent records os.Getwd() per call, so
 	// this assertion catches the regression generically across backends.
 	wantCWD := canonicalForCompare(t, paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), run.ID))
-	wantPlannerCWD := canonicalForCompare(t, paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), run.ID+"-command-plan"))
+	wantPlannerCWD := canonicalForCompare(t, paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), paths.CommandPlanWorktreeID(run.ID)))
 	for i, inv := range invocations {
 		got := canonicalForCompare(t, inv.CWD)
 		want := wantCWD
