@@ -84,7 +84,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "step_rounds", "reviewed_head_sha") {
 		t.Fatal("step_rounds.reviewed_head_sha column missing from fresh schema")
 	}
-	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "evidence_json"} {
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "evidence_json", "planned_command"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
@@ -144,7 +144,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 	for table, columns := range map[string][]string{
 		"runs":              {"metadata"},
-		"step_results":      {"evidence_json"},
+		"step_results":      {"evidence_json", "planned_command"},
 		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd"},
 	} {
 		for _, column := range columns {

@@ -248,6 +248,7 @@ func (e *Executor) initializeRunScopes(runID string) {
 type stepExecutionState struct {
 	fixing           bool
 	previousFindings string
+	plannedCommand   string
 	roundNum         int
 	autoFixAttempts  int
 	executionMS      int64
@@ -468,9 +469,14 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", "", nil)
+		plannedCommand := ""
+		if gate.stepResult.PlannedCommand != nil {
+			plannedCommand = *gate.stepResult.PlannedCommand
+		}
 		skipRemaining, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
 			fixing:           true,
 			previousFindings: merged,
+			plannedCommand:   plannedCommand,
 			roundNum:         gate.round,
 			autoFixAttempts:  gate.autoFixes,
 			executionMS:      duration,
@@ -780,6 +786,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Sessions:         e.sessions,
 		Fixing:           state.fixing,
 		PreviousFindings: state.previousFindings,
+		PlannedCommand:   state.plannedCommand,
 		Log:              writeLog,
 		LogChunk:         writeLogChunk,
 		LogFile: func(text string) {

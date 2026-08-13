@@ -111,5 +111,11 @@ Rules:
 	if len(result.Output) == 0 || json.Unmarshal(result.Output, &plan) != nil || plan.Command == nil {
 		return "", fmt.Errorf("%s command planner returned an invalid structured result", step)
 	}
-	return strings.TrimSpace(*plan.Command), nil
+	command := strings.TrimSpace(*plan.Command)
+	if command != "" && sctx.DB != nil && sctx.StepResultID != "" {
+		if err := sctx.DB.SetStepPlannedCommand(sctx.StepResultID, command); err != nil {
+			return "", fmt.Errorf("persist private %s planned command: %w", step, err)
+		}
+	}
+	return command, nil
 }

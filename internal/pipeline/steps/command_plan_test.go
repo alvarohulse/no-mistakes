@@ -120,3 +120,40 @@ func TestPlanPipelineCommandContainsMutationWhenAgentFails(t *testing.T) {
 		t.Fatalf("failed planner mutation reached pipeline worktree: %v", err)
 	}
 }
+
+func TestPlanPipelineCommandPersistsPrivateCommandSeparatelyFromEvidence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	command := "TOKEN='$UNEXPANDED' go test ./internal/pipeline/..."
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			output, err := json.Marshal(commandPlan{Command: &command})
+			return &agent.Result{Output: output}, err
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+
+	gotCommand, err := planPipelineCommand(sctx, types.StepLint, "Select lint.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotCommand != command {
+		t.Fatalf("planned command = %q, want %q", gotCommand, command)
+	}
+	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if step.PlannedCommand == nil || *step.PlannedCommand != command {
+		t.Fatalf("stored planned command = %v, want exact value %q", step.PlannedCommand, command)
+	}
+	if step.EvidenceJSON != nil && strings.Contains(*step.EvidenceJSON, command) {
+		t.Fatal("private planned command leaked into public evidence")
+	}
+}

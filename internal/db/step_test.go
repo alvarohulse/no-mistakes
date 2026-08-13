@@ -36,6 +36,28 @@ func TestStepEvidenceRoundTripsCommandsAndRejectsOversizedPayloads(t *testing.T)
 	}
 }
 
+func TestStepPlannedCommandRoundTripsExactlyAndRejectsOversizedValues(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/planned-command", "git@github.com:user/planned-command.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepLint)
+	command := "TOKEN='$UNEXPANDED' go test ./internal/pipeline/..."
+
+	if err := d.SetStepPlannedCommand(step.ID, command); err != nil {
+		t.Fatalf("set planned command: %v", err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlannedCommand == nil || *got.PlannedCommand != command {
+		t.Fatalf("planned command = %v, want exact value %q", got.PlannedCommand, command)
+	}
+	if err := d.SetStepPlannedCommand(step.ID, strings.Repeat("x", MaxPlannedCommandBytes+1)); err == nil {
+		t.Fatal("oversized planned command was accepted")
+	}
+}
+
 func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo("/tmp/repo", "git@github.com:test/repo.git", "main")

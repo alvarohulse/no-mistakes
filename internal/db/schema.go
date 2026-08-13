@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     duration_ms      INTEGER,
     log_path         TEXT,
     findings_json    TEXT,
-	evidence_json    TEXT,
+    evidence_json    TEXT,
+    planned_command  TEXT,
     error            TEXT,
     started_at       INTEGER,
     completed_at     INTEGER,
@@ -222,4 +223,5 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN pr_note TEXT`,
 	`ALTER TABLE runs ADD COLUMN metadata TEXT`,
 	`ALTER TABLE step_results ADD COLUMN evidence_json TEXT`,
+	`ALTER TABLE step_results ADD COLUMN planned_command TEXT`,
 }

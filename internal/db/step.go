@@ -20,6 +20,7 @@ type StepResult struct {
 	LogPath        *string
 	FindingsJSON   *string
 	EvidenceJSON   *string
+	PlannedCommand *string
 	Error          *string
 	StartedAt      *int64
 	CompletedAt    *int64
@@ -29,9 +30,11 @@ type StepResult struct {
 	AutoFixLimit   *int
 }
 
-const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, evidence_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, evidence_json, planned_command, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
 
 const MaxStepEvidenceBytes = 64 * 1024
+
+const MaxPlannedCommandBytes = 64 * 1024
 
 const (
 	CommandOutcomePassed = "passed"
@@ -113,7 +116,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+stepResultColumns+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -135,7 +138,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -150,6 +153,19 @@ func (d *DB) SetStepEvidence(id string, evidence StepEvidence) error {
 	}
 	if _, err := d.sql.Exec(`UPDATE step_results SET evidence_json = ? WHERE id = ?`, encoded, id); err != nil {
 		return fmt.Errorf("set step evidence: %w", err)
+	}
+	return nil
+}
+
+// SetStepPlannedCommand retains the private, unredacted command that an
+// unconfigured validation step must reuse after a daemon restart. Public PR
+// evidence remains separately redacted and bounded by RecordCommand.
+func (d *DB) SetStepPlannedCommand(id, command string) error {
+	if len(command) > MaxPlannedCommandBytes {
+		return fmt.Errorf("planned command exceeds %d bytes", MaxPlannedCommandBytes)
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET planned_command = ? WHERE id = ?`, command, id); err != nil {
+		return fmt.Errorf("set step planned command: %w", err)
 	}
 	return nil
 }
