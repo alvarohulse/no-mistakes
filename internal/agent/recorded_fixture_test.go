@@ -10,6 +10,18 @@ import (
 	"testing"
 )
 
+var recordedFixtureUnscrubbedPatterns = map[string]*regexp.Regexp{
+	"Linux home directory":     regexp.MustCompile(`/home/[^/\\\r\n"]+`),
+	"macOS home directory":     regexp.MustCompile(`/Users/[^/\\\r\n"]+`),
+	"Windows home directory":   regexp.MustCompile(`(?i)\b[A-Z]:[\\/]+Users[\\/]+[^/\\\r\n"]+`),
+	"recording temporary path": regexp.MustCompile(`/tmp/record(?:claude|codex|cursor)-[^\s"/]+`),
+	"UUID":                     regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
+	"provider-generated ID":    regexp.MustCompile(`\b(?:msg|req|toolu)_[A-Za-z0-9_-]+`),
+	"recording wall clock":     regexp.MustCompile(`20(?:2[4-9]|[3-9][0-9])-[0-9]{2}-[0-9]{2}T`),
+	"millisecond wall clock":   regexp.MustCompile(`"(?:timestamp_ms|startedAtMs|completedAtMs)":"?1[0-9]{12}`),
+	"second wall clock":        regexp.MustCompile(`"(?:resetsAt|overageResetsAt)":1[0-9]{9}`),
+}
+
 func TestRecordedClaudeStreamTelemetry(t *testing.T) {
 	stream := recordedAgentFixture(t, "claude")
 	var usage TokenUsage
@@ -73,14 +85,6 @@ func TestRecordedCursorStreamTelemetry(t *testing.T) {
 
 func TestRecordedAgentFixturesAreScrubbed(t *testing.T) {
 	t.Parallel()
-	patterns := map[string]*regexp.Regexp{
-		"recording temporary path": regexp.MustCompile(`/tmp/record(?:claude|codex|cursor)-[^\s"/]+`),
-		"UUID":                     regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`),
-		"provider-generated ID":    regexp.MustCompile(`\b(?:msg|req|toolu)_[A-Za-z0-9_-]+`),
-		"recording wall clock":     regexp.MustCompile(`20(?:2[4-9]|[3-9][0-9])-[0-9]{2}-[0-9]{2}T`),
-		"millisecond wall clock":   regexp.MustCompile(`"(?:timestamp_ms|startedAtMs|completedAtMs)":"?1[0-9]{12}`),
-		"second wall clock":        regexp.MustCompile(`"(?:resetsAt|overageResetsAt)":1[0-9]{9}`),
-	}
 	for _, agentName := range []string{"claude", "codex", "cursor"} {
 		paths, err := filepath.Glob(filepath.Join("..", "e2e", "fixtures", agentName, "*.jsonl"))
 		if err != nil {
@@ -91,11 +95,38 @@ func TestRecordedAgentFixturesAreScrubbed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for name, pattern := range patterns {
+			for name, pattern := range recordedFixtureUnscrubbedPatterns {
 				if match := pattern.Find(contents); match != nil {
 					t.Errorf("%s contains %s %q", path, name, match)
 				}
 			}
+		}
+	}
+}
+
+func TestRecordedFixtureScrubPatternsRejectMacOSHomeDirectories(t *testing.T) {
+	pattern := recordedFixtureUnscrubbedPatterns["macOS home directory"]
+	if pattern == nil || !pattern.MatchString(`/Users/another-user/repos/project`) {
+		t.Fatal("macOS home directory was not rejected")
+	}
+}
+
+func TestRecordedFixtureScrubPatternsRejectLinuxHomeDirectories(t *testing.T) {
+	pattern := recordedFixtureUnscrubbedPatterns["Linux home directory"]
+	if pattern == nil || !pattern.MatchString(`/home/another-user/repos/project`) {
+		t.Fatal("Linux home directory was not rejected")
+	}
+}
+
+func TestRecordedFixtureScrubPatternsRejectWindowsHomeDirectories(t *testing.T) {
+	pattern := recordedFixtureUnscrubbedPatterns["Windows home directory"]
+	for _, path := range []string{
+		`C:\Users\another-user\repos\project`,
+		`D:/Users/another-user/repos/project`,
+		`{"cwd":"C:\\Users\\another-user\\repos\\project"}`,
+	} {
+		if pattern == nil || !pattern.MatchString(path) {
+			t.Errorf("Windows home directory %q was not rejected", path)
 		}
 	}
 }
