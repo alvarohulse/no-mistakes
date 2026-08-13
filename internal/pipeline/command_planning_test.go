@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -12,35 +12,19 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
-func TestCommandPlanningWorkspaceCopiesPreparedState(t *testing.T) {
+func TestCommandPlanningWorkspaceUsesIndependentCommittedCheckout(t *testing.T) {
 	sourceDir := newCommandPlanningRepo(t)
-	if err := os.WriteFile(filepath.Join(sourceDir, "tracked.txt"), []byte("prepared tracked\n"), 0o750); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "tracked.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(sourceDir, "tracked.txt"), 0o750); err != nil {
+	if err := os.Mkdir(filepath.Join(sourceDir, "prepared-output"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	preparedDir := filepath.Join(sourceDir, "prepared-output")
-	if err := os.Mkdir(preparedDir, 0o750); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "prepared-output", "cache.bin"), []byte("ignored\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	preparedFile := filepath.Join(preparedDir, "cache.bin")
-	if err := os.WriteFile(preparedFile, []byte("prepared ignored\n"), 0o751); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "untracked.txt"), []byte("untracked\n"), 0o644); err != nil {
 		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(preparedDir, ".git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(preparedDir, ".git", "config"), []byte("nested metadata\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(sourceDir, "untracked.txt"), []byte("prepared untracked\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Symlink(filepath.Join("prepared-output", "cache.bin"), filepath.Join(sourceDir, "prepared-link")); err != nil {
-			t.Fatal(err)
-		}
 	}
 
 	workspace := newCommandPlanningWorkspaceForTest(t, sourceDir)
@@ -49,94 +33,97 @@ func TestCommandPlanningWorkspaceCopiesPreparedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertFileContent(t, filepath.Join(plannerDir, "tracked.txt"), "prepared tracked\n")
-	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "prepared ignored\n")
-	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", ".git", "config"), "nested metadata\n")
-	assertFileContent(t, filepath.Join(plannerDir, "untracked.txt"), "prepared untracked\n")
-	sourceInfo, err := os.Stat(preparedFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plannerInfo, err := os.Stat(filepath.Join(plannerDir, "prepared-output", "cache.bin"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(sourceInfo, plannerInfo) {
-		t.Fatal("prepared regular file was hard-linked into the planner workspace")
-	}
-	if runtime.GOOS != "windows" {
-		trackedInfo, err := os.Stat(filepath.Join(plannerDir, "tracked.txt"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := trackedInfo.Mode().Perm(); got != 0o750 {
-			t.Fatalf("prepared tracked file mode = %o, want 750", got)
-		}
-		if got := plannerInfo.Mode().Perm(); got != 0o751 {
-			t.Fatalf("prepared file mode = %o, want 751", got)
-		}
-		directoryInfo, err := os.Stat(filepath.Join(plannerDir, "prepared-output"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := directoryInfo.Mode().Perm(); got != 0o750 {
-			t.Fatalf("prepared directory mode = %o, want 750", got)
-		}
-		target, err := os.Readlink(filepath.Join(plannerDir, "prepared-link"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if target != filepath.Join("prepared-output", "cache.bin") {
-			t.Fatalf("prepared symlink target = %q", target)
+	assertFileContent(t, filepath.Join(plannerDir, "tracked.txt"), "tracked\n")
+	for _, path := range []string{"prepared-output", "untracked.txt"} {
+		if _, err := os.Stat(filepath.Join(plannerDir, path)); !os.IsNotExist(err) {
+			t.Fatalf("source-only path %q exists in planner: %v", path, err)
 		}
 	}
-
-	if err := os.WriteFile(filepath.Join(plannerDir, "prepared-output", "cache.bin"), []byte("planner-only\n"), 0o751); err != nil {
-		t.Fatal(err)
+	sourceCommonDir := commandPlanningGit(t, sourceDir, "rev-parse", "--git-common-dir")
+	plannerCommonDir := commandPlanningGit(t, plannerDir, "rev-parse", "--git-common-dir")
+	if canonicalTestPath(t, sourceDir, sourceCommonDir) == canonicalTestPath(t, plannerDir, plannerCommonDir) {
+		t.Fatal("planner shares refs, index, and worktree metadata with the source")
 	}
-	assertFileContent(t, preparedFile, "prepared ignored\n")
+	if _, err := gitutil.Run(context.Background(), plannerDir, "remote", "get-url", "origin"); err == nil {
+		t.Fatal("planner retained a usable source remote")
+	}
 }
 
-func TestCommandPlanningWorkspaceRefreshesPreparedStateAfterHeadAdvance(t *testing.T) {
+func TestCommandPlanningWorkspaceDoesNotCopyLargeIgnoredTree(t *testing.T) {
 	sourceDir := newCommandPlanningRepo(t)
-	preparedDir := filepath.Join(sourceDir, "prepared-output")
-	if err := os.Mkdir(preparedDir, 0o755); err != nil {
+	ignoredDir := filepath.Join(sourceDir, "prepared-output")
+	if err := os.Mkdir(ignoredDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	preparedFile := filepath.Join(preparedDir, "cache.bin")
-	if err := os.WriteFile(preparedFile, []byte("first\n"), 0o644); err != nil {
+	largePath := filepath.Join(ignoredDir, "large-cache.bin")
+	file, err := os.Create(largePath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(preparedDir, 0o500); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(preparedDir, 0o700) })
+	if err := file.Truncate(64 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 
+	plannerDir, err := newCommandPlanningWorkspaceForTest(t, sourceDir).Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(plannerDir, "prepared-output")); !os.IsNotExist(err) {
+		t.Fatalf("large ignored source tree was copied into planner: %v", err)
+	}
+}
+
+func TestCommandPlanningWorkspaceDoesNotCopyInitializedNestedSubmoduleMetadata(t *testing.T) {
+	leafDir := newCommandPlanningRepo(t)
+	middleDir := newCommandPlanningRepo(t)
+	commandPlanningGit(t, middleDir, "-c", "protocol.file.allow=always", "submodule", "add", leafDir, "nested")
+	commandPlanningGit(t, middleDir, "commit", "-am", "add nested dependency")
+
+	sourceDir := newCommandPlanningRepo(t)
+	commandPlanningGit(t, sourceDir, "-c", "protocol.file.allow=always", "submodule", "add", middleDir, "dependency")
+	commandPlanningGit(t, sourceDir, "commit", "-am", "add dependency")
+	commandPlanningGit(t, sourceDir, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+	if _, err := os.Stat(filepath.Join(sourceDir, "dependency", "nested", ".git")); err != nil {
+		t.Fatalf("source nested submodule is not initialized: %v", err)
+	}
+
+	plannerDir, err := newCommandPlanningWorkspaceForTest(t, sourceDir).Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join("dependency", ".git"),
+		filepath.Join("dependency", "nested", ".git"),
+	} {
+		if _, err := os.Stat(filepath.Join(plannerDir, path)); !os.IsNotExist(err) {
+			t.Fatalf("source submodule metadata %q was copied into planner: %v", path, err)
+		}
+	}
+}
+
+func TestCommandPlanningWorkspaceReusesCleanCloneAndRefreshesHead(t *testing.T) {
+	sourceDir := newCommandPlanningRepo(t)
 	workspace := newCommandPlanningWorkspaceForTest(t, sourceDir)
 	plannerDir, err := workspace.Prepare(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "first\n")
+	if again, err := workspace.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if again != plannerDir {
+		t.Fatalf("reused planner dir = %q, want %q", again, plannerDir)
+	}
 
-	if err := os.Chmod(preparedDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(preparedFile, []byte("second\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(preparedDir, 0o500); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if err := os.WriteFile(filepath.Join(sourceDir, "next.txt"), []byte("next head\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	commandPlanningGit(t, sourceDir, "add", "next.txt")
 	commandPlanningGit(t, sourceDir, "commit", "-m", "advance head")
+	wantHead := commandPlanningGit(t, sourceDir, "rev-parse", "HEAD")
 
 	refreshedDir, err := workspace.Prepare(context.Background())
 	if err != nil {
@@ -145,16 +132,34 @@ func TestCommandPlanningWorkspaceRefreshesPreparedStateAfterHeadAdvance(t *testi
 	if refreshedDir != plannerDir {
 		t.Fatalf("refreshed planner dir = %q, want %q", refreshedDir, plannerDir)
 	}
+	if got := commandPlanningGit(t, plannerDir, "rev-parse", "HEAD"); got != wantHead {
+		t.Fatalf("refreshed planner HEAD = %q, want %q", got, wantHead)
+	}
 	assertFileContent(t, filepath.Join(plannerDir, "next.txt"), "next head\n")
-	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "second\n")
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(filepath.Join(plannerDir, "prepared-output"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0o500 {
-			t.Fatalf("refreshed prepared directory mode = %o, want 500", got)
-		}
+}
+
+func TestCommandPlanningWorkspaceReplacesLegacyLinkedWorktree(t *testing.T) {
+	sourceDir := newCommandPlanningRepo(t)
+	workspace := newCommandPlanningWorkspaceForTest(t, sourceDir)
+	headSHA := commandPlanningGit(t, sourceDir, "rev-parse", "HEAD")
+	if err := gitutil.WorktreeAdd(context.Background(), sourceDir, workspace.dir, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	if worktrees := commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"); !strings.Contains(worktrees, workspace.dir) {
+		t.Fatalf("legacy planner %q is not registered:\n%s", workspace.dir, worktrees)
+	}
+
+	plannerDir, err := workspace.Prepare(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worktrees := commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"); strings.Contains(worktrees, plannerDir) {
+		t.Fatalf("legacy planner remains registered:\n%s", worktrees)
+	}
+	sourceCommonDir := commandPlanningGit(t, sourceDir, "rev-parse", "--git-common-dir")
+	plannerCommonDir := commandPlanningGit(t, plannerDir, "rev-parse", "--git-common-dir")
+	if canonicalTestPath(t, sourceDir, sourceCommonDir) == canonicalTestPath(t, plannerDir, plannerCommonDir) {
+		t.Fatal("replacement planner still shares Git metadata with the source")
 	}
 }
 
@@ -199,6 +204,22 @@ func commandPlanningGit(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v", args, err)
 	}
 	return output
+}
+
+func canonicalTestPath(t *testing.T, workDir, path string) string {
+	t.Helper()
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workDir, path)
+	}
+	path, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func assertFileContent(t *testing.T, path, want string) {

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	gitutil "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -268,7 +268,7 @@ func TestExecutor_ResumeFatalReconcileErrorFailsRun(t *testing.T) {
 	}
 }
 
-func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
+func TestExecutorResumeRecreatesPreservedCommandPlanningWorkspace(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := newCommandPlanningRepo(t)
 	preparedDir := filepath.Join(workDir, "prepared-output")
@@ -284,8 +284,13 @@ func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFileContent(t, filepath.Join(plannerDir, "prepared-output", "cache.bin"), "before restart\n")
-	commandPlanningGit(t, plannerDir, "checkout", "-b", "planner-mutation")
+	if _, err := os.Stat(filepath.Join(plannerDir, "prepared-output")); !os.IsNotExist(err) {
+		t.Fatalf("source ignored state exists in planner: %v", err)
+	}
+	commandPlanningGit(t, plannerDir, "branch", "planner-mutation", "HEAD")
+	if err := os.WriteFile(filepath.Join(plannerDir, "planner-only.txt"), []byte("discard me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(filepath.Join(preparedDir, "cache.bin"), []byte("after restart\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -341,9 +346,16 @@ func TestExecutorResumeAdoptsPreservedCommandPlanningWorkspace(t *testing.T) {
 				t.Fatalf("prepared planner dir = %q, want preserved %q", prepared, plannerDir)
 			}
 			assertFileContent(t, filepath.Join(prepared, "next.txt"), "advanced head\n")
-			assertFileContent(t, filepath.Join(prepared, "prepared-output", "cache.bin"), "after restart\n")
+			for _, path := range []string{"prepared-output", "planner-only.txt"} {
+				if _, err := os.Stat(filepath.Join(prepared, path)); !os.IsNotExist(err) {
+					t.Fatalf("preserved planner state %q survived recreation: %v", path, err)
+				}
+			}
+			if _, err := gitutil.Run(context.Background(), prepared, "show-ref", "--verify", "refs/heads/planner-mutation"); err == nil {
+				t.Fatal("preserved planner ref survived recreation")
+			}
 			if branch := commandPlanningGit(t, prepared, "rev-parse", "--abbrev-ref", "HEAD"); branch != "HEAD" {
-				t.Fatalf("adopted planner branch = %q, want detached HEAD", branch)
+				t.Fatalf("recreated planner branch = %q, want detached HEAD", branch)
 			}
 			plannerRan = true
 			return &StepOutcome{}, nil
@@ -366,9 +378,6 @@ func TestExecutorResumeRemovesUnusedPreservedCommandPlanningWorkspace(t *testing
 	plannerDir, err := preRestart.Prepare(context.Background())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if worktrees := commandPlanningGit(t, workDir, "worktree", "list", "--porcelain"); !strings.Contains(worktrees, plannerDir) {
-		t.Fatalf("preserved planner %q is not registered:\n%s", plannerDir, worktrees)
 	}
 
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -407,9 +416,6 @@ func TestExecutorResumeRemovesUnusedPreservedCommandPlanningWorkspace(t *testing
 	}
 	if _, err := os.Stat(plannerDir); !os.IsNotExist(err) {
 		t.Fatalf("preserved planner still exists after Resume: %v", err)
-	}
-	if worktrees := commandPlanningGit(t, workDir, "worktree", "list", "--porcelain"); strings.Contains(worktrees, plannerDir) {
-		t.Fatalf("preserved planner %q remains registered:\n%s", plannerDir, worktrees)
 	}
 }
 
