@@ -28,7 +28,11 @@ func TestExecutorReusesCleanCommandPlanningWorkspace(t *testing.T) {
 	counterPath := filepath.Join(t.TempDir(), "post-worktree-count.txt")
 	hook := fmt.Sprintf("echo prepared >> %q; echo prepared > planner-prepared.txt", counterPath)
 	if runtime.GOOS == "windows" {
-		hook = fmt.Sprintf("echo prepared>>%q & echo prepared>planner-prepared.txt", counterPath)
+		// Go escapes an embedded quote as \" when it builds the cmd.exe command
+		// line, and cmd.exe then reads that backslash as part of the redirection
+		// target, so the redirect fails while the hook still exits 0. Name the
+		// counter file unquoted so the append actually happens.
+		hook = fmt.Sprintf("echo prepared>>%s& echo prepared>planner-prepared.txt", counterPath)
 	}
 	cfg := &config.Config{Agent: types.AgentClaude, Hooks: config.Hooks{PostWorktree: hook}}
 	if err := worktreehook.Run(sctx.Ctx, dir, cfg); err != nil {

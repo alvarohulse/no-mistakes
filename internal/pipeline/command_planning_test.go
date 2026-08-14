@@ -147,16 +147,16 @@ func TestCommandPlanningWorkspaceReplacesLegacyLinkedWorktree(t *testing.T) {
 	if err := gitutil.WorktreeAdd(context.Background(), sourceDir, workspace.dir, headSHA); err != nil {
 		t.Fatal(err)
 	}
-	if worktrees := commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"); !strings.Contains(worktrees, workspace.dir) {
-		t.Fatalf("legacy planner %q is not registered:\n%s", workspace.dir, worktrees)
+	if !commandPlanningWorktreeRegistered(t, sourceDir, workspace.dir) {
+		t.Fatalf("legacy planner %q is not registered:\n%s", workspace.dir, commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"))
 	}
 
 	plannerDir, err := workspace.Prepare(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if worktrees := commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"); strings.Contains(worktrees, plannerDir) {
-		t.Fatalf("legacy planner remains registered:\n%s", worktrees)
+	if commandPlanningWorktreeRegistered(t, sourceDir, plannerDir) {
+		t.Fatalf("legacy planner remains registered:\n%s", commandPlanningGit(t, sourceDir, "worktree", "list", "--porcelain"))
 	}
 	sourceCommonDir := commandPlanningGit(t, sourceDir, "rev-parse", "--git-common-dir")
 	plannerCommonDir := commandPlanningGit(t, plannerDir, "rev-parse", "--git-common-dir")
@@ -259,8 +259,8 @@ func TestCommandPlanningWorkspaceRefusesAnotherRepositoriesLinkedWorktree(t *tes
 	if _, err := os.Stat(workspace.dir); err != nil {
 		t.Fatalf("foreign linked worktree was removed: %v", err)
 	}
-	if worktrees := commandPlanningGit(t, otherSourceDir, "worktree", "list", "--porcelain"); !strings.Contains(worktrees, workspace.dir) {
-		t.Fatalf("foreign linked worktree was unregistered:\n%s", worktrees)
+	if !commandPlanningWorktreeRegistered(t, otherSourceDir, workspace.dir) {
+		t.Fatalf("foreign linked worktree was unregistered:\n%s", commandPlanningGit(t, otherSourceDir, "worktree", "list", "--porcelain"))
 	}
 }
 
@@ -394,6 +394,40 @@ func commandPlanningEffectiveHooksDir(t *testing.T, plannerDir string) string {
 		hooksDir = filepath.Join(plannerDir, hooksDir)
 	}
 	return filepath.Clean(hooksDir)
+}
+
+// commandPlanningWorktreeRegistered reports whether git lists dir as a worktree
+// of repoDir. `git worktree list --porcelain` prints slash-separated, fully
+// resolved paths, so a substring match against a test path fails on Windows,
+// where the same directory is spelled with backslashes and an 8.3 short name.
+func commandPlanningWorktreeRegistered(t *testing.T, repoDir, dir string) bool {
+	t.Helper()
+	want := canonicalRegisteredPath(t, dir)
+	worktrees := commandPlanningGit(t, repoDir, "worktree", "list", "--porcelain")
+	for _, line := range strings.Split(worktrees, "\n") {
+		registered, ok := strings.CutPrefix(strings.TrimSpace(line), "worktree ")
+		if !ok {
+			continue
+		}
+		if canonicalRegisteredPath(t, filepath.FromSlash(registered)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalRegisteredPath resolves path for comparison, falling back to a clean
+// absolute path when the directory no longer exists.
+func canonicalRegisteredPath(t *testing.T, path string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+	return filepath.Clean(absolute)
 }
 
 func canonicalTestPath(t *testing.T, workDir, path string) string {
