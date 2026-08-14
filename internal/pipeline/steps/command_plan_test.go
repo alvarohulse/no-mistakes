@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1020,6 +1021,79 @@ func (s *commandPlanningProbeStep) Execute(context *pipeline.StepContext) (*pipe
 		}
 	}
 	return &pipeline.StepOutcome{}, nil
+}
+
+func TestCompactCommandPlanningIgnoredRootsDropsDescendantsSortedApartFromTheirRoot(t *testing.T) {
+	paths := []string{
+		filepath.Join("build", "out"),
+		"build",
+		"build-cache",
+		filepath.Join("build", "out", "deep"),
+		"builds",
+	}
+	sort.Strings(paths)
+
+	got := compactCommandPlanningIgnoredRoots(paths)
+
+	want := []string{"build", "build-cache", "builds"}
+	if len(got) != len(want) {
+		t.Fatalf("compacted roots = %v, want %v", got, want)
+	}
+	for i, path := range want {
+		if got[i] != path {
+			t.Fatalf("compacted roots = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestCommandPlanningIgnoredSnapshotRetainsRootAtExactEntryBudget(t *testing.T) {
+	dir, _, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "node_modules")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	children := commandPlanningIgnoredMaxEntriesPerRoot - 1
+	for i := range children {
+		path := filepath.Join(root, fmt.Sprintf("package-%03d.txt", i))
+		if err := os.WriteFile(path, []byte("dependency\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := captureCommandPlanningIgnoredSnapshot(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.roots) != 1 || snapshot.roots[0].path != "node_modules" {
+		t.Fatalf("ignored snapshot = %+v, want one node_modules root", snapshot.roots)
+	}
+	if snapshot.roots[0].skipped {
+		t.Fatalf("ignored root with exactly %d children was skipped as over budget", children)
+	}
+	if len(snapshot.roots[0].entries) != children+1 {
+		t.Fatalf("ignored root captured %d entries, want %d", len(snapshot.roots[0].entries), children+1)
+	}
+}
+
+func TestCommandPlanFailureDescriptionRedactsAndBoundsPlannerErrors(t *testing.T) {
+	description := commandPlanFailureDescription("  prepare build command planning workspace: clone https://user:hunter2@example.com/repo.git failed  ")
+	if strings.Contains(description, "hunter2") {
+		t.Fatalf("planner failure description leaked a credential: %q", description)
+	}
+	if !strings.HasPrefix(description, "prepare build command planning workspace:") {
+		t.Fatalf("planner failure description = %q, want the trimmed planner error", description)
+	}
+
+	bounded := commandPlanFailureDescription(strings.Repeat("a", commandPlanFailureMaxBytes*2))
+	if len(bounded) > commandPlanFailureMaxBytes {
+		t.Fatalf("planner failure description = %d bytes, want at most %d", len(bounded), commandPlanFailureMaxBytes)
+	}
+	if !strings.HasSuffix(bounded, commandPlanFailureTruncationMarker) {
+		t.Fatalf("planner failure description did not record truncation: %q", bounded[len(bounded)-64:])
+	}
 }
 
 func assertCommandPlanningFileContent(t *testing.T, path, want string) {

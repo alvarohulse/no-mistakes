@@ -139,6 +139,7 @@ func (s *BuildStep) executeAgentBuild(sctx *pipeline.StepContext) (*pipeline.Ste
 }
 
 func buildNotEstablishedOutcome(description string) *pipeline.StepOutcome {
+	description = commandPlanFailureDescription(description)
 	findings := Findings{
 		Items: []Finding{{
 			Severity:    "error",

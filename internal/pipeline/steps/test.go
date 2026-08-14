@@ -287,6 +287,7 @@ Rules:
 }
 
 func testNotEstablishedOutcome(description string) *pipeline.StepOutcome {
+	description = commandPlanFailureDescription(description)
 	findings := Findings{Items: []Finding{{Severity: "warning", Description: description, Action: types.ActionAskUser}}, Summary: description}
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{NeedsApproval: true, Findings: string(findingsJSON)}

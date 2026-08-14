@@ -7,11 +7,38 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// commandPlanFailureMaxBytes bounds the planner-failure text that Build, Test,
+// and Lint publish as a finding. Planner errors are joined chains that can
+// carry unbounded raw git stderr, and findings travel to persisted round data,
+// IPC, repair prompts, and the PR body; the complete error stays in the step
+// log.
+const commandPlanFailureMaxBytes = 8 * 1024
+
+const commandPlanFailureTruncationMarker = "… [planner failure truncated]"
+
+// commandPlanFailureDescription redacts and bounds text before it becomes a
+// command-gate finding, matching the treatment every other step-failure path
+// applies before error text can leave the pipeline.
+func commandPlanFailureDescription(description string) string {
+	description = strings.ToValidUTF8(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(description))), "?")
+	if len(description) <= commandPlanFailureMaxBytes {
+		return description
+	}
+	end := commandPlanFailureMaxBytes - len(commandPlanFailureTruncationMarker)
+	for end > 0 && !utf8.RuneStart(description[end]) {
+		end--
+	}
+	return description[:end] + commandPlanFailureTruncationMarker
+}
 
 var commandPlanSchema = json.RawMessage(`{
   "type": "object",

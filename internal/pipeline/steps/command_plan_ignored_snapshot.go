@@ -94,18 +94,32 @@ func commandPlanningIgnoredRoots(ctx context.Context, workDir string) ([]string,
 }
 
 func compactCommandPlanningIgnoredRoots(paths []string) []string {
+	// Byte-wise sorting does not keep a root adjacent to its descendants
+	// ("build-cache" sorts between "build" and "build/out"), so every path is
+	// tested against the whole retained set rather than the previous element.
+	retained := make(map[string]struct{}, len(paths))
 	compacted := paths[:0]
 	for _, path := range paths {
-		if len(compacted) > 0 && commandPlanningPathContains(compacted[len(compacted)-1], path) {
+		if commandPlanningRootRetained(retained, path) {
 			continue
 		}
+		retained[path] = struct{}{}
 		compacted = append(compacted, path)
 	}
 	return compacted
 }
 
-func commandPlanningPathContains(parent, path string) bool {
-	return parent == path || strings.HasPrefix(path, parent+string(filepath.Separator))
+func commandPlanningRootRetained(retained map[string]struct{}, path string) bool {
+	for ancestor := path; ; {
+		if _, ok := retained[ancestor]; ok {
+			return true
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return false
+		}
+		ancestor = parent
+	}
 }
 
 func captureCommandPlanningIgnoredRoot(ctx context.Context, workDir, path string, budget *commandPlanningIgnoredBudget) (commandPlanningIgnoredRoot, error) {
@@ -210,12 +224,15 @@ func readCommandPlanningIgnoredChildren(path string, rootEntries, totalEntries i
 	if err != nil {
 		return nil, false, err
 	}
-	children := make([]os.DirEntry, 0, remaining)
+	// One entry beyond the budget is read so a directory holding exactly
+	// `remaining` entries still reaches io.EOF and counts as complete;
+	// os.File.ReadDir only reports io.EOF once it returns nothing.
+	children := make([]os.DirEntry, 0, remaining+1)
 	complete := false
 	var readErr error
-	for len(children) < remaining {
+	for len(children) <= remaining {
 		var batch []os.DirEntry
-		batch, readErr = dir.ReadDir(remaining - len(children))
+		batch, readErr = dir.ReadDir(remaining + 1 - len(children))
 		children = append(children, batch...)
 		if errors.Is(readErr, io.EOF) {
 			complete = true
@@ -231,6 +248,9 @@ func readCommandPlanningIgnoredChildren(path string, rootEntries, totalEntries i
 	}
 	if closeErr != nil {
 		return nil, false, closeErr
+	}
+	if len(children) > remaining {
+		return nil, false, nil
 	}
 	return children, complete, nil
 }
