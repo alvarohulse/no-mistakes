@@ -27,7 +27,8 @@ type Scenario struct {
 // before the response is emitted, so subsequent pipeline steps see the
 // changes (this is how a "fix" round actually mutates files).
 type Action struct {
-	Match string `yaml:"match"`
+	Match    string   `yaml:"match"`
+	MatchAll []string `yaml:"match_all"`
 
 	// Structured is the JSON body returned in the structured-output slot
 	// (claude.result.structured_output, opencode.info.structured, or the
@@ -85,6 +86,7 @@ func defaultScenario() *Scenario {
 		Actions: []Action{{
 			Text: "no issues found",
 			Structured: map[string]any{
+				"command":         "true",
 				"findings":        []any{},
 				"summary":         "no issues found",
 				"risk_level":      "low",
@@ -103,11 +105,26 @@ func defaultScenario() *Scenario {
 // can serve as the catch-all.
 func (s *Scenario) Match(prompt string) Action {
 	for _, a := range s.Actions {
-		if a.Match == "" || strings.Contains(prompt, a.Match) {
+		if a.matches(prompt) {
 			return a
 		}
 	}
 	return Action{Text: "no matching scenario"}
+}
+
+func (a Action) matches(prompt string) bool {
+	if a.Match == "" && len(a.MatchAll) == 0 {
+		return true
+	}
+	if a.Match != "" && !strings.Contains(prompt, a.Match) {
+		return false
+	}
+	for _, fragment := range a.MatchAll {
+		if !strings.Contains(prompt, fragment) {
+			return false
+		}
+	}
+	return true
 }
 
 // applyEdits mutates files under CWD (which is the worktree no-mistakes

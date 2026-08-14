@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -35,6 +36,46 @@ func TestRefreshStep_RebasesOntoStackedBranch(t *testing.T) {
 	parents := strings.Fields(gitCmd(t, dir, "rev-list", "--parents", "-n", "1", "HEAD"))
 	if len(parents) != 2 {
 		t.Fatalf("rebased HEAD parents = %v, want one parent", parents)
+	}
+}
+
+func TestRefreshStepEvidenceKeepsPrimaryOperationAndOmitsFetchPlumbing(t *testing.T) {
+	t.Parallel()
+	dir, upstream, featureHead := setupStackedRefreshRepo(t)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.RefreshStrategy = types.RefreshStrategyRebase
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.Round = 1
+
+	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	stored, err := sctx.DB.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) == 0 {
+		t.Fatal("refresh evidence has no primary operation")
+	}
+	for _, command := range evidence.Commands {
+		if strings.HasPrefix(command.Command, "git fetch ") {
+			t.Fatalf("refresh evidence exposed support plumbing: %+v", evidence.Commands)
+		}
+	}
+	if !strings.HasPrefix(evidence.Commands[len(evidence.Commands)-1].Command, "git rebase ") {
+		t.Fatalf("refresh evidence = %+v, want a rebase operation", evidence.Commands)
 	}
 }
 
@@ -145,6 +186,12 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Fixing = true
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepRefresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.Round = 1
 
 	outcome, err := (&RefreshStep{}).Execute(sctx)
 	if err != nil {
@@ -160,6 +207,28 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	parents := strings.Fields(gitCmd(t, dir, "rev-list", "--parents", "-n", "1", "HEAD"))
 	if len(parents) != 3 {
 		t.Fatalf("resolved merge parents = %v, want two parents", parents)
+	}
+	stored, err := sctx.DB.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 {
+		t.Fatalf("merge command evidence = %+v, want only the merge the pipeline itself ran", evidence.Commands)
+	}
+	failed := evidence.Commands[0]
+	if failed.Command != "git merge --no-edit origin/dependency" || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
+		t.Fatalf("failed merge evidence = %+v", failed)
+	}
+	// The agent, not the pipeline, ran the continuation, and it may have taken
+	// several commands or none. Recording a synthetic `git merge --continue`
+	// would publish a command that never ran; the verified fact is that no
+	// merge remained in progress afterwards.
+	if len(evidence.Evidence) != 1 || !strings.Contains(evidence.Evidence[0], "origin/dependency") {
+		t.Fatalf("merge continuation evidence = %+v, want one observed-completion note", evidence.Evidence)
 	}
 }
 

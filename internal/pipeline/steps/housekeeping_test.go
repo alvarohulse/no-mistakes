@@ -15,354 +15,63 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// newHousekeepingContext builds a StepContext with a Shared scope, matching
-// how the executor wires steps at runtime.
-func newHousekeepingContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {
-	t.Helper()
-	sctx := newTestContextWithDBRecords(t, ag, workDir, baseSHA, headSHA, cmds)
-	sctx.Shared = &pipeline.RunShared{}
-	return sctx
-}
-
-// TestDocumentStep_CombinedPassCoversBothDutiesAndSplitsFindings proves the
-// combined pass asks for both duties in ONE invocation and routes each
-// finding category to its owning gate: documentation findings park the
-// document step, lint findings are stashed for the lint step.
-func TestDocumentStep_CombinedPassCoversBothDutiesAndSplitsFindings(t *testing.T) {
+func TestDocumentStepDoesNotPerformUnconfiguredLintWork(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{
-				"findings":[
-					{"severity":"warning","description":"config docs conflict","action":"ask-user","category":"documentation"},
-					{"severity":"warning","description":"unfixable vet warning","action":"ask-user","category":"lint"}
-				],
-				"summary":"housekeeping pass"
-			}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"documentation current"}`)}, nil
 		},
 	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-
-	step := &DocumentStep{}
-	outcome, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// One invocation covered both duties.
-	if len(ag.calls) != 1 {
-		t.Fatalf("combined pass must be one agent invocation, got %d", len(ag.calls))
-	}
-	prompt := ag.calls[0].Prompt
-	if !strings.Contains(prompt, "Combined lint duty") {
-		t.Fatalf("combined prompt missing the lint duty:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "Discover the configured linters and formatters") {
-		t.Fatal("combined prompt lost the lint discovery responsibility")
-	}
-	if !strings.Contains(prompt, "exactly one authoritative owner document") {
-		t.Fatal("combined prompt lost the documentation placement policy")
-	}
-
-	// Document gate sees only the documentation finding.
-	var docFindings Findings
-	if err := json.Unmarshal([]byte(outcome.Findings), &docFindings); err != nil {
-		t.Fatalf("unmarshal document findings: %v", err)
-	}
-	if len(docFindings.Items) != 1 || docFindings.Items[0].Description != "config docs conflict" {
-		t.Fatalf("document gate findings = %+v, want only the documentation finding", docFindings.Items)
-	}
-	if !outcome.NeedsApproval {
-		t.Fatal("documentation finding must park the document step")
-	}
-
-	// The lint half is stashed for the lint step.
-	stash, ok := sctx.Shared.TakeHousekeepingLint()
-	if !ok {
-		t.Fatal("combined pass must stash the lint result")
-	}
-	lintFindings, err := types.ParseFindingsJSON(stash.FindingsJSON)
-	if err != nil {
-		t.Fatalf("parse stashed lint findings: %v", err)
-	}
-	if len(lintFindings.Items) != 1 || lintFindings.Items[0].Description != "unfixable vet warning" {
-		t.Fatalf("stashed lint findings = %+v, want only the lint finding", lintFindings.Items)
-	}
-}
-
-// TestDocumentStep_ConfiguredLintCommandKeepsDocOnlyPrompt proves the
-// combined duty is only merged when lint would otherwise need its own agent
-// pass: with commands.lint configured the document prompt stays doc-only and
-// nothing is stashed.
-func TestDocumentStep_ConfiguredLintCommandKeepsDocOnlyPrompt(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"docs current"}`)}, nil
-		},
-	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "true"})
-
-	step := &DocumentStep{}
-	if _, err := step.Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(ag.calls[0].Prompt, "Combined lint duty") {
-		t.Fatal("configured lint command must keep the document prompt doc-only")
-	}
-	if _, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-		t.Fatal("nothing must be stashed when the lint command path is configured")
-	}
-}
-
-// TestDocumentStep_CombinedPassCarriesBothPromptAdditions proves the combined
-// pass carries the configured prompts.lint guidance - the lint step consumes
-// its stashed result without invoking an agent, so this is the only invocation
-// where prompts.lint can reach a model - with shared guidance emitted once and
-// ordered shared, document, lint.
-func TestDocumentStep_CombinedPassCarriesBothPromptAdditions(t *testing.T) {
-	t.Parallel()
-	prompts := config.PromptConfig{
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Prompts = config.PromptConfig{
 		Shared:   "shared guidance",
 		Document: "document guidance",
 		Lint:     "lint guidance",
 	}
 
-	runStep := func(t *testing.T, cmds config.Commands) string {
-		t.Helper()
-		dir, baseSHA, headSHA := setupGitRepo(t)
-		ag := &mockAgent{
-			name: "test",
-			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"housekeeping clean"}`)}, nil
-			},
-		}
-		sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, cmds)
-		sctx.Config.Prompts = prompts
-		if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
-			t.Fatal(err)
-		}
-		return ag.calls[0].Prompt
-	}
-
-	t.Run("combined pass", func(t *testing.T) {
-		t.Parallel()
-		prompt := runStep(t, config.Commands{})
-		if n := strings.Count(prompt, "shared guidance"); n != 1 {
-			t.Fatalf("shared guidance appears %d times, want exactly once:\n%s", n, prompt)
-		}
-		sharedAt := strings.Index(prompt, "shared guidance")
-		docAt := strings.Index(prompt, "document guidance")
-		lintAt := strings.Index(prompt, "lint guidance")
-		if docAt < 0 || lintAt < 0 {
-			t.Fatalf("combined prompt missing document (%d) or lint (%d) guidance:\n%s", docAt, lintAt, prompt)
-		}
-		if !(sharedAt < docAt && docAt < lintAt) {
-			t.Fatalf("want shared(%d) < document(%d) < lint(%d) ordering:\n%s", sharedAt, docAt, lintAt, prompt)
-		}
-		if n := strings.Count(prompt, "Additional prompt config:"); n != 1 {
-			t.Fatalf("prompt config section appears %d times, want exactly one wrapper", n)
-		}
-	})
-
-	t.Run("configured lint command keeps document-only additions", func(t *testing.T) {
-		t.Parallel()
-		prompt := runStep(t, config.Commands{Lint: "true"})
-		if !strings.Contains(prompt, "document guidance") {
-			t.Fatalf("document-only prompt lost its own guidance:\n%s", prompt)
-		}
-		if strings.Contains(prompt, "lint guidance") {
-			t.Fatalf("document-only prompt must not carry prompts.lint; the lint step runs its own pass:\n%s", prompt)
-		}
-	})
-}
-
-func TestDocumentStep_ConfiguredLintCommandKeepsLintCategorizedFindingInDocumentGate(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{
-				"findings":[{"severity":"warning","description":"documentation needs a decision","action":"ask-user","category":"lint"}],
-				"summary":"documentation needs review"
-			}`)}, nil
-		},
-	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "true"})
-
-	outcome, err := (&DocumentStep{}).Execute(sctx)
-	if err != nil {
+	if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
-	if !outcome.NeedsApproval {
-		t.Fatal("a doc-only pass must keep every finding in the document gate")
+	if len(ag.calls) != 1 {
+		t.Fatalf("document agent calls = %d, want 1", len(ag.calls))
 	}
-	var findings Findings
-	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
-		t.Fatalf("unmarshal document findings: %v", err)
+	prompt := ag.calls[0].Prompt
+	if !strings.Contains(prompt, "shared guidance") || !strings.Contains(prompt, "document guidance") {
+		t.Fatalf("document prompt lost its configured guidance:\n%s", prompt)
 	}
-	if len(findings.Items) != 1 || findings.Items[0].Description != "documentation needs a decision" {
-		t.Fatalf("document findings = %+v, want the categorized finding retained", findings.Items)
-	}
-	if _, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-		t.Fatal("a deterministic lint command must not receive a document-pass stash")
+	if strings.Contains(prompt, "lint guidance") || strings.Contains(prompt, "Combined lint duty") {
+		t.Fatalf("document prompt must not perform lint work:\n%s", prompt)
 	}
 }
 
-// TestLintStep_ConsumesCombinedResultWithoutAgentPass proves the lint step
-// reports the combined pass's lint findings with its own gate semantics and
-// pays no second agent invocation.
-func TestLintStep_ConsumesCombinedResultWithoutAgentPass(t *testing.T) {
+func TestLintStepPlansAndExecutesCommandWhenUnconfigured(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			t.Error("lint step must not invoke the agent when a combined result exists")
-			return &agent.Result{}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
 		},
 	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-
-	cases := []struct {
-		name          string
-		findings      string
-		needsApproval bool
-	}{
-		{
-			name:          "blocking lint finding parks",
-			findings:      `{"findings":[{"severity":"warning","description":"vet warning","action":"ask-user","category":"lint"}],"summary":"1 lint issue"}`,
-			needsApproval: true,
-		},
-		{
-			name:          "clean lint result passes",
-			findings:      `{"findings":[],"summary":"lint clean"}`,
-			needsApproval: false,
-		},
-		{
-			name:          "info-only lint finding passes",
-			findings:      `{"findings":[{"severity":"info","description":"style note","action":"no-op","category":"lint"}],"summary":"note"}`,
-			needsApproval: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: tc.findings, Summary: "housekeeping"})
-			outcome, err := (&LintStep{}).Execute(sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if outcome.NeedsApproval != tc.needsApproval {
-				t.Fatalf("NeedsApproval = %v, want %v", outcome.NeedsApproval, tc.needsApproval)
-			}
-			if outcome.AutoFixable {
-				t.Fatal("combined lint result must not enter the auto-fix loop")
-			}
-			if outcome.Findings != tc.findings {
-				t.Fatalf("lint findings = %s, want the stashed result", outcome.Findings)
-			}
-		})
-	}
-}
-
-// TestLintStep_RunsOwnPassWithoutCombinedResult proves the lint duty is
-// never silently dropped: with no stashed result (document step skipped or
-// failed to produce trustworthy output) the lint step runs its own pass.
-func TestLintStep_RunsOwnPassWithoutCombinedResult(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"lint clean"}`)}, nil
-		},
-	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	outcome, err := (&LintStep{}).Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("lint step must run its own agent pass when nothing was stashed, got %d calls", len(ag.calls))
-	}
 	if outcome.NeedsApproval {
-		t.Fatal("clean lint pass must not park")
+		t.Fatal("successful planned lint command must not park")
+	}
+	if len(ag.calls) != 1 || !strings.Contains(ag.calls[0].Prompt, "read-only command-planning pass") {
+		t.Fatalf("lint planner calls/prompt = %d/%q", len(ag.calls), ag.calls[0].Prompt)
 	}
 }
 
-func TestDocumentStep_CombinedPassInvalidatesPriorLintResultWhenOutputIsUntrusted(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-
-	calls := 0
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			calls++
-			if calls == 1 {
-				return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"docs need a decision","action":"ask-user","category":"documentation"}],"summary":"docs need review"}`)}, nil
-			}
-			return &agent.Result{Text: "untrusted output"}, nil
-		},
-	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	step := &DocumentStep{}
-
-	if _, err := step.Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-
-	sctx.Fixing = true
-	if _, err := step.Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-		t.Fatal("untrusted combined rerun must not leave the prior lint result available")
-	}
-}
-
-// TestLintStep_FixRoundReassessesWithOwnAgentPass proves a user-driven lint
-// fix round does not trust the stale combined result: the fix turn runs the
-// lint agent itself.
-func TestLintStep_FixRoundReassessesWithOwnAgentPass(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"fixed lint"}`)}, nil
-		},
-	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: `{"findings":[],"summary":"stale"}`, Summary: "stale"})
-	sctx.Fixing = true
-	sctx.PreviousFindings = `{"findings":[{"id":"l-1","severity":"warning","description":"vet warning","action":"auto-fix"}],"summary":"1 issue"}`
-
-	if _, err := (&LintStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("fix round must run the lint agent, got %d calls", len(ag.calls))
-	}
-}
-
-// TestPipeline_DocumentPlusLintIsOneAgentInvocation is the cold-start
-// regression: driving the real document and lint steps through the executor
-// with agent-driven lint used to cost two cold agent passes; the combined
-// pass must cost exactly one.
-func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
+func TestPipeline_DocumentAndLintPlanningAreSeparateAgentInvocations(t *testing.T) {
 	workDir, baseSHA, headSHA := setupGitRepo(t)
 
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
@@ -384,7 +93,10 @@ func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			calls++
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"housekeeping clean"}`)}, nil
+			if calls == 1 {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"documentation current"}`)}, nil
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
 		},
 	}
 
@@ -394,24 +106,27 @@ func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 
-	if calls != 1 {
-		t.Fatalf("document+lint cost %d agent invocations, want 1 (combined housekeeping pass)", calls)
+	if calls != 2 {
+		t.Fatalf("document+lint cost %d agent invocations, want document pass plus lint planning", calls)
+	}
+	if strings.Contains(ag.calls[0].Prompt, "lint") {
+		t.Fatalf("document prompt must not perform lint work:\n%s", ag.calls[0].Prompt)
+	}
+	if !strings.Contains(ag.calls[1].Prompt, "read-only command-planning pass") {
+		t.Fatalf("lint prompt must be read-only command planning:\n%s", ag.calls[1].Prompt)
 	}
 
 	steps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
 		t.Fatalf("get steps: %v", err)
 	}
-	for _, s := range steps {
-		if s.Status != types.StepStatusCompleted {
-			t.Fatalf("step %s = %s, want completed", s.StepName, s.Status)
+	for _, step := range steps {
+		if step.Status != types.StepStatusCompleted {
+			t.Fatalf("step %s = %s, want completed", step.StepName, step.Status)
 		}
 	}
 }
 
-// TestPipeline_ConfiguredLintCommandStaysFirstClassGate proves a configured
-// deterministic lint command still runs and its failure still parks the lint
-// step, unchanged by the combined pass.
 func TestPipeline_ConfiguredLintCommandStaysFirstClassGate(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -422,7 +137,7 @@ func TestPipeline_ConfiguredLintCommandStaysFirstClassGate(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"noop"}`)}, nil
 		},
 	}
-	sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "exit 3"})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Lint: "exit 3"})
 
 	outcome, err := (&LintStep{}).Execute(sctx)
 	if err != nil {

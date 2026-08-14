@@ -162,8 +162,8 @@ review:
 // actually reach the step agents of a real gated run, and that they follow the
 // same trusted default-branch boundary as commands and agent routes: the
 // trusted copy's prompts.shared reaches every model prompt, each step key
-// reaches its own step (including both halves of the combined document+lint
-// pass), and a hostile pushed-branch prompts value never reaches an agent.
+// reaches its own step, and a hostile pushed-branch prompts value never reaches
+// an agent.
 func TestRepoConfigPromptsFromDefaultBranch(t *testing.T) {
 	optOut := false
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t), AllowRepoCommands: &optOut})
@@ -228,8 +228,6 @@ prompts:
 	t.Logf("%d agent invocations: all carried the trusted prompts.shared guidance, none carried the pushed branch's prompts", len(invocations))
 
 	// Each step key reaches its own step's prompt, after the shared guidance.
-	// The combined document+lint housekeeping pass is a single invocation that
-	// owns both duties, so it must carry both keys.
 	for _, want := range []struct {
 		name    string
 		find    string
@@ -237,7 +235,8 @@ prompts:
 	}{
 		{name: "review", find: "Review the code changes and return structured findings", markers: []string{"NM_E2E_TRUSTED_REVIEW"}},
 		{name: "test", find: "You are validating a code change by testing it", markers: []string{"NM_E2E_TRUSTED_TEST"}},
-		{name: "document+lint", find: "Perform the combined documentation and lint housekeeping pass for this change", markers: []string{"NM_E2E_TRUSTED_DOCUMENT", "NM_E2E_TRUSTED_LINT"}},
+		{name: "document", find: "Keep the project documentation accurate for this change", markers: []string{"NM_E2E_TRUSTED_DOCUMENT"}},
+		{name: "lint", find: "Select the exact shell command the Lint pipeline step should execute", markers: []string{"NM_E2E_TRUSTED_LINT"}},
 	} {
 		prompt := findInvocationContaining(invocations, want.find)
 		if prompt == "" {

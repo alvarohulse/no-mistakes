@@ -2,8 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -54,6 +56,87 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	updated, _ := database.GetRun(run.ID)
 	if updated.Status != types.RunCompleted {
 		t.Errorf("expected run status %q, got %q", types.RunCompleted, updated.Status)
+	}
+}
+
+func TestExecutor_CommandSequenceRestartsForEachRound(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	zero := 0
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepLint,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			sctx.RecordCommand("first", &zero, nil)
+			sctx.RecordCommand("second", &zero, nil)
+			if callCount == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					AutoFixable:   true,
+					Findings:      `{"findings":[{"severity":"warning","description":"issue","action":"auto-fix"}],"summary":"lint issue"}`,
+				}, nil
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+
+	executor := NewExecutor(database, paths, &config.Config{AutoFix: config.AutoFix{Lint: 1}}, nil, []Step{step}, nil)
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := steps[0].Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRounds := []int{1, 1, 2, 2}
+	wantSequences := []int{1, 2, 1, 2}
+	if len(evidence.Commands) != len(wantRounds) {
+		t.Fatalf("commands = %+v", evidence.Commands)
+	}
+	for i, command := range evidence.Commands {
+		if command.Round != wantRounds[i] || command.Sequence != wantSequences[i] {
+			t.Fatalf("commands = %+v", evidence.Commands)
+		}
+	}
+}
+
+func TestStepContext_RecordCommandBoundsAndRedactsDisplayText(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	step, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := "curl https://user:secret@example.com/" + strings.Repeat("🧪", maxCommandEvidenceBytes)
+	sctx := &StepContext{DB: database, StepResultID: step.ID, Round: 1}
+	zero := 0
+	sctx.RecordCommand(command, &zero, nil)
+	stored, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 {
+		t.Fatalf("commands = %+v", evidence.Commands)
+	}
+	display := evidence.Commands[0].Command
+	if len(display) > maxCommandEvidenceBytes {
+		t.Fatalf("display command = %d bytes, want <= %d", len(display), maxCommandEvidenceBytes)
+	}
+	if !utf8.ValidString(display) {
+		t.Fatal("display command is not valid UTF-8")
+	}
+	if strings.Contains(display, "secret") || !strings.Contains(display, "redacted@example.com") {
+		t.Fatalf("display command was not redacted: %q", display)
+	}
+	if !strings.Contains(display, "command truncated") {
+		t.Fatalf("display command lacks truncation marker: %q", display)
 	}
 }
 
@@ -485,5 +568,67 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("executor timed out")
+	}
+}
+
+// Skip provenance has to be persisted where it is known. Every skipped step
+// otherwise renders with one generic sentence that guesses at a cause, and a
+// step named in the run's skip list, a step that skipped itself, and a step
+// that never ran because the run ended are three different facts.
+func TestExecutor_RecordsDistinctSkipProvenance(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	preSkipped := &adaptiveCallStep{
+		name: types.StepDocument,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			t.Fatal("pre-skipped step executed")
+			return nil, nil
+		},
+	}
+	selfSkipped := &adaptiveCallStep{
+		name: types.StepLint,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{Skipped: true, SkipReason: "Lint had nothing to check."}, nil
+		},
+	}
+	terminal := &adaptiveCallStep{
+		name: types.StepPush,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{SkipRemaining: true}, nil
+		},
+	}
+	trailing := &adaptiveCallStep{
+		name: types.StepPR,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			t.Fatal("trailing step executed after a terminal outcome")
+			return nil, nil
+		},
+	}
+
+	executor := NewExecutor(database, paths, &config.Config{}, nil, []Step{preSkipped, selfSkipped, terminal, trailing}, nil)
+	executor.SetSkippedSteps([]types.StepName{types.StepDocument})
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explanations := map[types.StepName]string{}
+	for _, sr := range steps {
+		evidence, err := sr.Evidence()
+		if err != nil {
+			t.Fatal(err)
+		}
+		explanations[sr.StepName] = evidence.Explanation
+	}
+	for step, want := range map[types.StepName]string{
+		types.StepDocument: "skip list",
+		types.StepLint:     "Lint had nothing to check.",
+		types.StepPR:       "ended the run",
+	} {
+		if !strings.Contains(explanations[step], want) {
+			t.Errorf("%s explanation = %q, want it to mention %q", step, explanations[step], want)
+		}
 	}
 }

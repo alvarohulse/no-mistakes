@@ -271,13 +271,15 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 
 // TestReviewLoop_OtherStepsStaySessionIsolated proves the reviewer/fixer
 // sessions are never lent to other pipeline steps: agent-driven document and
-// lint work runs with no session at all.
+// lint-planning work runs with no session at all.
 func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 	mock := &sessionMockAgent{}
 	mock.respond = func(opts agent.RunOpts) *agent.Result {
 		switch opts.Purpose {
 		case "review":
 			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
+		case "lint-plan":
+			return &agent.Result{Output: []byte(`{"command":"true"}`)}
 		default:
 			return &agent.Result{Output: []byte(`{"findings":[],"summary":"nothing to do"}`)}
 		}

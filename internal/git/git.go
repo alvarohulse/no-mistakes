@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +41,38 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	return runInDir(ctx, dir, args...)
 }
 
+// RunWithEnv executes Git with extra environment entries appended after the
+// process environment, so explicit caller values win. It preserves Run's
+// bare-repository handling.
+func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnv(ctx, dir, extraEnv, args...)
+}
+
+// RunWithEnvInput is RunWithEnv with stdin supplied by the caller.
+func RunWithEnvInput(ctx context.Context, dir string, extraEnv []string, input []byte, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnvInput(ctx, dir, extraEnv, input, args...)
+}
+
+// RunWithEnvOutputLimit executes Git with raw stdout capped at maxBytes. When
+// the cap is reached, the stdout pipe is closed so Git stops on the broken pipe
+// instead of continuing to produce discarded output. The returned boolean is
+// true when stdout was truncated.
+func RunWithEnvOutputLimit(ctx context.Context, dir string, extraEnv []string, maxBytes int, args ...string) (string, bool, error) {
+	if maxBytes < 0 {
+		return "", false, fmt.Errorf("git output limit must be non-negative")
+	}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirEnvOutputLimit(ctx, dir, extraEnv, maxBytes, args...)
+}
+
 // RunWithIndex executes Git with indexFile as its index without changing the
 // repository's real index. Callers use this for read-only working-tree
 // snapshots that need Git's normal staging and rename semantics.
@@ -68,9 +101,16 @@ func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 // runInDirEnv is runInDir with extra environment variables appended (last wins)
 // so callers can redirect GIT_INDEX_FILE / GIT_WORK_TREE for scratch operations.
 func runInDirEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	return runInDirEnvInput(ctx, dir, extraEnv, nil, args...)
+}
+
+func runInDirEnvInput(ctx context.Context, dir string, extraEnv []string, input []byte, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(NonInteractiveEnv(dir), extraEnv...)
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
@@ -81,6 +121,51 @@ func runInDirEnv(ctx context.Context, dir string, extraEnv []string, args ...str
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+var errGitOutputLimit = errors.New("git output limit reached")
+
+type gitOutputLimitWriter struct {
+	buffer    bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (w *gitOutputLimitWriter) Write(data []byte) (int, error) {
+	if len(data) <= w.remaining {
+		written, err := w.buffer.Write(data)
+		w.remaining -= written
+		return written, err
+	}
+	written := 0
+	if w.remaining > 0 {
+		written, _ = w.buffer.Write(data[:w.remaining])
+		w.remaining -= written
+	}
+	w.truncated = true
+	return written, errGitOutputLimit
+}
+
+func runInDirEnvOutputLimit(ctx context.Context, dir string, extraEnv []string, maxBytes int, args ...string) (string, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(NonInteractiveEnv(dir), extraEnv...)
+	stdout := &gitOutputLimitWriter{remaining: maxBytes}
+	var stderr bytes.Buffer
+	cmd.Stdout = stdout
+	cmd.Stderr = &stderr
+	winproc.Harden(cmd)
+	err := cmd.Run()
+	if stdout.truncated {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return stdout.buffer.String(), true, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), ctxErr, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+		}
+		return stdout.buffer.String(), true, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+	}
+	return stdout.buffer.String(), false, nil
 }
 
 // MergeToTree performs a real three-way content merge of ours and theirs onto

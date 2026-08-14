@@ -179,6 +179,9 @@ func TestParseCopilotEvents_FinalMessageAndUsage(t *testing.T) {
 	if usage.OutputTokens != 7 {
 		t.Errorf("output tokens = %d, want 7 (3+4)", usage.OutputTokens)
 	}
+	if !usage.MeterPresenceReported || !usage.OutputReported || usage.InputReported || usage.CacheReadReported || usage.CacheCreationReported {
+		t.Fatalf("usage presence = %+v, want output-only reporting", usage)
+	}
 	if exitCode != 0 {
 		t.Errorf("exit code = %d, want 0", exitCode)
 	}
@@ -330,20 +333,28 @@ func TestCopilotAgent_RunParsesJSONOutput(t *testing.T) {
 func TestCopilotAgent_RunReportsErrorOnNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCopilot(t, dir, []string{
+		`{"type":"assistant.message","data":{"content":"partial","outputTokens":9}}`,
 		`{"type":"error","data":{"message":"not authenticated"}}`,
 		`{"type":"result","exitCode":1}`,
 	}, 1)
 
 	ca := &copilotAgent{bin: bin}
+	var result *Result
 	_, err := ca.Run(context.Background(), RunOpts{
 		Prompt: "do work",
 		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
 	})
 	if err == nil {
 		t.Fatal("expected error on non-zero exit")
 	}
 	if !strings.Contains(err.Error(), "not authenticated") {
 		t.Fatalf("error = %v, want copilot error detail", err)
+	}
+	if result == nil || !result.UsageReported || result.Usage.OutputTokens != 9 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
 	}
 }
 

@@ -402,7 +402,9 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
+	rebaseCommand := "git rebase " + targetRef
 	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
+		recordRefreshCommand(sctx, rebaseCommand, err)
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
@@ -411,6 +413,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 		}
 		return conflictFiles, nil
 	}
+	recordRefreshCommand(sctx, rebaseCommand, nil)
 	return nil, nil
 }
 
@@ -425,8 +428,12 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
+	rebaseCommand := "git rebase " + targetRef
 	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
+		recordRefreshCommand(sctx, rebaseCommand, nil)
 		return nil
+	} else {
+		recordRefreshCommand(sctx, rebaseCommand, err)
 	}
 
 	if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
@@ -477,6 +484,7 @@ Instructions:
 		return fmt.Errorf("agent did not complete the rebase")
 	}
 
+	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the rebase conflicts onto %s; no rebase remained in progress.", targetRef))
 	return nil
 }
 
@@ -490,7 +498,9 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	mergeCommand := "git merge --no-edit " + targetRef
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err != nil {
+		recordRefreshCommand(sctx, mergeCommand, err)
 		conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		if len(conflictFiles) == 0 {
@@ -498,6 +508,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 		}
 		return conflictFiles, nil
 	}
+	recordRefreshCommand(sctx, mergeCommand, nil)
 	return nil, nil
 }
 
@@ -511,8 +522,12 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+	mergeCommand := "git merge --no-edit " + targetRef
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err == nil {
+		recordRefreshCommand(sctx, mergeCommand, nil)
 		return nil
+	} else {
+		recordRefreshCommand(sctx, mergeCommand, err)
 	}
 
 	conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
@@ -558,7 +573,23 @@ Instructions:
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		return fmt.Errorf("agent did not complete the merge")
 	}
+	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the merge conflicts from %s; no merge remained in progress.", targetRef))
 	return nil
+}
+
+func recordRefreshCommand(sctx *pipeline.StepContext, command string, runErr error) {
+	if runErr == nil {
+		zero := 0
+		sctx.RecordCommand(command, &zero, nil)
+		return
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		exitCode := exitErr.ExitCode()
+		sctx.RecordCommand(command, &exitCode, nil)
+		return
+	}
+	sctx.RecordCommand(command, nil, runErr)
 }
 
 // prepareRefreshTarget checks whether incorporating targetRef can be skipped.

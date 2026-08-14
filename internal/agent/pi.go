@@ -55,7 +55,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	args := a.buildArgs()
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env...)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	stdin, err := cmd.StdinPipe()
@@ -86,12 +86,16 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	}()
 
 	pp := &piParser{onChunk: opts.OnChunk}
+	partialResult := func() *Result {
+		result, _ := finalizeTextResult("pi", pp.finalText(), opts.JSONSchema, pp.usage)
+		return result
+	}
 	if err := pp.parse(ctx, started.stdout); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("pi parse events: %w", err)
 		emitAgentExited(opts, "pi", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	waitErr := started.wait()
@@ -101,17 +105,17 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 		if stderr != "" {
 			retErr := fmt.Errorf("pi exited: %w: %s", waitErr, stderr)
 			emitAgentExited(opts, "pi", pid, retErr)
-			return nil, retErr
+			return partialResult(), retErr
 		}
 		retErr := fmt.Errorf("pi exited: %w", waitErr)
 		emitAgentExited(opts, "pi", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	if pp.assistantError != "" {
 		retErr := fmt.Errorf("pi reported error: %s", pp.assistantError)
 		emitAgentExited(opts, "pi", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	text := pp.finalText()

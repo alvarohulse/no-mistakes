@@ -63,7 +63,7 @@ func TestMerge_PromptsCombineGlobalThenRepo(t *testing.T) {
 }
 
 // TestPrompts_ForStepsEmitsSharedOnce covers an agent invocation owning several
-// steps' duties, like the combined document+lint housekeeping pass.
+// steps' duties.
 func TestPrompts_ForStepsEmitsSharedOnce(t *testing.T) {
 	p := PromptConfig{
 		Shared:   "shared",

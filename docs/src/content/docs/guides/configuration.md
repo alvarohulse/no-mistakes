@@ -66,7 +66,7 @@ Machine-local overrides bind by `<owner>/<repo>` key against the registered upst
 
 ## Explicit commands versus agent detection
 
-Explicit `commands.build`, `commands.test`, and `commands.lint` give you deterministic local baseline behavior. With an empty `commands.build`, the Build agent detects and runs a meaningful compile command and must report what it ran. With an empty `commands.test`, the Test agent selects the smallest relevant tests under the targeted-validation contract (broad regression stays in remote CI). An empty `commands.lint` folds lint into the document step's combined housekeeping pass.
+Explicit `commands.build`, `commands.test`, and `commands.lint` give you deterministic local baseline behavior. When one is empty, that step asks its routed agent to select one exact command in a read-only pass, then the pipeline executes and records it. Test plans stay targeted under the local-validation contract; broad regression remains in remote CI.
 An empty `commands.format` runs no separate formatter, so configure it explicitly when the push step must format agent changes.
 Either way, available user intent can trigger an evidence-oriented agent follow-up after a successful test baseline, and evidence stays in a temporary local directory unless the repo opts into `test.evidence.store_in_repo`.
 The [Repo Config Reference](/no-mistakes/reference/repo-config/) owns the exact per-command semantics (including Build/Test separation and that `commands.test` is targeted, not CI-parity), command process lifetime, and the `ignore_patterns` match rules.

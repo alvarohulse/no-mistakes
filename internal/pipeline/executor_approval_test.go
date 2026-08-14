@@ -222,6 +222,78 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 }
 
+func TestExecutor_ResumeRestoresPrivatePlannedCommandForFix(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	const plannedCommand = "TOKEN='$UNEXPANDED' go test ./internal/pipeline/..."
+	if err := database.SetStepPlannedCommand(stepResult.ID, plannedCommand); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"lint-1","severity":"warning","description":"command failed","action":"auto-fix"}]}`
+	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	step := &adaptiveCallStep{
+		name: types.StepLint,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if !sctx.Fixing {
+				return nil, fmt.Errorf("recovered gate reran its initial round")
+			}
+			if sctx.PlannedCommand != plannedCommand {
+				return nil, fmt.Errorf("planned command = %q, want %q", sctx.PlannedCommand, plannedCommand)
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	executor := NewExecutor(database, paths, &config.Config{}, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepLint, types.ActionFix, []string{"lint-1"}); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered lint gate never accepted a response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+}
+
 func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {

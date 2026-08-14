@@ -563,6 +563,35 @@ func TestRovodevAgent_NoSchema(t *testing.T) {
 	}
 }
 
+func TestRovodevAgent_StreamFailureRetainsParsedUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v3/sessions/create":
+			fmt.Fprint(w, `{"session_id":"s1"}`)
+		case r.URL.Path == "/v3/set_chat_message":
+			w.WriteHeader(http.StatusOK)
+		case r.URL.Path == "/v3/stream_chat":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Content-Length", "4096")
+			fmt.Fprint(w, "event: request-usage\ndata: {\"input_tokens\":23,\"output_tokens\":8,\"cache_read_tokens\":5,\"cache_write_tokens\":2}\n\n")
+		case r.URL.Path == "/v3/sessions/s1":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	a := &rovodevAgent{bin: "acli", server: &managedServer{port: mustParsePort(server.URL)}}
+	result, err := a.runOnce(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected truncated stream error")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 23 || result.Usage.OutputTokens != 8 || result.Usage.CacheReadTokens != 5 || result.Usage.CacheCreationTokens != 2 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+}
+
 func mustParsePort(url string) int {
 	// url format: http://127.0.0.1:PORT
 	var port int

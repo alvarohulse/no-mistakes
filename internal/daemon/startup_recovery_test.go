@@ -55,6 +55,10 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	if err := os.WriteFile(activeWT+"/marker", []byte("still running"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	plannerWT := p.WorktreeDir(repo.ID, paths.CommandPlanWorktreeID(activeRun.ID))
+	if err := os.MkdirAll(plannerWT, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	// A terminal run's worktree, for contrast: cleanup should remove this one.
 	terminalRun, err := d.InsertRun(repo.ID, "old-branch", "headsha2", "basesha2")
@@ -68,14 +72,24 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	if err := os.MkdirAll(terminalWT, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	terminalPlannerWT := p.WorktreeDir(repo.ID, paths.CommandPlanWorktreeID(terminalRun.ID))
+	if err := os.MkdirAll(terminalPlannerWT, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	cleanupOrphanWorktrees(d, p)
 
 	if _, err := os.Stat(activeWT); err != nil {
 		t.Fatalf("active run worktree must survive cleanup, got: %v", err)
 	}
+	if _, err := os.Stat(plannerWT); err != nil {
+		t.Fatalf("active run planner worktree must survive cleanup, got: %v", err)
+	}
 	if _, err := os.Stat(terminalWT); !os.IsNotExist(err) {
 		t.Fatalf("terminal run worktree should have been cleaned up, stat err: %v", err)
+	}
+	if _, err := os.Stat(terminalPlannerWT); !os.IsNotExist(err) {
+		t.Fatalf("terminal run planner worktree should have been cleaned up, stat err: %v", err)
 	}
 
 	got, err := d.GetRun(activeRun.ID)

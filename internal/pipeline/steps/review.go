@@ -223,7 +223,7 @@ Risk assessment (after listing all findings):
 - Set risk_level to "low" if the change is well-bounded, mostly cosmetic, or straightforward with little ambiguity.
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
-- Provide a one-sentence risk_rationale explaining why you chose that risk level.
+- Provide a one-sentence risk_rationale in self-contained GitHub-flavored Markdown explaining why you chose that risk level. It is published on its own, so state the reason in full and never refer to the findings above, this review, or anything else the reader cannot see. Wrap code identifiers, symbols, files, commands, and configuration keys in backticks, for example %s.
 - Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s`,
 		branch,
 		baseSHA,
@@ -231,6 +231,7 @@ Risk assessment (after listing all findings):
 		reviewScope,
 		sctx.Repo.DefaultBranch,
 		ignorePatterns,
+		"`AlertMessage.close`",
 		historySection,
 	)
 

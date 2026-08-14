@@ -14,6 +14,7 @@ type agentObservationCollector struct {
 	reported     bool
 	observations []types.AgentObservation
 	seen         map[string]struct{}
+	count        int
 }
 
 func newAgentObservationCollector(reported bool) *agentObservationCollector {
@@ -24,7 +25,7 @@ func newAgentObservationCollector(reported bool) *agentObservationCollector {
 }
 
 func (c *agentObservationCollector) observe(key, identity string) {
-	if c == nil || len(c.observations) >= maxAgentObservations {
+	if c == nil {
 		return
 	}
 	identity = sanitizeAgentIdentity(identity)
@@ -37,10 +38,21 @@ func (c *agentObservationCollector) observe(key, identity string) {
 		}
 		c.seen[key] = struct{}{}
 	}
+	c.count++
+	if len(c.observations) >= maxAgentObservations {
+		return
+	}
 	c.observations = append(c.observations, types.AgentObservation{
 		Identity:       identity,
 		InvocationMode: types.AgentInvocationModeSubagentTool,
 	})
+}
+
+func (c *agentObservationCollector) uniqueCount() int {
+	if c == nil {
+		return 0
+	}
+	return c.count
 }
 
 func sanitizeAgentIdentity(identity string) string {

@@ -932,8 +932,7 @@ func (p PromptConfig) ForStep(step types.StepName) string {
 }
 
 // ForSteps returns the prompt additions for one agent invocation that carries
-// the duties of several steps - the combined document+lint housekeeping pass
-// is one invocation owning both keys. Shared guidance is emitted exactly once,
+// the duties of several steps. Shared guidance is emitted exactly once,
 // followed by each step's specific guidance in the order given.
 func (p PromptConfig) ForSteps(steps ...types.StepName) string {
 	parts := make([]string, 0, len(steps)+1)

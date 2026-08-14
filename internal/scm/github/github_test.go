@@ -594,3 +594,31 @@ func TestGitHubHelperProcess(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+// A base-only retarget carries no title or body. `gh pr edit` writes whatever
+// it is handed, so sending the empty strings would replace an adopted pull
+// request's title and description with nothing.
+func TestUpdatePRRetargetsWithoutRewritingTitleOrBody(t *testing.T) {
+	t.Parallel()
+
+	var recorded [][]string
+	host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
+
+	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42", Base: "main"}
+	if _, err := host.UpdatePR(context.Background(), pr, scm.PRContent{Base: "dependency"}); err != nil {
+		t.Fatalf("UpdatePR() error = %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("recorded commands = %v", recorded)
+	}
+	args := strings.Join(recorded[0], " ")
+	if !strings.Contains(args, "--base dependency") {
+		t.Fatalf("retarget did not set the new base: %s", args)
+	}
+	if strings.Contains(args, "--title") || strings.Contains(args, "--body") {
+		t.Fatalf("retarget rewrote title or body: %s", args)
+	}
+	if pr.Base != "dependency" {
+		t.Fatalf("UpdatePR() base = %q, want dependency", pr.Base)
+	}
+}

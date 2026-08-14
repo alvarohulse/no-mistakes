@@ -158,6 +158,31 @@ func TestExecutor_SkippedStepsDoNotEmitTelemetry(t *testing.T) {
 	}
 }
 
+func TestExecutor_SkippedIntentRecordsStructuredReason(t *testing.T) {
+	database, paths, run, repo := setupTest(t)
+	step := newPassStep(types.StepIntent)
+	executor := NewExecutor(database, paths, nil, nil, []Step{step}, nil)
+	executor.SetSkippedSteps([]types.StepName{types.StepIntent})
+
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if step.callCount() != 0 {
+		t.Fatalf("skipped intent executed %d times", step.callCount())
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := steps[0].Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Intent == nil || evidence.Intent.Reason == nil || evidence.Intent.Reason.Code != "step_skipped" {
+		t.Fatalf("intent evidence = %+v", evidence.Intent)
+	}
+}
+
 func TestExecutor_RunEventStatusCorrectOnSuccess(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

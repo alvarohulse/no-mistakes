@@ -99,7 +99,8 @@ func TestIntentJourney(t *testing.T) {
 	}
 
 	// 4. Every agent invocation - including the summarizer - must have run
-	// with the worktree as its cwd. Backends like opencode spawn a
+	// with the pipeline worktree as its cwd, except read-only command planners,
+	// which use the run's shared hook-prepared planning worktree. Backends like opencode spawn a
 	// long-lived server and lock its cwd from the first call; if the
 	// summarizer is invoked without setting CWD, the server roots itself
 	// in the daemon's launch directory and every subsequent step (review,
@@ -107,11 +108,16 @@ func TestIntentJourney(t *testing.T) {
 	// pass the right CWD. The fakeagent records os.Getwd() per call, so
 	// this assertion catches the regression generically across backends.
 	wantCWD := canonicalForCompare(t, paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), run.ID))
+	wantPlannerCWD := canonicalForCompare(t, paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), paths.CommandPlanWorktreeID(run.ID)))
 	for i, inv := range invocations {
 		got := canonicalForCompare(t, inv.CWD)
-		if got != wantCWD {
+		want := wantCWD
+		if strings.Contains(inv.Prompt, "read-only command-planning pass") {
+			want = wantPlannerCWD
+		}
+		if got != want {
 			t.Errorf("invocation %d ran in cwd %q, want worktree %q; prompt prefix:\n%s",
-				i, inv.CWD, wantCWD, truncate(inv.Prompt, 200))
+				i, inv.CWD, want, truncate(inv.Prompt, 200))
 		}
 	}
 }
@@ -212,6 +218,7 @@ func writeIntentScenario(t *testing.T) string {
       summary: "user wanted Bar() helper added"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low

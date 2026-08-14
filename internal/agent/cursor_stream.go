@@ -34,10 +34,10 @@ type cursorContent struct {
 }
 
 type cursorUsage struct {
-	InputTokens      int `json:"inputTokens"`
-	OutputTokens     int `json:"outputTokens"`
-	CacheReadTokens  int `json:"cacheReadTokens"`
-	CacheWriteTokens int `json:"cacheWriteTokens"`
+	InputTokens      *int `json:"inputTokens"`
+	OutputTokens     *int `json:"outputTokens"`
+	CacheReadTokens  *int `json:"cacheReadTokens"`
+	CacheWriteTokens *int `json:"cacheWriteTokens"`
 }
 
 type cursorParsedResult struct {
@@ -100,14 +100,13 @@ func parseCursorEvents(
 			parsed.Subtype = event.Subtype
 			parsed.IsError = event.IsError
 			if event.Usage != nil {
-				parsed.Usage = TokenUsage{
-					InputTokens:           event.Usage.InputTokens,
-					OutputTokens:          event.Usage.OutputTokens,
-					CacheReadTokens:       event.Usage.CacheReadTokens,
-					CacheCreationTokens:   event.Usage.CacheWriteTokens,
-					Reported:              true,
-					CacheCreationReported: true,
-				}
+				parsed.Usage = tokenUsageFromFields(
+					event.Usage.InputTokens,
+					event.Usage.OutputTokens,
+					event.Usage.CacheReadTokens,
+					event.Usage.CacheWriteTokens,
+					nil,
+				)
 			}
 		}
 	}

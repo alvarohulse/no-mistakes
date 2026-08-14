@@ -80,6 +80,7 @@ type PushReceivedParams struct {
 	StackedOn       string                `json:"stacked_on,omitempty"`
 	Intent          string                `json:"intent,omitempty"`
 	PRNote          string                `json:"pr_note,omitempty"`
+	Metadata        *string               `json:"metadata,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -120,6 +121,7 @@ type RerunParams struct {
 	StackedOn       string                `json:"stacked_on,omitempty"`
 	Intent          string                `json:"intent,omitempty"`
 	PRNote          string                `json:"pr_note,omitempty"`
+	Metadata        *string               `json:"metadata,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.

@@ -12,10 +12,14 @@ import (
 // contract has to populate all of it.
 func TestSampleExercisesEverySection(t *testing.T) {
 	t.Parallel()
-	s := Sample().Sections
+	sample := Sample()
+	s := sample.Sections
 
-	if s.Intent == nil || s.Intent.Text == "" {
-		t.Error("sample has no intent")
+	if sample.Metadata == "" {
+		t.Error("sample has no metadata")
+	}
+	if s.Summary == nil || s.Summary.Text == "" {
+		t.Error("sample has no summary")
 	}
 	if !s.Notes.Supplied || s.Notes.Text == "" {
 		t.Error("sample has no author note")
@@ -34,6 +38,62 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if s.Pipeline == nil || len(s.Pipeline.Steps) == 0 || len(s.Pipeline.ConfigSources) == 0 {
 		t.Fatal("sample pipeline is incomplete")
+	}
+	if intent := s.Pipeline.Steps[0].Intent; intent == nil || intent.Text == "" || !intent.Provided {
+		t.Errorf("sample intent result is incomplete: %+v", intent)
+	}
+
+	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
+	var completeTelemetry, supportedNested, unsupportedNested bool
+	for _, step := range s.Pipeline.Steps {
+		if _, ok := commandSteps[step.Name]; ok {
+			commandSteps[step.Name] = len(step.Commands) > 0
+			for _, command := range step.Commands {
+				if command.Round < 1 || command.Sequence < 1 || command.Command == "" || command.Outcome == "" {
+					t.Errorf("sample command evidence is incomplete: %+v", command)
+				}
+			}
+		}
+		if (step.Status == "completed" || step.Status == "skipped") && step.Intent == nil && len(step.Commands) == 0 && len(step.Evidence) == 0 && step.Explanation == "" {
+			t.Errorf("sample successful/skipped step %q has no evidence or explanation", step.Name)
+		}
+		for _, run := range step.Agents {
+			if run.NestedReported {
+				supportedNested = true
+				if run.NestedCount == nil {
+					t.Errorf("sample supported nested-agent row has no exact count: %+v", run)
+				}
+			}
+			if (run.Agent == "claude" || run.Agent == "codex") && run.InputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil {
+				want := *run.UncachedInputTokens + *run.CacheReadTokens + *run.CacheWriteTokens
+				if *run.InputTokens != want {
+					t.Errorf("sample %s input total = %d, want canonical meter sum %d", run.Agent, *run.InputTokens, want)
+				}
+			}
+			if run.Agent == "cursor" && run.InputTokens != nil && ((run.CacheReadTokens != nil && *run.CacheReadTokens > 0) || (run.CacheWriteTokens != nil && *run.CacheWriteTokens > 0)) {
+				t.Errorf("sample Cursor input total is populated despite ambiguous cache-inclusive semantics: %+v", run)
+			}
+			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
+				completeTelemetry = true
+			}
+			if !run.NestedReported {
+				unsupportedNested = true
+			}
+		}
+	}
+	for step, populated := range commandSteps {
+		if !populated {
+			t.Errorf("sample %s step has no command evidence", step)
+		}
+	}
+	if !completeTelemetry {
+		t.Error("sample has no fully populated telemetry row")
+	}
+	if !supportedNested {
+		t.Error("sample does not exercise supported nested-agent telemetry")
+	}
+	if !unsupportedNested {
+		t.Error("sample does not exercise unsupported nested-agent telemetry")
 	}
 }
 
@@ -119,5 +179,58 @@ func TestSampleRoundTripsThroughJSON(t *testing.T) {
 	}
 	if back.Sections.Risk != Sample().Sections.Risk {
 		t.Fatalf("risk did not round-trip: %+v", back.Sections.Risk)
+	}
+}
+
+// A formatter under a v2-to-v3 rollout is told to accept both shapes, so the
+// v2 sample has to stay reachable and has to be a real v2 contract: intent in
+// its own section, and none of the v3-only additions present.
+func TestSampleV2IsAVersion2Contract(t *testing.T) {
+	t.Parallel()
+	sample := SampleV2()
+
+	if sample.Version != 2 {
+		t.Fatalf("SampleV2 version = %d, want 2", sample.Version)
+	}
+	if sample.Metadata != "" {
+		t.Error("v2 sample carries v3 metadata")
+	}
+	if sample.Sections.Summary != nil {
+		t.Error("v2 sample carries a v3 summary section")
+	}
+	if sample.Sections.Intent == nil || sample.Sections.Intent.Text == "" || !sample.Sections.Intent.Authoritative {
+		t.Fatalf("v2 sample has no authoritative intent section: %+v", sample.Sections.Intent)
+	}
+	if sample.Sections.WhatChanged == nil || sample.Sections.Testing == nil || !sample.Sections.Risk.Reported {
+		t.Fatal("v2 sample lost a section every version 2 formatter reads")
+	}
+	if sample.Sections.Pipeline == nil || len(sample.Sections.Pipeline.Steps) == 0 {
+		t.Fatal("v2 sample has no pipeline steps")
+	}
+	for _, step := range sample.Sections.Pipeline.Steps {
+		if step.Intent != nil || len(step.Commands) > 0 || len(step.Evidence) > 0 || step.Explanation != "" {
+			t.Errorf("v2 sample step %q carries v3-only evidence: %+v", step.Name, step)
+		}
+		for _, run := range step.Agents {
+			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 || run.NestedCount != nil ||
+				run.InputTokens != nil || run.OutputTokens != nil || run.UncachedInputTokens != nil ||
+				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil {
+				t.Errorf("v2 sample agent row carries v3-only telemetry: %+v", run)
+			}
+		}
+	}
+
+	if SampleForVersion(2) == nil || SampleForVersion(Version) == nil {
+		t.Error("SampleForVersion does not cover every supported version")
+	}
+	if SampleForVersion(1) != nil {
+		t.Error("SampleForVersion returned a contract for an unsupported version")
+	}
+	if !IsSupportedVersion(2) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
+		t.Error("IsSupportedVersion disagrees with SupportedVersions")
+	}
+	// Sample must stay unaffected by the downgrade.
+	if Sample().Sections.Summary == nil {
+		t.Error("SampleV2 mutated the shared v3 sample")
 	}
 }

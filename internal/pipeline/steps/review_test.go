@@ -117,6 +117,9 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[1].Prompt, "inspect surrounding code, call sites, shared helpers, tests, and invariants") {
 		t.Error("expected review prompt to allow surrounding-code inspection for root cause")
 	}
+	if !strings.Contains(ag.calls[1].Prompt, "GitHub-flavored Markdown") || !strings.Contains(ag.calls[1].Prompt, "`AlertMessage.close`") {
+		t.Error("expected risk rationale prompt to require Markdown formatting for identifiers")
+	}
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after fix commit, got %q", status)
 	}

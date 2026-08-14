@@ -35,6 +35,25 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
+	testCmd := sctx.Config.Commands.Test
+	plannedTest := testCmd == ""
+	if plannedTest {
+		if sctx.PlannedCommand == "" {
+			sctx.Log("no test command configured, asking agent to plan one...")
+			command, err := planPipelineCommand(sctx, s.Name(), `Return the exact smallest relevant automated test command that validates the changed behavior.
+- Do NOT return the repository's complete test suite.
+- Prefer a package, test selector, or focused script aligned with the user intent.
+- Do not run linters, formatters, or static analysis.`)
+			if err != nil {
+				return testNotEstablishedOutcome(err.Error()), nil
+			}
+			sctx.PlannedCommand = command
+		}
+		if sctx.PlannedCommand == "" {
+			return testNotEstablishedOutcome("test planner found no meaningful targeted automated test command"), nil
+		}
+		testCmd = sctx.PlannedCommand
+	}
 
 	// In fix mode, ask agent to fix test failures first.
 	//
@@ -102,7 +121,6 @@ Previous test findings to address:
 		fixSummary = summary
 	}
 
-	testCmd := sctx.Config.Commands.Test
 	tested := []string{}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
@@ -119,6 +137,7 @@ Previous test findings to address:
 				Items: []Finding{{
 					Severity:    "error",
 					Description: fmt.Sprintf("tests failed with exit code %d", exitCode),
+					Action:      types.ActionAutoFix,
 				}},
 				Summary: projectedOutput,
 				Tested:  tested,
@@ -134,7 +153,7 @@ Previous test findings to address:
 		}
 	}
 
-	useEvidenceAgent := testCmd == "" || cleanedUserIntent(sctx) != ""
+	useEvidenceAgent := plannedTest || cleanedUserIntent(sctx) != ""
 	if useEvidenceAgent {
 		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
 		evidenceDir := evidenceLocation.Dir
@@ -145,8 +164,8 @@ Previous test findings to address:
 		if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create test evidence dir: %w", err)
 		}
-		if testCmd == "" {
-			sctx.Log("no test command configured, asking agent to run tests...")
+		if plannedTest {
+			sctx.Log("planned test command passed, asking agent to gather non-shell evidence...")
 		} else {
 			sctx.Log("user intent available, asking agent to gather test evidence...")
 		}
@@ -265,6 +284,13 @@ Rules:
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+}
+
+func testNotEstablishedOutcome(description string) *pipeline.StepOutcome {
+	description = commandPlanFailureDescription(description)
+	findings := Findings{Items: []Finding{{Severity: "warning", Description: description, Action: types.ActionAskUser}}, Summary: description}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{NeedsApproval: true, Findings: string(findingsJSON)}
 }
 
 func newTestFileFindings(paths []string) []Finding {

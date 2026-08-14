@@ -277,6 +277,8 @@ git worktree list
 git worktree remove --force <path>
 ```
 
+A leftover `<runID>-command-plan` sibling directory is a [command-planning checkout](/no-mistakes/concepts/daemon/#what-it-does), not a linked worktree, so it never appears in `git worktree list`; remove that one with `rm -rf`.
+
 Or let the daemon clean it on next startup:
 
 ```sh

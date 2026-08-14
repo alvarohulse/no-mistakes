@@ -169,7 +169,7 @@ review:
 
 `review.adversary_agent` accepts the same scalar or ordered availability-fallback form as `agent`, but it is not part of `review.agent`'s invocation fallback list. Both model objects are required, and their declared vendors must differ. The controller runs the adversary only after the primary Review returns `risk_level: high`, in a cold session isolated from the primary reviewer/fixer sessions, then merges and namespaces its findings into the same Review gate. Low- and medium-risk reviews do not invoke it.
 
-When [`commands.lint`](#commandslint) is empty, the agent-driven lint duty folds into the document step's combined housekeeping pass, which runs on the `document` route; the `lint` route then applies only if that step falls back to its own pass. Set `commands.lint` if you want the `lint` route to own the lint duty directly.
+When `commands.build`, `commands.test`, or `commands.lint` is empty, that step's route plans one exact command in a read-only agent pass. The pipeline executes and records the plan, and the same route owns any repair before the pipeline reruns the command.
 
 Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
@@ -226,7 +226,7 @@ External pull request body formatter. Receives the PR body contract as JSON on s
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. The contract is data, not markdown: the pipeline is per-step records, risk is its level, rationale, and scope, and testing is the test step's own summary, tested list, and artifacts. Layout is entirely the formatter's decision.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v3 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, structured per-round command evidence, the Intent step's provenance/absence result, risk fields, test evidence, and one telemetry row per agent invocation. Layout and API-cost estimation are entirely the formatter's decision. Formatters should accept both v2 and v3 while a producer rollout is in progress.
 
 ```yaml
 hooks:
@@ -274,10 +274,10 @@ Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Empty (agent detects the appropriate build) |
+| Default | Empty (agent plans the appropriate build command) |
 
 When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding and kept in full in the Build step log.
-When empty, the routed Build agent examines the repository, runs the smallest meaningful build or compile command for the changed production code, and must report which command it ran. If it cannot establish a build, the step parks instead of silently passing.
+When empty, the routed Build agent selects one exact command in a read-only planning pass. The pipeline executes and records it. If it fails, a repair agent fixes the cause and the pipeline reruns the same plan; no usable plan parks instead of silently passing.
 Build is separate from Test: do not put test, lint, or documentation work in `commands.build` unless that work is inseparable from the repository's canonical build command.
 
 ### commands.test
@@ -287,15 +287,14 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Empty (agent selects the smallest relevant tests and evidence checks) |
+| Default | Empty (agent plans the smallest relevant test command) |
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
 Broad regression belongs in remote CI and remains mandatory before a PR is ready; do not put a complete-suite walk here just to mirror CI.
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
-When empty, the agent detects and runs the smallest relevant tests itself (and is instructed never to run the complete repository suite).
-When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation, still under the same targeted-validation contract.
+When empty, the agent selects one exact focused test command in a read-only planning pass; the pipeline executes and records it, then an evidence agent gathers evidence and artifacts, running further focused checks itself when the planned command alone does not demonstrate the intent. A repair round reruns the same planned command. When user intent is available, the evidence agent may also run after a configured baseline succeeds, still under the same targeted-validation contract.
 
 ### commands.lint
 
@@ -304,11 +303,10 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Empty (agent auto-detects) |
+| Default | Empty (agent plans a lint command) |
 
 When set, the lint step runs this exact command and checks the exit code.
-When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
-Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
+When empty, the routed Lint agent selects one exact formatter, linter, or static-analysis command in a read-only planning pass. The pipeline executes and records it. A failure enters repair and reruns the same plan. Document remains a separate documentation-only pass.
 
 ### commands.format
 
@@ -319,7 +317,7 @@ Formatter command run before the push step commits agent fixes.
 | Type | `string` |
 | Default | Empty (no separate push-step formatter) |
 
-This does not prevent empty `commands.lint` from detecting and running formatters during the combined housekeeping pass, or during the lint step when that pass cannot provide a result.
+This remains separate from the Lint step's planned or configured command.
 
 ### document.instructions
 
@@ -379,7 +377,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 
 Set to `0` to disable the follow-up auto-fix loop for a step (findings require manual approval).
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings pause for approval instead of starting another automatic fix loop.
+Unconfigured Build, Test, and Lint still use their own repair loops after the pipeline-run planned command fails.
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
@@ -464,4 +462,4 @@ Global prompt config and repo prompt config combine in this order:
 | `prompts.ci` | CI failure and merge-conflict auto-fix prompt |
 
 Push never invokes a model, so there is no `prompts.push`.
-When `commands.lint` is empty, the [combined document+lint housekeeping pass](/no-mistakes/reference/pipeline-steps/#document) is a single invocation, so it carries both `prompts.document` and `prompts.lint` with shared guidance included once.
+An unconfigured Build, Test, or Lint step applies its own `prompts.<step>` guidance to the read-only command-planning pass and any later repair pass.

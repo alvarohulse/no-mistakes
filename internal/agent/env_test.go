@@ -104,3 +104,13 @@ func TestGitSafeEnv_GateMarkerWinsOverAmbient(t *testing.T) {
 		t.Errorf("%s = %q, want \"1\" (managed stamp must win over ambient)", GateRoleEnvVar, resolved[GateRoleEnvVar])
 	}
 }
+
+func TestGitSafeEnv_PropagatesExtraValuesWithoutWeakeningGateMarker(t *testing.T) {
+	resolved := resolveAgentEnv(gitSafeEnv("/work/dir", "NM_METADATA=opaque\nvalue", GateRoleEnvVar+"=0"))
+	if resolved["NM_METADATA"] != "opaque\nvalue" {
+		t.Fatalf("NM_METADATA = %q, want exact opaque value", resolved["NM_METADATA"])
+	}
+	if resolved[GateRoleEnvVar] != "1" {
+		t.Fatalf("%s = %q, want managed marker", GateRoleEnvVar, resolved[GateRoleEnvVar])
+	}
+}

@@ -86,12 +86,15 @@ type Run struct {
 	IntentScore     *float64
 	// PRNote is optional author-supplied content set per run via
 	// `axi run --pr-note` or `--pr-note-file`.
-	PRNote    *string
+	PRNote *string
+	// Metadata is opaque operator-supplied text. A non-nil empty string records
+	// an explicit clear on rerun; no parser assigns structure to it.
+	Metadata  *string
 	CreatedAt int64
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, submitted_head_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, metadata, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -104,7 +107,7 @@ func scanRun(row interface {
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
-		&r.PRNote,
+		&r.PRNote, &r.Metadata,
 		&r.CreatedAt, &r.UpdatedAt,
 	); err != nil {
 		return err
@@ -128,6 +131,7 @@ func (d *DB) InsertRunWithPRNote(repoID, branch, headSHA, baseSHA, prNote string
 // RunOptions are immutable selections stamped onto a run at creation.
 type RunOptions struct {
 	PRNote          string
+	Metadata        *string
 	RefreshStrategy types.RefreshStrategy
 	StackedOn       string
 }
@@ -159,9 +163,10 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		r.PRNote = &note
 		notePtr = &note
 	}
+	r.Metadata = opts.Metadata
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'none', ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), headSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, submitted_head_sha, status, pr_state, created_at, updated_at, pr_note, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, 'none', ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), headSHA, r.Status, r.CreatedAt, r.UpdatedAt, notePtr, opts.Metadata,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

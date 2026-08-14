@@ -348,25 +348,34 @@ func TestPiAgent_RunSurfacesNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakePi(t, dir, `#!/bin/sh
 cat > /dev/null
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"partial"}],"usage":{"input":19,"output":7,"cacheRead":4,"cacheWrite":3}}}'
 echo "boom" >&2
 exit 2
 `, strings.Join([]string{
 		"@echo off",
 		"more > nul",
+		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"partial\"}],\"usage\":{\"input\":19,\"output\":7,\"cacheRead\":4,\"cacheWrite\":3}}}",
 		"echo boom 1>&2",
 		"exit /b 2",
 	}, "\r\n"))
 
 	pa := &piAgent{bin: bin}
+	var result *Result
 	_, err := pa.Run(context.Background(), RunOpts{
 		Prompt: "review",
 		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
 	})
 	if err == nil {
 		t.Fatal("expected non-zero exit error")
 	}
 	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("expected stderr in error message, got: %v", err)
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 19 || result.Usage.OutputTokens != 7 || result.Usage.CacheReadTokens != 4 || result.Usage.CacheCreationTokens != 3 {
+		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
 	}
 }
 

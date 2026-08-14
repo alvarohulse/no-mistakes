@@ -43,7 +43,7 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env...)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
@@ -66,12 +66,16 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	var messages []string
 	var copilotErr string
 	exitCode := 0
+	partialResult := func() *Result {
+		result, _ := finalizeCopilotResult(messages, opts.JSONSchema, usage)
+		return result
+	}
 	if err := parseCopilotEvents(ctx, started.stdout, opts.OnChunk, &usage, &messages, &copilotErr, &exitCode); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("copilot parse events: %w", err)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	waitErr := started.wait()
@@ -82,21 +86,21 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		if detail != "" {
 			retErr := fmt.Errorf("copilot exited: %w: %s", waitErr, detail)
 			emitAgentExited(opts, "copilot", pid, retErr)
-			return nil, retErr
+			return partialResult(), retErr
 		}
 		retErr := fmt.Errorf("copilot exited: %w", waitErr)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 	if exitCode != 0 {
 		if detail != "" {
 			retErr := fmt.Errorf("copilot reported exit code %d: %s", exitCode, detail)
 			emitAgentExited(opts, "copilot", pid, retErr)
-			return nil, retErr
+			return partialResult(), retErr
 		}
 		retErr := fmt.Errorf("copilot reported exit code %d", exitCode)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	res, err := finalizeCopilotResult(messages, opts.JSONSchema, usage)
@@ -233,7 +237,7 @@ type copilotEventData struct {
 	DeltaContent string `json:"deltaContent,omitempty"`
 	// assistant.message
 	Content      string `json:"content,omitempty"`
-	OutputTokens int    `json:"outputTokens,omitempty"`
+	OutputTokens *int   `json:"outputTokens,omitempty"`
 	// error / abort events
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
@@ -282,7 +286,7 @@ func parseCopilotEvents(
 			if event.Data == nil {
 				continue
 			}
-			usage.Add(TokenUsage{OutputTokens: event.Data.OutputTokens, Reported: true})
+			usage.Add(tokenUsageFromFields(nil, event.Data.OutputTokens, nil, nil, nil))
 			if event.Data.Content != "" && messages != nil {
 				*messages = append(*messages, event.Data.Content)
 			}

@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // newIntentStepContext builds a StepContext backed by a real DB and
@@ -35,6 +36,10 @@ func newIntentStepContext(t *testing.T) *pipeline.StepContext {
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepIntent)
+	if err != nil {
+		t.Fatalf("insert intent step: %v", err)
+	}
 
 	return &pipeline.StepContext{
 		Ctx:     context.Background(),
@@ -44,11 +49,28 @@ func newIntentStepContext(t *testing.T) *pipeline.StepContext {
 		Config: &config.Config{
 			Intent: config.Intent{Enabled: true},
 		},
-		DB:       database,
-		Log:      func(string) {},
-		LogChunk: func(string) {},
-		LogFile:  func(string) {},
+		DB:           database,
+		StepResultID: stepResult.ID,
+		Log:          func(string) {},
+		LogChunk:     func(string) {},
+		LogFile:      func(string) {},
 	}
+}
+
+func requireIntentEvidence(t *testing.T, sctx *pipeline.StepContext) db.IntentEvidence {
+	t.Helper()
+	stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stepResult.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Intent == nil {
+		t.Fatal("intent evidence was not persisted")
+	}
+	return *evidence.Intent
 }
 
 func TestIntentStep_SuccessPersistsAndAttaches(t *testing.T) {
@@ -91,6 +113,10 @@ func TestIntentStep_SuccessPersistsAndAttaches(t *testing.T) {
 	}
 	if persisted.IntentScore == nil || *persisted.IntentScore != 0.9 {
 		t.Errorf("db intent score = %v, want 0.9", persisted.IntentScore)
+	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Text != "user added Bar()" || evidence.Source != "claude" || evidence.Provided || evidence.Reason != nil {
+		t.Fatalf("intent evidence = %+v", evidence)
 	}
 
 	joined := strings.Join(logs, "\n")
@@ -165,6 +191,10 @@ func TestIntentStep_NoMatchReturnsSkipped(t *testing.T) {
 	if sctx.Run.Intent != nil {
 		t.Errorf("run.Intent should remain nil on no-match, got %q", *sctx.Run.Intent)
 	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Reason == nil || evidence.Reason.Code != "no_matching_transcript" {
+		t.Fatalf("intent evidence = %+v", evidence)
+	}
 }
 
 func TestIntentStep_ExtractErrorReturnsSkippedNotError(t *testing.T) {
@@ -184,6 +214,29 @@ func TestIntentStep_ExtractErrorReturnsSkippedNotError(t *testing.T) {
 	}
 	if sctx.Run.Intent != nil {
 		t.Errorf("run.Intent should remain nil on error, got %q", *sctx.Run.Intent)
+	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Reason == nil || evidence.Reason.Code != "extraction_failed" {
+		t.Fatalf("intent evidence = %+v", evidence)
+	}
+}
+
+func TestIntentStep_EmptyDiffRecordsStructuredReason(t *testing.T) {
+	sctx := newIntentStepContext(t)
+	step := &IntentStep{runIntent: func(context.Context, *pipeline.StepContext) (*intent.Result, error) {
+		return nil, errIntentEmptyDiff
+	}}
+
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.Skipped {
+		t.Fatalf("outcome = %+v, want skipped", outcome)
+	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Reason == nil || evidence.Reason.Code != "empty_diff" {
+		t.Fatalf("intent evidence = %+v", evidence)
 	}
 }
 
@@ -289,6 +342,10 @@ func TestIntentStep_DisabledByConfigSkipsExtractor(t *testing.T) {
 	if called {
 		t.Errorf("runIntent must not run when intent extraction is disabled")
 	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Reason == nil || evidence.Reason.Code != "inference_disabled" {
+		t.Fatalf("intent evidence = %+v", evidence)
+	}
 }
 
 func TestIntentStep_PanicReturnsSkipped(t *testing.T) {
@@ -305,6 +362,10 @@ func TestIntentStep_PanicReturnsSkipped(t *testing.T) {
 	}
 	if outcome == nil || !outcome.Skipped {
 		t.Errorf("expected Skipped on panic, got %+v", outcome)
+	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Reason == nil || evidence.Reason.Code != "extraction_failed" {
+		t.Fatalf("intent evidence = %+v", evidence)
 	}
 }
 
@@ -344,5 +405,9 @@ func TestIntentStep_UsesSuppliedIntent(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("missing supplied-intent log line; logs: %v", logs)
+	}
+	evidence := requireIntentEvidence(t, sctx)
+	if evidence.Text != supplied || evidence.Source != db.RunIntentSourceAgent || !evidence.Provided || evidence.Reason != nil {
+		t.Fatalf("intent evidence = %+v", evidence)
 	}
 }

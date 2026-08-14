@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -277,7 +278,7 @@ func TestTestStep_ConfiguredTestFailureNeedsApproval(t *testing.T) {
 	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
 		t.Fatal(err)
 	}
-	if len(findings.Items) != 1 || findings.Items[0].Severity != "error" || findings.Items[0].Description != "tests failed with exit code 1" {
+	if len(findings.Items) != 1 || findings.Items[0].Severity != "error" || findings.Items[0].Description != "tests failed with exit code 1" || findings.Items[0].Action != types.ActionAutoFix {
 		t.Fatalf("test failure findings = %+v", findings.Items)
 	}
 }
@@ -339,7 +340,10 @@ func TestTestStep_EvidenceAgentExistingTestFileMutationsDoNotGate(t *testing.T) 
 
 				ag := &mockAgent{
 					name: "test",
-					runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+						if opts.Purpose == "test-plan" {
+							return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+						}
 						var err error
 						switch tt.mutation {
 						case "modify":
@@ -476,6 +480,9 @@ func TestTestStep_InRepoEvidenceFallsBackWhenConfiguredDirEscapesWorktree(t *tes
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-plan" {
+				return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+			}
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence"}`)}, nil
 		},
 	}
@@ -488,13 +495,49 @@ func TestTestStep_InRepoEvidenceFallsBackWhenConfiguredDirEscapesWorktree(t *tes
 		t.Fatal(err)
 	}
 
-	prompt := ag.calls[0].Prompt
+	prompt := ag.calls[1].Prompt
 	wantDir := filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID)
 	if !strings.Contains(prompt, "Write new evidence files into this temporary evidence directory: "+wantDir) {
 		t.Fatalf("expected temporary evidence guidance for unsafe in-repo dir, got:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "in-repo evidence directory") || strings.Contains(prompt, "committed and pushed automatically") {
 		t.Fatalf("did not expect in-repo publishing promise for unsafe evidence dir, got:\n%s", prompt)
+	}
+}
+
+func TestTestStep_DoesNotExecuteDisplayEvidenceAsARecoveredPlan(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-plan" {
+				return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	if err := sctx.DB.SetStepEvidence(stepResult.ID, db.StepEvidence{Commands: []db.CommandEvidence{{
+		Round: 1, Sequence: 1, Command: "false", Outcome: db.CommandOutcomeFailed,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("outcome = %+v, want newly planned passing command", outcome)
+	}
+	if len(ag.calls) != 2 || ag.calls[0].Purpose != "test-plan" {
+		t.Fatalf("agent calls = %+v, want planner followed by evidence", ag.calls)
 	}
 }
 
@@ -508,6 +551,9 @@ func TestTestStep_InRepoEvidenceFallsBackWhenEvidenceDirIsIgnored(t *testing.T) 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-plan" {
+				return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+			}
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence"}`)}, nil
 		},
 	}
@@ -520,7 +566,7 @@ func TestTestStep_InRepoEvidenceFallsBackWhenEvidenceDirIsIgnored(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	prompt := ag.calls[0].Prompt
+	prompt := ag.calls[1].Prompt
 	wantDir := filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID)
 	if !strings.Contains(prompt, "Write new evidence files into this temporary evidence directory: "+wantDir) {
 		t.Fatalf("expected temporary evidence guidance for ignored in-repo dir, got:\n%s", prompt)
@@ -541,6 +587,9 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-plan" {
+				return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+			}
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["go test ./internal/cli -run TestDoctor -count=1"],"testing_summary":"targeted check passed"}`)}, nil
 		},
 	}
@@ -550,10 +599,13 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(ag.calls) != 1 {
-		t.Fatalf("expected 1 evidence agent call, got %d", len(ag.calls))
+	if len(ag.calls) != 2 {
+		t.Fatalf("expected planner and evidence agent calls, got %d", len(ag.calls))
 	}
-	prompt := ag.calls[0].Prompt
+	if !strings.Contains(ag.calls[0].Prompt, sctx.UserIntent) {
+		t.Fatalf("planner prompt missing user intent: %s", ag.calls[0].Prompt)
+	}
+	prompt := ag.calls[1].Prompt
 
 	for _, want := range []string{
 		"run the smallest relevant tests yourself",
@@ -672,6 +724,9 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-plan" {
+				return &agent.Result{Output: json.RawMessage(`{"command":"test -f feature.txt"}`)}, nil
+			}
 			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"no targeted test can prove the intent","action":"ask-user"}],"summary":"missing evidence","tested":["manual review of changed packages"],"testing_summary":"could not produce targeted evidence"}`)}, nil
 		},
 	}
@@ -685,7 +740,7 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 	if !outcome.NeedsApproval {
 		t.Fatal("expected missing targeted evidence to require approval")
 	}
-	prompt := ag.calls[0].Prompt
+	prompt := ag.calls[1].Prompt
 	for _, want := range []string{
 		"Never treat \"do not run everything\" as permission to run nothing",
 		"write or improve a focused test",

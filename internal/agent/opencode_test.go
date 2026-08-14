@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpencodeAgent_CloseWithoutServer(t *testing.T) {
@@ -421,6 +422,67 @@ func TestOpencodeAgent_NoSchema(t *testing.T) {
 	}
 }
 
+func TestOpencodeAgent_EventStreamFailureRetainsCompletedMessageResult(t *testing.T) {
+	messageCompleted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/session" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"s1"}`)
+
+		case r.URL.Path == "/global/event" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Content-Length", "1024")
+			w.WriteHeader(http.StatusOK)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-messageCompleted
+			time.Sleep(50 * time.Millisecond)
+
+		case r.URL.Path == "/session/s1/message" && r.Method == http.MethodPost:
+			response := `{"info":{"id":"msg1","role":"assistant","tokens":{"input":17,"output":5,"cache":{"read":3,"write":2}}},"parts":[{"id":"task-1","type":"tool","tool":"task","state":{"status":"completed","input":{"subagent_type":"explore"}}},{"type":"text","text":"done"}]}`
+			w.Header().Set("Content-Length", fmt.Sprint(len(response)))
+			fmt.Fprint(w, response)
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			close(messageCompleted)
+
+		case r.URL.Path == "/session/s1/abort" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+
+		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	a := &opencodeAgent{
+		bin:    "opencode",
+		server: &managedServer{port: mustParsePort(server.URL)},
+	}
+
+	result, err := a.runOnce(context.Background(), RunOpts{
+		Prompt: "hello",
+		CWD:    t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "opencode events") {
+		t.Fatalf("error = %v, want event stream failure", err)
+	}
+	if result == nil || result.Text != "done" {
+		t.Fatalf("partial result = %+v, want completed message text", result)
+	}
+	if !result.UsageReported || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 5 || result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 2 {
+		t.Fatalf("partial result = %+v, want completed message usage", result)
+	}
+	if !result.AgentObservationsReported || result.NestedAgentCount != 1 || len(result.AgentObservations) != 1 || result.AgentObservations[0].Identity != "explore" {
+		t.Fatalf("partial nested-agent telemetry = %+v", result)
+	}
+}
+
 // TestOpencodeAgent_FinalAnswerPreferred tests that final_answer phase text is preferred.
 func TestOpencodeAgent_FinalAnswerPreferred(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -493,7 +555,7 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 			// opencode signals structured-output failure via
 			// info.error.name = "StructuredOutputError". The body
 			// intentionally omits info.structured.
-			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","error":{"name":"StructuredOutputError","message":"Model did not produce structured output","retries":2}},"parts":[{"type":"text","text":"Now I need to find the failing test. The only failing test is foo."}]}`)
+			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","error":{"name":"StructuredOutputError","message":"Model did not produce structured output","retries":2},"tokens":{"input":17,"output":5,"cache":{"read":3,"write":2}}},"parts":[{"id":"task-1","type":"tool","tool":"task","state":{"status":"completed","input":{"subagent_type":"explore"}}},{"type":"text","text":"Now I need to find the failing test. The only failing test is foo."}]}`)
 
 		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusOK)
@@ -509,16 +571,23 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 		server: &managedServer{port: mustParsePort(server.URL)},
 	}
 
-	result, err := a.Run(context.Background(), RunOpts{
+	var result *Result
+	_, err := a.Run(context.Background(), RunOpts{
 		Prompt:     "fix the failing tests",
 		CWD:        t.TempDir(),
 		JSONSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}`),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
 	})
 	if err == nil {
-		t.Fatalf("expected error, got result %+v", result)
+		t.Fatal("expected error")
 	}
-	if result != nil {
-		t.Fatalf("expected nil result on error, got %+v", result)
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 5 {
+		t.Fatalf("partial result = %+v, want incurred usage", result)
+	}
+	if !result.AgentObservationsReported || result.NestedAgentCount != 1 {
+		t.Fatalf("partial nested-agent telemetry = %+v", result)
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "structured output failed") {

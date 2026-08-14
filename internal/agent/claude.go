@@ -81,7 +81,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	// bytes out of argv and lets Cmd own the bounded concurrent copy, including
 	// EOF, early-child-exit, cancellation, and WaitDelay cleanup paths.
 	cmd.Stdin = strings.NewReader(opts.Prompt)
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Env = gitSafeEnv(opts.CWD, opts.Env...)
 	shellenv.ConfigureShellCommand(cmd, a.processTerminationGrace)
 
 	var stderrBuf []byte
@@ -102,12 +102,41 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var usage TokenUsage
 	var result *claudeResult
+	finalize := func() (*Result, error) {
+		if result == nil {
+			if !usage.Reported {
+				return nil, nil
+			}
+			return &Result{
+				Usage:                 usage,
+				UsageReported:         usage.Reported,
+				CacheCreationReported: usage.CacheCreationReported,
+			}, nil
+		}
+		res, err := finalizeClaudeResult(result, opts.JSONSchema, usage)
+		if res != nil {
+			res.SessionID = result.sessionID
+			res.Resumed = resumeID != ""
+			res.Model = sanitizeModelToken(result.model)
+			// Claude reports cache-creation cost per message, so the accumulated
+			// value is meaningful (recorded as a real number, not unknown). Its
+			// stream-json usage is per-invocation, not cumulative across --resume,
+			// so SessionUsageCumulative stays false and per-round deltas equal the
+			// raw counters.
+			res.CacheCreationReported = res.Usage.CacheCreationReported
+			if result.model != "" {
+				res.ModelProvider = "anthropic"
+			}
+		}
+		return res, err
+	}
 	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("claude parse events: %w", err)
 		emitAgentExited(opts, "claude", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
 	waitErr := started.wait()
@@ -115,7 +144,8 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if waitErr != nil {
 		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, string(stderrBuf))
 		emitAgentExited(opts, "claude", pid, retErr)
-		return nil, retErr
+		res, _ := finalize()
+		return res, retErr
 	}
 
 	if result == nil {
@@ -124,21 +154,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 		return nil, retErr
 	}
 
-	res, err := finalizeClaudeResult(result, opts.JSONSchema, usage)
-	if res != nil {
-		res.SessionID = result.sessionID
-		res.Resumed = resumeID != ""
-		res.Model = result.model
-		// Claude reports cache-creation cost per message, so the accumulated
-		// value is meaningful (recorded as a real number, not unknown). Its
-		// stream-json usage is per-invocation, not cumulative across --resume,
-		// so SessionUsageCumulative stays false and per-round deltas equal the
-		// raw counters.
-		res.CacheCreationReported = res.UsageReported
-		if result.model != "" {
-			res.ModelProvider = "anthropic"
-		}
-	}
+	res, err := finalize()
 	if errors.Is(err, errNoStructuredOutput) && opts.OnChunk != nil {
 		opts.OnChunk(fmt.Sprintf("structured output missing: subtype=%s, text_len=%d, input_tokens=%d, output_tokens=%d",
 			result.Subtype, len(result.text), usage.InputTokens, usage.OutputTokens))
@@ -151,14 +167,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
-	if result.IsError || result.Subtype != "success" {
-		return nil, fmt.Errorf("claude error: subtype=%s", result.Subtype)
-	}
-	if len(schema) > 0 && result.StructuredOutput == nil {
-		return nil, errNoStructuredOutput
-	}
-
-	return &Result{
+	finalized := &Result{
 		Output:                    result.StructuredOutput,
 		Text:                      result.text,
 		Usage:                     usage,
@@ -166,7 +175,17 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 		CacheCreationReported:     usage.CacheCreationReported,
 		AgentObservations:         result.agentObservations,
 		AgentObservationsReported: result.agentObservationsReported,
-	}, nil
+		NestedAgentCount:          result.nestedAgentCount,
+		Model:                     sanitizeModelToken(result.model),
+		ReportedCostUSD:           result.reportedCostUSD,
+	}
+	if result.IsError || result.Subtype != "success" {
+		return finalized, fmt.Errorf("claude error: subtype=%s", result.Subtype)
+	}
+	if len(schema) > 0 && result.StructuredOutput == nil {
+		return finalized, errNoStructuredOutput
+	}
+	return finalized, nil
 }
 
 // buildArgs constructs the claude CLI arguments. User-supplied extraArgs
@@ -284,6 +303,7 @@ type claudeEvent struct {
 	IsError          bool            `json:"is_error,omitempty"`
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Usage            *claudeUsage    `json:"usage,omitempty"`
+	TotalCostUSD     *float64        `json:"total_cost_usd,omitempty"`
 }
 
 // claudeResult captures the parsed result event.
@@ -297,13 +317,15 @@ type claudeResult struct {
 	model                     string // model reported by assistant events
 	agentObservations         []types.AgentObservation
 	agentObservationsReported bool
+	nestedAgentCount          int
+	reportedCostUSD           *float64
 }
 
 type claudeUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	InputTokens              *int `json:"input_tokens"`
+	OutputTokens             *int `json:"output_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
 }
 
 type claudeMessage struct {
@@ -362,14 +384,13 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if msg.Model != "" {
 				lastModel = msg.Model
 			}
-			usage.Add(TokenUsage{
-				InputTokens:           msg.Usage.InputTokens,
-				OutputTokens:          msg.Usage.OutputTokens,
-				CacheReadTokens:       msg.Usage.CacheReadInputTokens,
-				CacheCreationTokens:   msg.Usage.CacheCreationInputTokens,
-				Reported:              true,
-				CacheCreationReported: true,
-			})
+			usage.Add(tokenUsageFromFields(
+				msg.Usage.InputTokens,
+				msg.Usage.OutputTokens,
+				msg.Usage.CacheReadInputTokens,
+				msg.Usage.CacheCreationInputTokens,
+				nil,
+			))
 			for _, c := range msg.Content {
 				if c.Type == "text" && c.Text != "" {
 					textBuf += c.Text
@@ -387,6 +408,15 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			}
 
 		case "result":
+			if event.Usage != nil {
+				*usage = tokenUsageFromFields(
+					event.Usage.InputTokens,
+					event.Usage.OutputTokens,
+					event.Usage.CacheReadInputTokens,
+					event.Usage.CacheCreationInputTokens,
+					nil,
+				)
+			}
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
@@ -400,6 +430,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					model:                     lastModel,
 					agentObservations:         observations.observations,
 					agentObservationsReported: observations.reported,
+					nestedAgentCount:          observations.uniqueCount(),
+					reportedCostUSD:           event.TotalCostUSD,
 				}
 			}
 		}

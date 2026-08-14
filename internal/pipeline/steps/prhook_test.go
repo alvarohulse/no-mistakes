@@ -23,7 +23,8 @@ func newHookTestContext(t *testing.T, hook string) (*pipeline.StepContext, *[]st
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-command fixtures are POSIX")
 	}
-	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	workDir := t.TempDir()
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, workDir, "base", "head", config.Commands{})
 	sctx.Config.Hooks.PRBody = hook
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -117,9 +118,20 @@ func TestApplyPRBodyHookPassesContractOnStdin(t *testing.T) {
 	sctx.PRNote = "Skipping the dead-letter path deliberately."
 	sctx.UserIntent = "Bound the retry window."
 	sctx.IntentSource = db.RunIntentSourceAgent
+	intentStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepIntent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(intentStep.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
 
-	applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix(scheduler): bound the retry window", Body: "assembled"},
-		"## What Changed\n\n- cap retries",
+	applyPRBodyHook(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID), prContent{
+		Title:   "fix(scheduler): bound the retry window",
+		Summary: "Bounds retries through `maxRetryWindow`.",
+		Body:    "assembled",
+	},
+		"- cap retries",
 		prBodyScope{branch: "feature", baseBranch: "main", provider: "github", bodyLimit: 0})
 
 	raw, err := os.ReadFile(dump)
@@ -139,8 +151,18 @@ func TestApplyPRBodyHookPassesContractOnStdin(t *testing.T) {
 	if !contract.Sections.Notes.Supplied || !contract.Sections.Notes.Trusted {
 		t.Errorf("notes = %+v, want a supplied trusted note", contract.Sections.Notes)
 	}
-	if contract.Sections.Intent == nil || !contract.Sections.Intent.Authoritative {
-		t.Errorf("intent = %+v, want an authoritative intent", contract.Sections.Intent)
+	if contract.Sections.Intent != nil {
+		t.Errorf("legacy intent section = %+v, want intent only on the pipeline step", contract.Sections.Intent)
+	}
+	if contract.Sections.Summary == nil || !strings.Contains(contract.Sections.Summary.Text, "`maxRetryWindow`") {
+		t.Errorf("summary = %+v", contract.Sections.Summary)
+	}
+	if contract.Sections.Pipeline == nil || len(contract.Sections.Pipeline.Steps) != 1 {
+		t.Fatalf("pipeline = %+v", contract.Sections.Pipeline)
+	}
+	intentResult := contract.Sections.Pipeline.Steps[0].Intent
+	if intentResult == nil || !intentResult.Provided || intentResult.Text != "Bound the retry window." {
+		t.Errorf("intent result = %+v", intentResult)
 	}
 	// The formatter gets the agent's own prose, not the assembled body it
 	// would otherwise have to unpick.
@@ -160,11 +182,12 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 		t.Skip("shell-command fixtures are POSIX")
 	}
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	prose := "## What Changed\n\n- cap scheduler retries at the configured window"
+	summary := "Bounds retries through `maxRetryWindow`."
+	prose := "- cap scheduler retries at the configured window"
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload, err := json.Marshal(prContent{Title: "fix(scheduler): bound the retry window", Body: prose})
+			payload, err := json.Marshal(prContent{Title: "fix(scheduler): bound the retry window", Summary: summary, WhatChanged: prose})
 			if err != nil {
 				return nil, err
 			}
@@ -207,6 +230,9 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	}
 	if got := contract.Sections.WhatChanged.Text; got != prose {
 		t.Fatalf("what_changed = %q, want exactly the agent's prose %q", got, prose)
+	}
+	if contract.Sections.Summary == nil || contract.Sections.Summary.Text != summary {
+		t.Fatalf("summary = %+v, want exactly the agent's summary %q", contract.Sections.Summary, summary)
 	}
 	// Assembly's own additions must not have leaked in: a formatter that has to
 	// strip a Pipeline section back out has been handed a layout, not material.

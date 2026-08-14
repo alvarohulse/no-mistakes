@@ -89,6 +89,7 @@ no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
+no-mistakes axi run --intent "the user's goal" --metadata $'resolves TEAM-123\ncontributes to TEAM-456'
 no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacked-on feature/dependency
 ```
 
@@ -99,6 +100,7 @@ no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacke
 | `--skip`      | `string` | (none)  | Comma-separated pipeline steps to skip                           |
 | `--pr-note`   | `string` | (none)  | Trusted author text added verbatim to the generated PR body      |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
+| `--metadata`  | `string` | (none)  | Opaque run metadata; maximum 16 KiB; an explicit empty value clears it on rerun |
 | `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
 | `--stacked-on` | `string` | default branch | Use this branch as the refresh and pull-request base             |
 
@@ -108,7 +110,8 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
-`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as a `## Notes` section after `## Intent` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets.
+`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. The body is written only when the PR step creates the pull request, so a note supplied for a branch that already has an open PR is neither published to it nor given to the PR-summary agent; that run only retargets the existing PR's base.
+`--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in contract v3 for PR formatters. Treat it as non-secret input.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -297,6 +300,8 @@ Rerun the pipeline for the current branch.
 
 ```sh
 no-mistakes rerun
+no-mistakes rerun --metadata "resolves TEAM-123"
+no-mistakes rerun --metadata ""
 no-mistakes rerun --refresh-strategy merge
 no-mistakes rerun --stacked-on feature/dependency
 ```
@@ -305,10 +310,11 @@ no-mistakes rerun --stacked-on feature/dependency
 | --- | --- | --- | --- |
 | `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
 | `--stacked-on` | `string` | prior run's stack base | Use this branch as the refresh and pull-request base |
+| `--metadata` | `string` | inherited | Replace inherited opaque metadata; an explicit empty value clears it |
 
 Starts a new pipeline run using the last-known head SHA on the current branch.
 If another run is active on that branch, rerun cancels it before starting over.
-When `--stacked-on` changes, the PR step retargets an existing pull request to the new base. Once the base matches, later reruns update the PR content without repeating the retarget operation.
+When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Existing PRs are adopted without replacing their title or body.
 Treat rerun as a between-runs action after a failed or cancelled outcome, or after you have committed a separate fix outside an active run; do not use it to bypass a gate.
 
 ## no-mistakes sync
@@ -382,7 +388,7 @@ no-mistakes stats --agents
 no-mistakes stats --run <id>
 ```
 
-The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry. The generated PR's existing Pipeline section includes only the compact step/round, top-level invocation, and nested-agent attribution subset.
+The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body publishes only a bounded subset of it.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes pr-body
@@ -390,12 +396,13 @@ The field definitions and their local/remote split are owned by [the environment
 Render a pull request body through the [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter and print it.
 
 ```sh
-no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+no-mistakes pr-body [--sample [--sample-version <2|3>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
 ```
 
 | Flag               | Type     | Default    | Description                                                     |
 | ------------------ | -------- | ---------- | --------------------------------------------------------------- |
 | `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
+| `--sample-version` | `int`    | `3`        | Contract version `--sample` emits (`2` or `3`)                    |
 | `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
 | `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
 | `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
@@ -403,7 +410,7 @@ no-mistakes pr-body [--sample | --run <id> | --contract-file <path>] [--print-co
 
 This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
 
-Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `what_changed`, which is the drafting agent's own output and is not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block.
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block. `--contract-file` accepts any contract version this build still supports (`3` or `2`), so a formatter can be exercised against both shapes during a rollout.
 
 The formatter is resolved the same way a run resolves it: `--hook`, then a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry, then the repo's `.no-mistakes.yaml`, then the global `hooks.pr_body` default. The chosen source is reported on stderr.
 

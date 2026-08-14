@@ -1,10 +1,62 @@
 package db
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestStepEvidenceRoundTripsCommandsAndRejectsOversizedPayloads(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/evidence", "git@github.com:user/evidence.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepBuild)
+	exitCode := 0
+	evidence := StepEvidence{Commands: []CommandEvidence{{
+		Round: 1, Sequence: 1, Command: "make build", Outcome: CommandOutcomePassed, ExitCode: &exitCode,
+	}}}
+
+	if err := d.SetStepEvidence(step.ID, evidence); err != nil {
+		t.Fatalf("set step evidence: %v", err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := got.Evidence()
+	if err != nil {
+		t.Fatalf("decode step evidence: %v", err)
+	}
+	if len(decoded.Commands) != 1 || decoded.Commands[0].Command != "make build" || decoded.Commands[0].ExitCode == nil || *decoded.Commands[0].ExitCode != 0 {
+		t.Fatalf("evidence = %+v", decoded)
+	}
+	if err := d.SetStepEvidence(step.ID, StepEvidence{Explanation: strings.Repeat("x", MaxStepEvidenceBytes+1)}); err == nil {
+		t.Fatal("oversized step evidence was accepted")
+	}
+}
+
+func TestStepPlannedCommandRoundTripsExactlyAndRejectsOversizedValues(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/planned-command", "git@github.com:user/planned-command.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepLint)
+	command := "TOKEN='$UNEXPANDED' go test ./internal/pipeline/..."
+
+	if err := d.SetStepPlannedCommand(step.ID, command); err != nil {
+		t.Fatalf("set planned command: %v", err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlannedCommand == nil || *got.PlannedCommand != command {
+		t.Fatalf("planned command = %v, want exact value %q", got.PlannedCommand, command)
+	}
+	if err := d.SetStepPlannedCommand(step.ID, strings.Repeat("x", MaxPlannedCommandBytes+1)); err == nil {
+		t.Fatal("oversized planned command was accepted")
+	}
+}
 
 func TestGetStepResult_LegacyBabysitStepName(t *testing.T) {
 	d := openTestDB(t)

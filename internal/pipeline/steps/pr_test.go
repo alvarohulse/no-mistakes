@@ -46,7 +46,7 @@ func TestPRStep_GhNotAvailable(t *testing.T) {
 	}
 }
 
-func TestPRStep_UpdatesExistingPR(t *testing.T) {
+func TestPRStep_DiscoversExistingPRWithoutRewritingItsBody(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -72,20 +72,16 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 		t.Error("pr step should never need approval")
 	}
 
-	// Verify gh pr edit was called to update the PR body
 	logData, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr edit") {
-		t.Errorf("expected gh pr edit to be called, got:\n%s", ghLog)
+	if strings.Contains(ghLog, "pr edit") || strings.Contains(ghLog, "--body") || strings.Contains(ghLog, "--title") {
+		t.Errorf("existing PR body or title was rewritten:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "--body") {
-		t.Errorf("expected --body flag in gh pr edit, got:\n%s", ghLog)
-	}
-	if !strings.Contains(ghLog, noMistakesPRSignature) {
-		t.Errorf("expected updated PR body to include no-mistakes signature, got:\n%s", ghLog)
+	if len(ag.calls) != 0 {
+		t.Fatalf("PR drafting agent calls = %d, want 0 for an existing PR", len(ag.calls))
 	}
 
 	// Verify PR URL was stored
@@ -121,6 +117,10 @@ func TestPRStep_RetargetsExistingPRToStackedBase(t *testing.T) {
 	}
 	if !strings.Contains(logText, "pr edit 42") || !strings.Contains(logText, "--base dependency") {
 		t.Fatalf("existing PR was not retargeted to dependency:\n%s", logText)
+	}
+	editLine := lineContaining(logText, "pr edit")
+	if strings.Contains(editLine, "--title") || strings.Contains(editLine, "--body") {
+		t.Fatalf("retarget rewrote the adopted PR title or body: %s", editLine)
 	}
 }
 
@@ -517,7 +517,7 @@ func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing
 	}
 }
 
-func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
+func TestPRStep_BitbucketDiscoversExistingPRWithoutRewritingIt(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 42, "https://bitbucket.org/test/repo/pull-requests/42")
@@ -538,8 +538,8 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 1 {
-		t.Fatalf("update calls = %d, want 1", api.updateCalls)
+	if api.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", api.updateCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
@@ -547,8 +547,8 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	if api.lastAuthHeader == "" {
 		t.Fatal("expected Authorization header for Bitbucket API")
 	}
-	if !strings.Contains(api.lastUpdateBody, "title") || !strings.Contains(api.lastUpdateBody, "description") {
-		t.Fatalf("expected Bitbucket PR update payload to include title and description, got %q", api.lastUpdateBody)
+	if len(ag.calls) != 0 {
+		t.Fatalf("PR drafting agent calls = %d, want 0", len(ag.calls))
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -560,7 +560,7 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	}
 }
 
-func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
+func TestPRStep_BitbucketDiscoversExistingPRWithoutHTMLLink(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 42, "https://bitbucket.org/test/repo/pull-requests/42")
@@ -609,14 +609,17 @@ func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 1 {
-		t.Fatalf("update calls = %d, want 1", api.updateCalls)
+	if api.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", api.updateCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
 	}
 	if outcome.PRURL != api.existingPRURL {
 		t.Fatalf("outcome PR URL = %q, want %q", outcome.PRURL, api.existingPRURL)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("PR drafting agent calls = %d, want 0", len(ag.calls))
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -1161,7 +1164,7 @@ func TestAssemblePRBody_NoLimitKeepsEverything(t *testing.T) {
 
 	got := assemblePRBody(sctx, "## What Changed\n\n- add Bar()", "low risk", testing, "## Pipeline\n\n- ok", 0)
 
-	for _, want := range []string{"## Intent", "## What Changed", "## Risk Assessment", "## Testing", "## Pipeline"} {
+	for _, want := range []string{"## What Changed", "## Risk Assessment", "## Testing", "## Pipeline"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unlimited body missing %q section:\n%s", want, got)
 		}
@@ -1187,8 +1190,8 @@ func TestAssemblePRBody_DropsTestingEmbedsToFitAzureCap(t *testing.T) {
 	if scm.PRBodyLen(got) > limit {
 		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
 	}
-	// The Intent / What Changed / Risk / Pipeline narrative survives...
-	for _, want := range []string{"## Intent", "wanted a Bar() helper", "## What Changed", "## Risk Assessment", "## Pipeline"} {
+	// The What Changed / Risk / Pipeline narrative survives...
+	for _, want := range []string{"## What Changed", "## Risk Assessment", "## Pipeline"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("budgeted body dropped required content %q:\n%s", want, got)
 		}
@@ -1228,8 +1231,6 @@ func TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap(t *testing.T) {
 		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
 	}
 	for _, want := range []string{
-		"## Intent",
-		"wanted a Bar() helper",
 		"## What Changed",
 		"## Risk Assessment",
 		"## Pipeline",
@@ -1253,8 +1254,8 @@ func TestAssemblePRBody_OmitsOldestPipelineRoundsToFitAzureCap(t *testing.T) {
 
 func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	t.Parallel()
-	// An Intent so long that even Intent + What Changed overruns the cap, with no
-	// Testing section to drop. The clamp backstop must keep it within budget.
+	// A large stored intent is not part of the rendered body and must not affect
+	// provider budgeting.
 	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("x", 6000)}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
 
@@ -1265,7 +1266,7 @@ func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	}
 }
 
-func TestAssemblePRBody_NoNoteKeepsCurrentBudgetingWithFencedHeading(t *testing.T) {
+func TestAssemblePRBody_DoesNotRenderIntentWithFencedHeading(t *testing.T) {
 	t.Parallel()
 	sctx := &pipeline.StepContext{UserIntent: "Keep this example intact.\n\n```markdown\n## Testing\n" + strings.Repeat("example line\n", 500) + "```"}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
@@ -1274,11 +1275,10 @@ func TestAssemblePRBody_NoNoteKeepsCurrentBudgetingWithFencedHeading(t *testing.
 	pipelineMD := "## Pipeline\n\n- ok"
 
 	sections := appendGeneratedSections(whatChanged, riskLine, "", pipelineMD)
-	want := prependIntentSectionWithinLimit(sections, sctx, limit, false)
 	got := assemblePRBody(sctx, whatChanged, riskLine, "", pipelineMD, limit)
 
-	if got != want {
-		t.Fatalf("assemblePRBody() changed no-note budgeting around a fenced heading:\n%s", got)
+	if got != sections {
+		t.Fatalf("assemblePRBody() rendered stored intent or changed sections:\n%s", got)
 	}
 }
 
@@ -1661,8 +1661,6 @@ func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t 
 
 	assertGitHubBodyLimitForTest(t, got)
 	for _, want := range []string{
-		"## Intent",
-		"Keep the release notes readable.",
 		"## What Changed",
 		"essential summary survives",
 		"## Validation Notes",
@@ -1678,19 +1676,15 @@ func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t 
 	}
 }
 
-func TestBuildPRBody_NoNoteKeepsCurrentBudgetingWithFencedHeading(t *testing.T) {
+func TestBuildPRBody_DoesNotRenderIntentWithFencedHeading(t *testing.T) {
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep this example intact.\n\n```markdown\n## Testing\n" + strings.Repeat("example line\n", 6000) + "```"
 	body := "## What Changed\n\n- add Bar()"
 
-	sections := appendGeneratedSectionsToCleanBody(body, "", "", "")
-	intent := "## Intent\n\n" + cleanedUserIntent(sctx)
-	intentBudget := maxPullRequestBodyBytes - len("\n\n") - len(sections)
-	want := truncateTextAtLineBoundary(intent, intentBudget, essentialPRBodyTruncationMarker()) + "\n\n" + sections
 	got := buildPRBody(body, "", "", "", sctx)
 
-	if got != want {
-		t.Fatalf("buildPRBody() changed no-note budgeting around a fenced heading:\n%s", got)
+	if got != body {
+		t.Fatalf("buildPRBody() rendered stored intent or changed the body:\n%s", got)
 	}
 }
 
@@ -1728,7 +1722,7 @@ func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
 	}
 }
 
-func TestBuildPRBody_TruncatesOversizedIntentBeforeGeneratedSections(t *testing.T) {
+func TestBuildPRBody_DoesNotRenderOversizedIntent(t *testing.T) {
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep generated sections visible.\n" + strings.Repeat("oversized intent context line\n", 2500)
 	body := "## What Changed\n\n- essential summary survives"
@@ -1739,9 +1733,6 @@ func TestBuildPRBody_TruncatesOversizedIntentBeforeGeneratedSections(t *testing.
 
 	assertGitHubBodyLimitForTest(t, got)
 	for _, want := range []string{
-		"## Intent",
-		"Keep generated sections visible.",
-		"body truncated to keep the PR body within GitHub's 65536-char limit",
 		"## What Changed",
 		"essential summary survives",
 		"## Risk Assessment",
@@ -1753,9 +1744,12 @@ func TestBuildPRBody_TruncatesOversizedIntentBeforeGeneratedSections(t *testing.
 			t.Fatalf("expected oversized PR body to contain %q, got:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "## Intent") || strings.Contains(got, "Keep generated sections visible.") {
+		t.Fatalf("stored intent leaked into PR body:\n%s", got)
+	}
 }
 
-func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
+func TestPRStep_CreateKeepsGeneratedSectionsWithoutRenderingIntent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, logFile := fakeGH(t, "")
@@ -1805,9 +1799,6 @@ func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
 	body := readFakeGHBodyArg(t, logFile)
 	assertGitHubBodyLimitForTest(t, body)
 	for _, want := range []string{
-		"## Intent",
-		"Keep generated sections visible.",
-		"body truncated to keep the PR body within GitHub's 65536-char limit",
 		"## What Changed",
 		"essential summary survives",
 		"## Risk Assessment",
@@ -1817,6 +1808,9 @@ func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected created PR body to contain %q, got:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "## Intent") || strings.Contains(body, "Keep generated sections visible.") {
+		t.Fatalf("stored intent leaked into created PR body:\n%s", body)
 	}
 }
 
@@ -1858,8 +1852,8 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	}
 
 	assertGitHubBodyLimitForTest(t, content.Body)
-	if !strings.Contains(content.Body, "Keep PR creation postable") || !strings.Contains(content.Body, "essential summary survives") {
-		t.Fatalf("expected intent and summary to survive, got:\n%s", content.Body)
+	if strings.Contains(content.Body, "Keep PR creation postable") || !strings.Contains(content.Body, "essential summary survives") {
+		t.Fatalf("expected stored intent to stay out of the body and summary to survive, got:\n%s", content.Body)
 	}
 	if !strings.Contains(content.Body, "earlier update rounds omitted") {
 		t.Fatalf("expected omission marker, got:\n%s", content.Body)
@@ -1872,7 +1866,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	}
 }
 
-func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
+func TestPRStep_CreateCapsBodyWithoutRenderingIntent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -1920,9 +1914,6 @@ func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
 	body := readFakeGHBodyArg(t, logFile)
 	assertGitHubBodyLimitForTest(t, body)
 	for _, want := range []string{
-		"## Intent",
-		"Keep PR creation postable.",
-		"intent context line stays visible",
 		"essential summary survives",
 		"earlier update rounds omitted",
 		"review round 140",
@@ -1931,12 +1922,15 @@ func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
 			t.Fatalf("expected final PR body to contain %q", want)
 		}
 	}
+	if strings.Contains(body, "## Intent") || strings.Contains(body, "Keep PR creation postable.") {
+		t.Fatal("stored intent leaked into final PR body")
+	}
 	if strings.Contains(body, "review round 001") {
 		t.Fatal("expected oldest pipeline update to be omitted")
 	}
 }
 
-func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
+func TestFallbackPRContentCapsBodyWithoutRenderingIntent(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Fallback intent survives.\n" + strings.Repeat("fallback intent context line\n", 900)
@@ -1957,8 +1951,7 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 
 	assertGitHubBodyLimitForTest(t, content.Body)
 	for _, want := range []string{
-		"## Intent",
-		"Fallback intent survives.",
+		"## Summary",
 		"## What Changed",
 		"internal/pipeline/steps/pr.go",
 		"## Risk Assessment",
@@ -1969,6 +1962,9 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 		if !strings.Contains(content.Body, want) {
 			t.Fatalf("expected fallback PR body to contain %q", want)
 		}
+	}
+	if strings.Contains(content.Body, "## Intent") || strings.Contains(content.Body, "Fallback intent survives.") {
+		t.Fatal("stored intent leaked into fallback PR body")
 	}
 	if strings.Contains(content.Body, "review round 001") {
 		t.Fatal("expected oldest pipeline update to be omitted")
@@ -2035,7 +2031,7 @@ func assertNoPartialRoundLinesForTest(t *testing.T, body string, rounds []string
 	}
 }
 
-func TestPRStep_PrependsIntentSectionWhenIntentSet(t *testing.T) {
+func TestPRStep_UsesIntentForDraftingWithoutRenderingIt(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2063,19 +2059,14 @@ func TestPRStep_PrependsIntentSectionWhenIntentSet(t *testing.T) {
 	}
 	ghLog := string(logData)
 
-	intentIdx := strings.Index(ghLog, "## Intent")
-	whatChangedIdx := strings.Index(ghLog, "## What Changed")
-	if intentIdx < 0 {
-		t.Fatalf("expected ## Intent section in PR body, got:\n%s", ghLog)
-	}
-	if whatChangedIdx < 0 {
+	if !strings.Contains(ghLog, "## What Changed") {
 		t.Fatalf("expected ## What Changed section in PR body, got:\n%s", ghLog)
 	}
-	if intentIdx > whatChangedIdx {
-		t.Fatalf("expected ## Intent before ## What Changed, got:\n%s", ghLog)
+	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "user wanted to add a Bar() helper for foo callers") {
+		t.Fatalf("stored intent leaked into PR body:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "user wanted to add a Bar() helper for foo callers") {
-		t.Fatalf("expected intent text in PR body, got:\n%s", ghLog)
+	if len(ag.calls) != 1 || !strings.Contains(ag.calls[0].Prompt, "user wanted to add a Bar() helper for foo callers") {
+		t.Fatalf("drafting prompt did not receive intent: %+v", ag.calls)
 	}
 }
 
@@ -2112,7 +2103,7 @@ func TestPRStep_OmitsIntentSectionWhenIntentEmpty(t *testing.T) {
 	}
 }
 
-func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
+func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2140,18 +2131,15 @@ func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
 	}
 	ghLog := string(logData)
 
-	if strings.Count(ghLog, "## Intent") != 1 {
-		t.Fatalf("expected exactly one ## Intent section, got:\n%s", ghLog)
-	}
-	if strings.Contains(ghLog, "agent paraphrase") {
+	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "agent paraphrase") {
 		t.Fatalf("expected agent-emitted Intent body to be stripped, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "real user intent string") {
-		t.Fatalf("expected deterministic intent text, got:\n%s", ghLog)
+	if strings.Contains(ghLog, "real user intent string") {
+		t.Fatalf("stored intent leaked into PR body:\n%s", ghLog)
 	}
 }
 
-func TestPRStep_PrependsNotesSectionAfterIntentWhenPRNoteSet(t *testing.T) {
+func TestPRStep_PrependsNotesSectionBeforeWhatChanged(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2180,15 +2168,13 @@ func TestPRStep_PrependsNotesSectionAfterIntentWhenPRNoteSet(t *testing.T) {
 	}
 	ghLog := string(logData)
 
-	intentIdx := strings.Index(ghLog, "## Intent")
 	notesIdx := strings.Index(ghLog, "## Notes")
 	whatChangedIdx := strings.Index(ghLog, "## What Changed")
-	if intentIdx < 0 || notesIdx < 0 || whatChangedIdx < 0 {
-		t.Fatalf("expected Intent, Notes, and What Changed sections, got:\n%s", ghLog)
+	if notesIdx < 0 || whatChangedIdx < 0 {
+		t.Fatalf("expected Notes and What Changed sections, got:\n%s", ghLog)
 	}
-	// Ordering must be Intent -> Notes -> What Changed.
-	if !(intentIdx < notesIdx && notesIdx < whatChangedIdx) {
-		t.Fatalf("expected ## Intent before ## Notes before ## What Changed, got:\n%s", ghLog)
+	if notesIdx > whatChangedIdx {
+		t.Fatalf("expected ## Notes before ## What Changed, got:\n%s", ghLog)
 	}
 	if strings.Count(ghLog, "## Notes") != 1 {
 		t.Fatalf("expected exactly one ## Notes section, got:\n%s", ghLog)
@@ -2344,7 +2330,7 @@ func TestPRNoteSectionText(t *testing.T) {
 	}
 }
 
-func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
+func TestPRStep_PromptRequestsDistinctHeadingFreeMarkdownSections(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2367,12 +2353,51 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(capturedPrompt, "## What Changed") {
-		t.Errorf("expected prompt to instruct agent to write ## What Changed, got:\n%s", capturedPrompt)
+	for _, want := range []string{"self-contained summary", "Do not include a Summary heading", "Do not include a What Changed heading", "Format code identifiers"} {
+		if !strings.Contains(capturedPrompt, want) {
+			t.Errorf("drafting prompt missing %q:\n%s", want, capturedPrompt)
+		}
 	}
 }
 
-func TestPRStep_FallbackUsesWhatChangedAndIntent(t *testing.T) {
+func TestPRStep_NormalizesAgentSectionHeadingsBeforeAssembly(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(prContent{
+				Title:       "feat: add bar",
+				Summary:     "### Summary\n\nUse `Bar.Close` for cleanup.",
+				WhatChanged: "### What changed\n\n- call `Bar.Close`",
+			})
+			return &agent.Result{Output: payload}, err
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if strings.Count(body, "Summary") != 1 || strings.Count(strings.ToLower(body), "what changed") != 1 {
+		t.Fatalf("agent headings were duplicated during assembly:\n%s", body)
+	}
+	for _, want := range []string{"## Summary", "## What Changed", "`Bar.Close`"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("assembled body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestPRStep_FallbackUsesDistinctSummaryAndWhatChanged(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2402,20 +2427,42 @@ func TestPRStep_FallbackUsesWhatChangedAndIntent(t *testing.T) {
 	if !strings.Contains(ghLog, "## What Changed") {
 		t.Fatalf("expected fallback PR body to use ## What Changed heading, got:\n%s", ghLog)
 	}
-	if strings.Contains(ghLog, "## Summary") {
-		t.Fatalf("expected fallback PR body to no longer use ## Summary heading, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "## Summary") {
+		t.Fatalf("expected fallback PR body to use ## Summary heading, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "## Intent") {
-		t.Fatalf("expected fallback PR body to include ## Intent section, got:\n%s", ghLog)
+	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "fallback intent text") {
+		t.Fatalf("stored intent leaked into fallback PR body:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "fallback intent text") {
-		t.Fatalf("expected fallback PR body to include intent text, got:\n%s", ghLog)
-	}
+}
 
-	intentIdx := strings.Index(ghLog, "## Intent")
-	whatChangedIdx := strings.Index(ghLog, "## What Changed")
-	if intentIdx > whatChangedIdx {
-		t.Fatalf("expected ## Intent before ## What Changed in fallback, got:\n%s", ghLog)
+func TestPRStep_FallsBackWhenAgentOmitsSummary(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete draft","what_changed":"- agent-only change"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghLog := string(logData)
+	if !strings.Contains(ghLog, "## Summary\n\nUpdates the branch with the final recorded changes.") {
+		t.Fatalf("agent output without a summary did not use the complete fallback:\n%s", ghLog)
+	}
+	if strings.Contains(ghLog, "agent-only change") {
+		t.Fatalf("incomplete agent output leaked into the PR body:\n%s", ghLog)
 	}
 }
 
@@ -2563,7 +2610,7 @@ func TestPRStep_AgentNonConventionalTitleFallsBack(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"Improve pipeline header UX","body":"## Summary\n\n- improvements"}`)
+			payload := json.RawMessage(`{"title":"Improve pipeline header UX","summary":"Improves the pipeline header UX.","what_changed":"- improvements"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2587,9 +2634,8 @@ func TestPRStep_AgentNonConventionalTitleFallsBack(t *testing.T) {
 	if !strings.Contains(ghLog, "fix: Improve pipeline header UX") {
 		t.Fatal("expected user-facing agent title to be prefixed with fix:, got: " + ghLog)
 	}
-	// The agent's body should be preserved, not replaced with fallback
-	if !strings.Contains(ghLog, "## Summary") {
-		t.Fatal("expected agent body to be preserved, got: " + ghLog)
+	if !strings.Contains(ghLog, "## Summary\n\nImproves the pipeline header UX.") {
+		t.Fatal("expected agent summary to be preserved, got: " + ghLog)
 	}
 }
 

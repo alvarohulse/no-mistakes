@@ -3,12 +3,21 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const maxCommandEvidenceBytes = 8 * 1024
+
+const commandEvidenceTruncationMarker = "… [command truncated]"
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
@@ -50,7 +59,12 @@ type StepContext struct {
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
-	Env          []string // extra environment variables for subprocesses (used in tests)
+	Round        int
+	// PlannedCommand is retained across repair rounds so an unconfigured
+	// command gate reruns the exact command selected before the failure.
+	PlannedCommand  string
+	commandSequence int
+	Env             []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an
@@ -68,10 +82,58 @@ type StepContext struct {
 	PRNote string
 	// Sessions manages the run's durable review-loop agent sessions
 	// (reviewer and fixer roles). nil runs every invocation cold.
-	Sessions *RunSessions
-	// Shared carries in-memory run-scoped results one step hands to a later
-	// step in the same run (e.g. the combined document+lint pass).
-	Shared *RunShared
+	Sessions        *RunSessions
+	CommandPlanning *CommandPlanningWorkspace
+}
+
+// RecordCommand appends one primary step command to the run's bounded
+// evidence. It is observability, never a gate: the write is best-effort
+// because it happens after the command already ran, so a busy database or an
+// oversized evidence blob must not abort a step whose remote branch, worktree,
+// or commit history has already moved.
+func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return
+	}
+	outcome := db.CommandOutcomePassed
+	if runErr != nil {
+		outcome = db.CommandOutcomeError
+	} else if exitCode != nil && *exitCode != 0 {
+		outcome = db.CommandOutcomeFailed
+	}
+	sctx.commandSequence++
+	display := boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(command))))
+	if err := sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
+		Round: sctx.Round, Sequence: sctx.commandSequence, Command: display, Outcome: outcome, ExitCode: exitCode,
+	}); err != nil {
+		slog.Warn("failed to record step command evidence", "step_result", sctx.StepResultID, "err", err)
+	}
+}
+
+// RecordEvidence appends one non-shell observation the step verified itself.
+// It shares RecordCommand's best-effort contract: evidence never gates a step.
+func (sctx *StepContext) RecordEvidence(note string) {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return
+	}
+	note = boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(note))))
+	if note == "" {
+		return
+	}
+	if err := sctx.DB.AppendStepEvidenceNote(sctx.StepResultID, note); err != nil {
+		slog.Warn("failed to record step evidence", "step_result", sctx.StepResultID, "err", err)
+	}
+}
+
+func boundedCommandDisplay(command string) string {
+	if len(command) <= maxCommandEvidenceBytes {
+		return command
+	}
+	end := maxCommandEvidenceBytes - len(commandEvidenceTruncationMarker)
+	for end > 0 && !utf8.ValidString(command[:end]) {
+		end--
+	}
+	return command[:end] + commandEvidenceTruncationMarker
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
@@ -93,7 +155,11 @@ type StepOutcome struct {
 	ExitCode      int    // process exit code (0 = success)
 	PRURL         string // PR/MR URL if this step created or found one
 	Skipped       bool   // mark the step as skipped without failing the run
-	SkipRemaining bool   // skip all subsequent steps (e.g. empty diff after refresh)
+	// SkipReason explains a self-determined Skipped outcome in one sentence.
+	// It is recorded as the step's evidence explanation so a rendered PR states
+	// why the step did not run rather than guessing at its provenance.
+	SkipReason    string
+	SkipRemaining bool // skip all subsequent steps (e.g. empty diff after refresh)
 	// FixSummary, when non-empty, is the agent's one-line commit summary for
 	// the fix attempt performed during this round. Steps populate it in fix
 	// mode so the executor can persist it on the round record and later

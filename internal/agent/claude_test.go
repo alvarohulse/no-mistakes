@@ -188,7 +188,7 @@ func TestParseClaudeEvents_ResultEvent(t *testing.T) {
 
 func TestParseClaudeEvents_CollectsNestedAgentInvocations(t *testing.T) {
 	events := strings.Join([]string{
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-2","name":"Task","input":{"subagent_type":"general-purpose"}},{"type":"tool_use","id":"tool-3","name":"StructuredOutput","input":{}}],"usage":{}}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-2","name":"Task","input":{"subagent_type":"general-purpose"}},{"type":"tool_use","id":"tool-3","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-4","name":"StructuredOutput","input":{}}],"usage":{}}}`,
 		`{"type":"result","subtype":"success","is_error":false}`,
 		"",
 	}, "\n")
@@ -204,6 +204,7 @@ func TestParseClaudeEvents_CollectsNestedAgentInvocations(t *testing.T) {
 	want := []types.AgentObservation{
 		{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
 		{Identity: "general-purpose", InvocationMode: types.AgentInvocationModeSubagentTool},
+		{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
 	}
 	if !reflect.DeepEqual(result.agentObservations, want) {
 		t.Fatalf("agent observations = %+v, want %+v", result.agentObservations, want)
@@ -406,6 +407,18 @@ func TestParseClaudeEvents_CacheTokens(t *testing.T) {
 	}
 }
 
+func TestParseClaudeEvents_PreservesMissingCacheMeters(t *testing.T) {
+	events := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50},"content":[]}}
+`
+	var usage TokenUsage
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !usage.InputReported || !usage.OutputReported || usage.CacheReadReported || usage.CacheCreationReported {
+		t.Fatalf("usage presence = %+v", usage)
+	}
+}
+
 func TestParseClaudeEvents_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -439,9 +452,12 @@ func TestParseClaudeEvents_ErrorResult(t *testing.T) {
 }
 
 func TestClaudeAgent_FinalizeResult_NoSchemaAllowsTextOnly(t *testing.T) {
+	reportedCost := 1.25
 	result, err := finalizeClaudeResult(&claudeResult{
-		Subtype: "success",
-		text:    "All tests pass. Here's what I fixed:",
+		Subtype:         "success",
+		text:            "All tests pass. Here's what I fixed:",
+		model:           strings.Repeat("claude-opus-4-8/", 8) + " untrusted prose",
+		reportedCostUSD: &reportedCost,
 	}, nil, TokenUsage{InputTokens: 10, OutputTokens: 5})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -455,15 +471,29 @@ func TestClaudeAgent_FinalizeResult_NoSchemaAllowsTextOnly(t *testing.T) {
 	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 5 {
 		t.Errorf("unexpected usage: %+v", result.Usage)
 	}
+	if result.ReportedCostUSD == nil || *result.ReportedCostUSD != reportedCost {
+		t.Fatalf("reported cost = %v, want %.2f", result.ReportedCostUSD, reportedCost)
+	}
+	if result.Model != sanitizeModelToken(strings.Repeat("claude-opus-4-8/", 8)) || len(result.Model) > 64 {
+		t.Fatalf("model = %q, want bounded sanitized identity", result.Model)
+	}
 }
 
 func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testing.T) {
-	_, err := finalizeClaudeResult(&claudeResult{Subtype: "success", text: "plain text"}, json.RawMessage(`{"type":"object"}`), TokenUsage{})
+	reportedCost := 1.25
+	result, err := finalizeClaudeResult(
+		&claudeResult{Subtype: "success", text: "plain text", reportedCostUSD: &reportedCost},
+		json.RawMessage(`{"type":"object"}`),
+		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
+	)
 	if err == nil {
 		t.Fatal("expected error when structured output is missing")
 	}
 	if !errors.Is(err, errNoStructuredOutput) {
 		t.Fatalf("expected errNoStructuredOutput, got: %v", err)
+	}
+	if result == nil || result.ReportedCostUSD == nil || *result.ReportedCostUSD != reportedCost || result.Usage.InputTokens != 100 {
+		t.Fatalf("partial result = %+v, want incurred usage and reported cost", result)
 	}
 }
 
@@ -638,6 +668,24 @@ func TestClaudeAgent_EarlyExitWithoutReadingLargeStdinDoesNotLeakGoroutines(t *t
 	}
 }
 
+func TestClaudeAgent_ExitFailureRetainsParsedUsageAndCost(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "usage-exit")
+	var result *Result
+	_, err := newClaudeStdinHelperAgent(t).Run(context.Background(), RunOpts{
+		Prompt: "review",
+		CWD:    t.TempDir(),
+		OnAttempt: func(attempt Attempt) {
+			result = attempt.Result
+		},
+	})
+	if err == nil {
+		t.Fatal("expected claude failure")
+	}
+	if result == nil || !result.UsageReported || result.Usage.InputTokens != 120 || result.Usage.OutputTokens != 30 || result.ReportedCostUSD == nil || *result.ReportedCostUSD != 0.42 {
+		t.Fatalf("partial result = %+v, want parsed usage and reported cost from failed invocation", result)
+	}
+}
+
 func TestClaudeAgent_CancellationWithBlockedStdinAndInheritedPipesIsBounded(t *testing.T) {
 	for _, mode := range []string{"block", "spawn-grandchild"} {
 		t.Run(mode, func(t *testing.T) {
@@ -690,6 +738,10 @@ func TestClaudeStdinHelper(t *testing.T) {
 	switch mode {
 	case "exit-early":
 		os.Exit(0)
+	case "usage-exit":
+		_, _ = io.WriteString(os.Stdout, `{"type":"assistant","session_id":"helper-session","message":{"model":"helper-model","usage":{"input_tokens":120,"output_tokens":30,"cache_read_input_tokens":80,"cache_creation_input_tokens":5},"content":[{"type":"text","text":"partial"}]}}`+"\n")
+		_, _ = io.WriteString(os.Stdout, `{"type":"result","subtype":"success","session_id":"helper-session","total_cost_usd":0.42,"structured_output":{"ok":true}}`+"\n")
+		os.Exit(1)
 	case "block":
 		_ = os.WriteFile(os.Getenv("NM_CLAUDE_STDIN_READY"), []byte("ready"), 0o644)
 		for {

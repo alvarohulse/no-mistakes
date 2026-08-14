@@ -157,9 +157,12 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 }
 
 func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, body, destBranch string) (*PullRequest, error) {
-	requestBody := map[string]any{
-		"title":       title,
-		"description": body,
+	requestBody := map[string]any{}
+	if title != "" {
+		requestBody["title"] = title
+	}
+	if body != "" {
+		requestBody["description"] = body
 	}
 	if strings.TrimSpace(destBranch) != "" {
 		requestBody["destination"] = map[string]any{

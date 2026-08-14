@@ -75,7 +75,7 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"build passed","tested":["go build ./..."]}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":"go env GOVERSION"}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -84,15 +84,16 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.NeedsApproval || outcome.Findings == "" {
-		t.Fatalf("outcome = %#v, want successful structured agent build", outcome)
+	if outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("outcome = %#v, want successful pipeline-executed build", outcome)
 	}
 	if len(ag.calls) != 1 {
 		t.Fatalf("agent calls = %d, want 1", len(ag.calls))
 	}
 	prompt := ag.calls[0].Prompt
 	for _, clause := range []string{
-		"detect and run the appropriate build or compile command",
+		"return the exact build or compile command",
+		"Do not run the selected command",
 		"Do NOT run tests",
 		"Do NOT run linters",
 		"Do NOT update documentation",
@@ -109,7 +110,7 @@ func TestBuildStepWithoutCommandDoesNotPassWithoutExecutedBuild(t *testing.T) {
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"nothing to build","tested":[]}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"command":""}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})

@@ -158,6 +158,19 @@ Override or enable the telemetry website ID.
 
 When set, telemetry uses this website ID at runtime. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_WEBSITE_ID`. If no runtime value is found, it falls back to any website ID embedded at build time.
 
+## `NM_METADATA`
+
+Opaque metadata supplied for the current run.
+
+|         |                                      |
+| ------- | ------------------------------------ |
+| Type    | `string`                             |
+| Default | empty when the run has no metadata   |
+
+[`axi run --metadata`](/no-mistakes/reference/cli/#no-mistakes-axi-run) stores one bounded UTF-8 string exactly and does not parse it as JSON, keys, or associations. Pipeline commands and agent subprocesses receive that exact value as `NM_METADATA`; agent prompts receive a sanitized copy clearly marked as untrusted data; and PR body contract v3 exposes the original string to formatters. An explicitly empty value is preserved as `NM_METADATA=` and clears inherited metadata on rerun. A run with no metadata also sets `NM_METADATA=`, so a value exported into the daemon's own environment can never reach a run that did not ask for it.
+
+Metadata is non-secret input. Secret-like text is redacted only in prompt and display projections, not from the exact persisted or environment value.
+
 When telemetry is enabled, `no-mistakes` sends command, run, approval, fix, and wizard events, completed step events with `awaiting_approval`, `fix_review`, or `failed` status, and pageviews for the human surfaces `/wizard` and `/tui` and the state-changing agent surfaces `/axi/run`, `/axi/respond`, and `/axi/abort` to Umami.
 Mutation pageviews are sent alongside command events, so command status and duration remain available.
 They include only flag-derived context: `/axi/run` records whether `--yes`, `--intent`, `--skip`, or a PR-note flag was present, and `/axi/respond` records the sanitized action and whether `--yes` was present.
@@ -173,17 +186,18 @@ It never sends a SHA, run ID, path, branch name, URL, remote name, or command ar
 Everything sent remotely is low-cardinality: command names, statuses, durations, counts, flag booleans, agent and step names, and - on the single terminal `run finished` event - the bounded performance rollup `agent_invocations`, `resumed_invocations`, and `fallback_invocations` (small counts only).
 Run IDs, repository paths, branch names, session identities, prompts, model outputs, diffs, and per-invocation performance records are never sent to the telemetry service.
 
-The generated PR body deliberately exposes one bounded subset of this local performance evidence to the repository host: a compact Pipeline table with each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested-agent attribution. It contains no tokens, timing, session identity, prompts, outputs, or paths. Unreported nested attribution renders as `-`; a supported stream that observed no nested agents renders as `none`. When a machine-local config override from the global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map is active, the table is preceded by a `Config sources:` line of generic source kinds and 12-character digest prefixes; full digests, the matched key, and the global config path stay local.
+The generated PR body deliberately exposes one bounded subset of this local run evidence to the repository host: the built-in body publishes a compact Pipeline attribution table of each invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents, plus each rendered step's redacted primary commands and evidence notes. That subset carries no token counts, cost, session identity, prompts, model outputs, or machine paths; the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) owns its layout.
+PR body contract v3 offers a configured formatter a wider subset: one row per invocation and round with step, agent, model, provider, start time, duration, nullable total/uncached/cache-read/cache-write/output token meters, nested-agent observations, and nullable CLI-reported USD cost. It still contains no session identity, prompts, outputs, diffs, credentials, or paths. The formatter decides whether to publish those rows and may calculate a separate API-price estimate; no-mistakes never treats an estimate as a reported charge. When a machine-local config override from the global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map is active, the contract also supplies generic source kinds and digest prefixes; full digests, the matched key, and the global config path stay local.
 
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
-Each row records run and step identity, purpose (such as review/review-fix/housekeeping), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
+Each row records run and step identity, purpose (such as review, review-fix, or lint-plan), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
 It also records how the top-level agent was invoked and any nested agent identities that the adapter's event stream exposed.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 
 The additive session-fidelity fields are nullable and read back as unknown (rendered `-`) rather than a fabricated zero when the adapter did not report them, so rows written before a field existed, and adapters that do not surface a datum, stay honest.
-The legacy raw input, output, and cache-read token counters render numerically; use the nullable per-round and derived fields to determine whether the adapter reported comparable usage:
+The raw counters remain available locally; use the nullable per-round and canonical fields to determine whether the adapter reported comparable usage:
 
-- Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens` (raw, cumulative across a resumed session for codex), `fresh_input_tokens` (input minus cache reads), `cache_creation_tokens` (unknown when the provider does not surface it), `reasoning_tokens`, and `delta_input_tokens`/`delta_output_tokens`/`delta_cache_read_tokens` (the correct per-round amounts, so a resumed session's cumulative counter is never mistaken for one round's usage).
+- Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_creation_tokens` are raw CLI counters and may be cumulative across a resumed session. `delta_input_tokens`, `delta_output_tokens`, `delta_cache_read_tokens`, and `delta_cache_creation_tokens` are the per-round amounts. `fresh_input_tokens` is the canonical uncached-input meter only when the adapter's cache relationship is verified; ambiguous cache splits stay unknown. `reported_cost_usd` stores a CLI-reported charge when available, independently of formatter estimates.
 - Activity: `model_roundtrips` (a proxy for productive model turns), `tool_calls`, and a bounded tool-category histogram (`tool_wait_calls`, `tool_test_lint_calls`, `tool_edit_calls`, `tool_read_calls`, `tool_git_calls`, `tool_other_calls`); a compound command counts once per sub-command, so the histogram can sum higher than `tool_calls`.
 - Timing split: `subprocess_wait_ms` is the wall-clock spent inside tool subprocesses; model/reasoning time is the invocation duration minus it, clamped at zero.
 - Context: `workload_files`/`workload_lines` (bounded change size), `finding_count` (findings in the structured output), and `fallback_reason` (why a failed resume forced a fresh session, one of transient/parse/exit/spawn/unsupported/other).

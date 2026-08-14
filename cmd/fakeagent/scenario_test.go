@@ -46,6 +46,20 @@ func TestActionStructuredJSONUsesRawPayload(t *testing.T) {
 	}
 }
 
+func TestScenarioMatchRequiresEveryConfiguredFragment(t *testing.T) {
+	scenario := &Scenario{Actions: []Action{
+		{MatchAll: []string{"Lint pipeline step", "branch: malformed-lint"}, Text: "specific"},
+		{Text: "fallback"},
+	}}
+
+	if got := scenario.Match("Lint pipeline step\nbranch: malformed-lint").Text; got != "specific" {
+		t.Fatalf("matching every fragment selected %q, want specific", got)
+	}
+	if got := scenario.Match("Lint pipeline step\nbranch: another").Text; got != "fallback" {
+		t.Fatalf("partial match selected %q, want fallback", got)
+	}
+}
+
 func TestApplyActionStagesFiles(t *testing.T) {
 	dir := t.TempDir()
 	gitCmd := func(args ...string) string {

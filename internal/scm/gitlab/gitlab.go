@@ -221,10 +221,14 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	if id == "" && pr != nil {
 		id = pr.URL
 	}
-	args := []string{"mr", "update", id,
-		"--title", content.Title,
-		"--description", content.Body,
-		"--yes"}
+	args := []string{"mr", "update", id}
+	if content.Title != "" {
+		args = append(args, "--title", content.Title)
+	}
+	if content.Body != "" {
+		args = append(args, "--description", content.Body)
+	}
+	args = append(args, "--yes")
 	if strings.TrimSpace(content.Base) != "" {
 		args = append(args, "--target-branch", content.Base)
 	}

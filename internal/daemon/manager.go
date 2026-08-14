@@ -715,12 +715,22 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote, params.RefreshStrategy, params.StackedOn)
+	return m.startRunWithMetadata(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote, params.Metadata, params.RefreshStrategy, params.StackedOn)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. An
 // optional intent and PR note are stamped onto the new run.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.handleRerun(ctx, repoID, branch, skipSteps, intent, prNote, nil, refreshStrategy, stackedOn)
+}
+
+// HandleRerunWithMetadata creates a rerun while distinguishing absent metadata
+// (inherit) from an explicitly supplied empty string (clear).
+func (m *RunManager) HandleRerunWithMetadata(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.handleRerun(ctx, repoID, branch, skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
+}
+
+func (m *RunManager) handleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -763,13 +773,17 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	if strings.TrimSpace(string(refreshStrategy)) == "" {
 		refreshStrategy = latestForBranch.RefreshStrategy
 	}
+	if metadata == nil && latestForBranch.Metadata != nil {
+		inherited := *latestForBranch.Metadata
+		metadata = &inherited
+	}
 
 	baseSHA := latestForBranch.BaseSHA
 	if matchingHead != nil {
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote, refreshStrategy, stackedOn)
+	return m.startRunWithMetadata(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -799,6 +813,10 @@ func resolveRefreshStrategy(explicit, configured types.RefreshStrategy) types.Re
 // stamped onto the run so the PR step renders it verbatim and feeds it to the
 // PR summary prompt.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.startRunWithMetadata(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, prNote, nil, refreshStrategy, stackedOn)
+}
+
+func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -859,6 +877,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// is missing its guaranteed PR-note content.
 	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
 		PRNote:          strings.TrimSpace(prNote),
+		Metadata:        metadata,
 		RefreshStrategy: refreshStrategy,
 		StackedOn:       stackedOn,
 	})

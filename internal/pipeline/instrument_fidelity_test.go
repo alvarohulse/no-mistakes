@@ -11,14 +11,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// cumulativeSessionAgent models codex: a stable durable session whose reported
-// token usage is cumulative across resumed rounds, with bounded activity
-// metrics and no cache-creation reporting.
+// cumulativeSessionAgent models a stable durable session whose reported token
+// usage is cumulative across resumed rounds, including cache-write meters.
 type cumulativeSessionAgent struct {
-	round     int
-	cumInput  int
-	cumOutput int
-	cumCache  int
+	round         int
+	cumInput      int
+	cumOutput     int
+	cumCacheRead  int
+	cumCacheWrite int
 }
 
 func (a *cumulativeSessionAgent) Name() string                { return "codex" }
@@ -31,10 +31,11 @@ func (a *cumulativeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 	// counters grow and the per-round deltas are the additions.
 	switch a.round {
 	case 1:
-		a.cumInput, a.cumOutput, a.cumCache = 1000, 100, 600
+		a.cumInput, a.cumOutput, a.cumCacheRead, a.cumCacheWrite = 1000, 100, 600, 20
 	default:
-		a.cumInput, a.cumOutput, a.cumCache = 2500, 250, 1800
+		a.cumInput, a.cumOutput, a.cumCacheRead, a.cumCacheWrite = 2500, 250, 1800, 70
 	}
+	reportedCost := float64(a.round) * 1.25
 	return &agent.Result{
 		Output:        json.RawMessage(`{"findings":[{"severity":"warning","description":"x","action":"auto-fix"},{"severity":"error","description":"y","action":"ask-user"}],"summary":"s"}`),
 		SessionID:     "sess-abc",
@@ -42,12 +43,15 @@ func (a *cumulativeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 		Model:         "gpt-5.6-sol",
 		ModelProvider: "openai",
 		Usage: agent.TokenUsage{
-			InputTokens:     a.cumInput,
-			OutputTokens:    a.cumOutput,
-			CacheReadTokens: a.cumCache,
-			ReasoningTokens: 5 * a.round,
+			InputTokens:           a.cumInput,
+			OutputTokens:          a.cumOutput,
+			CacheReadTokens:       a.cumCacheRead,
+			CacheCreationTokens:   a.cumCacheWrite,
+			CacheCreationReported: true,
+			ReasoningTokens:       5 * a.round,
 		},
-		UsageReported: true,
+		UsageReported:   true,
+		ReportedCostUSD: &reportedCost,
 		Metrics: &agent.InvocationMetrics{
 			ModelRoundtrips:  4,
 			ToolCalls:        3,
@@ -55,7 +59,7 @@ func (a *cumulativeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 			SubprocessWaitMS: 1200,
 		},
 		SessionUsageCumulative: true,
-		CacheCreationReported:  false,
+		CacheCreationReported:  true,
 	}, nil
 }
 
@@ -113,9 +117,9 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	assertPtr(t, "r2 delta input", r2.DeltaInputTokens, 1500)
 	assertPtr(t, "r2 delta output", r2.DeltaOutputTokens, 150)
 	assertPtr(t, "r2 delta cache", r2.DeltaCacheReadTokens, 1200)
-	// Fresh input = input - cache read (cumulative per row).
-	assertPtr(t, "r1 fresh", r1.FreshInputTokens, 400)
-	assertPtr(t, "r2 fresh", r2.FreshInputTokens, 700)
+	// Codex fresh input excludes both cache reads and cache writes.
+	assertPtr(t, "r1 fresh", r1.FreshInputTokens, 380)
+	assertPtr(t, "r2 fresh", r2.FreshInputTokens, 630)
 	// Reasoning + activity metrics.
 	assertPtr(t, "r2 reasoning", r2.ReasoningTokens, 10)
 	assertPtr(t, "r2 roundtrips", r2.ModelRoundtrips, 4)
@@ -130,9 +134,10 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	if r2.Model != "gpt-5.6-sol" || r2.ModelProvider == nil || *r2.ModelProvider != "openai" {
 		t.Fatalf("model/provider = %q/%v", r2.Model, r2.ModelProvider)
 	}
-	// Cache creation is unknown (codex does not report it), not a fabricated 0.
-	if r2.CacheCreationTokens != nil {
-		t.Fatalf("cache creation must be unknown, got %v", *r2.CacheCreationTokens)
+	assertPtr(t, "r2 raw cache write", r2.CacheCreationTokens, 70)
+	assertPtr(t, "r2 delta cache write", r2.DeltaCacheCreationTokens, 50)
+	if r2.ReportedCostUSD == nil || *r2.ReportedCostUSD != 2.5 {
+		t.Fatalf("r2 reported cost = %v, want 2.5", r2.ReportedCostUSD)
 	}
 }
 
@@ -260,16 +265,17 @@ func TestPerfRecording_MissingProviderUsageIsUnknown(t *testing.T) {
 	}
 	inv := invs[0]
 	for name, p := range map[string]*int{
-		"model_roundtrips": inv.ModelRoundtrips,
-		"tool_calls":       inv.ToolCalls,
-		"cache_creation":   inv.CacheCreationTokens,
-		"fresh_input":      inv.FreshInputTokens,
-		"delta_input":      inv.DeltaInputTokens,
-		"delta_output":     inv.DeltaOutputTokens,
-		"delta_cache_read": inv.DeltaCacheReadTokens,
-		"reasoning":        inv.ReasoningTokens,
-		"finding_count":    inv.FindingCount,
-		"workload_files":   inv.WorkloadFiles,
+		"model_roundtrips":  inv.ModelRoundtrips,
+		"tool_calls":        inv.ToolCalls,
+		"cache_creation":    inv.CacheCreationTokens,
+		"fresh_input":       inv.FreshInputTokens,
+		"delta_input":       inv.DeltaInputTokens,
+		"delta_output":      inv.DeltaOutputTokens,
+		"delta_cache_read":  inv.DeltaCacheReadTokens,
+		"delta_cache_write": inv.DeltaCacheCreationTokens,
+		"reasoning":         inv.ReasoningTokens,
+		"finding_count":     inv.FindingCount,
+		"workload_files":    inv.WorkloadFiles,
 	} {
 		if p != nil {
 			t.Fatalf("%s must be unknown (nil) for a no-usage invocation, got %d", name, *p)
@@ -278,6 +284,148 @@ func TestPerfRecording_MissingProviderUsageIsUnknown(t *testing.T) {
 	if inv.SubprocessWaitMS != nil {
 		t.Fatalf("subprocess wait must be unknown, got %d", *inv.SubprocessWaitMS)
 	}
+	if inv.ReportedCostUSD != nil {
+		t.Fatalf("reported cost must be unknown, got %f", *inv.ReportedCostUSD)
+	}
+}
+
+func TestPerfRecording_PreservesMissingCacheMeters(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	wrapped := &perfRecordingAgent{
+		inner: &partialUsageAgent{}, db: database, runID: run.ID,
+		stepName: types.StepTest, round: func() int { return 1 },
+	}
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "test-evidence"}); err != nil {
+		t.Fatal(err)
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 1 {
+		t.Fatalf("invocations = %d, want 1", len(invs))
+	}
+	inv := invs[0]
+	assertPtr(t, "input", inv.DeltaInputTokens, 100)
+	assertPtr(t, "output", inv.DeltaOutputTokens, 20)
+	if inv.DeltaCacheReadTokens != nil || inv.DeltaCacheCreationTokens != nil || inv.FreshInputTokens != nil {
+		t.Fatalf("missing cache meters became known: %+v", inv)
+	}
+}
+
+func TestPerfRecording_ResumedSessionDoesNotInferNewlyAppearingCacheMeters(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	round := 0
+	wrapped := &perfRecordingAgent{
+		inner: &partialCumulativeAgent{}, db: database, runID: run.ID,
+		stepName: types.StepReview, round: func() int { return round },
+	}
+	sessions := NewRunSessions(database, run.ID, wrapped, true)
+	for round = 1; round <= 2; round++ {
+		if _, err := sessions.Run(context.Background(), wrapped, SessionRoleReviewer, agent.RunOpts{Purpose: "review"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 2 {
+		t.Fatalf("invocations = %d, want 2", len(invs))
+	}
+	assertPtr(t, "round 2 input", invs[1].DeltaInputTokens, 100)
+	assertPtr(t, "round 2 output", invs[1].DeltaOutputTokens, 20)
+	if invs[1].DeltaCacheReadTokens != nil || invs[1].DeltaCacheCreationTokens != nil {
+		t.Fatalf("newly appearing cumulative cache meters must be unknown: %+v", invs[1])
+	}
+}
+
+func TestPerfRecording_ResumedSessionDoesNotSkipUnknownUsageRound(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	round := 0
+	wrapped := &perfRecordingAgent{
+		inner: &intermittentCumulativeUsageAgent{}, db: database, runID: run.ID,
+		stepName: types.StepReview, round: func() int { return round },
+	}
+	sessions := NewRunSessions(database, run.ID, wrapped, true)
+	for round = 1; round <= 3; round++ {
+		if _, err := sessions.Run(context.Background(), wrapped, SessionRoleReviewer, agent.RunOpts{Purpose: "review"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invs, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invs) != 3 {
+		t.Fatalf("invocations = %d, want 3", len(invs))
+	}
+	if invs[1].DeltaInputTokens != nil || invs[1].DeltaOutputTokens != nil {
+		t.Fatalf("round 2 unknown usage became known: %+v", invs[1])
+	}
+	if invs[2].DeltaInputTokens != nil || invs[2].DeltaOutputTokens != nil {
+		t.Fatalf("round 3 absorbed usage from the unknown round: %+v", invs[2])
+	}
+}
+
+type partialUsageAgent struct{}
+
+func (*partialUsageAgent) Name() string { return "codex" }
+func (*partialUsageAgent) Close() error { return nil }
+func (*partialUsageAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return &agent.Result{
+		UsageReported: true,
+		Usage: agent.TokenUsage{
+			InputTokens: 100, OutputTokens: 20, Reported: true,
+			MeterPresenceReported: true, InputReported: true, OutputReported: true,
+		},
+	}, nil
+}
+
+type partialCumulativeAgent struct{ calls int }
+
+func (a *partialCumulativeAgent) Name() string                { return "codex" }
+func (a *partialCumulativeAgent) Close() error                { return nil }
+func (a *partialCumulativeAgent) SupportsSessionResume() bool { return true }
+func (a *partialCumulativeAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	usage := agent.TokenUsage{
+		InputTokens: 100 * a.calls, OutputTokens: 20 * a.calls, Reported: true,
+		MeterPresenceReported: true, InputReported: true, OutputReported: true,
+	}
+	if a.calls == 2 {
+		usage.CacheReadTokens = 50
+		usage.CacheCreationTokens = 10
+		usage.CacheReadReported = true
+		usage.CacheCreationReported = true
+	}
+	return &agent.Result{
+		SessionID: "partial-session", Resumed: opts.Session != nil,
+		Usage: usage, UsageReported: true, CacheCreationReported: usage.CacheCreationReported,
+		SessionUsageCumulative: true,
+	}, nil
+}
+
+type intermittentCumulativeUsageAgent struct{ calls int }
+
+func (a *intermittentCumulativeUsageAgent) Name() string                { return "codex" }
+func (a *intermittentCumulativeUsageAgent) Close() error                { return nil }
+func (a *intermittentCumulativeUsageAgent) SupportsSessionResume() bool { return true }
+func (a *intermittentCumulativeUsageAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	result := &agent.Result{
+		SessionID: "intermittent-session", Resumed: opts.Session != nil,
+		SessionUsageCumulative: true,
+	}
+	if a.calls == 2 {
+		return result, nil
+	}
+	result.Usage = agent.TokenUsage{
+		InputTokens: 100 * a.calls, OutputTokens: 20 * a.calls, Reported: true,
+		MeterPresenceReported: true, InputReported: true, OutputReported: true,
+	}
+	result.UsageReported = true
+	return result, nil
 }
 
 type noUsageAgent struct{}

@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+const commandPlanWorktreeSuffix = "-command-plan"
 
 // Paths provides access to all no-mistakes filesystem locations.
 // The root defaults to ~/.no-mistakes but can be overridden via NM_HOME
@@ -65,6 +68,19 @@ func (p *Paths) RepoDir(repoID string) string {
 func (p *Paths) WorktreesDir() string { return filepath.Join(p.root, "worktrees") }
 func (p *Paths) WorktreeDir(repoID, runID string) string {
 	return filepath.Join(p.root, "worktrees", repoID, runID)
+}
+
+// CommandPlanWorktreeID returns the worktree directory name reserved for a
+// run's command-planning workspace.
+func CommandPlanWorktreeID(runID string) string {
+	return runID + commandPlanWorktreeSuffix
+}
+
+// CommandPlanParentRunID resolves a command-planning worktree directory name
+// to its owning run. An empty parent is not a valid match.
+func CommandPlanParentRunID(worktreeID string) (string, bool) {
+	runID, ok := strings.CutSuffix(worktreeID, commandPlanWorktreeSuffix)
+	return runID, ok && runID != ""
 }
 
 func (p *Paths) LogsDir() string { return filepath.Join(p.root, "logs") }

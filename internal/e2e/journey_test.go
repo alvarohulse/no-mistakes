@@ -35,8 +35,8 @@ import (
 //   - SQLite persistence and IPC retrieval of run state
 //
 // PR and CI steps gracefully skip because the upstream is a local file://
-// path with no SCM provider. Build, Test, and Lint don't run real commands
-// because no commands are configured; they delegate to the agent which
+// path with no SCM provider. Build, Test, and Lint plan focused commands
+// because no commands are configured; the pipeline executes those plans and
 // returns the canned "no findings" response.
 //
 // Adding more journeys: append subtests here rather than spawning new
@@ -254,7 +254,7 @@ func runHappyPath(t *testing.T, agentName string) {
 
 	// The agent must have been called at least for review and document.
 	// Build, test, and lint also call the agent because no commands are
-	// configured - the steps delegate detection to the agent.
+	// configured - the steps use a read-only planning pass before execution.
 	invs := h.AgentInvocations()
 	if len(invs) == 0 {
 		t.Fatalf("expected fake agent to be invoked, got 0 invocations")
@@ -278,8 +278,8 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertDocumentStepNoGaps(t, run.Steps)
 	assertNoCommandBuildStep(t, run.Steps, invs)
 	assertNoCommandTestStep(t, run.Steps, invs)
-	if sawPromptContainingAll(invs, "Detect the linting and formatting tools", "branch: feature/e2e") {
-		t.Errorf("expected combined housekeeping to avoid a separate lint prompt, got %d:\n%s", len(invs), summarisePrompts(invs))
+	if !sawPromptContainingAll(invs, "Select the exact shell command the Lint pipeline step should execute", "read-only command-planning pass") {
+		t.Errorf("expected a separate lint command-planning prompt, got %d:\n%s", len(invs), summarisePrompts(invs))
 	}
 	assertPromptsAbsent(t, invs,
 		"Draft a pull request title and summary for the full branch delta.",
@@ -455,11 +455,11 @@ func cleanReviewScenario(t *testing.T) string {
         - severity: warning
           description: "README missing new CLI flag"
       summary: "README needs updating"
-  - match: "branch: document-missing-findings"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: document-missing-findings"
     text: "documentation missing findings field"
     structured:
       summary: "docs status unavailable"
-  - match: "branch: document-info"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: document-info"
     text: "documentation info finding"
     structured:
       findings:
@@ -478,7 +478,7 @@ func cleanReviewScenario(t *testing.T) string {
       artifacts: []
       title: "docs: update README"
       body: "## Summary\ndocumentation update"
-  - match: "branch: review-warning"
+  - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: review-warning"
     text: "review found a warning"
     structured:
       findings:
@@ -491,7 +491,7 @@ func cleanReviewScenario(t *testing.T) string {
       summary: "found 1 issue"
       risk_level: medium
       risk_rationale: "warning requires human review"
-  - match: "branch: agent-edits"
+  - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: agent-edits"
     text: "agent edited a file"
     edits:
       - path: "agent-edit.txt"
@@ -523,8 +523,10 @@ func cleanReviewScenario(t *testing.T) string {
   - match: "You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.\n\nContext:\n- branch: test-malformed-structured-output"
     text: "tests found some issues"
     structured_raw: '{"summary":123}'
-  - match: "Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.\n\nContext:\n- branch: lint-malformed-structured-output"
-    text: "lint found some issues"
+  - match_all:
+      - "Select the exact shell command the Lint pipeline step should execute."
+      - "branch: lint-malformed-structured-output"
+    text: "lint planner returned malformed output"
     structured_raw: '{"summary":123}'
   - match: "You are validating a code change by testing it. Examine the repository and run the smallest relevant tests yourself.\n\nContext:\n- branch: test-agent-staged-new-test-file"
     text: "tests passed after staging a regression test"
@@ -598,8 +600,21 @@ func cleanReviewScenario(t *testing.T) string {
       tested:
         - "fakeagent: simulated review"
       testing_summary: "not run during review"
+  - match: "Select the exact shell command the Build pipeline step should execute."
+    text: "planned build command"
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Test pipeline step should execute."
+    text: "planned test command"
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Lint pipeline step should execute."
+    text: "planned lint command"
+    structured:
+      command: "true"
   - text: "no issues found"
     structured:
+      command: "true"
       findings: []
       summary: "no issues found"
       risk_level: low
@@ -1782,10 +1797,7 @@ func assertLintMalformedStructuredOutputRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("lint-malformed-structured-output", "lint-malformed-structured-output.generated.go", "lint malformed structured output\n", "add lint malformed structured output")
 	h.PushToGate("lint-malformed-structured-output")
-	run := h.WaitForRun("lint-malformed-structured-output", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("lint-malformed-structured-output run status=%s error=%v", run.Status, deref(run.Error))
-	}
+	run := waitForStepStatus(t, h, "lint-malformed-structured-output", types.StepLint, types.StepStatusAwaitingApproval, 60*time.Second)
 	lintStep, ok := findStep(run.Steps, types.StepLint)
 	if !ok {
 		t.Fatal("expected lint step in lint-malformed-structured-output run")
@@ -1797,8 +1809,16 @@ func assertLintMalformedStructuredOutputRun(t *testing.T, h *Harness) {
 	if err != nil {
 		t.Fatalf("parse malformed lint output fallback findings: %v", err)
 	}
-	if !strings.Contains(findings.Summary, "lint found some issues") {
-		t.Fatalf("malformed lint output fallback summary = %q, want lint found some issues", findings.Summary)
+	if !strings.Contains(findings.Summary, "lint command planner returned an invalid structured result") {
+		t.Fatalf("malformed lint planner summary = %q", findings.Summary)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser {
+		t.Fatalf("malformed lint planner findings = %+v", findings.Items)
+	}
+	h.Respond(run.ID, types.StepLint, types.ActionSkip)
+	completed := h.WaitForRun("lint-malformed-structured-output", 60*time.Second)
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("lint-malformed-structured-output run status=%s error=%v", completed.Status, deref(completed.Error))
 	}
 }
 
@@ -2872,8 +2892,8 @@ func assertNoCommandBuildStep(t *testing.T, steps []ipc.StepResultInfo, invs []I
 	if buildStep.Status != types.StepStatusCompleted {
 		t.Fatalf("no-command build step status = %s, want completed", buildStep.Status)
 	}
-	if !sawPromptContainingAll(invs, "detect and run the appropriate build or compile command", "branch: feature/e2e") {
-		t.Fatalf("no-command Build did not invoke the agent:\n%s", summarisePrompts(invs))
+	if !sawPromptContainingAll(invs, "Select the exact shell command the Build pipeline step should execute", "read-only command-planning pass") {
+		t.Fatalf("no-command Build did not invoke the planner:\n%s", summarisePrompts(invs))
 	}
 }
 
@@ -2975,14 +2995,14 @@ func assertDocumentPrompt(t *testing.T, h *Harness, run *ipc.RunInfo, invs []Inv
 		"one authoritative owner document",
 		"Only touch documentation this change made stale",
 		"Do not create a new documentation surface merely to close a perceived gap.",
-		"Combined lint duty (same pass - no separate lint agent will run):",
-		`"category" set to "lint"`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("expected document prompt to contain %q, got:\n%s", want, prompt)
 		}
 	}
 	for _, unexpected := range []string{
+		"Combined lint duty",
+		`"category" set to "lint"`,
 		"Find every documentation gap",
 		"Be exhaustive.",
 		"fix all of them yourself",
@@ -3021,6 +3041,9 @@ func assertNoUnexpectedAutofixCommits(t *testing.T, run *ipc.RunInfo, featureHea
 
 func assertNoCommandTestStep(t *testing.T, steps []ipc.StepResultInfo, invs []Invocation) {
 	t.Helper()
+	if !sawPromptContainingAll(invs, "Select the exact shell command the Test pipeline step should execute", "read-only command-planning pass") {
+		t.Errorf("expected a test command-planning prompt, got %d:\n%s", len(invs), summarisePrompts(invs))
+	}
 	if !sawPromptContainingAll(invs, "You are validating a code change by testing it", "branch: feature/e2e", "action", "tested", "testing_summary") {
 		t.Errorf("expected a test prompt with branch metadata, action guidance, and test reporting fields in invocations, got %d:\n%s", len(invs), summarisePrompts(invs))
 	}
@@ -3035,7 +3058,7 @@ func assertNoCommandTestStep(t *testing.T, steps []ipc.StepResultInfo, invs []In
 	if err != nil {
 		t.Fatalf("parse test step findings: %v", err)
 	}
-	if len(findings.Tested) != 1 || findings.Tested[0] != "fakeagent: simulated test run" {
+	if len(findings.Tested) != 2 || findings.Tested[0] != "true" || findings.Tested[1] != "fakeagent: simulated test run" {
 		t.Fatalf("expected fakeagent test details to be preserved, got %+v", findings.Tested)
 	}
 	if findings.TestingSummary != "simulated tests passed" {

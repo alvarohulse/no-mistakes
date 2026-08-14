@@ -1125,6 +1125,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	var b strings.Builder
 	b.WriteString("<details>\n")
 	b.WriteString(fmt.Sprintf("<summary>%s</summary>\n\n", summaryLine))
+	writeStoredStepEvidence(&b, sr)
 
 	if len(rounds) == 0 {
 		writeStepStatusDetail(&b, sr)
@@ -1183,6 +1184,69 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 
 	b.WriteString("</details>\n")
 	return b.String()
+}
+
+func writeStoredStepEvidence(b *strings.Builder, sr *db.StepResult) {
+	evidence, err := sr.Evidence()
+	if err != nil {
+		b.WriteString("Stored step evidence could not be read.\n\n")
+		return
+	}
+	if evidence.Intent != nil {
+		writeStoredIntentEvidence(b, evidence.Intent)
+	}
+	for _, command := range evidence.Commands {
+		if strings.TrimSpace(command.Command) == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- Command (round %d, #%d): %s — %s", command.Round, command.Sequence, renderTestedDetail(command.Command), html.EscapeString(command.Outcome)))
+		if command.ExitCode != nil {
+			b.WriteString(fmt.Sprintf(" (exit %d)", *command.ExitCode))
+		}
+		b.WriteString("\n")
+	}
+	for _, item := range evidence.Evidence {
+		if rendered := renderTestingSummary(item); rendered != "" {
+			b.WriteString("- Evidence: ")
+			b.WriteString(rendered)
+			b.WriteString("\n")
+		}
+	}
+	if explanation := sanitizePromptMultilineText(evidence.Explanation); explanation != "" {
+		b.WriteString("- ")
+		b.WriteString(html.EscapeString(explanation))
+		b.WriteString("\n")
+	}
+	if evidence.Intent != nil || len(evidence.Commands) > 0 || len(evidence.Evidence) > 0 || strings.TrimSpace(evidence.Explanation) != "" {
+		b.WriteString("\n")
+	}
+}
+
+func writeStoredIntentEvidence(b *strings.Builder, evidence *db.IntentEvidence) {
+	if text := sanitizePromptMultilineText(evidence.Text); text != "" {
+		b.WriteString("- Intent: ")
+		b.WriteString(html.EscapeString(text))
+		b.WriteString("\n")
+	}
+	if source := sanitizePromptText(evidence.Source); source != "" {
+		b.WriteString("- Source: ")
+		b.WriteString(renderTestedDetail(source))
+		b.WriteString("\n")
+	}
+	b.WriteString(fmt.Sprintf("- Provided: `%t`\n", evidence.Provided))
+	if evidence.Reason == nil {
+		return
+	}
+	if message := sanitizePromptMultilineText(evidence.Reason.Message); message != "" {
+		b.WriteString("- ")
+		b.WriteString(html.EscapeString(message))
+		b.WriteString("\n")
+	}
+	if code := sanitizePromptText(evidence.Reason.Code); code != "" {
+		b.WriteString("- Reason: ")
+		b.WriteString(renderTestedDetail(code))
+		b.WriteString("\n")
+	}
 }
 
 // fixRoundLine renders the one-line summary of the fix the agent applied in a

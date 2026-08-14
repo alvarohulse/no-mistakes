@@ -42,7 +42,7 @@ func (a *opencodeAgent) recoverTransientRetry(label string) {
 
 func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	// Start server on first invocation (synchronized)
-	baseURL, err := a.ensureServer(ctx, opts.CWD)
+	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -99,39 +99,78 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		select {
 		case mr := <-msgCh:
 			if mr.err != nil {
-				return nil, fmt.Errorf("opencode message: %w", mr.err)
+				return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 			}
+			foldOpencodeMessageResponse(state, mr.resp)
 		default:
 		}
 		a.abortSession(baseURL, sessionID)
-		return nil, fmt.Errorf("opencode events: %w", err)
+		return opencodePartialResult(state), fmt.Errorf("opencode events: %w", err)
 	}
 
 	// Wait for message response
 	mr := <-msgCh
 	if mr.err != nil {
-		return nil, fmt.Errorf("opencode message: %w", mr.err)
+		return opencodePartialResult(state), fmt.Errorf("opencode message: %w", mr.err)
 	}
 
-	// Update usage and text from message response
+	foldOpencodeMessageResponse(state, mr.resp)
+
+	// Prefer structured output from response
+	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
+		result := opencodePartialResult(state)
+		result.Output = mr.resp.Info.Structured
+		return result, nil
+	}
+
+	// Surface opencode's StructuredOutputError directly. When the model
+	// fails to call the StructuredOutput tool after the configured retries,
+	// opencode sets info.error.name = "StructuredOutputError" and the
+	// streamed text is just reasoning prose - feeding it to
+	// finalizeTextResult produces the misleading "invalid character 'N'
+	// looking for beginning of value" error.
+	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Error.IsStructuredOutput() {
+		retries := 0
+		if mr.resp.Info.Error.Retries != nil {
+			retries = *mr.resp.Info.Error.Retries
+		}
+		return opencodePartialResult(state), fmt.Errorf("opencode structured output failed after %d internal retries: %s",
+			retries, mr.resp.Info.Error.Message)
+	}
+
+	// Fall back to parsing JSON from text
+	outputText := state.lastFinalText
+	if outputText == "" {
+		outputText = state.lastText
+	}
+	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
+	if result != nil {
+		result.AgentObservations = state.observations.observations
+		result.AgentObservationsReported = true
+		result.NestedAgentCount = state.observations.uniqueCount()
+	}
+	return result, err
+}
+
+func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {
 	responseText := ""
 	responseFinalText := ""
-	if mr.resp != nil && mr.resp.Info != nil {
+	if response != nil && response.Info != nil {
 		streamedText := state.lastText
 		streamedFinalText := state.lastFinalText
 		emitResponseChunk := func(chunk string) {
-			if opts.OnChunk == nil || chunk == "" {
+			if state.onChunk == nil || chunk == "" {
 				return
 			}
 			state.emitSeparatorIfNeeded()
-			opts.OnChunk(chunk)
+			state.onChunk(chunk)
 			state.hasEmittedText = true
 		}
-		if mr.resp.Info.Role == "assistant" && mr.resp.Info.Tokens != nil {
-			state.usageByMsg[mr.resp.Info.ID] = opencodeTokensToUsage(mr.resp.Info.Tokens)
+		if response.Info.Role == "assistant" && response.Info.Tokens != nil {
+			state.usageByMsg[response.Info.ID] = opencodeTokensToUsage(response.Info.Tokens)
 			state.usage = accumulateUsage(state.usageByMsg)
 		}
-		for _, part := range mr.resp.Parts {
+		for _, part := range response.Parts {
 			state.observeOpencodeTool(part.ID, part.Type, part.Tool, part.State)
 			if part.Type != "text" || strings.TrimSpace(part.Text) == "" {
 				continue
@@ -150,7 +189,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		if responseFinalText != "" {
 			responseText = responseFinalText
 		}
-		if opts.OnChunk != nil && responseText != "" {
+		if state.onChunk != nil && responseText != "" {
 			streamedResponseText := streamedText
 			if streamedFinalText != "" {
 				streamedResponseText = streamedFinalText
@@ -166,46 +205,21 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 			}
 		}
 	}
+}
 
-	// Prefer structured output from response
-	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
-		return &Result{
-			Output:                    mr.resp.Info.Structured,
-			Text:                      state.lastText,
-			Usage:                     state.usage,
-			UsageReported:             state.usage.Reported,
-			CacheCreationReported:     state.usage.CacheCreationReported,
-			AgentObservations:         state.observations.observations,
-			AgentObservationsReported: true,
-		}, nil
+func opencodePartialResult(state *opencodeStreamState) *Result {
+	if state == nil {
+		return nil
 	}
-
-	// Surface opencode's StructuredOutputError directly. When the model
-	// fails to call the StructuredOutput tool after the configured retries,
-	// opencode sets info.error.name = "StructuredOutputError" and the
-	// streamed text is just reasoning prose - feeding it to
-	// finalizeTextResult produces the misleading "invalid character 'N'
-	// looking for beginning of value" error.
-	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Error.IsStructuredOutput() {
-		retries := 0
-		if mr.resp.Info.Error.Retries != nil {
-			retries = *mr.resp.Info.Error.Retries
-		}
-		return nil, fmt.Errorf("opencode structured output failed after %d internal retries: %s",
-			retries, mr.resp.Info.Error.Message)
+	return &Result{
+		Text:                      state.lastText,
+		Usage:                     state.usage,
+		UsageReported:             state.usage.Reported,
+		CacheCreationReported:     state.usage.CacheCreationReported,
+		AgentObservations:         state.observations.observations,
+		AgentObservationsReported: true,
+		NestedAgentCount:          state.observations.uniqueCount(),
 	}
-
-	// Fall back to parsing JSON from text
-	outputText := state.lastFinalText
-	if outputText == "" {
-		outputText = state.lastText
-	}
-	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
-	if result != nil {
-		result.AgentObservations = state.observations.observations
-		result.AgentObservationsReported = true
-	}
-	return result, err
 }
 
 func (a *opencodeAgent) Close() error {
