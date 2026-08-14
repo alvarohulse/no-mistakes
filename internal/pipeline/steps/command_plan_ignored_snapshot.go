@@ -276,6 +276,14 @@ func (s commandPlanningIgnoredSnapshot) restore(ctx context.Context, workDir str
 	for _, path := range ordered {
 		beforeRoot, hadBefore := before[path]
 		afterRoot, hasAfter := after[path]
+		if !hadBefore && hasAfter && s.truncated {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("refuse to remove ignored command planning source root %s omitted by the truncated before snapshot", path))
+			continue
+		}
+		if hadBefore && !hasAfter && current.truncated {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("refuse to restore ignored command planning source root %s omitted by the truncated after snapshot", path))
+			continue
+		}
 		if !hadBefore && hasAfter && afterRoot.skipped {
 			cleanPath, err := commandPlanningTrackedPath(path)
 			if err != nil {

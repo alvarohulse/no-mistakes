@@ -723,6 +723,55 @@ func TestPlanPipelineCommandRestoresSmallIgnoredStateAfterExistingLargeRootFailu
 	assertCommandPlanningFileContent(t, statePath, "prepared\n")
 }
 
+func TestPlanPipelineCommandPreservesPreexistingIgnoredRootOmittedByTruncatedSnapshot(t *testing.T) {
+	dir, baseSHA, _ := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\nz-cache/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".gitignore")
+	gitCmd(t, dir, "commit", "-m", "ignore planner caches")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	prefixPaths := make([]string, 0, 256)
+	for i := range 256 {
+		path := filepath.Join(dir, fmt.Sprintf("a-prefix-%03d-with-a-long-discovery-name.log", i))
+		if err := os.WriteFile(path, []byte("prefix\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prefixPaths = append(prefixPaths, path)
+	}
+	cacheDir := filepath.Join(dir, "z-cache")
+	if err := os.Mkdir(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(cacheDir, "sentinel.txt")
+	if err := os.WriteFile(sentinelPath, []byte("preexisting\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 256 {
+		path := filepath.Join(cacheDir, fmt.Sprintf("cache-%03d.bin", i))
+		if err := os.WriteFile(path, []byte("cache\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			for _, path := range prefixPaths {
+				if err := os.Remove(path); err != nil {
+					return nil, err
+				}
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want truncated ignored-state violation", err)
+	}
+	assertCommandPlanningFileContent(t, sentinelPath, "preexisting\n")
+}
+
 func TestPlanPipelineCommandPreservesConcurrentSharedGitState(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
