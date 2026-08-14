@@ -121,7 +121,7 @@ func (s *commandPlanningSourceSnapshot) Restore() error {
 		"GIT_INDEX_FILE="+s.indexFile,
 		"GIT_WORK_TREE="+s.workDir,
 	)
-	if _, err := git.RunWithEnv(ctx, s.workDir, gitEnv, "checkout-index", "--all", "--force", "--ignore-skip-worktree-bits"); err != nil {
+	if _, err := git.RunWithEnv(ctx, s.workDir, gitEnv, "checkout-index", "--all", "--force"); err != nil {
 		restoreErr = errors.Join(restoreErr, fmt.Errorf("restore command planning source files: %w", err))
 	}
 	if _, err := git.RunWithEnv(ctx, s.workDir, gitEnv, "clean", "-ffd"); err != nil {

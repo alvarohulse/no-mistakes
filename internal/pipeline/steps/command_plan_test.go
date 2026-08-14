@@ -456,6 +456,8 @@ func TestPlanPipelineCommandRestoresDirectSourceMutation(t *testing.T) {
 
 	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("planPipelineCommand() error = %v, want direct-source read-only violation", err)
+	} else if strings.Contains(err.Error(), "restore pipeline worktree") {
+		t.Fatalf("planPipelineCommand() hid a source restoration failure: %v", err)
 	}
 	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "feature code\n")
 }
@@ -480,11 +482,55 @@ func TestPlanPipelineCommandRestoresHiddenDirtySourceMutation(t *testing.T) {
 
 	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("planPipelineCommand() error = %v, want hidden direct-source read-only violation", err)
+	} else if strings.Contains(err.Error(), "restore pipeline worktree") {
+		t.Fatalf("planPipelineCommand() hid a source restoration failure: %v", err)
 	}
 	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "prepared hidden change\n")
 	if got := gitCmd(t, dir, "ls-files", "-v", "-z"); got != indexFlags {
 		t.Fatalf("source index flags = %q, want %q", got, indexFlags)
 	}
+}
+
+func TestPlanPipelineCommandRestoresSourceWithLegacyCheckoutIndex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("legacy Git wrapper is a POSIX shell script")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	wrapper := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--ignore-skip-worktree-bits" ]; then
+    echo "error: unknown option ignore-skip-worktree-bits" >&2
+    exit 129
+  fi
+done
+exec %q "$@"
+`, realGit)
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("planner bypass\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"command":"true"}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := planPipelineCommand(sctx, types.StepBuild, "Select build."); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("planPipelineCommand() error = %v, want legacy-Git read-only violation", err)
+	} else if strings.Contains(err.Error(), "restore pipeline worktree") {
+		t.Fatalf("planPipelineCommand() failed source restoration with legacy Git: %v", err)
+	}
+	assertCommandPlanningFileContent(t, filepath.Join(dir, "feature.txt"), "feature code\n")
 }
 
 func TestPlanPipelineCommandRestoresSmallIgnoredSourceMutations(t *testing.T) {
