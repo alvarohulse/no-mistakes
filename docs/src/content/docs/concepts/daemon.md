@@ -86,6 +86,9 @@ When a push arrives via the post-receive hook:
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure)
 
+A run that has to plan a Build, Test, or Lint command also gets a private planning checkout at `~/.no-mistakes/worktrees/<repoID>/<runID>-command-plan/`, cleaned up on the same run boundary.
+It is a clone rather than a linked worktree, and the [Pipeline Steps reference](/no-mistakes/reference/pipeline-steps/) owns what the planning pass does inside it.
+
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
 While executing steps, the daemon also owns child-process cleanup.
@@ -114,7 +117,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
+- Removes orphaned worktree directories via `git worktree remove --force`, falling back to a direct removal for a `<runID>-command-plan` planning checkout - but never one whose run is still `pending` or `running`, a status a planning checkout inherits from its parent run; only leftovers from terminal runs or directories with no matching run record are removed
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
