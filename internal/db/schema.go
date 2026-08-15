@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS runs (
     stacked_on              TEXT,
     config_sources_json     TEXT NOT NULL DEFAULT '[]',
     resolved_agent_routing_json TEXT,
+    resolved_policy_json    TEXT,
+    resolved_policy_digest  TEXT,
     submitted_head_sha      TEXT,
     no_mistakes_version     TEXT,
     no_mistakes_build_sha   TEXT,
@@ -180,6 +182,8 @@ var migrationStatements = []string{
 	// New runs explicitly insert an empty marker until launch-time resolution
 	// persists the complete routing snapshot.
 	`ALTER TABLE runs ADD COLUMN resolved_agent_routing_json TEXT`,
+	`ALTER TABLE runs ADD COLUMN resolved_policy_json TEXT`,
+	`ALTER TABLE runs ADD COLUMN resolved_policy_digest TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,

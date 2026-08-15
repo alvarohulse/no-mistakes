@@ -60,6 +60,36 @@ func TestUpdateRunResolvedAgentRoutingPersistsPrivateSnapshot(t *testing.T) {
 	}
 }
 
+func TestUpdateRunResolvedPolicyPersistsSnapshotAndDigest(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/resolved-policy", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ResolvedPolicy == nil || *run.ResolvedPolicy != "" || run.ResolvedPolicyDigest == nil || *run.ResolvedPolicyDigest != "" {
+		t.Fatalf("new run policy marker = policy %v digest %v, want explicit empty markers", run.ResolvedPolicy, run.ResolvedPolicyDigest)
+	}
+	const snapshot = `{"version":1}`
+	const digest = "resolved-policy-digest"
+	if err := d.UpdateRunResolvedPolicy(run.ID, snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResolvedPolicy == nil || *got.ResolvedPolicy != snapshot || got.ResolvedPolicyDigest == nil || *got.ResolvedPolicyDigest != digest {
+		t.Fatalf("resolved policy = policy %v digest %v", got.ResolvedPolicy, got.ResolvedPolicyDigest)
+	}
+	if err := d.UpdateRunResolvedPolicy(run.ID, "", digest); err == nil {
+		t.Fatal("empty resolved policy snapshot was accepted")
+	}
+	if err := d.UpdateRunResolvedPolicy(run.ID, snapshot, ""); err == nil {
+		t.Fatal("empty resolved policy digest was accepted")
+	}
+}
+
 func TestRunInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

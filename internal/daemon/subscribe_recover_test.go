@@ -283,7 +283,7 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staleRun, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	staleRun, err := d.InsertRunWithOptions(repo.ID, "feature", "abc123", "def456", db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+			run, err := database.InsertRunWithOptions(repo.ID, "feature", "abc123", "def456", db.RunOptions{LegacyResolvedPolicy: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -467,7 +467,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	}
 	defer d.Close()
 	repo, headSHA := setupTestGitRepo(t, p, d, "resume-parked-run")
-	run, err := d.InsertRun(repo.ID, "main", headSHA, headSHA)
+	run, err := d.InsertRunWithOptions(repo.ID, "main", headSHA, headSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +597,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			}
 			defer d.Close()
 			repo, headSHA := setupTestGitRepo(t, p, d, "reconcile-parked-ci-"+strings.ToLower(state))
-			run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
+			run, err := d.InsertRunWithOptions(repo.ID, "feature", headSHA, headSHA, db.RunOptions{LegacyResolvedPolicy: true})
 			if err != nil {
 				t.Fatal(err)
 			}

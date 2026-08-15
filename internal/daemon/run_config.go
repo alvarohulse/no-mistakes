@@ -172,9 +172,6 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 		return effective
 	}
 	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
-	if override == nil {
-		return effective, nil
-	}
 	resolved := config.Merge(global.Config, effective)
 
 	var sources []db.ConfigSource
@@ -193,12 +190,14 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 			sources = append(sources, *trusted.Source)
 		}
 	}
-	sources = append(sources, db.ConfigSource{
-		Kind:   db.ConfigSourceGlobalOverride,
-		Digest: override.Digest,
-		Ref:    override.Key,
-		Path:   override.Path,
-	})
+	if override != nil {
+		sources = append(sources, db.ConfigSource{
+			Kind:   db.ConfigSourceGlobalOverride,
+			Digest: override.Digest,
+			Ref:    override.Key,
+			Path:   override.Path,
+		})
+	}
 	return effective, sources
 }
 

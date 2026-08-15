@@ -175,7 +175,7 @@ review:
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "main", launchHead, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", launchHead, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ review:
 	}
 }
 
-func TestStartRunPersistsResolvedRoutingWithoutPublicConfigProvenance(t *testing.T) {
+func TestStartRunPersistsResolvedPolicyAndContributingSources(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
 	agentDir := t.TempDir()
 	codexBin := writeRunnableMockAgent(t, agentDir, "codex")
@@ -270,8 +270,17 @@ review:
 	if run.ResolvedAgentRouting == nil || strings.TrimSpace(*run.ResolvedAgentRouting) == "" {
 		t.Fatal("run did not persist resolved agent routing")
 	}
-	if len(run.ConfigSources) != 0 {
-		t.Fatalf("ordinary run config sources = %#v, want unchanged empty public provenance", run.ConfigSources)
+	if run.ResolvedPolicy == nil || strings.TrimSpace(*run.ResolvedPolicy) == "" || run.ResolvedPolicyDigest == nil || strings.TrimSpace(*run.ResolvedPolicyDigest) == "" {
+		t.Fatal("run did not persist resolved policy and digest")
+	}
+	if _, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest); err != nil || legacy {
+		t.Fatalf("persisted resolved policy = legacy %v error %v", legacy, err)
+	}
+	if got := configSourceKinds(run.ConfigSources); got != "global,default" {
+		t.Fatalf("ordinary run config sources = %q, want global,default", got)
+	}
+	if strings.Contains(*run.ResolvedPolicy, codexBin) || strings.Contains(*run.ResolvedPolicy, claudeBin) {
+		t.Fatalf("resolved policy leaked private agent paths: %s", *run.ResolvedPolicy)
 	}
 }
 

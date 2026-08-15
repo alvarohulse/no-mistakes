@@ -178,6 +178,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+	if err := validateResolvedPolicy(cfg, run, execSteps); err != nil {
+		return nil, err
+	}
 	agents, err := newPipelineAgentsWithEvidenceRoot(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
 	if err != nil {
 		return nil, err
@@ -233,6 +236,34 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	override := resolveGlobalOverride(globalInput, repo)
 	if err := validateRecoveredGlobalOverride(run.ConfigSources, override); err != nil {
 		return nil, err
+	}
+	if run.ResolvedPolicy != nil || run.ResolvedPolicyDigest != nil {
+		resolvedPolicy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+		if err != nil {
+			return nil, err
+		} else if legacy {
+			return nil, fmt.Errorf("resolved policy recovery state is inconsistent")
+		}
+		cfg, err := loadRecordedRunConfig(ctx, run, workDir, override)
+		if err != nil {
+			return nil, err
+		}
+		cfg.TrustedConfigSHA = resolvedPolicy.TrustedConfigSHA
+		if cfg.Eval.CaptureProvenance {
+			replayConfig, err := config.MarshalEvalReplayConfig(cfg)
+			if err != nil {
+				return nil, err
+			}
+			cfg.ReplayConfigJSON = replayConfig
+			cfg.CaptureEvalProvenance = true
+		}
+		if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+			return nil, err
+		}
+		if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
+			return nil, err
+		}
+		return cfg, nil
 	}
 	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceGlobalOverride) {
 		cfg, err := loadRecordedRunConfig(ctx, run, workDir, override)
@@ -1246,6 +1277,22 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	run.ResolvedAgentRouting = &resolvedRouting
 
 	execSteps := m.steps()
+	resolvedPolicy, resolvedPolicyDigest, err := marshalResolvedPolicy(cfg, configSources, execSteps, skipSteps, resolvedRefreshStrategy, steps.IsDemoMode())
+	if err != nil {
+		_ = agents.Close()
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("resolve_policy")
+		return "", err
+	}
+	if err := m.db.UpdateRunResolvedPolicy(run.ID, resolvedPolicy, resolvedPolicyDigest); err != nil {
+		_ = agents.Close()
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_resolved_policy")
+		return "", err
+	}
+	run.ResolvedPolicy = &resolvedPolicy
+	run.ResolvedPolicyDigest = &resolvedPolicyDigest
+
 	telemetry.Track("run", telemetry.Fields{
 		"action":      "started",
 		"trigger":     trigger,

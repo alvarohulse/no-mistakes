@@ -280,6 +280,33 @@ func TestEffectiveRepoConfigSourcesIncludeOnlyContributingCommittedInputs(t *tes
 	}
 }
 
+func TestEffectiveRepoConfigSourcesPersistOrdinaryContributingInputs(t *testing.T) {
+	globalConfig := config.DefaultGlobalConfig()
+	globalConfig.Agent = types.AgentClaude
+	global := &globalConfigInput{
+		Config: globalConfig,
+		Source: &db.ConfigSource{Kind: db.ConfigSourceGlobal, Digest: "global", Path: "/private/global.yaml"},
+	}
+	pushedConfig, err := config.LoadRepoFromBytes([]byte("ignore_patterns: [vendor/**]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedConfig, err := config.LoadRepoFromBytes([]byte("commands:\n  test: trusted-test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := repoConfigInputFromBytes(pushedConfig, []byte("pushed"), db.ConfigSourceBranch, "head")
+	trusted := repoConfigInputFromBytes(trustedConfig, []byte("trusted"), db.ConfigSourceDefault, "main")
+
+	effective, sources := effectiveRepoConfigAndSources(global, pushed, trusted, nil)
+	if effective.Commands.Test != "trusted-test" || !reflect.DeepEqual(effective.IgnorePatterns, []string{"vendor/**"}) {
+		t.Fatalf("effective config = %#v", effective)
+	}
+	if kinds := configSourceKinds(sources); kinds != "global,branch,default" {
+		t.Fatalf("config source kinds = %q, want global,branch,default", kinds)
+	}
+}
+
 func TestEffectiveRepoConfigSourcesDoNotInventDigestForBuiltInGlobalDefaults(t *testing.T) {
 	overrideConfig, err := config.LoadRepoFromBytes([]byte("commands:\n  test: machine-test\n"))
 	if err != nil {
@@ -334,7 +361,7 @@ func TestRecoveredGlobalOverrideRefusesChangedMissingOrNewSource(t *testing.T) {
 func TestLoadRecoveredConfigRefusesRetiredMachineLocalSource(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
 	repo, head := setupTestGitRepo(t, p, database, "machine-source-recovery")
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +394,7 @@ func TestLoadRecoveredConfigRefusesGlobalOverrideDigestDrift(t *testing.T) {
 	if override == nil {
 		t.Fatal("override did not resolve at launch")
 	}
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +437,7 @@ func TestLoadRecoveredConfigRefusesGlobalConfigDigestDrift(t *testing.T) {
 	if override == nil {
 		t.Fatal("override did not resolve at launch")
 	}
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +494,7 @@ func TestLoadRecoveredConfigUsesLaunchRefsAfterCommittedConfigAdvances(t *testin
 	pushed := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceBranch, launchHead)
 	trusted := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceDefault, launchHead)
 	_, sources := effectiveRepoConfigAndSources(globalInput, pushed, trusted, override)
-	run, err := database.InsertRun(repo.ID, "main", launchHead, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", launchHead, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
