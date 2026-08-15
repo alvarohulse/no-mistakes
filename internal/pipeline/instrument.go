@@ -21,10 +21,11 @@ import (
 // best-effort: a failed insert never fails the invocation, and no
 // per-invocation record leaves the machine.
 type perfRecordingAgent struct {
-	inner    agent.Agent
-	db       *db.DB
-	runID    string
-	stepName types.StepName
+	inner               agent.Agent
+	db                  *db.DB
+	runID               string
+	stepName            types.StepName
+	reviewCandidatePool []db.ReviewCandidateReceipt
 	// round returns the 1-based round the current invocation belongs to.
 	round func() int
 }
@@ -79,18 +80,19 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 
 	sessionKey := invocationSessionKey(opts, result)
 	inv := db.AgentInvocation{
-		RunID:          a.runID,
-		StepName:       string(a.stepName),
-		Round:          a.round(),
-		Purpose:        purpose,
-		Agent:          agentName,
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
-		SessionMode:    invocationSessionMode(opts),
-		SessionKey:     sessionKey,
-		StartedAt:      startedAt.Unix(),
-		CompletedAt:    completedAt.Unix(),
-		DurationMS:     completedAt.Sub(startedAt).Milliseconds(),
-		ExitStatus:     "ok",
+		RunID:               a.runID,
+		StepName:            string(a.stepName),
+		Round:               a.round(),
+		Purpose:             purpose,
+		Agent:               agentName,
+		InvocationMode:      types.AgentInvocationModeHarnessCLI,
+		SessionMode:         invocationSessionMode(opts),
+		SessionKey:          sessionKey,
+		StartedAt:           startedAt.Unix(),
+		CompletedAt:         completedAt.Unix(),
+		DurationMS:          completedAt.Sub(startedAt).Milliseconds(),
+		ExitStatus:          "ok",
+		ReviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), a.reviewCandidatePool...),
 	}
 	configuredModel := agent.ConfiguredModel(a.inner)
 	inv.Model = configuredModel.Name

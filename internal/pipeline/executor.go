@@ -51,7 +51,8 @@ type Executor struct {
 	steps  []Step
 	skips  map[types.StepName]bool
 
-	onEvent EventFunc
+	onEvent               EventFunc
+	reviewCandidatePicker reviewCandidatePicker
 
 	// sessions manages this run's durable review-loop agent sessions.
 	sessions        *RunSessions
@@ -110,6 +111,7 @@ func NewExecutorWithAgentRoutes(database *db.DB, p *paths.Paths, cfg *config.Con
 		approvalCh:            make(chan approvalResponse, 1),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
+		reviewCandidatePicker: secureReviewCandidatePicker,
 	}
 }
 
@@ -784,7 +786,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	instrumentAgent := func(inner agent.Agent) agent.Agent {
+	instrumentAgent := func(inner agent.Agent, reviewCandidatePool []db.ReviewCandidateReceipt) agent.Agent {
 		if inner == nil {
 			return nil
 		}
@@ -792,17 +794,30 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		inner = &gateStepBoundaryAgent{inner: inner, phase: stepName}
 		inner = &lifecycleAgent{inner: inner, onLifecycle: onAgentLifecycle}
 		return &perfRecordingAgent{
-			inner:    inner,
-			db:       e.db,
-			runID:    run.ID,
-			stepName: stepName,
-			round:    func() int { return roundNum + 1 },
+			inner:               inner,
+			db:                  e.db,
+			runID:               run.ID,
+			stepName:            stepName,
+			round:               func() int { return roundNum + 1 },
+			reviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), reviewCandidatePool...),
 		}
 	}
-	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName))
+	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName), nil)
+	reviewer := stepAgent
 	var reviewAdversary agent.Agent
 	if stepName == types.StepReview {
-		reviewAdversary = instrumentAgent(e.agents.AdversaryForReview())
+		if len(e.agents.ReviewCandidates) > 0 {
+			if e.config == nil || len(e.config.ReviewCandidates) != len(e.agents.ReviewCandidates) {
+				return false, fmt.Errorf("resolved review candidate routes do not match the policy pool")
+			}
+			receipts := reviewCandidateReceipts(e.config.ReviewCandidates)
+			candidates := make([]agent.Agent, 0, len(e.agents.ReviewCandidates))
+			for _, candidate := range e.agents.ReviewCandidates {
+				candidates = append(candidates, instrumentAgent(candidate, receipts))
+			}
+			reviewer = newReviewPoolAgent(candidates, e.reviewCandidatePicker)
+		}
+		reviewAdversary = instrumentAgent(e.agents.AdversaryForReview(), nil)
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
@@ -821,6 +836,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:             repo,
 		WorkDir:          workDir,
 		Agent:            stepAgent,
+		Reviewer:         reviewer,
 		ReviewAdversary:  reviewAdversary,
 		Config:           e.config,
 		DB:               e.db,

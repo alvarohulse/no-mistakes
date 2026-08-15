@@ -89,6 +89,7 @@ const (
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
 	SourceYAML              []byte              `yaml:"-"`
+	Managed                 bool                `yaml:"managed"`
 	Agent                   types.AgentName     `yaml:"agent"`
 	Agents                  []types.AgentName   `yaml:"-"`
 	ACPXPath                string              `yaml:"acpx_path"`
@@ -141,6 +142,7 @@ type GlobalConfig struct {
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
 type globalConfigRaw struct {
+	Managed                 *bool                  `yaml:"managed"`
 	Agent                   agentList              `yaml:"agent"`
 	ACPXPath                string                 `yaml:"acpx_path"`
 	ACPRegistryOverrides    map[string]string      `yaml:"acp_registry_overrides"`
@@ -368,11 +370,56 @@ func validVendorIdentity(vendor string) bool {
 	return vendor != ""
 }
 
-// ReviewRaw adds the high-risk adversarial route to the ordinary Review
-// route. AdversaryAgents is an ordered availability fallback list; it is never
-// overloaded as the primary review route.
+// ReviewCandidate is one explicit full-review route. Candidates are selected
+// uniformly after unavailable optional routes have been removed; they are not
+// an ordered availability fallback list.
+type ReviewCandidate struct {
+	Agent    types.AgentName `yaml:"agent" json:"agent"`
+	Model    ModelRoute      `yaml:"model" json:"model"`
+	Optional bool            `yaml:"optional,omitempty" json:"optional,omitempty"`
+}
+
+func (c *ReviewCandidate) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent    string     `yaml:"agent"`
+		Model    ModelRoute `yaml:"model"`
+		Optional bool       `yaml:"optional"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	raw.Agent = strings.TrimSpace(raw.Agent)
+	candidate := ReviewCandidate{Agent: types.AgentName(raw.Agent), Model: raw.Model, Optional: raw.Optional}
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	*c = candidate
+	return nil
+}
+
+// Validate checks the static, privacy-safe identity of one Review candidate.
+// Runtime availability is resolved immediately before run creation.
+func (c ReviewCandidate) Validate() error {
+	if c.Agent == "" {
+		return fmt.Errorf("review candidate agent is required")
+	}
+	if c.Agent == types.AgentAuto {
+		return fmt.Errorf("review candidate agent must name an explicit harness, not auto")
+	}
+	if c.Model == (ModelRoute{}) {
+		return fmt.Errorf("review candidate model is required")
+	}
+	if err := c.Model.Validate(); err != nil {
+		return fmt.Errorf("review candidate model: %w", err)
+	}
+	return nil
+}
+
+// ReviewRaw adds the randomized full-review pool to the ordinary Review route.
+// The embedded route remains the stable fixer route.
 type ReviewRaw struct {
 	StepAgentRaw
+	Candidates       []ReviewCandidate `yaml:"candidates"`
 	AdversaryAgent   types.AgentName   `yaml:"-"`
 	AdversaryAgents  []types.AgentName `yaml:"-"`
 	AdversaryModel   ModelRoute        `yaml:"adversary_model"`
@@ -383,12 +430,14 @@ func (c ReviewRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent            agentList         `yaml:"agent,omitempty"`
 		Model            ModelRoute        `yaml:"model,omitempty"`
+		Candidates       []ReviewCandidate `yaml:"candidates,omitempty"`
 		AdversaryAgent   agentList         `yaml:"adversary_agent,omitempty"`
 		AdversaryModel   ModelRoute        `yaml:"adversary_model,omitempty"`
 		PathInstructions []PathInstruction `yaml:"path_instructions,omitempty"`
 	}{
 		Agent:            agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:            c.Model,
+		Candidates:       append([]ReviewCandidate(nil), c.Candidates...),
 		AdversaryAgent:   agentList(stepAgentNames(c.AdversaryAgent, c.AdversaryAgents)),
 		AdversaryModel:   c.AdversaryModel,
 		PathInstructions: c.PathInstructions,
@@ -399,6 +448,7 @@ func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent            agentList         `yaml:"agent"`
 		Model            ModelRoute        `yaml:"model"`
+		Candidates       []ReviewCandidate `yaml:"candidates"`
 		AdversaryAgent   agentList         `yaml:"adversary_agent"`
 		AdversaryModel   ModelRoute        `yaml:"adversary_model"`
 		PathInstructions []PathInstruction `yaml:"path_instructions"`
@@ -409,6 +459,7 @@ func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Candidates = append([]ReviewCandidate(nil), raw.Candidates...)
 	c.AdversaryAgent = firstAgent(raw.AdversaryAgent)
 	c.AdversaryAgents = copyAgents(raw.AdversaryAgent)
 	c.AdversaryModel = raw.AdversaryModel
@@ -788,6 +839,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("review.model") {
 		out.Review.Model = override.Review.Model
 	}
+	if override.has("review.candidates") {
+		out.Review.Candidates = copyReviewCandidates(override.Review.Candidates)
+	}
 	if override.has("review.adversary_agent") {
 		out.Review.AdversaryAgent = override.Review.AdversaryAgent
 		out.Review.AdversaryAgents = copyAgents(override.Review.AdversaryAgents)
@@ -1025,6 +1079,15 @@ func copyStrings(values []string) []string {
 	return out
 }
 
+func copyReviewCandidates(candidates []ReviewCandidate) []ReviewCandidate {
+	if candidates == nil {
+		return nil
+	}
+	out := make([]ReviewCandidate, len(candidates))
+	copy(out, candidates)
+	return out
+}
+
 func repoConfigPresence(value *yaml.Node) map[string]bool {
 	present := make(map[string]bool)
 	collectRepoConfigPresence(value, "", present)
@@ -1211,10 +1274,12 @@ type Config struct {
 	ReplayConfigJSON        []byte
 	TrustedConfigSHA        string
 	CaptureEvalProvenance   bool
+	Managed                 bool
 	Agent                   types.AgentName
 	Agents                  []types.AgentName
 	StepAgents              map[types.StepName][]types.AgentName
 	StepModels              map[types.StepName]ModelRoute
+	ReviewCandidates        []ReviewCandidate
 	ReviewAdversaryAgents   []types.AgentName
 	ReviewAdversaryModel    ModelRoute
 	ACPXPath                string
@@ -2120,6 +2185,35 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 	return false, fmt.Errorf("probe rovodev support via %q: %w", bin, err)
 }
 
+const reviewCandidateModelProbeTimeout = 5 * time.Second
+
+// loadReviewCandidateModelCatalog reads model catalogs only where the harness
+// exposes a stable local listing command. A nil catalog means the adapter has
+// no probeable catalog and its compatibility contract is authoritative.
+var loadReviewCandidateModelCatalog = func(ctx context.Context, name types.AgentName, bin string) (map[string]bool, error) {
+	if name != types.AgentCursor {
+		return nil, nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, reviewCandidateModelProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, bin, "models")
+	output, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("probe cursor model catalog timed out")
+		}
+		return nil, fmt.Errorf("probe cursor model catalog: %w", err)
+	}
+	models := make(map[string]bool)
+	for _, line := range strings.Split(string(output), "\n") {
+		modelName, _, ok := strings.Cut(strings.TrimSpace(line), " - ")
+		if ok && modelName != "" {
+			models[modelName] = true
+		}
+	}
+	return models, nil
+}
+
 // ResolveAgent resolves configured agent names to available agents. A single
 // explicit agent must be runnable; auto probes native agents, then registered ACP fallbacks;
 // an ordered list is filtered to available agents, deduplicated by resolved
@@ -2128,6 +2222,12 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
 	if c.StepAgents == nil {
 		c.StepAgents = make(map[types.StepName][]types.AgentName)
+	}
+	if c.StepModels == nil {
+		c.StepModels = make(map[types.StepName]ModelRoute)
+	}
+	if err := c.validateManagedRoutes(); err != nil {
+		return err
 	}
 	defaultCandidates := c.configuredAgents()
 	resolved, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
@@ -2164,6 +2264,123 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 	if err := c.resolveReviewAdversary(ctx, lookPath); err != nil {
 		return err
 	}
+	if err := c.resolveReviewCandidates(ctx, lookPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Config) validateManagedRoutes() error {
+	if !c.Managed {
+		return nil
+	}
+	if err := c.ValidateManagedStepPlan(types.AllSteps()); err != nil {
+		return err
+	}
+	if len(c.ReviewCandidates) == 0 {
+		return fmt.Errorf("managed configuration requires a non-empty review candidate pool")
+	}
+	return nil
+}
+
+// ValidateManagedStepPlan rejects an executable step that has not been
+// deliberately classified and routed. The daemon applies it to its actual
+// step factory output so a newly added step cannot inherit the default agent
+// merely because types.AllSteps has not been updated with it yet.
+func (c *Config) ValidateManagedStepPlan(steps []types.StepName) error {
+	if !c.Managed {
+		return nil
+	}
+	for _, step := range steps {
+		invokesModel, classified := managedStepModelClassification(step)
+		if !classified {
+			return fmt.Errorf("managed configuration has no model-routing classification for step %q", step)
+		}
+		if !invokesModel {
+			continue
+		}
+		agents := c.StepAgents[step]
+		if len(agents) == 0 {
+			return fmt.Errorf("managed configuration requires an explicit %s agent route", step)
+		}
+		for _, name := range agents {
+			if name == "" || name == types.AgentAuto {
+				return fmt.Errorf("managed configuration requires a concrete %s agent route, got %q", step, name)
+			}
+		}
+		if c.StepModels[step] == (ModelRoute{}) {
+			return fmt.Errorf("managed configuration requires an explicit %s model route", step)
+		}
+	}
+	return nil
+}
+
+func managedStepModelClassification(step types.StepName) (bool, bool) {
+	switch step.Canonical() {
+	case types.StepIntent, types.StepRefresh, types.StepReview, types.StepBuild, types.StepTest, types.StepDocument, types.StepLint, types.StepPR, types.StepCI:
+		return true, true
+	case types.StepPush:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(string) (string, error)) error {
+	if len(c.ReviewCandidates) == 0 {
+		return nil
+	}
+	resolvedCandidates := make([]ReviewCandidate, 0, len(c.ReviewCandidates))
+	seen := make(map[string]bool, len(c.ReviewCandidates))
+	modelCatalogs := make(map[string]map[string]bool)
+	for i, candidate := range c.ReviewCandidates {
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("resolve review candidate %d: %w", i+1, err)
+		}
+		if err := validateAgentModelCompatibility(candidate.Agent, candidate.Model); err != nil {
+			return fmt.Errorf("resolve review candidate %d: %w", i+1, err)
+		}
+		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate.Agent, lookPath)
+		if err != nil {
+			return fmt.Errorf("resolve review candidate %d: %w", i+1, err)
+		}
+		if !ok {
+			if candidate.Optional {
+				continue
+			}
+			return fmt.Errorf("required review candidate %s/%s is unavailable: %w", candidate.Agent, candidate.Model.Name, noRunnableAgentError([]types.AgentName{candidate.Agent}, []string{probe}))
+		}
+		bin, err := lookPath(c.AgentPathFor(resolved))
+		if err != nil {
+			return fmt.Errorf("resolve review candidate %d executable: %w", i+1, err)
+		}
+		catalogKey := string(resolved) + "\x00" + bin
+		modelCatalog, probed := modelCatalogs[catalogKey]
+		if !probed {
+			modelCatalog, err = loadReviewCandidateModelCatalog(ctx, resolved, bin)
+			if err != nil {
+				return fmt.Errorf("probe review candidate %s/%s: %w", candidate.Agent, candidate.Model.Name, err)
+			}
+			modelCatalogs[catalogKey] = modelCatalog
+		}
+		if modelCatalog != nil && !modelCatalog[candidate.Model.Name] {
+			if candidate.Optional {
+				continue
+			}
+			return fmt.Errorf("required review candidate %s/%s is unavailable: model is not present in the harness catalog", candidate.Agent, candidate.Model.Name)
+		}
+		candidate.Agent = resolved
+		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor
+		if seen[key] {
+			return fmt.Errorf("resolved review candidate %d duplicates the %s/%s route", i+1, candidate.Agent, candidate.Model.Name)
+		}
+		seen[key] = true
+		resolvedCandidates = append(resolvedCandidates, candidate)
+	}
+	if len(resolvedCandidates) == 0 {
+		return fmt.Errorf("no usable review candidates remain after removing unavailable optional routes")
+	}
+	c.ReviewCandidates = resolvedCandidates
 	return nil
 }
 
@@ -2756,6 +2973,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateTestRaw(raw.Test); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateReviewRaw(raw.Review); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 	if err := validateEvalRaw(raw.Eval); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2763,6 +2983,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
 		cfg.Agent = firstAgent(cfg.Agents)
+	}
+	if raw.Managed != nil {
+		cfg.Managed = *raw.Managed
 	}
 	if raw.ACPXPath != "" {
 		cfg.ACPXPath = raw.ACPXPath
@@ -2954,6 +3177,17 @@ func finalizeRepoConfig(cfg *RepoConfig) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	seenCandidates := make(map[string]bool, len(review.Candidates))
+	for i, candidate := range review.Candidates {
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("review.candidates[%d]: %w", i, err)
+		}
+		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor
+		if seenCandidates[key] {
+			return fmt.Errorf("review.candidates[%d] duplicates the %s/%s route", i, candidate.Agent, candidate.Model.Name)
+		}
+		seenCandidates[key] = true
+	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
 		return fmt.Errorf("review.path_instructions has %d entries, at most %d are allowed", len(review.PathInstructions), MaxReviewPathInstructions)
 	}
@@ -3124,6 +3358,7 @@ func copyStepAgentRaw(src StepAgentRaw) StepAgentRaw {
 func copyReviewRaw(src ReviewRaw) ReviewRaw {
 	return ReviewRaw{
 		StepAgentRaw:     copyStepAgentRaw(src.StepAgentRaw),
+		Candidates:       copyReviewCandidates(src.Candidates),
 		AdversaryAgent:   src.AdversaryAgent,
 		AdversaryAgents:  copyAgents(src.AdversaryAgents),
 		AdversaryModel:   src.AdversaryModel,
@@ -3460,10 +3695,12 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 
 	cfg := &Config{
+		Managed:                 global.Managed,
 		Agent:                   global.Agent,
 		Agents:                  copyAgents(global.Agents),
 		StepAgents:              global.configuredStepAgents(),
 		StepModels:              global.configuredStepModels(),
+		ReviewCandidates:        copyReviewCandidates(global.Review.Candidates),
 		ReviewAdversaryAgents:   copyAgents(global.Review.AdversaryAgents),
 		ReviewAdversaryModel:    global.Review.AdversaryModel,
 		ACPXPath:                global.ACPXPath,
@@ -3506,6 +3743,9 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 	for step, model := range repo.ConfiguredStepModels() {
 		cfg.StepModels[step] = model
+	}
+	if repo.Review.Candidates != nil {
+		cfg.ReviewCandidates = copyReviewCandidates(repo.Review.Candidates)
 	}
 	if len(repo.Review.AdversaryAgents) > 0 {
 		cfg.ReviewAdversaryAgents = copyAgents(repo.Review.AdversaryAgents)

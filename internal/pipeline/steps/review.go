@@ -191,6 +191,7 @@ Context:
 - ignore patterns: %s
 
 Task:
+- Apply the installed /review-changes contract, including its normal delegated review fan-out, while returning this step's required structured schema.
 - Read the relevant history and diff yourself.
 - Focus findings on risks introduced by changed code, but inspect surrounding code, call sites, shared helpers, tests, and invariants when needed to understand root cause.
 - Determine from the stated intent and relevant evidence whether a bug-fix change claims a durable fix or explicitly authorized short-term containment.
@@ -250,7 +251,11 @@ Risk assessment (after listing all findings):
 	// cross-round context a rereview legitimately needs travels in the
 	// explicit sanitized round-history section above; only the fixer keeps a
 	// durable session (executeFixMode), because it certifies nothing.
-	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+	reviewer := sctx.Reviewer
+	if reviewer == nil {
+		reviewer = sctx.Agent
+	}
+	result, err := reviewer.Run(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		Env:        sctx.Env,

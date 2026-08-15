@@ -24,11 +24,17 @@ type sessionMockAgent struct {
 	mu     sync.Mutex
 	calls  []agent.RunOpts
 	nextID int
+	name   string
 	// respond picks the reply for one invocation (called under the lock).
 	respond func(opts agent.RunOpts) *agent.Result
 }
 
-func (m *sessionMockAgent) Name() string { return "session-mock" }
+func (m *sessionMockAgent) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "session-mock"
+}
 
 func (m *sessionMockAgent) SupportsSessionResume() bool { return true }
 
@@ -183,6 +189,9 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		if !strings.Contains(call.Prompt, "Review the code changes") {
 			t.Fatalf("review round %d prompt is not a full review prompt:\n%s", i+1, call.Prompt)
 		}
+		if !strings.Contains(call.Prompt, "/review-changes") {
+			t.Fatalf("review round %d prompt lost the review-changes contract:\n%s", i+1, call.Prompt)
+		}
 	}
 
 	// The persisted resume metadata is the minimum, and only the fixer role
@@ -196,6 +205,102 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	}
 	if sessions[0].Role != string(pipeline.SessionRoleFixer) || sessions[0].SessionID == "" || sessions[0].Agent != "session-mock" {
 		t.Fatalf("unexpected persisted session: %+v", sessions[0])
+	}
+}
+
+func TestReviewLoop_SelectsFromPoolForEveryColdReviewAndKeepsFixerStable(t *testing.T) {
+	workDir, baseSHA, headSHA := setupGitRepo(t)
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(workDir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRound := 0
+	reviewerResponse := func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review" {
+			t.Fatalf("review candidate received purpose %q", opts.Purpose)
+		}
+		reviewRound++
+		if reviewRound == 1 {
+			return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"issue","risk_level":"medium","risk_rationale":"bug"}`)}
+		}
+		return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
+	}
+	claude := &sessionMockAgent{name: "claude", respond: reviewerResponse}
+	codex := &sessionMockAgent{name: "codex", respond: reviewerResponse}
+	fixer := &sessionMockAgent{name: "cursor", respond: func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review-fix" {
+			t.Fatalf("fixer received purpose %q", opts.Purpose)
+		}
+		return &agent.Result{Output: []byte(`{"summary":"fix bug"}`)}
+	}}
+	candidates := []config.ReviewCandidate{
+		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+	}
+	cfg := &config.Config{Agent: types.AgentCursor, AutoFix: config.AutoFix{Review: 3}, SessionReuse: true, ReviewCandidates: candidates}
+	exec := pipeline.NewExecutorWithAgentRoutes(
+		database,
+		paths.WithRoot(t.TempDir()),
+		cfg,
+		pipeline.AgentRoutes{
+			Default:          fixer,
+			ByStep:           map[types.StepName]agent.Agent{types.StepReview: fixer},
+			ReviewCandidates: []agent.Agent{claude, codex},
+		},
+		[]pipeline.Step{&ReviewStep{}},
+		nil,
+	)
+	exec.SetReviewCandidateSeed(7)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	reviewerCalls := append(claude.snapshot(), codex.snapshot()...)
+	if len(reviewerCalls) != 2 {
+		t.Fatalf("reviewer calls = %d, want initial review and rereview", len(reviewerCalls))
+	}
+	for _, call := range reviewerCalls {
+		if call.Session != nil {
+			t.Fatalf("full review carried a session: %+v", call.Session)
+		}
+	}
+	fixerCalls := fixer.snapshot()
+	if len(fixerCalls) != 1 || fixerCalls[0].Purpose != "review-fix" || fixerCalls[0].Session == nil || fixerCalls[0].Session.ID != "" {
+		t.Fatalf("fixer calls = %+v, want one stable fixer-session start", fixerCalls)
+	}
+
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewReceipts := 0
+	fixReceipts := 0
+	for _, invocation := range invocations {
+		switch invocation.Purpose {
+		case "review":
+			reviewReceipts++
+			if len(invocation.ReviewCandidatePool) != 2 || invocation.SessionMode != db.InvocationModeCold {
+				t.Fatalf("review receipt = %+v", invocation)
+			}
+		case "review-fix":
+			fixReceipts++
+			if invocation.Agent != "cursor" || invocation.ReviewCandidatePool != nil {
+				t.Fatalf("fix receipt = %+v", invocation)
+			}
+		}
+	}
+	if reviewReceipts != 2 || fixReceipts != 1 {
+		t.Fatalf("review/fix receipts = %d/%d, want 2/1", reviewReceipts, fixReceipts)
 	}
 }
 

@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 1
+	resolvedPolicyVersion     = 2
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
 
 type resolvedPolicy struct {
 	Version                int                    `json:"version"`
+	Managed                bool                   `json:"managed"`
 	Binary                 resolvedPolicyBinary   `json:"binary"`
 	Steps                  []resolvedPolicyStep   `json:"steps"`
 	Commands               resolvedPolicyCommands `json:"commands"`
@@ -267,6 +268,7 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 	}
 	policy := &resolvedPolicy{
 		Version: resolvedPolicyVersion,
+		Managed: cfg.Managed,
 		Binary:  resolvedPolicyBinary{Version: buildinfo.CurrentVersion(), BuildSHA: buildinfo.Commit},
 		Steps:   resolvedSteps,
 		Commands: resolvedPolicyCommands{
@@ -319,7 +321,7 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 }
 
 func (p *resolvedPolicy) validate() error {
-	if p.Version != resolvedPolicyVersion {
+	if p.Version != 1 && p.Version != resolvedPolicyVersion {
 		return fmt.Errorf("resolved policy version %d is unsupported", p.Version)
 	}
 	if strings.TrimSpace(p.Binary.Version) == "" || strings.TrimSpace(p.Binary.BuildSHA) == "" {

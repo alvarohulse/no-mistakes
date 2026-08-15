@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,11 +15,14 @@ import (
 
 type routedTestAgent struct {
 	name     string
+	model    agent.ModelIdentity
 	calls    int
 	lastOpts agent.RunOpts
 }
 
 func (a *routedTestAgent) Name() string { return a.name }
+
+func (a *routedTestAgent) ConfiguredModel() agent.ModelIdentity { return a.model }
 
 func (a *routedTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	a.calls++
@@ -129,6 +134,92 @@ func TestExecutor_RoutesEachStepAndAttributesActualAgent(t *testing.T) {
 	}
 	if invocations[1].StepName != string(types.StepTest) || invocations[1].Agent != "pi" {
 		t.Fatalf("test invocation = %+v", invocations[1])
+	}
+}
+
+func TestExecutor_ReviewPoolSelectsPerColdReviewAndPersistsReceipts(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	fixer := &routedTestAgent{name: "cursor", model: agent.ModelIdentity{Name: "gpt-5.6-luna-medium", Vendor: "openai"}}
+	claude := &routedTestAgent{name: "claude", model: agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}}
+	codex := &routedTestAgent{name: "codex", model: agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}}
+	const reviewCount = 6
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if sctx.Reviewer == nil {
+				t.Fatal("review candidate pool was not attached")
+			}
+			for i := 0; i < reviewCount; i++ {
+				if _, err := sctx.Reviewer.Run(sctx.Ctx, agent.RunOpts{Purpose: "review"}); err != nil {
+					return nil, err
+				}
+			}
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Purpose: "review-fix"}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	candidates := []config.ReviewCandidate{
+		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+	}
+	exec := NewExecutorWithAgentRoutes(
+		database,
+		p,
+		&config.Config{ReviewCandidates: candidates},
+		AgentRoutes{
+			Default:          fixer,
+			ByStep:           map[types.StepName]agent.Agent{types.StepReview: fixer},
+			ReviewCandidates: []agent.Agent{claude, codex},
+		},
+		[]Step{step},
+		nil,
+	)
+	const seed = int64(42)
+	exec.SetReviewCandidateSeed(seed)
+
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	expected := [2]int{}
+	random := rand.New(rand.NewSource(seed))
+	for i := 0; i < reviewCount; i++ {
+		expected[random.Intn(2)]++
+	}
+	if claude.calls != expected[0] || codex.calls != expected[1] || fixer.calls != 1 {
+		t.Fatalf("calls claude/codex/fixer = %d/%d/%d, want %d/%d/1", claude.calls, codex.calls, fixer.calls, expected[0], expected[1])
+	}
+
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPool := []db.ReviewCandidateReceipt{
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
+		{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+	}
+	reviews := 0
+	fixes := 0
+	for _, invocation := range invocations {
+		switch invocation.Purpose {
+		case "review":
+			reviews++
+			if invocation.SessionMode != db.InvocationModeCold || !reflect.DeepEqual(invocation.ReviewCandidatePool, wantPool) {
+				t.Fatalf("review invocation = %+v, want cold invocation with complete pool", invocation)
+			}
+			if invocation.Agent != "claude" && invocation.Agent != "codex" {
+				t.Fatalf("selected review agent = %q", invocation.Agent)
+			}
+		case "review-fix":
+			fixes++
+			if invocation.Agent != "cursor" || invocation.ReviewCandidatePool != nil {
+				t.Fatalf("fix invocation = %+v, want stable cursor route without review pool", invocation)
+			}
+		}
+	}
+	if reviews != reviewCount || fixes != 1 {
+		t.Fatalf("review/fix receipts = %d/%d, want %d/1", reviews, fixes, reviewCount)
 	}
 }
 

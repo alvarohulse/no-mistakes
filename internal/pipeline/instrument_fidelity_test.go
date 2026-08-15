@@ -160,6 +160,9 @@ func TestPerfRecording_FailedInvocationRetainsConfiguredModelIdentity(t *testing
 		runID:    run.ID,
 		stepName: types.StepReview,
 		round:    func() int { return 1 },
+		reviewCandidatePool: []db.ReviewCandidateReceipt{
+			{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+		},
 	}
 
 	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err == nil {
@@ -174,6 +177,9 @@ func TestPerfRecording_FailedInvocationRetainsConfiguredModelIdentity(t *testing
 	}
 	if invs[0].Model != "gpt-5.6-sol" || invs[0].ModelProvider == nil || *invs[0].ModelProvider != "openai" {
 		t.Fatalf("failed invocation model/provider = %q/%v", invs[0].Model, invs[0].ModelProvider)
+	}
+	if len(invs[0].ReviewCandidatePool) != 1 || invs[0].ReviewCandidatePool[0].Agent != "codex" {
+		t.Fatalf("failed invocation review pool = %#v", invs[0].ReviewCandidatePool)
 	}
 }
 

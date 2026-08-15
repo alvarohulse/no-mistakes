@@ -45,8 +45,8 @@ func TestResolvedAgentRoutingSnapshotRestoresConcreteLaunchIdentity(t *testing.T
 	if !reflect.DeepEqual(changed.Agents, launch.Agents) || !reflect.DeepEqual(changed.StepAgents, launch.StepAgents) {
 		t.Fatalf("restored agents = %v/%v, want %v/%v", changed.Agents, changed.StepAgents, launch.Agents, launch.StepAgents)
 	}
-	if !reflect.DeepEqual(changed.StepModels, launch.StepModels) || !reflect.DeepEqual(changed.ReviewAdversaryAgents, launch.ReviewAdversaryAgents) || changed.ReviewAdversaryModel != launch.ReviewAdversaryModel {
-		t.Fatalf("restored model/adversary routing = models %v adversary %v/%+v", changed.StepModels, changed.ReviewAdversaryAgents, changed.ReviewAdversaryModel)
+	if !reflect.DeepEqual(changed.StepModels, launch.StepModels) || !reflect.DeepEqual(changed.ReviewCandidates, launch.ReviewCandidates) || !reflect.DeepEqual(changed.ReviewAdversaryAgents, launch.ReviewAdversaryAgents) || changed.ReviewAdversaryModel != launch.ReviewAdversaryModel {
+		t.Fatalf("restored model/review routing = models %v candidates %v adversary %v/%+v", changed.StepModels, changed.ReviewCandidates, changed.ReviewAdversaryAgents, changed.ReviewAdversaryModel)
 	}
 }
 
@@ -128,6 +128,19 @@ func TestRestoreResolvedAgentRoutingAcceptsParameterizedModelIdentity(t *testing
 	want := config.ModelRoute{Name: "openai/gpt-5.6?reasoning_effort=high", Vendor: "openai-compatible-v2"}
 	if got := cfg.StepModels[types.StepTest]; got != want {
 		t.Fatalf("restored model = %+v, want %+v", got, want)
+	}
+}
+
+func TestRestoreResolvedAgentRoutingRejectsInvalidReviewCandidatePool(t *testing.T) {
+	tests := []string{
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"","model":{"name":"gpt-5.6-sol","vendor":"openai"}}]}`,
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"codex","model":{"name":"","vendor":""}}]}`,
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"}},{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"},"optional":true}]}`,
+	}
+	for _, persisted := range tests {
+		if _, err := restoreResolvedAgentRouting(&config.Config{}, &persisted, false); err == nil {
+			t.Fatalf("restore accepted invalid review candidate pool: %s", persisted)
+		}
 	}
 }
 
@@ -295,6 +308,10 @@ func resolvedRoutingTestConfig() *config.Config {
 		StepModels: map[types.StepName]config.ModelRoute{
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepTest:   {Name: "google/gemini-3.5-pro", Vendor: "google"},
+		},
+		ReviewCandidates: []config.ReviewCandidate{
+			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
 		},
 		ReviewAdversaryAgents: []types.AgentName{types.AgentClaude},
 		ReviewAdversaryModel:  config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"},

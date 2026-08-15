@@ -12,7 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const resolvedAgentRoutingVersion = 1
+const resolvedAgentRoutingVersion = 2
 
 type resolvedAgentModel struct {
 	Name   string `json:"name"`
@@ -24,12 +24,19 @@ type resolvedAgentRoute struct {
 	Model  resolvedAgentModel `json:"model"`
 }
 
+type resolvedReviewCandidate struct {
+	Agent    types.AgentName    `json:"agent"`
+	Model    resolvedAgentModel `json:"model"`
+	Optional bool               `json:"optional,omitempty"`
+}
+
 type resolvedAgentRouting struct {
-	Version         int                                   `json:"version"`
-	Demo            bool                                  `json:"demo,omitempty"`
-	DefaultAgents   []types.AgentName                     `json:"default_agents"`
-	StepRoutes      map[types.StepName]resolvedAgentRoute `json:"step_routes"`
-	ReviewAdversary *resolvedAgentRoute                   `json:"review_adversary,omitempty"`
+	Version          int                                   `json:"version"`
+	Demo             bool                                  `json:"demo,omitempty"`
+	DefaultAgents    []types.AgentName                     `json:"default_agents"`
+	StepRoutes       map[types.StepName]resolvedAgentRoute `json:"step_routes"`
+	ReviewCandidates []resolvedReviewCandidate             `json:"review_candidates,omitempty"`
+	ReviewAdversary  *resolvedAgentRoute                   `json:"review_adversary,omitempty"`
 }
 
 func marshalResolvedAgentRouting(cfg *config.Config, demo bool) (string, error) {
@@ -67,6 +74,14 @@ func restoreResolvedAgentRouting(cfg *config.Config, persisted *string, demo boo
 		cfg.StepAgents[step] = append([]types.AgentName(nil), route.Agents...)
 		if route.Model.Name != "" {
 			cfg.StepModels[step] = config.ModelRoute{Name: route.Model.Name, Vendor: route.Model.Vendor}
+		}
+	}
+	cfg.ReviewCandidates = make([]config.ReviewCandidate, len(snapshot.ReviewCandidates))
+	for i, candidate := range snapshot.ReviewCandidates {
+		cfg.ReviewCandidates[i] = config.ReviewCandidate{
+			Agent:    candidate.Agent,
+			Model:    config.ModelRoute{Name: candidate.Model.Name, Vendor: candidate.Model.Vendor},
+			Optional: candidate.Optional,
 		}
 	}
 	cfg.ReviewAdversaryAgents = nil
@@ -148,6 +163,13 @@ func resolvedAgentRoutingFromConfig(cfg *config.Config, demo bool) (*resolvedAge
 			}
 		}
 	}
+	for _, candidate := range cfg.ReviewCandidates {
+		snapshot.ReviewCandidates = append(snapshot.ReviewCandidates, resolvedReviewCandidate{
+			Agent:    candidate.Agent,
+			Model:    resolvedAgentModel{Name: candidate.Model.Name, Vendor: candidate.Model.Vendor},
+			Optional: candidate.Optional,
+		})
+	}
 	if len(cfg.ReviewAdversaryAgents) > 0 || cfg.ReviewAdversaryModel.Name != "" {
 		snapshot.ReviewAdversary = &resolvedAgentRoute{
 			Agents: append([]types.AgentName(nil), cfg.ReviewAdversaryAgents...),
@@ -164,14 +186,14 @@ func resolvedAgentRoutingFromConfig(cfg *config.Config, demo bool) (*resolvedAge
 }
 
 func (r *resolvedAgentRouting) validate() error {
-	if r.Version != resolvedAgentRoutingVersion {
+	if r.Version != 1 && r.Version != resolvedAgentRoutingVersion {
 		return fmt.Errorf("resolved agent routing version %d is unsupported", r.Version)
 	}
 	if r.StepRoutes == nil {
 		return fmt.Errorf("resolved agent routing step routes are missing")
 	}
 	if r.Demo {
-		if len(r.DefaultAgents) > 0 || len(r.StepRoutes) > 0 || r.ReviewAdversary != nil {
+		if len(r.DefaultAgents) > 0 || len(r.StepRoutes) > 0 || len(r.ReviewCandidates) > 0 || r.ReviewAdversary != nil {
 			return fmt.Errorf("demo resolved agent routing contains executable routes")
 		}
 		return nil
@@ -189,6 +211,20 @@ func (r *resolvedAgentRouting) validate() error {
 		if err := validateResolvedModel(string(step), route.Model, false); err != nil {
 			return err
 		}
+	}
+	seenCandidates := make(map[string]bool, len(r.ReviewCandidates))
+	for i, candidate := range r.ReviewCandidates {
+		if err := validateResolvedAgents(fmt.Sprintf("review candidate %d", i+1), []types.AgentName{candidate.Agent}); err != nil {
+			return err
+		}
+		if err := validateResolvedModel(fmt.Sprintf("review candidate %d", i+1), candidate.Model, true); err != nil {
+			return err
+		}
+		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor
+		if seenCandidates[key] {
+			return fmt.Errorf("resolved review candidate pool contains duplicate %s/%s route", candidate.Agent, candidate.Model.Name)
+		}
+		seenCandidates[key] = true
 	}
 	if r.ReviewAdversary != nil {
 		if err := validateResolvedAgents("review adversary", r.ReviewAdversary.Agents); err != nil {

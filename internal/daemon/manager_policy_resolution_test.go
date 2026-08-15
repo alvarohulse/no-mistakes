@@ -162,6 +162,38 @@ func TestStartRunRejectsMalformedGlobalConfigBeforeCreatingRun(t *testing.T) {
 	assertPolicyResolutionFailureHasNoSideEffects(t, p, database, repo, marker, step, err, "load global config")
 }
 
+func TestStartRunRejectsIncompleteManagedRoutesBeforeCreatingRun(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database, repo, marker := newPolicyResolutionFixture(t, "incomplete-managed-routes")
+	if err := os.WriteFile(p.ConfigFile(), []byte("managed: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	_, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "incomplete managed routes", "", "", "")
+	assertPolicyResolutionFailureHasNoSideEffects(t, p, database, repo, marker, step, err, "explicit review agent route")
+}
+
+func TestStartRunRejectsUnclassifiedManagedStepBeforeCreatingRun(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database, repo, marker := newPolicyResolutionFixture(t, "unclassified-managed-step")
+	if err := os.WriteFile(p.ConfigFile(), []byte("managed: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: "new-model-step"}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	_, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "unclassified managed step", "", "", "")
+	assertPolicyResolutionFailureHasNoSideEffects(t, p, database, repo, marker, step, err, "classification")
+}
+
 func TestStartRunRejectsMissingTrustedCommitBeforeCreatingRun(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database, repo, marker := newPolicyResolutionFixture(t, "missing-trusted")

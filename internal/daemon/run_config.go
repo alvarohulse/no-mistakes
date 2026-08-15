@@ -146,6 +146,17 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		}
 	}
 	demo := steps.IsDemoMode()
+	execSteps := m.steps()
+	stepNames := make([]types.StepName, 0, len(execSteps))
+	for _, step := range execSteps {
+		if step == nil {
+			return nil, fmt.Errorf("resolve managed step plan: pipeline contains a nil step")
+		}
+		stepNames = append(stepNames, step.Name().Canonical())
+	}
+	if err := cfg.ValidateManagedStepPlan(stepNames); err != nil {
+		return nil, fmt.Errorf("resolve managed step plan: %w", err)
+	}
 	if !demo {
 		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
 			return nil, fmt.Errorf("resolve agent routes: %w", err)
@@ -155,7 +166,6 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	if err != nil {
 		return nil, err
 	}
-	execSteps := m.steps()
 	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
 	policy, err := resolvedPolicyFromConfig(cfg, sources, execSteps, skipped, resolvedRefreshStrategy, demo)
 	if err != nil {

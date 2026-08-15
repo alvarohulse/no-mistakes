@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
 	nested_agent_count      INTEGER,
     model                 TEXT,
     model_provider        TEXT,
+	review_candidate_pool_json TEXT,
     session_mode          TEXT NOT NULL,
     session_key           TEXT,
     fallback_reason       TEXT,
@@ -241,6 +242,7 @@ var migrationStatements = []string{
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,
+	`ALTER TABLE agent_invocations ADD COLUMN review_candidate_pool_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN fallback_reason TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN subprocess_wait_ms INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN fresh_input_tokens INTEGER`,

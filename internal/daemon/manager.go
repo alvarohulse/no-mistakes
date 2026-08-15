@@ -471,6 +471,14 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 		}
 		routes.routes.ByStep[step] = routed
 	}
+	for i, candidate := range cfg.ReviewCandidates {
+		routed, routeErr := build([]types.AgentName{candidate.Agent}, candidate.Model)
+		if routeErr != nil {
+			_ = routes.Close()
+			return nil, fmt.Errorf("create review candidate %d route: %w", i+1, routeErr)
+		}
+		routes.routes.ReviewCandidates = append(routes.routes.ReviewCandidates, routed)
+	}
 	if len(cfg.ReviewAdversaryAgents) > 0 {
 		adversary, routeErr := build(cfg.ReviewAdversaryAgents, cfg.ReviewAdversaryModel)
 		if routeErr != nil {
