@@ -33,6 +33,15 @@ func TestEvalJourney(t *testing.T) {
       risk_level: medium
       risk_rationale: "scenario review finding"
       risk_scope: source-or-external
+  - match: "Select the exact shell command the Build pipeline step should execute."
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Test pipeline step should execute."
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Lint pipeline step should execute."
+    structured:
+      command: "true"
   - structured:
       findings: []
       summary: "clean"
@@ -76,7 +85,7 @@ func TestEvalJourney(t *testing.T) {
 	}
 	t.Logf("eval sets output:\n%s", out)
 
-	out, err = h.Run("eval", "run", "--cases", "all", "--candidate", "claude+claude-opus-4-7", "--repeats", "1")
+	out, err = h.Run("eval", "run", "--cases", "all", "--candidate", "claude+claude-opus-5", "--repeats", "1")
 	if err != nil {
 		report, reportErr := h.Run("eval", "report")
 		t.Fatalf("eval run: %v\n%s\neval report after failure (%v):\n%s", err, out, reportErr, report)
@@ -98,7 +107,7 @@ func TestEvalJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval report: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "LOCAL-ONLY EVAL REPORT") || !strings.Contains(out, "claude+claude-opus-4-7") || !strings.Contains(out, "unlabeled / pending") || !strings.Contains(out, "queued unmatched candidate findings: 1") {
+	if !strings.Contains(out, "LOCAL-ONLY EVAL REPORT") || !strings.Contains(out, "claude+claude-opus-5") || !strings.Contains(out, "unlabeled / pending") || !strings.Contains(out, "queued unmatched candidate findings: 1") {
 		t.Fatalf("report output = %q", out)
 	}
 	t.Logf("eval report output:\n%s", out)
@@ -124,6 +133,15 @@ func TestEvalAutoCaptureJourney(t *testing.T) {
       risk_level: medium
       risk_rationale: "scenario review finding"
       risk_scope: source-or-external
+  - match: "Select the exact shell command the Build pipeline step should execute."
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Test pipeline step should execute."
+    structured:
+      command: "true"
+  - match: "Select the exact shell command the Lint pipeline step should execute."
+    structured:
+      command: "true"
   - structured:
       findings: []
       summary: "clean"
