@@ -29,6 +29,35 @@ func TestLoadRepoFromBytes_InvalidYAML(t *testing.T) {
 	}
 }
 
+func TestLoadRepoFromBytesRejectsUnknownTopLevelField(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("disable_project_setting: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "disable_project_setting") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want unknown field refusal", err)
+	}
+}
+
+func TestLoadRepoFromBytesValidatesTopLevelMergeFields(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte(`<<: &defaults
+  agent: [codex, claude]
+  disable_project_settings: true
+commands:
+  test: go test ./...
+`))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	if cfg.Agent != types.AgentCodex || len(cfg.Agents) != 2 || !cfg.DisableProjectSettings {
+		t.Fatalf("merged config = %#v", cfg)
+	}
+
+	_, err = LoadRepoFromBytes([]byte(`<<: &defaults
+  disable_project_setting: true
+`))
+	if err == nil || !strings.Contains(err.Error(), "disable_project_setting") {
+		t.Fatalf("LoadRepoFromBytes() merged error = %v, want unknown field refusal", err)
+	}
+}
+
 func TestEffectiveRepoConfig_TrustedOverridesPushedCommands(t *testing.T) {
 	pushedTemplate := "fix({{.Step}}): {{.Summary}}"
 	trustedTemplate := "trusted({{.Step}}): {{.Summary}}"

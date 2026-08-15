@@ -652,9 +652,11 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Prompts                PromptConfig  `yaml:"prompts"`
 		DisableProjectSettings bool          `yaml:"disable_project_settings"`
 		NoCI                   bool          `yaml:"no_ci"`
+		LegacyEval             any           `yaml:"eval"`
+		LegacyRepoBinding      any           `yaml:"repo"`
 	}
 	var raw repoConfigRaw
-	if err := value.Decode(&raw); err != nil {
+	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
 		return err
 	}
 	c.present = repoConfigPresence(value)
@@ -1562,6 +1564,74 @@ func decodeKnownFields(value *yaml.Node, out any) error {
 		return err
 	}
 	return value.Decode(out)
+}
+
+// decodeKnownFieldsShallow validates one custom-unmarshal boundary while
+// leaving nested custom types to validate their own accepted shapes. A parent
+// decoder cannot infer the private raw structs used by nested UnmarshalYAML
+// methods, so recursively reflecting over the public normalized structs would
+// reject valid keys such as step.agent and legacy aliases.
+func decodeKnownFieldsShallow(value *yaml.Node, out any) error {
+	if err := validateKnownFieldsShallow(value, reflect.TypeOf(out), make(map[*yaml.Node]bool)); err != nil {
+		return err
+	}
+	return value.Decode(out)
+}
+
+func validateKnownFieldsShallow(value *yaml.Node, target reflect.Type, stack map[*yaml.Node]bool) error {
+	if value == nil || target == nil {
+		return nil
+	}
+	if stack[value] {
+		return fmt.Errorf("YAML alias cycle while validating %s", target)
+	}
+	stack[value] = true
+	defer delete(stack, value)
+	if value.Kind == yaml.AliasNode {
+		return validateKnownFieldsShallow(value.Alias, target, stack)
+	}
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	if target.Kind() != reflect.Struct || value.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	fields := make(map[string]bool, target.NumField())
+	for i := 0; i < target.NumField(); i++ {
+		field := target.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fields[name] = true
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		if key == "<<" {
+			merged := value.Content[i+1]
+			if merged.Kind == yaml.SequenceNode {
+				for _, item := range merged.Content {
+					if err := validateKnownFieldsShallow(item, target, stack); err != nil {
+						return err
+					}
+				}
+			} else if err := validateKnownFieldsShallow(merged, target, stack); err != nil {
+				return err
+			}
+			continue
+		}
+		if !fields[key] {
+			return fmt.Errorf("field %s not found in type %s", key, target)
+		}
+	}
+	return nil
 }
 
 func validateKnownFields(value *yaml.Node, target reflect.Type) error {
