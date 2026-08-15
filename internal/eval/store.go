@@ -33,11 +33,25 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("eval root is empty")
 	}
 	root = filepath.Clean(root)
+	if err := ensurePrivateDir(root); err != nil {
+		return nil, fmt.Errorf("create eval root: %w", err)
+	}
 	cases := filepath.Join(root, "cases")
-	if err := os.MkdirAll(cases, 0o755); err != nil {
+	if err := ensurePrivateDir(cases); err != nil {
 		return nil, fmt.Errorf("create eval cases directory: %w", err)
 	}
-	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	databasePath := filepath.Join(root, "registry.sqlite")
+	databaseFile, err := os.OpenFile(databasePath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("create eval registry: %w", err)
+	}
+	if err := databaseFile.Close(); err != nil {
+		return nil, fmt.Errorf("close eval registry: %w", err)
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil {
+		return nil, fmt.Errorf("protect eval registry: %w", err)
+	}
+	database, err := sql.Open("sqlite", databasePath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open eval registry: %w", err)
 	}
@@ -46,6 +60,10 @@ func Open(root string) (*Store, error) {
 	if err := store.migrate(); err != nil {
 		_ = database.Close()
 		return nil, err
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("protect eval registry: %w", err)
 	}
 	return store, nil
 }
@@ -577,10 +595,21 @@ func writeJSON(path string, value any) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	return writePrivateFile(path, data)
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
-	return nil
+	return os.Chmod(path, 0o700)
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func caseComposition(c Case) (language, size, severity string) {

@@ -210,7 +210,8 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		if round.ReviewedHeadSHA != nil && strings.TrimSpace(*round.ReviewedHeadSHA) != "" {
 			reviewedSHA = strings.TrimSpace(*round.ReviewedHeadSHA)
 		}
-		if round.StartingHeadSHA == nil || strings.TrimSpace(*round.StartingHeadSHA) == "" || round.TrustedConfigSHA == nil || strings.TrimSpace(*round.TrustedConfigSHA) == "" || len(round.GlobalConfigYAML) == 0 || len(round.RepoConfigYAML) == 0 {
+		legacyConfig := len(round.GlobalConfigYAML) > 0 && len(round.RepoConfigYAML) > 0
+		if round.StartingHeadSHA == nil || strings.TrimSpace(*round.StartingHeadSHA) == "" || round.TrustedConfigSHA == nil || strings.TrimSpace(*round.TrustedConfigSHA) == "" || (len(round.ReplayConfigJSON) == 0 && !legacyConfig) {
 			// Provenance is a point-in-time snapshot of configuration that no
 			// longer exists anywhere, so this can never be backfilled - only
 			// later runs are capturable. Name the setting rather than the age:
@@ -221,14 +222,22 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		}
 		startingSHA := strings.TrimSpace(*round.StartingHeadSHA)
 		trustedSHA := strings.TrimSpace(*round.TrustedConfigSHA)
-		globalConfig, err := agentNeutralGlobalConfig(round.GlobalConfigYAML)
-		if err != nil {
-			return nil, fmt.Errorf("read review round %q global configuration: %w", round.ID, err)
+		var replayConfigJSON, globalConfig, repoConfigBytes []byte
+		if len(round.ReplayConfigJSON) > 0 {
+			if _, err := config.UnmarshalEvalReplayConfig(round.ReplayConfigJSON); err != nil {
+				return nil, fmt.Errorf("read review round %q replay configuration: %w", round.ID, err)
+			}
+			replayConfigJSON = append([]byte(nil), round.ReplayConfigJSON...)
+		} else {
+			globalConfig, err = agentNeutralGlobalConfig(round.GlobalConfigYAML)
+			if err != nil {
+				return nil, fmt.Errorf("read review round %q global configuration: %w", round.ID, err)
+			}
+			if _, err := config.LoadRepoFromBytes(round.RepoConfigYAML); err != nil {
+				return nil, fmt.Errorf("read review round %q repository configuration: %w", round.ID, err)
+			}
+			repoConfigBytes = append([]byte(nil), round.RepoConfigYAML...)
 		}
-		if _, err := config.LoadRepoFromBytes(round.RepoConfigYAML); err != nil {
-			return nil, fmt.Errorf("read review round %q repository configuration: %w", round.ID, err)
-		}
-		repoConfigBytes := append([]byte(nil), round.RepoConfigYAML...)
 		replayBaseSHA, err := effectiveReplayBase(ctx, gateDir, run.BaseSHA, reviewedSHA, trustedSHA)
 		if err != nil {
 			return nil, err
@@ -278,7 +287,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		}
 		baseline := baselineForRound(invocations, round.Round)
 		c := Case{Manifest: manifest, Labels: labels, Decision: decision, Baseline: baseline, Dir: caseDir}
-		if err := writeCase(ctx, store, gateDir, c, globalConfig, repoConfigBytes, sourceRunFor(run), sourceStepsFor(steps), allRounds, sourceInvocationsFor(invocations), portableRound(round, types.StepReview), changedPaths); err != nil {
+		if err := writeCase(ctx, store, gateDir, c, replayConfigJSON, globalConfig, repoConfigBytes, sourceRunFor(run), sourceStepsFor(steps), allRounds, sourceInvocationsFor(invocations), portableRound(round, types.StepReview), changedPaths); err != nil {
 			return nil, err
 		}
 		c, err = loadCase(caseDir)
@@ -353,14 +362,14 @@ func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
 	return out, nil
 }
 
-func writeCase(ctx context.Context, store *Store, gateDir string, c Case, globalConfig, repoConfig []byte, run sourceRun, steps []sourceStep, rounds []sourceRound, invocations []sourceInvocation, selectedRound sourceRound, changedFiles []string) (err error) {
+func writeCase(ctx context.Context, store *Store, gateDir string, c Case, replayConfigJSON, globalConfig, repoConfig []byte, run sourceRun, steps []sourceStep, rounds []sourceRound, invocations []sourceInvocation, selectedRound sourceRound, changedFiles []string) (err error) {
 	tmp, err := os.MkdirTemp(store.cases, ".capture-")
 	if err != nil {
 		return fmt.Errorf("create temporary case: %w", err)
 	}
 	defer os.RemoveAll(tmp)
 	for _, dir := range []string{filepath.Join(tmp, "config"), filepath.Join(tmp, "original"), filepath.Join(tmp, "evals")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
@@ -380,11 +389,17 @@ func writeCase(ctx context.Context, store *Store, gateDir string, c Case, global
 			_ = dropCaseObjects(ctx, store.poolDir(c.RepoFingerprint), c.ID)
 		}
 	}()
-	if err := os.WriteFile(filepath.Join(tmp, "config", "global.yaml"), globalConfig, 0o644); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "config", "repo-config.yaml"), repoConfig, 0o644); err != nil {
-		return err
+	if len(replayConfigJSON) > 0 {
+		if err := writePrivateFile(filepath.Join(tmp, "config", "replay.json"), replayConfigJSON); err != nil {
+			return err
+		}
+	} else {
+		if err := writePrivateFile(filepath.Join(tmp, "config", "global.yaml"), globalConfig); err != nil {
+			return err
+		}
+		if err := writePrivateFile(filepath.Join(tmp, "config", "repo-config.yaml"), repoConfig); err != nil {
+			return err
+		}
 	}
 	for _, item := range []struct {
 		path  string

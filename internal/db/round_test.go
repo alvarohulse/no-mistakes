@@ -47,6 +47,29 @@ func TestReviewRoundPersistsExactReplayProvenance(t *testing.T) {
 	}
 }
 
+func TestReviewRoundPersistsSecretFreeReplayConfig(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/review-replay-config", "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "reviewed", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	replayConfig := []byte(`{"version":1,"ignore_patterns":["vendor/**"]}`)
+	_, err := d.InsertReviewStepRoundWithReplayConfig(step.ID, 1, "initial", nil, nil, "reviewed", "starting", "trusted", replayConfig, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rounds[0]
+	if string(got.ReplayConfigJSON) != string(replayConfig) {
+		t.Fatalf("replay config = %q, want %q", got.ReplayConfigJSON, replayConfig)
+	}
+	if len(got.GlobalConfigYAML) != 0 || len(got.RepoConfigYAML) != 0 {
+		t.Fatalf("new replay provenance retained legacy YAML: global=%q repo=%q", got.GlobalConfigYAML, got.RepoConfigYAML)
+	}
+}
+
 func TestStepRoundInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

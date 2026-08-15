@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -79,6 +80,115 @@ func TestCaptureCreatesPortableReviewCaseWithoutRecordingRemoteURL(t *testing.T)
 	}
 	if len(listed) != 1 || listed[0].ID != captured.ID {
 		t.Fatalf("registry cases = %#v, want captured case", listed)
+	}
+}
+
+func TestCaptureWritesVersionedOwnerOnlyReplayConfig(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+	steps, err := sourceDB.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayConfigJSON, err := config.MarshalEvalReplayConfig(&config.Config{
+		AgentPathOverride:       map[string]string{"claude": "/private/agent"},
+		AgentArgsOverride:       map[string][]string{"claude": {"--token", "private-secret"}},
+		IgnorePatterns:          []string{"generated/**"},
+		ProcessTerminationGrace: 2 * time.Second,
+		DisableProjectSettings:  true,
+		Prompts:                 config.PromptConfig{Shared: "shared guidance", Review: "review guidance", Test: "private test prompt"},
+		Review:                  config.Review{PathInstructions: []config.PathInstruction{{Path: "internal/**", Instructions: "review errors"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean := `{"findings":[],"risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external"}`
+	secondRound, err := sourceDB.InsertReviewStepRoundWithReplayConfig(steps[0].ID, 2, "initial", &clean, nil, run.HeadSHA, stringValue(firstRound.ReviewedHeadSHA), stringValue(firstRound.TrustedConfigSHA), replayConfigJSON, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cases, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured Case
+	for _, c := range cases {
+		if c.SourceRoundID == secondRound.ID {
+			captured = c
+		}
+	}
+	if captured.ID == "" {
+		t.Fatalf("new replay case missing from %#v", cases)
+	}
+	replayPath := filepath.Join(captured.Dir, "config", "replay.json")
+	got, err := os.ReadFile(replayPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(replayConfigJSON) {
+		t.Fatalf("replay config = %s, want %s", got, replayConfigJSON)
+	}
+	for _, secret := range []string{"/private/agent", "private-secret", "private test prompt"} {
+		if strings.Contains(string(got), secret) {
+			t.Fatalf("replay config leaked %q: %s", secret, got)
+		}
+	}
+	for _, legacy := range []string{"global.yaml", "repo-config.yaml"} {
+		if _, err := os.Stat(filepath.Join(captured.Dir, "config", legacy)); !os.IsNotExist(err) {
+			t.Fatalf("new case retained legacy %s: %v", legacy, err)
+		}
+	}
+	replayed, err := replayConfig(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.IgnorePatterns) != 1 || replayed.IgnorePatterns[0] != "generated/**" || replayed.Prompts.Review != "review guidance" || !replayed.DisableProjectSettings {
+		t.Fatalf("replayed config = %#v", replayed)
+	}
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{
+			p.EvalDir():                           0o700,
+			captured.Dir:                          0o700,
+			filepath.Join(captured.Dir, "config"): 0o700,
+			replayPath:                            0o600,
+			filepath.Join(p.EvalDir(), "registry.sqlite"): 0o600,
+		} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Errorf("%s permissions = %04o, want %04o", path, got, want)
+			}
+		}
+	}
+}
+
+func TestReplayConfigRejectsCorruptVersionedConfigWithoutLegacyFallback(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "config")
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "replay.json"), []byte(`{"version":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "global.yaml"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "repo-config.yaml"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := replayConfig(Case{Dir: dir})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("replayConfig error = %v, want unsupported version", err)
 	}
 }
 

@@ -915,7 +915,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		var dbErr error
 		if stepName == types.StepReview {
 			if e.config != nil && e.config.CaptureEvalProvenance {
-				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayGlobalYAML, e.config.ReplayRepoYAML, roundDuration)
+				inserted, dbErr = e.db.InsertReviewStepRoundWithReplayConfig(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayConfigJSON, roundDuration)
 			} else {
 				inserted, dbErr = e.db.InsertReviewStepRound(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, roundDuration)
 			}

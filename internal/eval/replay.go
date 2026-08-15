@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,7 +115,7 @@ func (s *Store) prepareReplay(ctx context.Context, opts ReplayOptions) ([]Case, 
 	}
 	session.Cohort = cohortID(session.CaseIDs, session.Repeats)
 	sessionsDir := filepath.Join(s.root, "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+	if err := ensurePrivateDir(sessionsDir); err != nil {
 		return nil, Session{}, fmt.Errorf("create eval sessions directory: %w", err)
 	}
 	sessionPath := filepath.Join(sessionsDir, session.ID+".json")
@@ -217,7 +218,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		return evaluation
 	}
 	isolatedHome := filepath.Join(root, "home")
-	if err := os.MkdirAll(isolatedHome, 0o755); err != nil {
+	if err := ensurePrivateDir(isolatedHome); err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create isolated eval home: %v", err))
 		evaluation.CompletedAt = time.Now().Unix()
 		return evaluation
@@ -252,8 +253,9 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		return evaluation
 	}
 	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), modelArgs, agent.Options{
-		ACPRegistryOverrides:   cfg.ACPRegistryOverrides,
-		DisableProjectSettings: cfg.DisableProjectSettings,
+		ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
+		DisableProjectSettings:  cfg.DisableProjectSettings,
+		ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 	})
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(fmt.Sprintf("create candidate agent: %v", err))
@@ -479,6 +481,19 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 }
 
 func replayConfig(c Case) (*config.Config, error) {
+	replayPath := filepath.Join(c.Dir, "config", "replay.json")
+	replayBytes, err := os.ReadFile(replayPath)
+	if err == nil {
+		cfg, err := config.UnmarshalEvalReplayConfig(replayBytes)
+		if err != nil {
+			return nil, fmt.Errorf("load captured replay config: %w", err)
+		}
+		return cfg, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read captured replay config: %w", err)
+	}
+
 	global, err := config.LoadGlobal(filepath.Join(c.Dir, "config", "global.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("load captured global config: %w", err)
@@ -558,7 +573,7 @@ func (s *Store) persistEvaluation(c Case, evaluation Evaluation) error {
 	}
 	candidateDir := candidatePathPart(evaluation.Candidate)
 	resultDir := filepath.Join(c.Dir, "evals", evaluation.SessionID, candidateDir)
-	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+	if err := ensurePrivateDir(resultDir); err != nil {
 		return fmt.Errorf("create eval result directory: %w", err)
 	}
 	path := filepath.Join(resultDir, fmt.Sprintf("repeat-%03d.json", evaluation.Repeat))

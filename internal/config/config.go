@@ -1208,8 +1208,7 @@ type AutoFix struct {
 
 // Config is the merged result of global + per-repo configuration.
 type Config struct {
-	ReplayGlobalYAML        []byte
-	ReplayRepoYAML          []byte
+	ReplayConfigJSON        []byte
 	TrustedConfigSHA        string
 	CaptureEvalProvenance   bool
 	Agent                   types.AgentName
@@ -3526,12 +3525,11 @@ func (c *Config) EnableEvalProvenance(global *GlobalConfig, repo *RepoConfig) er
 	if c == nil || global == nil || repo == nil {
 		return fmt.Errorf("eval provenance requires merged, global, and repository configuration")
 	}
-	repoYAML, err := yaml.Marshal(repo)
+	replayConfig, err := MarshalEvalReplayConfig(c)
 	if err != nil {
-		return fmt.Errorf("serialize eval repository configuration: %w", err)
+		return fmt.Errorf("serialize eval replay configuration: %w", err)
 	}
-	c.ReplayGlobalYAML = append([]byte(nil), global.SourceYAML...)
-	c.ReplayRepoYAML = repoYAML
+	c.ReplayConfigJSON = replayConfig
 	c.CaptureEvalProvenance = true
 	return nil
 }

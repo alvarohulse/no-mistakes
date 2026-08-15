@@ -67,8 +67,14 @@ func (s *Store) poolDir(repoFingerprint string) string {
 // hardlink their objects, so this costs no meaningful disk or time - and the
 // pool fetches them from there by refspec, which is ordinary supported Git.
 func initializeObjectPool(ctx context.Context, pool string) error {
+	if err := ensurePrivateDir(filepath.Dir(pool)); err != nil {
+		return fmt.Errorf("create eval object pool directory: %w", err)
+	}
 	if err := git.InitBare(ctx, pool); err != nil {
 		return fmt.Errorf("create eval object pool: %w", err)
+	}
+	if err := os.Chmod(pool, 0o700); err != nil {
+		return fmt.Errorf("protect eval object pool: %w", err)
 	}
 	// Case refs intentionally carry both the case ID and a descriptive commit
 	// name. In a normal Windows temp or user-data path their lock files can
