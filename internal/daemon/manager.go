@@ -381,12 +381,34 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 }
 
 func newPipelineAgentsWithEvidenceRoot(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error)) (*pipelineAgents, error) {
+	if !steps.IsDemoMode() {
+		if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
+			return nil, err
+		}
+	}
+	return newResolvedPipelineAgentsWithEvidenceRoot(cfg, evidenceRoot)
+}
+
+// newResolvedPipelineAgentsWithEvidenceRoot constructs the concrete routes
+// selected by pre-run policy resolution. It must not probe or re-resolve them:
+// doing so after run insertion would make persisted policy differ from the
+// agents that actually execute.
+func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot string) (*pipelineAgents, error) {
 	if steps.IsDemoMode() {
 		noop := agent.NewNoop()
 		return &pipelineAgents{routes: pipeline.AgentRoutes{Default: noop}, owned: []agent.Agent{noop}}, nil
 	}
-	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
-		return nil, err
+	if cfg == nil {
+		return nil, fmt.Errorf("resolved pipeline config is nil")
+	}
+	if len(cfg.Agents) == 0 {
+		return nil, fmt.Errorf("resolved pipeline agent route is empty")
+	}
+	if cfg.Agent == "" || cfg.Agent == types.AgentAuto {
+		return nil, fmt.Errorf("resolved pipeline agent route contains non-concrete default %q", cfg.Agent)
+	}
+	if cfg.Agent != cfg.Agents[0] {
+		return nil, fmt.Errorf("resolved pipeline default agent does not match route order")
 	}
 	routes := &pipelineAgents{routes: pipeline.AgentRoutes{ByStep: make(map[types.StepName]agent.Agent)}}
 	build := func(names []types.AgentName, model config.ModelRoute) (agent.Agent, error) {
@@ -534,6 +556,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			cancel(nil)
 			_ = agents.Close()
+			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.closeSubscribers(plan.run.ID)
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
@@ -1015,6 +1038,18 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
+// fetchRunDefaultBranchToPrivateRef pins one resolution without updating
+// FETCH_HEAD or the shared origin/<default> ref. Starts for different branches
+// and config-explain requests can run concurrently, including across
+// processes, so every caller owns a unique ref until its run finishes.
+func fetchRunDefaultBranchToPrivateRef(ctx context.Context, gateDir string, repo *db.Repo, privateRef string) error {
+	originURL, err := git.GetRemoteURL(ctx, gateDir, "origin")
+	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
+		return git.FetchRemoteBranchToPrivateRef(ctx, gateDir, "origin", repo.DefaultBranch, privateRef)
+	}
+	return git.FetchRemoteBranchToPrivateRef(ctx, gateDir, repo.UpstreamURL, repo.DefaultBranch, privateRef)
+}
+
 func resolveRefreshStrategy(explicit, configured types.RefreshStrategy) types.RefreshStrategy {
 	if explicit != "" {
 		return explicit
@@ -1089,6 +1124,18 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	} else {
 		repo = refreshed
 	}
+	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipSteps, refreshStrategy)
+	if err != nil {
+		trackStartFailure("resolve_policy")
+		return "", err
+	}
+	policyRefOwnedByRun := false
+	defer func() {
+		if !policyRefOwnedByRun {
+			resolved.releaseTrustedRef(context.Background())
+		}
+	}()
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -1109,10 +1156,10 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
 	}
 
-	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
+	run, err := m.db.InsertRunWithOptions(repo.ID, branch, resolved.HeadSHA, baseSHA, db.RunOptions{
 		PRNote:          strings.TrimSpace(prNote),
 		Metadata:        metadata,
-		RefreshStrategy: refreshStrategy,
+		RefreshStrategy: resolved.RefreshStrategy,
 		StackedOn:       stackedOn,
 		Intent:          runIntent,
 	})
@@ -1120,43 +1167,43 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	if err := resolved.bindTrustedRefToRun(ctx, run.ID); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_trusted_ref")
+		return "", err
+	}
 
-	// Create worktree from the gate bare repo.
+	if err := m.db.UpdateRunConfigSources(run.ID, resolved.Sources); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_config_sources")
+		return "", err
+	}
+	run.ConfigSources = resolved.Sources
+	if err := m.db.UpdateRunResolvedAgentRouting(run.ID, resolved.ResolvedRouting); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_agent_routing")
+		return "", err
+	}
+	run.ResolvedAgentRouting = &resolved.ResolvedRouting
+	if err := m.db.UpdateRunResolvedPolicy(run.ID, resolved.ResolvedPolicy, resolved.ResolvedPolicyDigest); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_resolved_policy")
+		return "", err
+	}
+	run.ResolvedPolicy = &resolved.ResolvedPolicy
+	run.ResolvedPolicyDigest = &resolved.ResolvedPolicyDigest
+	run.RefreshStrategy = resolved.RefreshStrategy
+	run.StackedOn = stackedOn
+
+	// Create the worktree only after the complete policy has resolved and been
+	// persisted. From this point, setup cleanup owns every pre-launch failure.
 	gateDir := m.paths.RepoDir(repo.ID)
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+	if err := git.WorktreeAdd(ctx, gateDir, wtDir, resolved.HeadSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
-		trackStartFailure("configure_worktree_identity")
-		return "", fmt.Errorf("configure worktree git identity: %w", err)
-	}
-	// Fetch the trusted default branch and resolve it to an exact commit SHA
-	// before any read. Reading the trusted config at this pinned SHA (rather
-	// than the origin/<defaultBranch> remote-tracking ref) is what makes a
-	// fetch failure fail closed: if the fetch errors or the ref does not
-	// resolve, trustedSHA stays empty, loadTrustedRepoConfig returns nil, and
-	// EffectiveRepoConfig drops the pushed branch's commands/agent routes. Without
-	// the resolve, a stale origin/<defaultBranch> left in the shared bare
-	// repo by a previous run could serve a trusted copy that the live default
-	// branch has already removed - silently running stale shell.
-	var trustedSHA string
-	if repo.DefaultBranch != "" {
-		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
-		if fetchErr != nil {
-			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent routes from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
-			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else {
-			trustedSHA = sha
-		}
-	}
-
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
@@ -1165,133 +1212,20 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 		}
 	}()
+	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
+		trackStartFailure("configure_worktree_identity")
+		return "", fmt.Errorf("configure worktree git identity: %w", err)
+	}
 
-	// A malformed global config (including a malformed overrides section) is
-	// recorded on the run rather than refusing run creation: the run row plus
-	// its error is the only feedback a push-triggered pipeline can give, and
-	// the deferred cleanup above still removes the setup worktree.
-	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
-	globalCfg := globalInput.Config
-	globalOverride := resolveGlobalOverride(globalInput, repo)
-	pushedRepoInput, err := loadPushedRepoConfigInput(ctx, wtDir, headSHA)
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_repo_config")
-		return "", fmt.Errorf("load repo config: %w", err)
-	}
-	repoCfg := pushedRepoInput.Config
-	// SECURITY: load the code-executing selection fields (commands.*,
-	// hooks.post_worktree, the
-	// run-wide agent, per-step agent/model routes, and the Review adversary) from the trusted default-branch
-	// copy of .no-mistakes.yaml rather
-	// than the pushed SHA. The worktree is checked out at headSHA (the
-	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/hooks/agent routes and let any pushed SHA run arbitrary shell
-	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
-	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
-	// EffectiveRepoConfig replaces commands + hooks + agent routes with the trusted
-	// default-branch values unless the maintainer has explicitly opted in.
-	//
-	// allow_repo_commands is itself read ONLY from the trusted copy: a
-	// contributor cannot self-enable it from the pushed branch. A readable
-	// trusted tree with no config leaves the opt-in false and forces
-	// commands/hooks/agent routes empty. An unreadable trusted tree aborts below.
-	// SECURITY: a trusted-config fetch failure must abort, not silently disable
-	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("trusted_config_unreadable")
-		return "", err
-	}
-	trustedRepoInput := loadTrustedRepoConfigInput(ctx, wtDir, trustedSHA, run.ID)
-	var trustedRepoCfg *config.RepoConfig
-	if trustedRepoInput != nil {
-		trustedRepoCfg = trustedRepoInput.Config
-	}
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalInput, pushedRepoInput, trustedRepoInput, globalOverride)
-	if globalOverride != nil {
-		slog.Warn("global config override is active: honoring machine-local repository configuration", "run_id", run.ID, "override", globalOverride.Key)
-	}
-	if allowRepoCommands {
-		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
-	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) || !stepModelRoutesEqual(repoCfg.ConfiguredStepModels(), effectiveRepoCfg.ConfiguredStepModels()) || !reviewAdversaryRoutesEqual(repoCfg.Review, effectiveRepoCfg.Review) {
-		// Surface the silent override so a maintainer who shipped a commands.*,
-		// hooks.*, or agent change on a feature branch understands why it did not run.
-		// This is not an error: it is the secure default in action.
-		slog.Info("repo commands/hooks/agent/model routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
-	}
-	cfg := config.Merge(globalCfg, effectiveRepoCfg)
-	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("evidence_root")
-		return "", err
-	}
-	cfg.TrustedConfigSHA = trustedSHA
-	if globalCfg.Eval.CaptureProvenance {
-		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("eval_provenance")
-			return "", err
-		}
-	}
-	if err := m.db.UpdateRunConfigSources(run.ID, configSources); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_config_sources")
-		return "", err
-	}
-	run.ConfigSources = configSources
-	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
-	if err := m.db.UpdateRunRefreshSelection(run.ID, resolvedRefreshStrategy, stackedOn); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_refresh_selection")
-		return "", err
-	}
-	run.RefreshStrategy = resolvedRefreshStrategy
-	run.StackedOn = stackedOn
-
-	agents, err := newPipelineAgentsWithEvidenceRoot(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
+	cfg := resolved.Config
+	execSteps := resolved.Steps
+	agents, err := newResolvedPipelineAgentsWithEvidenceRoot(cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot))
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("resolve_agent")
+		trackStartFailure("create_agents")
 		return "", err
 	}
-	resolvedRouting, err := marshalResolvedAgentRouting(cfg, steps.IsDemoMode())
-	if err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("resolve_agent_routing")
-		return "", err
-	}
-	if err := m.db.UpdateRunResolvedAgentRouting(run.ID, resolvedRouting); err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_agent_routing")
-		return "", err
-	}
-	run.ResolvedAgentRouting = &resolvedRouting
-
-	execSteps := m.steps()
-	resolvedPolicy, resolvedPolicyDigest, err := marshalResolvedPolicy(cfg, configSources, execSteps, skipSteps, resolvedRefreshStrategy, steps.IsDemoMode())
-	if err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("resolve_policy")
-		return "", err
-	}
-	if err := m.db.UpdateRunResolvedPolicy(run.ID, resolvedPolicy, resolvedPolicyDigest); err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_resolved_policy")
-		return "", err
-	}
-	run.ResolvedPolicy = &resolvedPolicy
-	run.ResolvedPolicyDigest = &resolvedPolicyDigest
 
 	telemetry.Track("run", telemetry.Fields{
 		"action":      "started",
@@ -1324,6 +1258,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 
 	// Background goroutine now owns worktree cleanup.
 	bgOwnsWorktree = true
+	policyRefOwnedByRun = true
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1358,6 +1293,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 			cancel(nil)
 			_ = agents.Close()
+			resolved.releaseTrustedRef(context.Background())
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
 			m.sweepRunWorktreeProcesses(wtDir)

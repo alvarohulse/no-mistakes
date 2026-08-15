@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -413,6 +414,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	}
 	logStartupPhase("stale_runs", staleStarted, "recovered", count)
 
+	policyRefsStarted := time.Now()
+	policyRefsReaped := reapPolicyTrustedRefs(context.Background(), d, p)
+	logStartupPhase("policy_ref_cleanup", policyRefsStarted, "reaped", policyRefsReaped)
+
 	orphanProcStarted := time.Now()
 	sweepOrphanRunProcesses(d, p)
 	logStartupPhase("orphan_processes", orphanProcStarted)
@@ -770,6 +775,59 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, fmt.Errorf("get steps: %w", err)
 		}
 		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+	})
+
+	srv.Handle(ipc.MethodConfigExplain, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.ConfigExplainParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		p.RepoID = strings.TrimSpace(p.RepoID)
+		p.Branch = strings.TrimSpace(p.Branch)
+		p.Format = strings.ToLower(strings.TrimSpace(p.Format))
+		if p.RepoID == "" || p.Branch == "" {
+			return nil, fmt.Errorf("repo_id and branch are required")
+		}
+		if p.Format != "text" && p.Format != "json" {
+			return nil, fmt.Errorf("format must be text or json")
+		}
+		repo, err := d.GetRepo(p.RepoID)
+		if err != nil {
+			return nil, fmt.Errorf("get repo: %w", err)
+		}
+		if repo == nil {
+			return nil, fmt.Errorf("unknown repo %s", p.RepoID)
+		}
+		gateDir := mgr.paths.RepoDir(repo.ID)
+		if err := git.ValidateBranchName(ctx, gateDir, p.Branch); err != nil {
+			return nil, fmt.Errorf("invalid branch: %w", err)
+		}
+		if refreshed, _, refreshErr := gate.RefreshRepoURLs(ctx, d, repo); refreshErr != nil {
+			slog.Warn("repository URL refresh skipped; explaining existing registration", "repo_id", repo.ID, "reason", gate.ReasonForRefreshFailure(refreshErr))
+		} else {
+			repo = refreshed
+		}
+		headSHA, err := git.ResolveRef(ctx, gateDir, "refs/heads/"+p.Branch)
+		if err != nil {
+			return nil, fmt.Errorf("resolve current gate branch %q: %w", p.Branch, err)
+		}
+		explanation, err := mgr.ResolvePolicy(ctx, repo, headSHA, nil, "")
+		if err != nil {
+			return nil, err
+		}
+		var output string
+		if p.Format == "json" {
+			output, err = explanation.CanonicalJSON()
+		} else {
+			output, err = explanation.Text()
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.ConfigExplainResult{Output: output}, nil
 	})
 
 	srv.Handle(ipc.MethodGateContext, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

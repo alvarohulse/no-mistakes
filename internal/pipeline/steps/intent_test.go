@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,38 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestResolveIntentBaseSHAPrefersPinnedTrustedCommitOverStaleTrackingRef(t *testing.T) {
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "old base")
+	staleDefault := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "base.txt")
+	gitCmd(t, dir, "commit", "-m", "fresh base")
+	trustedDefault := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "feature.txt")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	gitCmd(t, dir, "update-ref", "refs/remotes/origin/main", staleDefault)
+
+	got := resolveIntentBaseSHA(context.Background(), dir, strings.Repeat("0", 40), "main", trustedDefault)
+	if got != trustedDefault {
+		t.Fatalf("intent base = %s, want pinned trusted default %s", got, trustedDefault)
+	}
+}
 
 // newIntentStepContext builds a StepContext backed by a real DB and
 // freshly-inserted repo + run, suitable for testing IntentStep without

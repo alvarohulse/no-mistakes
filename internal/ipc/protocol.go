@@ -15,6 +15,7 @@ const (
 	MethodGetRuns        = "get_runs"
 	MethodGetRunsForHead = "get_runs_for_head"
 	MethodGetActiveRun   = "get_active_run"
+	MethodConfigExplain  = "config_explain"
 	MethodRerun          = "rerun"
 	MethodSubscribe      = "subscribe"
 	MethodRespond        = "respond"
@@ -127,6 +128,15 @@ type GetActiveRunParams struct {
 	Branch string `json:"branch,omitempty"`
 }
 
+// ConfigExplainParams requests the effective policy for one current gate
+// branch. Resolution runs inside the daemon so executable availability exactly
+// matches a subsequent run.
+type ConfigExplainParams struct {
+	RepoID string `json:"repo_id"`
+	Branch string `json:"branch"`
+	Format string `json:"format"`
+}
+
 // RerunParams requests a new run for the latest gate head on a branch.
 // Intent, when set, overrides inherited intent and fresh inference. When empty,
 // the daemon inherits authoritative intent from the selected prior run or
@@ -208,6 +218,12 @@ type GetRunsResult struct {
 // GetActiveRunResult wraps the active run (nil if none).
 type GetActiveRunResult struct {
 	Run *RunInfo `json:"run,omitempty"`
+}
+
+// ConfigExplainResult carries the requested projection of the canonical
+// resolved policy DTO.
+type ConfigExplainResult struct {
+	Output string `json:"output"`
 }
 
 // RerunResult confirms a rerun was created.

@@ -214,7 +214,7 @@ type RepoConfig struct {
 	// would otherwise install a fleet-captain identity on a gate agent. It is a
 	// SECURITY boundary honored ONLY from the trusted default-branch copy of
 	// .no-mistakes.yaml (see EffectiveRepoConfig and the daemon's
-	// assertGateTrustedConfigReadable): a contributor's pushed branch must not be
+	// resolveRunPolicyFromBareGate): a contributor's pushed branch must not be
 	// able to turn it off (or on). Default false; a plain bool so a missing key
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
@@ -2948,8 +2948,8 @@ func finalizeRepoConfig(cfg *RepoConfig) error {
 // maintainer expects the reviewer to apply.
 //
 // This deliberately also runs on the PUSHED copy, even though EffectiveRepoConfig
-// discards a pushed review block: the trusted-copy read
-// (assertGateTrustedConfigReadable in internal/daemon) aborts EVERY run whose
+// discards a pushed review block: the strict trusted-copy read
+// (loadBareRepoConfigInput in internal/daemon) aborts EVERY run whose
 // default-branch .no-mistakes.yaml fails these checks, so a branch carrying an
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.

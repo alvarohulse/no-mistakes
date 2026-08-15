@@ -110,11 +110,74 @@ type resolvedPolicyEval struct {
 	DiversifiedSize   int  `json:"diversified_size"`
 }
 
+// PolicyExplanation is a presentation wrapper around the exact NM-02 policy
+// DTO. It deliberately carries no second policy model: text pretty-prints the
+// canonical DTO and JSON embeds the same bytes beside their digest.
+type PolicyExplanation struct {
+	policyJSON string
+	digest     string
+}
+
+type policyExplanationEnvelope struct {
+	PolicyDigest string          `json:"policy_digest"`
+	Policy       json.RawMessage `json:"policy"`
+}
+
+func newPolicyExplanation(resolved *runPolicyResolution) (*PolicyExplanation, error) {
+	if resolved == nil || resolved.Policy == nil {
+		return nil, fmt.Errorf("resolved policy explanation is missing")
+	}
+	if strings.TrimSpace(resolved.ResolvedPolicy) == "" || strings.TrimSpace(resolved.ResolvedPolicyDigest) == "" {
+		return nil, fmt.Errorf("resolved policy explanation is incomplete")
+	}
+	return &PolicyExplanation{policyJSON: resolved.ResolvedPolicy, digest: resolved.ResolvedPolicyDigest}, nil
+}
+
+// Digest returns the SHA-256 digest of the canonical policy bytes.
+func (e *PolicyExplanation) Digest() string {
+	if e == nil {
+		return ""
+	}
+	return e.digest
+}
+
+// CanonicalJSON returns a compact JSON envelope containing the exact canonical
+// policy bytes and their digest.
+func (e *PolicyExplanation) CanonicalJSON() (string, error) {
+	if e == nil || strings.TrimSpace(e.policyJSON) == "" || strings.TrimSpace(e.digest) == "" {
+		return "", fmt.Errorf("resolved policy explanation is incomplete")
+	}
+	encoded, err := json.Marshal(policyExplanationEnvelope{
+		PolicyDigest: e.digest,
+		Policy:       json.RawMessage(e.policyJSON),
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode resolved policy explanation: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// Text returns a readable projection of the exact policy DTO.
+func (e *PolicyExplanation) Text() (string, error) {
+	if e == nil || strings.TrimSpace(e.policyJSON) == "" || strings.TrimSpace(e.digest) == "" {
+		return "", fmt.Errorf("resolved policy explanation is incomplete")
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(e.policyJSON), "", "  "); err != nil {
+		return "", fmt.Errorf("format resolved policy explanation: %w", err)
+	}
+	return fmt.Sprintf("policy digest: %s\npolicy:\n%s\n", e.digest, pretty.String()), nil
+}
+
 func marshalResolvedPolicy(cfg *config.Config, sources []db.ConfigSource, steps []pipeline.Step, skipped []types.StepName, refreshStrategy types.RefreshStrategy, demo bool) (string, string, error) {
 	policy, err := resolvedPolicyFromConfig(cfg, sources, steps, skipped, refreshStrategy, demo)
 	if err != nil {
 		return "", "", err
 	}
+	return marshalResolvedPolicyDTO(policy)
+}
+
+func marshalResolvedPolicyDTO(policy *resolvedPolicy) (string, string, error) {
 	encoded, err := json.Marshal(policy)
 	if err != nil {
 		return "", "", fmt.Errorf("encode resolved policy: %w", err)

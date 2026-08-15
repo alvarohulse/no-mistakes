@@ -202,7 +202,7 @@ func defaultRunIntent(ctx context.Context, sctx *pipeline.StepContext) (*intent.
 		gitWorkDir = repo.WorkingPath
 	}
 
-	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, run.BaseSHA, repo.DefaultBranch)
+	resolvedBaseSHA := resolveIntentBaseSHA(ctx, gitWorkDir, run.BaseSHA, repo.DefaultBranch, cfg.TrustedConfigSHA)
 	diffFiles, err := diffFilesForIntentMatching(ctx, gitWorkDir, resolvedBaseSHA, run.HeadSHA)
 	if err != nil {
 		return nil, err
@@ -277,14 +277,18 @@ func splitDiffNameOnly(out string) []string {
 }
 
 // resolveIntentBaseSHA returns a usable base SHA for diff'ing against head.
-// Prefers an explicit run.BaseSHA when reachable in the worktree, but falls
-// back to merge-base against the default branch when the SHA is the zero ref
-// (new branch push) or has been orphaned by a force push that rewrote the
-// prior remote tip away. Final fallback is git's empty-tree SHA so the diff
-// always succeeds.
-func resolveIntentBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string) string {
+// Prefers an explicit run.BaseSHA when reachable in the worktree, then the
+// policy's freshly pinned trusted default commit when the SHA is the zero ref
+// or was orphaned by a force push. Legacy configs fall back to default-branch
+// refs. Final fallback is git's empty-tree SHA so the diff always succeeds.
+func resolveIntentBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch, trustedDefaultSHA string) string {
 	if !git.IsZeroSHA(baseSHA) && commitReachable(ctx, workDir, baseSHA) {
 		return baseSHA
+	}
+	if commitReachable(ctx, workDir, trustedDefaultSHA) {
+		if mb, err := git.Run(ctx, workDir, "merge-base", "HEAD", trustedDefaultSHA); err == nil && strings.TrimSpace(mb) != "" {
+			return strings.TrimSpace(mb)
+		}
 	}
 	if mb := mergeBaseWithDefaultBranch(ctx, workDir, defaultBranch); mb != "" {
 		return mb
