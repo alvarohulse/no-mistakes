@@ -224,12 +224,70 @@ type RepoConfig struct {
 	present map[string]bool
 }
 
+// MarshalYAML emits the same canonical shape accepted by LoadRepoFromBytes.
+// RepoConfig keeps normalized fallback lists and presence metadata in derived
+// fields that must never leak into captured eval provenance.
+func (c RepoConfig) MarshalYAML() (any, error) {
+	type repoConfigYAML struct {
+		Agent                  agentList    `yaml:"agent,omitempty"`
+		Commands               Commands     `yaml:"commands,omitempty"`
+		Hooks                  Hooks        `yaml:"hooks,omitempty"`
+		IgnorePatterns         []string     `yaml:"ignore_patterns,omitempty"`
+		AllowRepoCommands      bool         `yaml:"allow_repo_commands,omitempty"`
+		AutoFix                AutoFixRaw   `yaml:"auto_fix,omitempty"`
+		Commit                 CommitRaw    `yaml:"commit,omitempty"`
+		Intent                 IntentRaw    `yaml:"intent,omitempty"`
+		Refresh                RefreshRaw   `yaml:"refresh,omitempty"`
+		Review                 ReviewRaw    `yaml:"review,omitempty"`
+		Build                  StepAgentRaw `yaml:"build,omitempty"`
+		Test                   TestRaw      `yaml:"test,omitempty"`
+		Document               DocumentRaw  `yaml:"document,omitempty"`
+		Lint                   StepAgentRaw `yaml:"lint,omitempty"`
+		PR                     StepAgentRaw `yaml:"pr,omitempty"`
+		CI                     CIRaw        `yaml:"ci,omitempty"`
+		Prompts                PromptConfig `yaml:"prompts,omitempty"`
+		DisableProjectSettings bool         `yaml:"disable_project_settings,omitempty"`
+		NoCI                   bool         `yaml:"no_ci,omitempty"`
+	}
+	return repoConfigYAML{
+		Agent:                  agentList(stepAgentNames(c.Agent, c.Agents)),
+		Commands:               c.Commands,
+		Hooks:                  c.Hooks,
+		IgnorePatterns:         c.IgnorePatterns,
+		AllowRepoCommands:      c.AllowRepoCommands,
+		AutoFix:                c.AutoFix,
+		Commit:                 c.Commit,
+		Intent:                 c.Intent,
+		Refresh:                c.Refresh,
+		Review:                 c.Review,
+		Build:                  c.Build,
+		Test:                   c.Test,
+		Document:               c.Document,
+		Lint:                   c.Lint,
+		PR:                     c.PR,
+		CI:                     c.CI,
+		Prompts:                c.Prompts,
+		DisableProjectSettings: c.DisableProjectSettings,
+		NoCI:                   c.NoCI,
+	}, nil
+}
+
 // StepAgentRaw is the YAML representation of one step's optional agent route.
 // Agent is the primary entry and Agents preserves the ordered fallback list.
 type StepAgentRaw struct {
 	Agent  types.AgentName   `yaml:"-"`
 	Agents []types.AgentName `yaml:"-"`
 	Model  ModelRoute        `yaml:"model"`
+}
+
+func (c StepAgentRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent agentList  `yaml:"agent,omitempty"`
+		Model ModelRoute `yaml:"model,omitempty"`
+	}{
+		Agent: agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model: c.Model,
+	}, nil
 }
 
 func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
@@ -321,6 +379,22 @@ type ReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
+func (c ReviewRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent            agentList         `yaml:"agent,omitempty"`
+		Model            ModelRoute        `yaml:"model,omitempty"`
+		AdversaryAgent   agentList         `yaml:"adversary_agent,omitempty"`
+		AdversaryModel   ModelRoute        `yaml:"adversary_model,omitempty"`
+		PathInstructions []PathInstruction `yaml:"path_instructions,omitempty"`
+	}{
+		Agent:            agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:            c.Model,
+		AdversaryAgent:   agentList(stepAgentNames(c.AdversaryAgent, c.AdversaryAgents)),
+		AdversaryModel:   c.AdversaryModel,
+		PathInstructions: c.PathInstructions,
+	}, nil
+}
+
 func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent            agentList         `yaml:"agent"`
@@ -365,6 +439,18 @@ type RefreshRaw struct {
 	Strategy types.RefreshStrategy
 }
 
+func (c RefreshRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent    agentList             `yaml:"agent,omitempty"`
+		Model    ModelRoute            `yaml:"model,omitempty"`
+		Strategy types.RefreshStrategy `yaml:"strategy,omitempty"`
+	}{
+		Agent:    agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:    c.Model,
+		Strategy: c.Strategy,
+	}, nil
+}
+
 func (c *RefreshRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent    agentList  `yaml:"agent"`
@@ -407,6 +493,18 @@ type DocumentRaw struct {
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
 	Instructions string `yaml:"instructions"`
+}
+
+func (c DocumentRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent        agentList  `yaml:"agent,omitempty"`
+		Model        ModelRoute `yaml:"model,omitempty"`
+		Instructions string     `yaml:"instructions,omitempty"`
+	}{
+		Agent:        agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:        c.Model,
+		Instructions: c.Instructions,
+	}, nil
 }
 
 func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
@@ -997,6 +1095,26 @@ type AutoFixRaw struct {
 	Refresh  *int `yaml:"refresh"`
 }
 
+func (c AutoFixRaw) MarshalYAML() (any, error) {
+	return struct {
+		Lint     *int `yaml:"lint,omitempty"`
+		Build    *int `yaml:"build,omitempty"`
+		Test     *int `yaml:"test,omitempty"`
+		Review   *int `yaml:"review,omitempty"`
+		Document *int `yaml:"document,omitempty"`
+		CI       *int `yaml:"ci,omitempty"`
+		Refresh  *int `yaml:"refresh,omitempty"`
+	}{
+		Lint:     c.Lint,
+		Build:    c.Build,
+		Test:     c.Test,
+		Review:   c.Review,
+		Document: c.Document,
+		CI:       c.CI,
+		Refresh:  c.Refresh,
+	}, nil
+}
+
 func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Lint         *int `yaml:"lint"`
@@ -1034,6 +1152,18 @@ func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 type CIRaw struct {
 	StepAgentRaw
 	RerunTransient *int `yaml:"rerun_transient"`
+}
+
+func (c CIRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent          agentList  `yaml:"agent,omitempty"`
+		Model          ModelRoute `yaml:"model,omitempty"`
+		RerunTransient *int       `yaml:"rerun_transient,omitempty"`
+	}{
+		Agent:          agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:          c.Model,
+		RerunTransient: c.RerunTransient,
+	}, nil
 }
 
 func (c *CIRaw) UnmarshalYAML(value *yaml.Node) error {
@@ -1247,6 +1377,18 @@ type TestRaw struct {
 	Evidence EvidenceRaw       `yaml:"evidence"`
 }
 
+func (c TestRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent    agentList   `yaml:"agent,omitempty"`
+		Model    ModelRoute  `yaml:"model,omitempty"`
+		Evidence EvidenceRaw `yaml:"evidence,omitempty"`
+	}{
+		Agent:    agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:    c.Model,
+		Evidence: c.Evidence,
+	}, nil
+}
+
 func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent    agentList   `yaml:"agent"`
@@ -1359,6 +1501,24 @@ type IntentRaw struct {
 	Threshold       *float64          `yaml:"threshold"`
 	SlackDays       *int              `yaml:"slack_days"`
 	DisabledReaders []string          `yaml:"disabled_readers"`
+}
+
+func (c IntentRaw) MarshalYAML() (any, error) {
+	return struct {
+		Agent           agentList  `yaml:"agent,omitempty"`
+		Model           ModelRoute `yaml:"model,omitempty"`
+		Enabled         *bool      `yaml:"enabled,omitempty"`
+		Threshold       *float64   `yaml:"threshold,omitempty"`
+		SlackDays       *int       `yaml:"slack_days,omitempty"`
+		DisabledReaders []string   `yaml:"disabled_readers,omitempty"`
+	}{
+		Agent:           agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:           c.Model,
+		Enabled:         c.Enabled,
+		Threshold:       c.Threshold,
+		SlackDays:       c.SlackDays,
+		DisabledReaders: c.DisabledReaders,
+	}, nil
 }
 
 func (c *IntentRaw) UnmarshalYAML(value *yaml.Node) error {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -104,6 +105,102 @@ func TestMergeLeavesEvalProvenanceDisabledUntilExplicitlyEnabled(t *testing.T) {
 	}
 	if !cfg.CaptureEvalProvenance || string(cfg.ReplayGlobalYAML) != "agent: claude\n" || len(cfg.ReplayRepoYAML) == 0 {
 		t.Fatalf("enabled eval provenance = %#v", cfg)
+	}
+}
+
+func TestEnableEvalProvenanceSerializesCanonicalRepoConfig(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte(`agent: [claude, codex]
+intent:
+  agent: pi
+  model: {name: claude-opus-5, vendor: anthropic}
+refresh:
+  agent: [codex, claude]
+  model: {name: gpt-5.6-sol, vendor: openai}
+  strategy: merge
+review:
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+  adversary_agent: [codex, pi]
+  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+build:
+  agent: codex
+  model: {name: gpt-5.6-sol, vendor: openai}
+test:
+  agent: pi
+  model: {name: claude-opus-5, vendor: anthropic}
+document:
+  agent: opencode
+  model: {name: claude-opus-5, vendor: anthropic}
+lint:
+  agent: copilot
+  model: {name: claude-opus-5, vendor: anthropic}
+pr:
+  agent: claude
+  model: {name: claude-opus-5, vendor: anthropic}
+ci:
+  agent: [pi, codex]
+  model: {name: gpt-5.6-sol, vendor: openai}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := &GlobalConfig{SourceYAML: []byte("agent: claude\n"), Agent: types.AgentClaude}
+	cfg := Merge(global, repo)
+	if err := cfg.EnableEvalProvenance(global, repo); err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, err := LoadRepoFromBytes(cfg.ReplayRepoYAML)
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes(captured provenance) error = %v\n%s", err, cfg.ReplayRepoYAML)
+	}
+	if !reflect.DeepEqual(replayed.Agents, repo.Agents) {
+		t.Fatalf("replayed agents = %v, want %v", replayed.Agents, repo.Agents)
+	}
+	if !reflect.DeepEqual(replayed.ConfiguredStepAgents(), repo.ConfiguredStepAgents()) {
+		t.Fatalf("replayed step agents = %v, want %v", replayed.ConfiguredStepAgents(), repo.ConfiguredStepAgents())
+	}
+	if !reflect.DeepEqual(replayed.ConfiguredStepModels(), repo.ConfiguredStepModels()) {
+		t.Fatalf("replayed step models = %v, want %v", replayed.ConfiguredStepModels(), repo.ConfiguredStepModels())
+	}
+	if replayed.Refresh.Strategy != repo.Refresh.Strategy {
+		t.Fatalf("replayed refresh strategy = %q, want %q", replayed.Refresh.Strategy, repo.Refresh.Strategy)
+	}
+	if !reflect.DeepEqual(replayed.Review.AdversaryAgents, repo.Review.AdversaryAgents) || replayed.Review.AdversaryModel != repo.Review.AdversaryModel {
+		t.Fatalf("replayed adversary route = %v/%#v, want %v/%#v", replayed.Review.AdversaryAgents, replayed.Review.AdversaryModel, repo.Review.AdversaryAgents, repo.Review.AdversaryModel)
+	}
+}
+
+func TestEnableEvalProvenancePreservesOmittedRepoInheritances(t *testing.T) {
+	global, err := LoadGlobalFromBytes([]byte(`agent: [claude, codex]
+build:
+  agent: [codex, claude]
+  model: {name: gpt-5.6-sol, vendor: openai}
+auto_fix:
+  build: 2
+  review: 1
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := LoadRepoFromBytes([]byte("ignore_patterns: ['vendor/**']\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Merge(global, repo)
+	captured := Merge(global, repo)
+	if err := captured.EnableEvalProvenance(global, repo); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := LoadRepoFromBytes(captured.ReplayRepoYAML)
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes(captured provenance) error = %v\n%s", err, captured.ReplayRepoYAML)
+	}
+	if replayed.Declares("agent") || replayed.Declares("build.agent") || replayed.Declares("auto_fix.build") {
+		t.Fatalf("captured repo made inherited fields explicit:\n%s", captured.ReplayRepoYAML)
+	}
+	if got := Merge(global, replayed); !reflect.DeepEqual(got, want) {
+		t.Fatalf("replayed merge changed omitted repo inheritance:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
