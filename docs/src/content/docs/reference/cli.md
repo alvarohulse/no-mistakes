@@ -389,6 +389,18 @@ no-mistakes runs [--limit <n>]
 
 Shows runs newest-first with branch, status (styled), short SHA, timestamp, and PR URL if set.
 
+## no-mistakes config explain
+
+Resolve the policy that the current branch would use without creating a run or worktree.
+
+```sh
+no-mistakes config explain [--format text|json]
+```
+
+The command asks the daemon to read the current branch head from the registered bare gate, freshly pin the trusted default branch, apply the global config and matching override, resolve available agent routes in the daemon's environment, and emit the same canonical policy contract persisted when a run starts. It starts the daemon when needed, but does not create a run or worktree, run hooks, or construct agents. Because resolution fetches trusted policy and refreshes registered routing, recursive gate-execution containment refuses this command from an active validation step.
+
+Text is the default. `--format json` emits a compact envelope containing `policy_digest` and the exact canonical `policy` object. The policy includes ordered enabled/skipped steps, effective commands, routes, runner identity, budgets, settings, the trusted commit, and contributing config sources with their kind, ref, and SHA-256 digest.
+
 ## no-mistakes eval
 
 Inspect the locally collected review-case corpus before spending tokens, replay an explicit agent and model in isolation, and report finding-level scores, token cost, wall time, and the recall-versus-cost frontier. Eligible cases are collected automatically as runs finish; `eval capture <run-id>` collects one on demand; `eval miss ingest <run-id> --finding '<json>'` labels a confirmed post-PR miss (review passed green, later caught) as false-negative gold.
