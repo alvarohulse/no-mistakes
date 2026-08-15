@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -68,10 +70,6 @@ func TestGitSafeEnv_StampsGateRoleMarker(t *testing.T) {
 	}
 }
 
-// TestGitSafeEnv_GateMarkerWinsOverAmbient guards that a target repo (or a
-// confused parent) cannot pre-empt the marker with its own ambient value: the
-// stamp is appended last, and exec resolves duplicate keys to the last
-// occurrence.
 func TestEverySupportedAdapterPropagatesGateMarkerThroughCanonicalEnv(t *testing.T) {
 	// Native one-shot adapters own their command in the named file. OpenCode
 	// and Rovo Dev use the shared managed-server launcher, while ACP targets use
@@ -95,6 +93,25 @@ func TestEverySupportedAdapterPropagatesGateMarkerThroughCanonicalEnv(t *testing
 			t.Errorf("%s no longer propagates the gate marker through gitSafeEnv (%s)", adapter, path)
 		}
 	}
+}
+
+func TestGitSafeEnvIsObservedBySpawnedProcess(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAgentEnvProbe$")
+	cmd.Env = gitSafeEnv(t.TempDir(), "NM_HOME=/isolated/eval", GateRoleEnvVar+"=0", "NM_TEST_ENV_PROBE=1")
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run environment probe: %v", err)
+	}
+	if got := string(output); !strings.HasPrefix(got, "/isolated/eval|1") {
+		t.Fatalf("spawned environment = %q, want isolated home and gate marker", got)
+	}
+}
+
+func TestAgentEnvProbe(t *testing.T) {
+	if os.Getenv("NM_TEST_ENV_PROBE") != "1" {
+		return
+	}
+	fmt.Printf("%s|%s", os.Getenv("NM_HOME"), os.Getenv(GateRoleEnvVar))
 }
 
 func TestGitSafeEnv_GateMarkerWinsOverAmbient(t *testing.T) {

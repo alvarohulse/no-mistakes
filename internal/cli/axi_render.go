@@ -105,6 +105,8 @@ type runView struct {
 	RefreshStrategy types.RefreshStrategy
 	PRURL           string
 	Error           string
+	CIReady         bool
+	CIReadyNoCI     bool
 	// AwaitingAgentSince is the unix-seconds time the run parked awaiting the
 	// driving agent, or nil when the run is not parked. It powers the top-level
 	// parked signal in the run object.
@@ -119,6 +121,8 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		RefreshStrategy:    r.RefreshStrategy.OrDefault(),
+		CIReady:            r.CIReady,
+		CIReadyNoCI:        r.CIReadyNoCI,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {

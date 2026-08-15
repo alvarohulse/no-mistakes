@@ -386,7 +386,7 @@ func TestBuiltInPipelineSectionStillOmitsPRAndCI(t *testing.T) {
 		{ID: "s3", StepName: types.StepCI, StepOrder: 10, Status: types.StepStatusFailed, ExitCode: &failExit},
 	}}
 
-	got, _ := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, types.RefreshStrategyRebase)
+	got, _ := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, types.RefreshStrategyRebase, "")
 	if strings.Contains(got, "**PR**") || strings.Contains(got, "**CI**") {
 		t.Fatalf("built-in pipeline section should omit the pr and ci rows, got:\n%s", got)
 	}

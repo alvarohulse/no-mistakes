@@ -61,11 +61,12 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 ## Why these steps, in this order
 
-- **Intent first** so downstream agent prompts and generated PR descriptions can include author intent supplied by the agent or inferred from transcripts.
+- **Intent first** so downstream agent prompts, including PR drafting, can use author intent supplied by the agent or inferred from transcripts.
 - **Refresh next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after refresh, the pipeline skips the rest.
 - **Review before build and test** so semantic review happens before deterministic verification and any repair commits.
+  A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
 - **Build before test** so compile failures are isolated from behavioral test failures.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
@@ -92,7 +93,7 @@ You can't reorder steps. You *can*:
 
 - Swap the agent, or configure an ordered fallback list, globally or per-repo.
 - Set explicit `commands.lint`, `commands.format`, and an optional **targeted** `commands.test` (local intent validation only; not a full CI suite).
-- Store test evidence locally by default or opt into committed in-repo evidence with `test.evidence.store_in_repo`.
+- Store test evidence locally by default or, on a supported provider, opt into publishing it to an orphan evidence branch with `test.evidence.store_in_repo`.
 - Control auto-fix limits per step.
 - Select `refresh.strategy: rebase|merge` in trusted repo config, override it for one run with `--refresh-strategy`, and declare a stack base with `--stacked-on <branch>`.
 - Ignore paths during review and documentation checks.

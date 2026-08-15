@@ -62,6 +62,9 @@ auto_fix:
   lint: 3
   ci: 3
 
+ci:
+  rerun_transient: 0
+
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
 
@@ -75,6 +78,9 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+    branch: no-mistakes/evidence
+    retention: 336h
+    max_runs: 200
 
 prompts:
   shared: |
@@ -230,7 +236,7 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `cursor`, `acp:cursor` | `-p`, `--print`, `--output-format`, `resume`, `--resume`, `--continue`, `--workspace`, `--add-dir`, `--trust` |
 
 For structured `codex` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it.
-The Claude, Codex, and Cursor session-control forms are reserved so no-mistakes can keep reviewer and fixer conversations role-isolated. Cursor workspace flags are reserved because no-mistakes owns the clean-primary-workspace containment boundary.
+The Claude, Codex, and Cursor session-control forms are reserved so no-mistakes can keep review-loop conversations deterministic: review turns stay session-free while the fixer keeps its own isolated durable session. Cursor workspace flags are reserved because no-mistakes owns the clean-primary-workspace containment boundary.
 
 Smart defaults:
 
@@ -352,17 +358,17 @@ Daemon log verbosity.
 
 ### session_reuse
 
-Per-run, per-role agent session reuse for the review loop.
+Per-run agent session reuse for the review loop's fixer role.
 
 |         |        |
 | ------- | ------ |
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`, Cursor via `--resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
-The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
-Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
-When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
+When enabled and the pipeline agent supports native session resume (Claude via `--resume`, Codex via `exec resume`, Cursor via `--resume`), each run keeps one durable fixer session across its review-fix turns.
+Review turns - the initial full review and every full rereview - always run as fresh, session-free invocations regardless of this setting: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
+The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
+When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
@@ -390,6 +396,26 @@ For unconfigured Build, Test, and Lint, the agent plans one exact command read-o
 Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
 
 These are global defaults. Per-repo config can override individual steps.
+
+### ci.rerun_transient
+
+How many times the CI step may re-run a single check the provider reported as cancelled before that check reaches an approval gate.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `0` |
+| Range | `0` to `5`; values outside it are clamped |
+
+```yaml
+ci:
+  rerun_transient: 0
+```
+
+Each rerun is another provider-side workflow run billed to the repository being contributed to.
+Set `0` here to never spend someone else's CI minutes; this is the only place to make that choice for a repository whose default branch you do not control.
+
+The per-repo [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) overrides this value and owns the classification, the trust boundary, and every case that skips the rerun.
 
 ### commit.fix_message
 
@@ -421,7 +447,7 @@ A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, pass that summary to refresh, review, build, test, document, lint, CI auto-fix, and PR prompts, and include it in generated PR descriptions.
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to refresh, review, build, test, document, lint, CI auto-fix, and PR drafting prompts. The generated description keeps intent provenance on the Intent pipeline result instead of duplicating it in the body.
 
 |      |          |
 | ---- | -------- |
@@ -447,22 +473,72 @@ Otherwise, accepted candidates are ranked by confidence, which combines the raw 
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts stay in a temporary directory keyed by run ID and are referenced by local path.
+By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and referenced by local path.
 
 |      |          |
 | ---- | -------- |
 | Type | `object` |
 
-| Field                         | Type     | Default                 | Description                                                           |
-| ----------------------------- | -------- | ----------------------- | --------------------------------------------------------------------- |
-| `test.evidence.store_in_repo` | `bool`   | `false`                 | Commit and push test evidence artifacts from inside the repo worktree |
-| `test.evidence.dir`           | `string` | `.no-mistakes/evidence` | Repo-relative parent directory used when `store_in_repo` is true      |
+| Field                         | Type     | Default                  | Description                                                                |
+| ----------------------------- | -------- | ------------------------ | -------------------------------------------------------------------------- |
+| `test.evidence.store_in_repo` | `bool`   | `false`                  | Publish test evidence artifacts to the repository's orphan evidence branch |
+| `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
+| `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
+| `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
+| `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
+| `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
 
-When `store_in_repo` is true, the test step writes evidence under `<dir>/<branch-slug>` and the push step stages files from that directory before committing agent changes.
+The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
+When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
+The branch is an orphan: it shares no history with your code branches, so evidence never reaches the default branch. Links use the evidence commit rather than the branch, so they keep resolving after later runs.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
-If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+`branch` must be a valid Git branch name; an invalid value fails the config with the offending key and value.
+The publisher never force-pushes. It appends to the fetched evidence-branch tip with a fast-forward push, retries one lost race, and refuses to use the run branch, default branch, or an existing branch whose tip lacks the `.no-mistakes-evidence` marker.
+Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
+Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed and the PR body keeps its local rendering.
+Enabling this pushes a branch to your remote, so pick a `branch` name your CI workflows do not build.
 
-These are global defaults. Per-repo config can override either field.
+#### Local storage and cleanup
+
+Evidence lives under the app root rather than the system temp directory. On Linux the daemon runs from a service unit that does not export `TMPDIR`, so the old temp-directory default resolved to the shared `/tmp`, which current Ubuntu mounts as a RAM-backed `tmpfs`. The app root is disk backed on macOS, Linux, and Windows alike.
+
+no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
+
+- A finished run that produced no artifacts leaves nothing behind.
+- Recorded run directories older than `retention` are removed.
+- Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
+- A run that is still pending or running is never touched.
+
+Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
+
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+
+The publication fields are global defaults. Repo config can override `store_in_repo` and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+
+### eval
+
+Local review-evaluation corpus settings for [`no-mistakes eval`](/no-mistakes/reference/eval/).
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                      | Type   | Default | Description                                                            |
+| -------------------------- | ------ | ------- | ---------------------------------------------------------------------- |
+| `eval.capture_provenance`  | `bool` | `true`  | Record the exact commit and configuration inputs a replay needs        |
+| `eval.auto_capture`        | `bool` | `true`  | Freeze eligible finished runs' review passes into the local corpus     |
+| `eval.max_cases`           | `int`  | `200`   | Retention target for automatic collection; `0` keeps every case        |
+| `eval.diversified_size`    | `int`  | `32`    | Cap on the official gold-only `diversified` set; `0` is one gold case per stratum |
+
+`capture_provenance` is what makes a review pass replayable at all. It is recorded when the round is written and cannot be added afterwards, because the pinned configuration is a point-in-time snapshot, so a run reviewed with it off can never be captured later.
+
+`auto_capture` collects those passes without any command: when an eligible run finishes, its decided review rounds become cases. It does nothing while `capture_provenance` is off. Collection runs after the pipeline has already reported its outcome and can never change it; a failure is logged and nothing else.
+
+`max_cases` sets the retention target enforced after automatic collection. When it is exceeded the oldest unprotected cases are dropped first. A case with a replay in progress or recorded candidate replays is protected, so the corpus can remain above the target rather than invalidate a comparison you have spent tokens on. Cases from the same repository share one local object pool, so a case costs its own records plus the objects its commits introduced rather than a copy of the repository.
+
+`diversified_size` caps the official gold-only eval set used by `eval run --cases diversified`. Selection is stratified and pinned; unlabeled cases never fill it. `0` keeps one gold case per stratum with no Hamilton bound. Corpus retention (`max_cases`) and this official-set cap are different knobs.
+
+These are operator settings for this machine's local disk, so they are global-only: an `eval` block in a repository's `.no-mistakes.yaml` is ignored. Corpus storage stays under `<NM_HOME>/eval` and no-mistakes never uploads it; replay still sends code to the selected agent's configured model provider as described in the [Evaluation toolkit](/no-mistakes/reference/eval/).
 
 ### hooks.pr_body
 

@@ -189,6 +189,7 @@ func TestRerunParams(t *testing.T) {
 	params := RerunParams{
 		RepoID:          "repo456",
 		Branch:          "feature",
+		PreviousRunID:   "run123",
 		SkipSteps:       []types.StepName{types.StepReview},
 		RefreshStrategy: types.RefreshStrategyMerge,
 		StackedOn:       "feature/dependency",
@@ -203,6 +204,9 @@ func TestRerunParams(t *testing.T) {
 	}
 	if got.Branch != "feature" {
 		t.Errorf("branch = %q, want %q", got.Branch, "feature")
+	}
+	if got.PreviousRunID != "run123" {
+		t.Errorf("previous_run_id = %q, want %q", got.PreviousRunID, "run123")
 	}
 	if len(got.SkipSteps) != 1 || got.SkipSteps[0] != types.StepReview {
 		t.Errorf("skip_steps = %#v, want review", got.SkipSteps)
@@ -427,6 +431,7 @@ func TestMethodConstants(t *testing.T) {
 	methods := []string{
 		MethodPushReceived,
 		MethodGetRun,
+		MethodGetStepDiff,
 		MethodGetRuns,
 		MethodGetRunsForHead,
 		MethodGetActiveRun,
@@ -449,8 +454,8 @@ func TestMethodConstants(t *testing.T) {
 		}
 		seen[m] = true
 	}
-	if len(methods) != 13 {
-		t.Errorf("expected 13 methods, got %d", len(methods))
+	if len(methods) != 14 {
+		t.Errorf("expected 14 methods, got %d", len(methods))
 	}
 }
 

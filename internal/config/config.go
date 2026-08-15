@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -49,10 +51,44 @@ const (
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
 	// "off", and "never", resolves to this.
 	CITimeoutUnlimited = time.Duration(-1)
+	// DefaultCIRerunTransient is the per-check rerun budget the CI step uses
+	// when ci.rerun_transient is unset. It is 0 because GitHub's CANCELLED
+	// conclusion does not carry a cause: the same value covers a provider
+	// aborting its own infrastructure, a maintainer stopping a runaway or
+	// unsafe job, and repository concurrency with cancel-in-progress. Until a
+	// reliable cause signal exists, restarting on that ambiguity risks
+	// re-running work a person deliberately stopped, so rerunning cancelled
+	// checks is an explicit opt-in rather than a default.
+	DefaultCIRerunTransient = 0
+	// MaxCIRerunTransient caps ci.rerun_transient. Reruns are cheap compared
+	// with an agent round, but they are not free: each one keeps the monitor
+	// polling the same commit, so the budget stays small by construction.
+	MaxCIRerunTransient = 5
+	// DefaultEvalMaxCases caps the auto-captured local eval corpus. Cases
+	// share one object pool per repository, so the marginal cost of a case is
+	// its JSON records plus the objects its commits actually introduced, not a
+	// copy of the repository. The cap exists to bound that JSON and to keep
+	// the corpus a recent, representative window rather than an archive.
+	DefaultEvalMaxCases = 200
+	// DefaultEvalDiversifiedSize caps the official gold-only eval set.
+	// 0 means one gold case per stratum with no Hamilton bound.
+	DefaultEvalDiversifiedSize = 32
+	// DefaultEvidenceRetention is how long a run's on-disk evidence survives
+	// before the daemon reaps it. It is comfortably longer than typical PR
+	// review latency because a PR body references these artifacts by local path
+	// whenever publishing is off or the provider has no derivable links. This
+	// is no-mistakes' own budget: the point of owning it is that no OS temp
+	// timer decides when a user's screenshots disappear.
+	DefaultEvidenceRetention = 14 * 24 * time.Hour
+	// DefaultEvidenceMaxRuns caps how many run directories survive regardless
+	// of age, so a burst of parallel runs that all land inside the retention
+	// window still cannot grow the directory without bound.
+	DefaultEvidenceMaxRuns = 200
 )
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
 type GlobalConfig struct {
+	SourceYAML              []byte              `yaml:"-"`
 	Agent                   types.AgentName     `yaml:"agent"`
 	Agents                  []types.AgentName   `yaml:"-"`
 	ACPXPath                string              `yaml:"acpx_path"`
@@ -64,9 +100,10 @@ type GlobalConfig struct {
 	DaemonConnectTimeout    time.Duration       `yaml:"-"`
 	ProcessTerminationGrace time.Duration       `yaml:"-"`
 	LogLevel                string              `yaml:"log_level"`
-	// SessionReuse controls per-run, per-role agent session reuse in the
-	// review loop (one durable reviewer session across full reviews, a
-	// separate durable fixer session across fix turns). Default true; set
+	// SessionReuse controls per-run agent session reuse in the review loop:
+	// one durable fixer session across review-fix turns. Review turns always
+	// run session-free so the rereview never resumes the session whose
+	// findings prescribed the fixes it certifies. Default true; set
 	// session_reuse: false to force every invocation cold.
 	SessionReuse bool `yaml:"-"`
 	// Hooks carries the machine-wide hook defaults. Only pr_body is accepted
@@ -93,8 +130,13 @@ type GlobalConfig struct {
 	Document  DocumentRaw
 	Lint      StepAgentRaw
 	PR        StepAgentRaw
-	CI        StepAgentRaw
+	CI        CIRaw
 	Prompts   PromptConfig
+	// Eval is resolved at load time because it is global-only: it describes
+	// this machine's local eval corpus (disk, retention, whether review rounds
+	// record replay provenance), never a repository policy. Keeping it out of
+	// RepoConfig means no pushed branch can enable, disable, or resize it.
+	Eval Eval
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -124,8 +166,9 @@ type globalConfigRaw struct {
 	Document                DocumentRaw            `yaml:"document"`
 	Lint                    StepAgentRaw           `yaml:"lint"`
 	PR                      StepAgentRaw           `yaml:"pr"`
-	CI                      StepAgentRaw           `yaml:"ci"`
+	CI                      CIRaw                  `yaml:"ci"`
 	Prompts                 PromptConfig           `yaml:"prompts"`
+	Eval                    EvalRaw                `yaml:"eval"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -157,7 +200,7 @@ type RepoConfig struct {
 	Document DocumentRaw  `yaml:"document"`
 	Lint     StepAgentRaw `yaml:"lint"`
 	PR       StepAgentRaw `yaml:"pr"`
-	CI       StepAgentRaw `yaml:"ci"`
+	CI       CIRaw        `yaml:"ci"`
 	// Prompts appends extra guidance to the built-in pipeline agent prompts.
 	// It steers the agents that launch with the maintainer's credentials, so
 	// it is honored ONLY from the trusted default-branch copy of
@@ -175,7 +218,10 @@ type RepoConfig struct {
 	// able to turn it off (or on). Default false; a plain bool so a missing key
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
-	present                map[string]bool
+	// NoCI is a trusted readiness boundary. It only permits an empty provider
+	// check suite; it never waives a registered pending or failing check.
+	NoCI    bool `yaml:"no_ci"`
+	present map[string]bool
 }
 
 // StepAgentRaw is the YAML representation of one step's optional agent route.
@@ -269,17 +315,19 @@ func validVendorIdentity(vendor string) bool {
 // overloaded as the primary review route.
 type ReviewRaw struct {
 	StepAgentRaw
-	AdversaryAgent  types.AgentName   `yaml:"-"`
-	AdversaryAgents []types.AgentName `yaml:"-"`
-	AdversaryModel  ModelRoute        `yaml:"adversary_model"`
+	AdversaryAgent   types.AgentName   `yaml:"-"`
+	AdversaryAgents  []types.AgentName `yaml:"-"`
+	AdversaryModel   ModelRoute        `yaml:"adversary_model"`
+	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
 func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
-		Agent          agentList  `yaml:"agent"`
-		Model          ModelRoute `yaml:"model"`
-		AdversaryAgent agentList  `yaml:"adversary_agent"`
-		AdversaryModel ModelRoute `yaml:"adversary_model"`
+		Agent            agentList         `yaml:"agent"`
+		Model            ModelRoute        `yaml:"model"`
+		AdversaryAgent   agentList         `yaml:"adversary_agent"`
+		AdversaryModel   ModelRoute        `yaml:"adversary_model"`
+		PathInstructions []PathInstruction `yaml:"path_instructions"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
@@ -290,6 +338,7 @@ func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.AdversaryAgent = firstAgent(raw.AdversaryAgent)
 	c.AdversaryAgents = copyAgents(raw.AdversaryAgent)
 	c.AdversaryModel = raw.AdversaryModel
+	c.PathInstructions = raw.PathInstructions
 	return nil
 }
 
@@ -376,6 +425,113 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// PathInstruction is one glob-scoped block of review guidance. Path follows the
+// same match rules as ignore_patterns: no slash matches by basename, a trailing
+// "/**" matches an entire subtree, and anything else is a full-path glob.
+type PathInstruction struct {
+	Path         string `yaml:"path"`
+	Instructions string `yaml:"instructions"`
+}
+
+// Review-prompt block frame for review.path_instructions.
+//
+// The review step renders every matched entry as
+//
+//	path: <path>
+//	matched files: <files>
+//	instructions:
+//	<instructions>
+//
+// so each rule travels with the scope it was selected for and no block can read
+// as a global instruction. The labels live here rather than in the review step
+// because the byte accounting below has to measure the real assembled section,
+// not an estimate of it; internal/pipeline/steps builds its blocks from these
+// same constants and TestReviewPathInstructionsSectionStaysWithinAccountedBytes
+// is the drift check.
+const (
+	ReviewPathInstructionsHeading    = "Repository review instructions for the changed paths (trusted, from the default branch). Each block below applies only to the files listed under its path, and adds to the requirements above:"
+	ReviewPathInstructionsPathLabel  = "path: "
+	ReviewPathInstructionsFilesLabel = "matched files: "
+	ReviewPathInstructionsRulesLabel = "instructions:"
+	// ReviewPathInstructionsMaxFilesBytes bounds the matched-file list a single
+	// block may print. A broad glob can match hundreds of files, so the review
+	// step truncates the list deterministically and states the remaining count;
+	// the accounting charges every entry this full allowance so the cap holds
+	// for any diff rather than only for small ones.
+	ReviewPathInstructionsMaxFilesBytes = 192
+)
+
+// Bounds on review.path_instructions.
+//
+// The injected text lands in the review prompt, which is already the largest
+// gate prompt no-mistakes builds, and an oversized prompt fails the agent
+// invocation outright instead of degrading. The budget is therefore validated
+// when the config is parsed - before a run starts - rather than truncated
+// silently at review time.
+const (
+	// MaxReviewPathInstructions is the largest number of path_instructions
+	// entries a repository may configure.
+	MaxReviewPathInstructions = 32
+	// MaxReviewPathInstructionsBytes is the largest review-prompt section
+	// path_instructions may produce, measured by ReviewPathInstructionsBytes.
+	// It leaves room for the entry cap to be reached with a rule of ordinary
+	// length, so neither cap makes the other unusable.
+	MaxReviewPathInstructionsBytes = 16384
+)
+
+// ReviewPathInstructionsBytes returns the largest review-prompt section these
+// entries can produce: the leading blank line, the heading, and for every entry
+// its labels, its path, its instructions, its full matched-file allowance, and
+// the separator before it. Instruction text can only shrink on its way into the
+// prompt (conflict markers are removed and whitespace is collapsed), and the
+// matched-file list is truncated to its allowance, so the result is an upper
+// bound on the real section for any diff.
+func ReviewPathInstructionsBytes(entries []PathInstruction) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	total := len("\n\n") + len(ReviewPathInstructionsHeading) + len("\n")
+	for i, entry := range entries {
+		if i > 0 {
+			total += len("\n\n")
+		}
+		total += len(ReviewPathInstructionsPathLabel) + len(strings.TrimSpace(entry.Path)) + len("\n")
+		total += len(ReviewPathInstructionsFilesLabel) + ReviewPathInstructionsMaxFilesBytes + len("\n")
+		total += len(ReviewPathInstructionsRulesLabel) + len("\n")
+		total += len(strings.TrimSpace(entry.Instructions))
+	}
+	return total
+}
+
+// promptConflictMarkers are the merge-conflict tokens the pipeline removes from
+// maintainer-authored text before injecting it into an agent prompt
+// (sanitizePromptMultilineText in internal/pipeline/steps owns the removal, and
+// document.instructions goes through the same path). Validation applies the same
+// removal so a value that would reach the reviewer as an empty block is rejected
+// here instead of disappearing from the prompt without a word.
+var promptConflictMarkers = strings.NewReplacer("<<<<<<<", " ", "=======", " ", ">>>>>>>", " ")
+
+// RenderedInstructions is the emptiness-agreement helper for instruction text,
+// not a second copy of the prompt renderer. The real renderer is
+// sanitizePromptMultilineText in internal/pipeline/steps, which additionally
+// normalizes CR and collapses each line's runs of whitespace; internal/config
+// cannot import that package, which is why the conflict-marker replacer above is
+// duplicated here at all. Two invariants tie the two together, and the rest of
+// this feature silently depends on both:
+//
+//   - Emptiness agrees exactly. This returns "" for precisely the inputs the
+//     prompt renderer reduces to "", so validation can reject a value that would
+//     otherwise reach the reviewer as an empty block.
+//   - The prompt renderer never lengthens text, so the rendered instructions are
+//     no longer than strings.TrimSpace of the raw value and
+//     ReviewPathInstructionsBytes stays an upper bound on the assembled section.
+//
+// A change to sanitizePromptMultilineText that can lengthen text (escaping,
+// wrapping) or that strips a token this replacer keeps breaks one of them;
+// TestPathInstructionRenderingAgreesWithConfigValidation is the drift check.
+func RenderedInstructions(instructions string) string {
+	return strings.TrimSpace(promptConflictMarkers.Replace(instructions))
+}
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
 		Agent                  agentList     `yaml:"agent"`
@@ -394,9 +550,10 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Document               DocumentRaw   `yaml:"document"`
 		Lint                   StepAgentRaw  `yaml:"lint"`
 		PR                     StepAgentRaw  `yaml:"pr"`
-		CI                     StepAgentRaw  `yaml:"ci"`
+		CI                     CIRaw         `yaml:"ci"`
 		Prompts                PromptConfig  `yaml:"prompts"`
 		DisableProjectSettings bool          `yaml:"disable_project_settings"`
+		NoCI                   bool          `yaml:"no_ci"`
 	}
 	var raw repoConfigRaw
 	if err := value.Decode(&raw); err != nil {
@@ -410,6 +567,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
+	c.CI = raw.CI
 	c.Commit = raw.Commit
 	c.Intent = raw.Intent
 	refresh, err := resolveLegacyRepoRefreshConfig(raw.Refresh, raw.LegacyRebase)
@@ -423,9 +581,9 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Document = raw.Document
 	c.Lint = raw.Lint
 	c.PR = raw.PR
-	c.CI = raw.CI
 	c.Prompts = raw.Prompts
 	c.DisableProjectSettings = raw.DisableProjectSettings
+	c.NoCI = raw.NoCI
 	return nil
 }
 
@@ -537,6 +695,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("review.adversary_model") {
 		out.Review.AdversaryModel = override.Review.AdversaryModel
 	}
+	if override.has("review.path_instructions") {
+		out.Review.PathInstructions = append([]PathInstruction(nil), override.Review.PathInstructions...)
+	}
 	if override.has("build.agent") {
 		out.Build.Agent = override.Build.Agent
 		out.Build.Agents = copyAgents(override.Build.Agents)
@@ -556,6 +717,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("test.evidence.dir") {
 		out.Test.Evidence.Dir = override.Test.Evidence.Dir
+	}
+	if override.has("test.evidence.branch") {
+		out.Test.Evidence.Branch = override.Test.Evidence.Branch
 	}
 	if override.has("document.agent") {
 		out.Document.Agent = override.Document.Agent
@@ -587,6 +751,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("ci.model") {
 		out.CI.Model = override.CI.Model
+	}
+	if override.has("ci.rerun_transient") {
+		out.CI.RerunTransient = override.CI.RerunTransient
 	}
 	if override.has("prompts.shared") {
 		out.Prompts.Shared = override.Prompts.Shared
@@ -620,6 +787,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("disable_project_settings") {
 		out.DisableProjectSettings = override.DisableProjectSettings
+	}
+	if override.has("no_ci") {
+		out.NoCI = override.NoCI
 	}
 	return out
 }
@@ -733,7 +903,10 @@ func cloneRepoConfig(src *RepoConfig) *RepoConfig {
 	out.Document.Agents = copyAgents(src.Document.Agents)
 	out.Lint = copyStepAgentRaw(src.Lint)
 	out.PR = copyStepAgentRaw(src.PR)
-	out.CI = copyStepAgentRaw(src.CI)
+	out.CI = CIRaw{
+		StepAgentRaw:   copyStepAgentRaw(src.CI.StepAgentRaw),
+		RerunTransient: src.CI.RerunTransient,
+	}
 	if src.present != nil {
 		out.present = make(map[string]bool, len(src.present))
 		for path, present := range src.present {
@@ -856,6 +1029,39 @@ func (c *AutoFixRaw) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// CIRaw is the YAML representation of CI-step settings.
+// Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
+type CIRaw struct {
+	StepAgentRaw
+	RerunTransient *int `yaml:"rerun_transient"`
+}
+
+func (c *CIRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Agent          agentList  `yaml:"agent"`
+		Model          ModelRoute `yaml:"model"`
+		RerunTransient *int       `yaml:"rerun_transient"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.Agent = firstAgent(raw.Agent)
+	c.Agents = copyAgents(raw.Agent)
+	c.Model = raw.Model
+	c.RerunTransient = raw.RerunTransient
+	return nil
+}
+
+// CI holds the resolved CI-step settings.
+type CI struct {
+	// RerunTransient is how many times the CI step may re-run a single check
+	// the provider reported as cancelled - the one terminal outcome it
+	// attributes to itself rather than to the job - before that check reaches
+	// an approval gate. 0 disables reruns and restores the behavior of
+	// escalating every failure on sight.
+	RerunTransient int
+}
+
 // AutoFix holds resolved per-step auto-fix attempt limits.
 // A value of 0 means auto-fix is disabled (requires manual approval).
 type AutoFix struct {
@@ -870,6 +1076,10 @@ type AutoFix struct {
 
 // Config is the merged result of global + per-repo configuration.
 type Config struct {
+	ReplayGlobalYAML        []byte
+	ReplayRepoYAML          []byte
+	TrustedConfigSHA        string
+	CaptureEvalProvenance   bool
 	Agent                   types.AgentName
 	Agents                  []types.AgentName
 	StepAgents              map[types.StepName][]types.AgentName
@@ -889,10 +1099,13 @@ type Config struct {
 	Hooks                   Hooks
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
+	CI                      CI
 	Commit                  Commit
 	Intent                  Intent
 	Test                    Test
 	Document                Document
+	Review                  Review
+	Eval                    Eval
 	Prompts                 PromptConfig
 	RefreshStrategy         types.RefreshStrategy
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
@@ -900,6 +1113,10 @@ type Config struct {
 	// project-level settings/instructions suppressed; the daemon fails the run
 	// closed if the resolved harness has no verified suppression knob.
 	DisableProjectSettings bool
+	// NoCI is the resolved, trusted-only declaration that this repository
+	// intentionally has no CI (see the RepoConfig field). When true and the
+	// forge reports zero checks, the CI monitor treats that as all-checks-passed.
+	NoCI bool
 }
 
 // Document is the resolved document-step config. Instructions come from the
@@ -1015,6 +1232,13 @@ func combinePromptText(parts ...string) string {
 	return strings.Join(trimmed, "\n\n")
 }
 
+// Review is the resolved review-step config. PathInstructions come from the
+// trusted default-branch repo config and scope extra review guidance to the
+// changed paths each glob matches.
+type Review struct {
+	PathInstructions []PathInstruction
+}
+
 // TestRaw is the YAML representation of test-step settings.
 type TestRaw struct {
 	Agent    types.AgentName   `yaml:"-"`
@@ -1044,6 +1268,25 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 type EvidenceRaw struct {
 	StoreInRepo *bool   `yaml:"store_in_repo"`
 	Dir         *string `yaml:"dir"`
+	// Branch selects the orphan evidence branch. It names a git ref the
+	// daemon pushes to with the maintainer's credentials, so it is honored
+	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (see
+	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
+	// aim evidence commits at another branch of the repository.
+	Branch *string `yaml:"branch"`
+	// LocalRoot, Retention, and MaxRuns describe this MACHINE's evidence
+	// storage: where the daemon writes artifacts on local disk and how long it
+	// keeps them. They are global-only - Merge resolves them straight from
+	// GlobalConfig and never from a repository, trusted copy included. A
+	// repository does not get to name a filesystem path the daemon writes to,
+	// nor to set the retention budget for a resource every other repository on
+	// the machine shares. (Contrast Branch, which is trusted-repo-settable
+	// because a branch genuinely is per-repository state.)
+	//
+	// LocalRoot must be absolute; see validateTestRaw.
+	LocalRoot *string `yaml:"local_root"`
+	Retention *string `yaml:"retention"`
+	MaxRuns   *int    `yaml:"max_runs"`
 }
 
 // Test is the resolved test-step config.
@@ -1052,12 +1295,58 @@ type Test struct {
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
-// test step writes evidence artifacts into Dir (relative to the repo worktree)
-// so they are committed, pushed, and viewable directly on the PR. Otherwise
-// evidence stays in a temporary directory referenced only by local path.
+// run publishes its evidence artifacts to the orphan Branch of the same
+// repository, under Dir, and links them from the pull request body. Evidence
+// never enters the pushed code branch, so it never reaches the default
+// branch's history. Otherwise evidence stays on local disk under LocalRoot,
+// referenced only by local path.
 type Evidence struct {
 	StoreInRepo bool
 	Dir         string
+	Branch      string
+	// LocalRoot overrides the app-root default for on-disk evidence; empty
+	// means paths.EvidenceDir(). Retention and MaxRuns bound how much of it
+	// survives: no-mistakes reaps its own evidence rather than leaving that to
+	// an OS temp-directory timer. Zero disables the corresponding bound.
+	LocalRoot string
+	Retention time.Duration
+	MaxRuns   int
+}
+
+// EvalRaw is the YAML representation of local evaluation-corpus settings.
+// Pointer fields distinguish "not set" (nil) from explicit zero/false values.
+type EvalRaw struct {
+	CaptureProvenance *bool `yaml:"capture_provenance"`
+	AutoCapture       *bool `yaml:"auto_capture"`
+	MaxCases          *int  `yaml:"max_cases"`
+	DiversifiedSize   *int  `yaml:"diversified_size"`
+}
+
+// Eval is the resolved local evaluation-corpus config. It is deliberately a
+// first-class configuration key rather than an environment variable: the
+// daemon is a long-lived launchd/systemd service whose unit file is re-rendered
+// on install and update, and only proxy variables survive that re-render, so an
+// environment-gated corpus would silently stop collecting after an update.
+//
+// CaptureProvenance is the upstream half: it makes every review round record
+// the exact commit and configuration inputs a replay needs. A round written
+// with it off can never be captured afterwards, because the pinned global
+// configuration is a point-in-time snapshot that no longer exists anywhere.
+//
+// AutoCapture is the downstream half: it freezes each finished run's review
+// passes into the local corpus without anyone running a command. It has no
+// effect while CaptureProvenance is off, since there is nothing to freeze.
+type Eval struct {
+	CaptureProvenance bool
+	AutoCapture       bool
+	// MaxCases caps the auto-captured corpus. 0 keeps every case. Pruning is
+	// oldest-first and never removes a case that already has recorded
+	// candidate replays, so a corpus you have spent tokens on is never
+	// silently reclaimed underneath a comparison.
+	MaxCases int
+	// DiversifiedSize caps the official gold-only eval set. 0 means one gold
+	// case per stratum (no Hamilton bound). Unlabeled cases never fill it.
+	DiversifiedSize int
 }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
@@ -1330,6 +1619,31 @@ func (c *Config) ConfiguredAgentsForStep(step types.StepName) []types.AgentName 
 	return c.configuredAgents()
 }
 
+// resolvePathInstructions trims every entry and drops the ones left without a
+// path or without instruction text that survives prompt rendering, so the
+// resolved config never carries an entry the review step would have to skip.
+// Parsing already rejects those, but Merge also runs on configs built in code.
+func resolvePathInstructions(entries []PathInstruction) []PathInstruction {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]PathInstruction, 0, len(entries))
+	for _, entry := range entries {
+		trimmed := PathInstruction{
+			Path:         strings.TrimSpace(entry.Path),
+			Instructions: strings.TrimSpace(entry.Instructions),
+		}
+		if trimmed.Path == "" || RenderedInstructions(trimmed.Instructions) == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // defaultConfigYAML is the template written when no global config file exists.
 const defaultConfigYAML = `# no-mistakes global configuration
 
@@ -1385,11 +1699,10 @@ daemon_connect_timeout: "3s"
 # escalates to SIGKILL. Processes that exit promptly do not wait out the window.
 process_termination_grace: "10s"
 
-# Reuse one durable agent session per run for the review loop: the reviewer
-# keeps a single session across the initial review and every full rereview,
-# and review fixes keep a separate fixer session. Roles never share a session.
-# Supported for claude, codex, and cursor; other agents run cold. Set false to force
-# every agent invocation cold.
+# Reuse one durable fixer session per run across review-fix turns. Review turns
+# always run session-free so a rereview never resumes the session that prescribed
+# its fixes. Supported for claude, codex, and cursor; other agents run cold. Set false to
+# force every agent invocation cold.
 session_reuse: true
 
 # Log level for daemon output
@@ -1425,6 +1738,17 @@ auto_fix:
   document: 3
   ci: 3
 
+# How many times the CI step may re-run a single check the provider reported as
+# cancelled before that check reaches an approval gate instead of the fix agent.
+# Defaults to 0: a cancelled conclusion does not identify who cancelled, so a
+# rerun can restart a job a maintainer or a concurrency rule stopped on purpose.
+# Raise this only for repositories whose cancellations are known to be
+# provider-side. Each rerun is another workflow run billed to the repository
+# being contributed to. A repository that sets ci.rerun_transient on its own
+# default branch overrides this value.
+ci:
+  rerun_transient: 0
+
 # Auto-fix commit subject template. Available variables: {{.Step}} and {{.Summary}}.
 # Repo config may override this value.
 # commit:
@@ -1442,14 +1766,28 @@ intent:
   # disabled_readers: [codex]
 
 # Test-step evidence artifacts (screenshots, recordings, logs the test step
-# gathers to demonstrate the change works). By default they are kept in a
-# temporary directory and referenced by local path. Opt in to store_in_repo to
-# commit them into the repo under a readable, branch-named directory so they are
-# pushed and render directly on the PR.
+# gathers to demonstrate the change works). By default they are kept on local
+# disk under <NM_HOME>/evidence and referenced by local path. Opt in to
+# store_in_repo to publish them to an orphan evidence branch in the same
+# repository and link them from the PR body. The evidence branch shares no
+# history with your code branches, so artifacts never enter the pushed branch or
+# the default branch.
+#
+# no-mistakes reaps its own evidence rather than leaving that to an OS temp
+# directory timer: retention ages run directories out (default 14 days) and
+# max_runs caps how many survive regardless of age (default 200). Set retention
+# to "unlimited", or either to 0, to disable that bound. local_root moves the
+# directory to another disk and must be an absolute path. These three are
+# global-only - a repository's .no-mistakes.yaml cannot change where this
+# machine writes evidence or how long it keeps it.
 # test:
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
+#     branch: no-mistakes/evidence
+#     local_root: /var/lib/no-mistakes/evidence
+#     retention: 720h
+#     max_runs: 50
 
 # Optional prompt additions. Built-in prompts remain authoritative; these are
 # appended as extra guidance. Shared guidance is included in every pipeline
@@ -1474,6 +1812,26 @@ intent:
 #     prompts:
 #       test: |
 #         Repo-specific testing guidance.
+
+# Local review evaluation corpus, used by "no-mistakes eval" to compare
+# agent+model candidates against review passes your own pipeline already made.
+# capture_provenance records, on every review round, the exact commits and
+# configuration a replay needs; it cannot be added afterwards, so a round
+# recorded without it is never replayable. auto_capture freezes each finished
+# run's review passes into the corpus so it fills without anyone remembering to
+# collect it. Cases of the same repository share one local object pool, so a
+# case costs its own records plus the objects its commits introduced - not a
+# copy of the repository. max_cases bounds the corpus: the oldest cases are
+# dropped first, and a case that already has recorded replays is never dropped.
+# Set max_cases to 0 to keep every case. diversified_size caps the official
+# gold-only eval set (default 32); 0 means one gold case per stratum. Unlabeled
+# cases never fill it. Everything stays under <NM_HOME>/eval and is never
+# uploaded anywhere.
+eval:
+  capture_provenance: true
+  auto_capture: true
+  max_cases: 200
+  diversified_size: 32
 `
 
 // defaultBinary maps agent names to their default binary names.
@@ -2127,15 +2485,18 @@ func DefaultGlobalConfig() *GlobalConfig {
 		ProcessTerminationGrace: DefaultProcessTerminationGrace,
 		LogLevel:                "info",
 		SessionReuse:            true,
+		Eval:                    evalDefaults(),
 	}
 }
 
 // LoadGlobal reads global config from path. Returns defaults if file doesn't exist.
 func LoadGlobal(path string) (*GlobalConfig, error) {
+	cfg := DefaultGlobalConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return DefaultGlobalConfig(), nil
+			cfg.SourceYAML = []byte("{}\n")
+			return cfg, nil
 		}
 		return nil, fmt.Errorf("read global config: %w", err)
 	}
@@ -2147,7 +2508,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 // without silently switching to a newer file.
 func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg := DefaultGlobalConfig()
-
+	cfg.SourceYAML = append([]byte(nil), data...)
 	var raw globalConfigRaw
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -2162,6 +2523,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	}
 	if strings.TrimSpace(raw.Hooks.PostWorktree) != "" {
 		return nil, fmt.Errorf("parse global config: hooks.post_worktree is repo-only")
+	}
+	if err := validateTestRaw(raw.Test); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateEvalRaw(raw.Eval); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 
 	if len(raw.Agent) > 0 {
@@ -2235,6 +2602,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
 	}
 	cfg.AutoFix = raw.AutoFix
+	cfg.CI = raw.CI
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	refresh, err := resolveLegacyStepConfig(raw.Refresh, raw.LegacyRebase)
@@ -2248,8 +2616,8 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Document = raw.Document
 	cfg.Lint = raw.Lint
 	cfg.PR = raw.PR
-	cfg.CI = raw.CI
 	cfg.Prompts = raw.Prompts
+	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 
 	return cfg, nil
 }
@@ -2331,8 +2699,72 @@ func finalizeRepoConfig(cfg *RepoConfig) error {
 	if err := validateCommitRaw(cfg.Commit); err != nil {
 		return err
 	}
+	if err := validateReviewRaw(cfg.Review); err != nil {
+		return err
+	}
+	if err := validateTestRaw(cfg.Test); err != nil {
+		return err
+	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
+	}
+	return nil
+}
+
+// validateReviewRaw fails the config closed on a review.path_instructions list
+// the review step could not honor deterministically: a missing path or
+// instructions value, a glob the matcher cannot compile, or a list that would
+// overrun the review prompt budget. Rejecting the config aborts the run before
+// an agent starts, which is preferable to silently dropping guidance the
+// maintainer expects the reviewer to apply.
+//
+// This deliberately also runs on the PUSHED copy, even though EffectiveRepoConfig
+// discards a pushed review block: the trusted-copy read
+// (assertGateTrustedConfigReadable in internal/daemon) aborts EVERY run whose
+// default-branch .no-mistakes.yaml fails these checks, so a branch carrying an
+// invalid block has to fail here, before it merges, rather than brick the
+// repository's pipeline afterwards. Do not scope this to the trusted copy.
+func validateReviewRaw(review ReviewRaw) error {
+	if len(review.PathInstructions) > MaxReviewPathInstructions {
+		return fmt.Errorf("review.path_instructions has %d entries, at most %d are allowed", len(review.PathInstructions), MaxReviewPathInstructions)
+	}
+	for i, entry := range review.PathInstructions {
+		path := strings.TrimSpace(entry.Path)
+		if path == "" {
+			return fmt.Errorf("review.path_instructions[%d].path must not be empty", i)
+		}
+		if strings.TrimSpace(entry.Instructions) == "" {
+			return fmt.Errorf("review.path_instructions[%d].instructions must not be empty (path %q)", i, path)
+		}
+		if RenderedInstructions(entry.Instructions) == "" {
+			return fmt.Errorf("review.path_instructions[%d].instructions for path %q is left empty once merge-conflict markers are removed; write the rule without <<<<<<<, =======, or >>>>>>>", i, path)
+		}
+		if err := validatePathInstructionGlob(path); err != nil {
+			return fmt.Errorf("review.path_instructions[%d].path %q is not a valid glob: %w", i, path, err)
+		}
+	}
+	if total := ReviewPathInstructionsBytes(review.PathInstructions); total > MaxReviewPathInstructionsBytes {
+		return fmt.Errorf("review.path_instructions would add up to %d bytes to the review prompt, at most %d are allowed so the prompt stays within budget", total, MaxReviewPathInstructionsBytes)
+	}
+	return nil
+}
+
+// validatePathInstructionGlob mirrors how ignore_patterns are matched: a
+// trailing "/**" is a literal subtree prefix rather than a glob, and everything
+// else goes through path.Match, so only patterns Match can compile are accepted.
+// It must stay path.Match rather than filepath.Match for the same reason the
+// matcher does (matchIgnorePattern in internal/pipeline/steps): filepath.Match
+// is separator-dependent, so on Windows the validator would accept patterns the
+// matcher rejects and read a "\" as a path separator instead of an escape.
+func validatePathInstructionGlob(pattern string) error {
+	if prefix, ok := strings.CutSuffix(pattern, "/**"); ok {
+		if prefix == "" {
+			return errors.New("subtree pattern needs a directory before /**")
+		}
+		return nil
+	}
+	if _, err := path.Match(pattern, "a"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2346,14 +2778,10 @@ func finalizeRepoConfig(cfg *RepoConfig) error {
 // processes launch with the maintainer's credentials, including fallback lists
 // and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
-// pushed branch cannot inject shell or pick an agent. Prompts (appended to
-// every pipeline agent prompt) follows the same opt-in boundary as those
-// fields: a pushed branch must not steer the agents that gate it unless the
-// maintainer opted in. Document (the documentation placement policy injected
-// into the document gate prompt) and DisableProjectSettings are
-// unconditionally trusted-only, so not even the opt-in lets a pushed branch
-// weaken the placement policy or the gate-agent project-instruction boundary.
-// When allowRepoCommands is
+// pushed branch cannot inject shell or pick an agent. Prompts follow the same
+// opt-in boundary. Refresh strategy, document instructions, review path
+// instructions, project-settings suppression, no-CI readiness, the CI rerun
+// budget, and the evidence branch are always trusted-only.
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
 // prompt additions, and agent selection, including step routes.
@@ -2364,10 +2792,11 @@ func finalizeRepoConfig(cfg *RepoConfig) error {
 // the supply-chain vector for repos that ship .no-mistakes.yaml only on feature
 // branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, commit, intent settings
-// other than its agent route, and test evidence) are always taken from the
-// pushed copy, matching prior behavior, since they cannot run arbitrary shell
-// or select a process.
+// Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
+// always taken from the pushed copy, matching prior behavior, since they cannot
+// run arbitrary shell, select a process, or spend the maintainer's CI minutes.
+// The single exception inside test is evidence.branch, which names a git ref
+// the daemon pushes to and is therefore trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -2376,16 +2805,37 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	if trusted != nil {
 		effective.Refresh.Strategy = trusted.Refresh.Strategy
 		effective.Document.Instructions = trusted.Document.Instructions
+		effective.Review.PathInstructions = append([]PathInstruction(nil), trusted.Review.PathInstructions...)
 		// disable_project_settings is a security boundary: honor it ONLY from the
 		// trusted default-branch copy so a pushed branch cannot turn the opt-out
 		// off (and re-enable its own AGENTS.md) or on. A nil trusted copy here
 		// means the trusted config was legitimately absent (the daemon aborts
 		// separately when it could not be READ at all), so falsy is correct.
 		effective.DisableProjectSettings = trusted.DisableProjectSettings
+		// no_ci is a readiness boundary: honor it ONLY from the trusted
+		// default-branch copy so a pushed branch cannot self-declare no-CI and
+		// bypass checks that the default branch still expects.
+		effective.NoCI = trusted.NoCI
+		// ci.rerun_transient spends the maintainer's resources rather than the
+		// contributor's: every rerun is another provider-side workflow run
+		// billed to the repository. It is trusted-only for that reason, so a
+		// pushed branch cannot raise its own rerun budget to the cap.
+		effective.CI.RerunTransient = trusted.CI.RerunTransient
+		// test.evidence.branch names the git ref evidence commits are pushed
+		// to with the maintainer's credentials. It is trusted-only so a pushed
+		// branch cannot aim them at another branch of the repository; the rest
+		// of test.evidence stays pushed-readable because it only picks where
+		// artifacts are collected. The publisher independently refuses any
+		// branch without its marker file, so this is defense in depth.
+		effective.Test.Evidence.Branch = trusted.Test.Evidence.Branch
 	} else {
 		effective.Refresh.Strategy = ""
 		effective.Document.Instructions = ""
+		effective.Review.PathInstructions = nil
 		effective.DisableProjectSettings = false
+		effective.NoCI = false
+		effective.CI = CIRaw{}
+		effective.Test.Evidence.Branch = nil
 	}
 	if allowRepoCommands {
 		return &effective
@@ -2411,7 +2861,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Document.Model = trusted.Document.Model
 		effective.Lint = copyStepAgentRaw(trusted.Lint)
 		effective.PR = copyStepAgentRaw(trusted.PR)
-		effective.CI = copyStepAgentRaw(trusted.CI)
+		effective.CI.StepAgentRaw = copyStepAgentRaw(trusted.CI.StepAgentRaw)
 		effective.Prompts = trusted.Prompts
 	} else {
 		effective.Commands = Commands{}
@@ -2432,7 +2882,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Document.Model = ModelRoute{}
 		effective.Lint = StepAgentRaw{}
 		effective.PR = StepAgentRaw{}
-		effective.CI = StepAgentRaw{}
+		effective.CI.StepAgentRaw = StepAgentRaw{}
 		effective.Prompts = PromptConfig{}
 	}
 	return &effective
@@ -2444,10 +2894,11 @@ func copyStepAgentRaw(src StepAgentRaw) StepAgentRaw {
 
 func copyReviewRaw(src ReviewRaw) ReviewRaw {
 	return ReviewRaw{
-		StepAgentRaw:    copyStepAgentRaw(src.StepAgentRaw),
-		AdversaryAgent:  src.AdversaryAgent,
-		AdversaryAgents: copyAgents(src.AdversaryAgents),
-		AdversaryModel:  src.AdversaryModel,
+		StepAgentRaw:     copyStepAgentRaw(src.StepAgentRaw),
+		AdversaryAgent:   src.AdversaryAgent,
+		AdversaryAgents:  copyAgents(src.AdversaryAgents),
+		AdversaryModel:   src.AdversaryModel,
+		PathInstructions: append([]PathInstruction(nil), src.PathInstructions...),
 	}
 }
 
@@ -2501,18 +2952,29 @@ func applyIntentOverrides(dst *Intent, src *IntentRaw) {
 	}
 }
 
-// testDefaults returns the default test-step settings. Evidence storage is
-// opt-in (off by default); when enabled it lands under .no-mistakes/evidence.
+// testDefaults returns the default test-step settings. Evidence publication is
+// opt-in (off by default); when enabled it lands under .no-mistakes/evidence on
+// the default orphan evidence branch.
 func testDefaults() Test {
 	return Test{
 		Evidence: Evidence{
 			StoreInRepo: false,
 			Dir:         ".no-mistakes/evidence",
+			Branch:      evidence.DefaultBranch,
+			LocalRoot:   "",
+			Retention:   DefaultEvidenceRetention,
+			MaxRuns:     DefaultEvidenceMaxRuns,
 		},
 	}
 }
 
 // applyTestOverrides applies non-nil raw values onto resolved defaults.
+// The branch name is validated at config parse time (validateTestRaw), so an
+// unusable value never reaches here.
+//
+// It deliberately covers only the repository-relevant half of test.evidence.
+// The local-storage half is applied separately by applyEvidenceStorageOverrides
+// so a repository config can never reach it (see EvidenceRaw.LocalRoot).
 func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
@@ -2520,6 +2982,128 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.Dir != nil && strings.TrimSpace(*src.Evidence.Dir) != "" {
 		dst.Evidence.Dir = strings.TrimSpace(*src.Evidence.Dir)
 	}
+	if src.Evidence.Branch != nil && strings.TrimSpace(*src.Evidence.Branch) != "" {
+		if branch, err := evidence.NormalizeBranch(*src.Evidence.Branch); err == nil {
+			dst.Evidence.Branch = branch
+		}
+	}
+}
+
+// applyEvidenceStorageOverrides applies the global-only local-storage half of
+// test.evidence. Merge calls it with the GlobalConfig copy and nothing else, so
+// neither a pushed nor a trusted repository config can move the daemon's
+// evidence directory or change its retention budget. Values are validated at
+// config parse time (validateTestRaw), so an unusable value never reaches here.
+func applyEvidenceStorageOverrides(dst *Evidence, src *EvidenceRaw) {
+	if src.LocalRoot != nil && strings.TrimSpace(*src.LocalRoot) != "" {
+		dst.LocalRoot = strings.TrimSpace(*src.LocalRoot)
+	}
+	if src.Retention != nil {
+		if d, err := parseEvidenceRetention(*src.Retention); err == nil {
+			dst.Retention = d
+		}
+	}
+	if src.MaxRuns != nil && *src.MaxRuns >= 0 {
+		dst.MaxRuns = *src.MaxRuns
+	}
+}
+
+// parseEvidenceRetention interprets test.evidence.retention. The keyword
+// "unlimited" (also "none"/"off"/"never"), or any non-positive duration,
+// disables age-based reaping and resolves to 0, which keeps every run's
+// evidence until the max_runs ceiling removes it.
+func parseEvidenceRetention(value string) (time.Duration, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "":
+		return DefaultEvidenceRetention, nil
+	case "unlimited", "none", "off", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("test.evidence.retention: parse %q: %w", value, err)
+	}
+	if d <= 0 {
+		return 0, nil
+	}
+	return d, nil
+}
+
+// evalDefaults returns the default local evaluation-corpus settings. Both
+// halves are on by default: provenance is unrecoverable if it was not recorded
+// at review time, and a corpus nobody has to remember to collect is the only
+// kind that exists when a comparison is finally needed. The default cap keeps
+// the corpus a rolling window rather than an unbounded archive.
+func evalDefaults() Eval {
+	return Eval{CaptureProvenance: true, AutoCapture: true, MaxCases: DefaultEvalMaxCases, DiversifiedSize: DefaultEvalDiversifiedSize}
+}
+
+// applyEvalOverrides applies non-nil raw values onto resolved defaults. The
+// max_cases value is validated at config parse time (validateEvalRaw).
+func applyEvalOverrides(dst *Eval, src *EvalRaw) {
+	if src.CaptureProvenance != nil {
+		dst.CaptureProvenance = *src.CaptureProvenance
+	}
+	if src.AutoCapture != nil {
+		dst.AutoCapture = *src.AutoCapture
+	}
+	if src.MaxCases != nil && *src.MaxCases >= 0 {
+		dst.MaxCases = *src.MaxCases
+	}
+	if src.DiversifiedSize != nil && *src.DiversifiedSize >= 0 {
+		dst.DiversifiedSize = *src.DiversifiedSize
+	}
+}
+
+// validateEvalRaw fails the config closed on a negative eval.max_cases. A
+// negative cap has no defensible meaning here - it is neither "keep everything"
+// (0) nor a bound - so surfacing the typo beats guessing which one was meant.
+func validateEvalRaw(raw EvalRaw) error {
+	if raw.MaxCases != nil && *raw.MaxCases < 0 {
+		return fmt.Errorf("eval.max_cases must be 0 (keep every case) or greater, got %d", *raw.MaxCases)
+	}
+	if raw.DiversifiedSize != nil && *raw.DiversifiedSize < 0 {
+		return fmt.Errorf("eval.diversified_size must be 0 (one gold case per stratum) or greater, got %d", *raw.DiversifiedSize)
+	}
+	return nil
+}
+
+// validateTestRaw fails the config closed on a test.evidence.branch value Git
+// would reject as a branch name. Rejecting the config surfaces the typo where
+// the user can fix it, rather than letting a run reach the push and fail there.
+//
+// Like validateReviewRaw this deliberately also runs on the PUSHED copy even
+// though EffectiveRepoConfig only honors the trusted branch name: a branch
+// carrying an invalid value has to fail before it merges.
+func validateTestRaw(test TestRaw) error {
+	if test.Evidence.Branch != nil {
+		if _, err := evidence.NormalizeBranch(*test.Evidence.Branch); err != nil {
+			return fmt.Errorf("test.evidence.branch: %w", err)
+		}
+	}
+	// local_root must be absolute. The daemon's working directory is a bare
+	// gate repository, so a relative path would resolve somewhere the operator
+	// never named - and evidence would silently scatter instead of landing
+	// where they asked. Surface the mistake in the config rather than at run
+	// time. Like branch, this also validates the PUSHED copy even though the
+	// value is honored only from the global config: a branch carrying an
+	// invalid value has to fail before it merges.
+	if test.Evidence.LocalRoot != nil {
+		root := strings.TrimSpace(*test.Evidence.LocalRoot)
+		if root != "" && !filepath.IsAbs(root) {
+			return fmt.Errorf("test.evidence.local_root must be an absolute path, got %q", root)
+		}
+	}
+	if test.Evidence.Retention != nil {
+		if _, err := parseEvidenceRetention(*test.Evidence.Retention); err != nil {
+			return err
+		}
+	}
+	if test.Evidence.MaxRuns != nil && *test.Evidence.MaxRuns < 0 {
+		return fmt.Errorf("test.evidence.max_runs must be 0 (keep every run) or greater, got %d", *test.Evidence.MaxRuns)
+	}
+	return nil
 }
 
 // autoFixDefaults returns the default auto-fix configuration.
@@ -2533,6 +3117,26 @@ func autoFixDefaults() AutoFix {
 		CI:       3,
 		Refresh:  3,
 	}
+}
+
+// ciDefaults returns the default CI-step settings. Rerunning cancelled checks
+// is off by default: a CANCELLED conclusion does not say who cancelled, so the
+// safe baseline is to escalate rather than risk restarting a job a maintainer
+// or a concurrency rule deliberately stopped. Repositories that know their
+// cancellations are provider-side opt in via ci.rerun_transient.
+func ciDefaults() CI {
+	return CI{RerunTransient: DefaultCIRerunTransient}
+}
+
+// applyCIOverrides applies non-nil raw values onto resolved defaults, clamping
+// the rerun budget into range: a negative value disables reruns rather than
+// inverting the bound, and anything above MaxCIRerunTransient is capped so a
+// typo cannot keep a run polling one commit indefinitely.
+func applyCIOverrides(dst *CI, src *CIRaw) {
+	if src.RerunTransient == nil {
+		return
+	}
+	dst.RerunTransient = min(max(*src.RerunTransient, 0), MaxCIRerunTransient)
 }
 
 // applyAutoFixOverrides applies non-nil raw values onto resolved defaults.
@@ -2591,6 +3195,14 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyAutoFixOverrides(&af, &global.AutoFix)
 	applyAutoFixOverrides(&af, &repo.AutoFix)
 
+	ci := ciDefaults()
+	// The operator's global value is a machine-wide floor they can always set;
+	// the repo value is trusted-only (EffectiveRepoConfig sourced it from the
+	// default branch), so the maintainer of the repository still has the last
+	// word on how many workflow runs their project is billed for.
+	applyCIOverrides(&ci, &global.CI)
+	applyCIOverrides(&ci, &repo.CI)
+
 	intent := intentDefaults()
 	applyIntentOverrides(&intent, &global.Intent)
 	applyIntentOverrides(&intent, &repo.Intent)
@@ -2598,6 +3210,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	test := testDefaults()
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
+	// Applied last and from the global config only: where the daemon writes
+	// evidence on this machine, and how long it keeps it, is never a
+	// repository's decision (see EvidenceRaw.LocalRoot).
+	applyEvidenceStorageOverrides(&test.Evidence, &global.Test.Evidence)
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -2634,15 +3250,19 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Hooks:                   hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
+		CI:                      ci,
 		Commit:                  commit,
 		Intent:                  intent,
 		Test:                    test,
 		Document:                Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Review:                  Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
+		Eval:                    global.Eval,
 		Prompts:                 mergePromptConfigs(global.Prompts, repo.Prompts),
 		RefreshStrategy:         repo.Refresh.Strategy.OrDefault(),
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
+		NoCI:                   repo.NoCI,
 	}
 
 	if repo.Agent != "" {
@@ -2666,4 +3286,22 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 
 	return cfg
+}
+
+// EnableEvalProvenance pins the exact configuration this run reviews under so
+// a later replay grades a candidate against identical conditions. The caller
+// decides whether to call it (see Eval.CaptureProvenance); this is the single
+// owner of what "exact provenance" contains.
+func (c *Config) EnableEvalProvenance(global *GlobalConfig, repo *RepoConfig) error {
+	if c == nil || global == nil || repo == nil {
+		return fmt.Errorf("eval provenance requires merged, global, and repository configuration")
+	}
+	repoYAML, err := yaml.Marshal(repo)
+	if err != nil {
+		return fmt.Errorf("serialize eval repository configuration: %w", err)
+	}
+	c.ReplayGlobalYAML = append([]byte(nil), global.SourceYAML...)
+	c.ReplayRepoYAML = repoYAML
+	c.CaptureEvalProvenance = true
+	return nil
 }

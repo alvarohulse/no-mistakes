@@ -298,8 +298,8 @@ func redactOutboundPRContent(content prContent, bodyLimit int) prContent {
 }
 
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) (string, string, string) {
-	summary, riskLine := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy)
-	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx.Run.ID))
+	summary, riskLine := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy, sctx.Run.HeadSHA)
+	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx))
 	configSources := configSourcesSummary(sctx.Run.ConfigSources)
 	if summary == "" || configSources == "" {
 		return summary, riskLine, testingMD
@@ -398,6 +398,12 @@ func fitPipelineWithinPRBodyLimit(narrative, riskLine, pipelineMD string, bodyLi
 	if prefix != "" {
 		budget -= scm.PRBodyLen("\n\n")
 	}
+	if budget <= 0 && strings.Contains(pipelineMD, pipelineAttestationCommentPrefix) {
+		candidate := appendGeneratedSectionsToCleanBodyWithinLimit(stripGeneratedSections(narrative), riskLine, "", pipelineMD, bodyLimit)
+		if scm.PRBodyLen(candidate) <= bodyLimit && strings.Contains(candidate, "## Pipeline") {
+			return candidate
+		}
+	}
 	if budget <= 0 {
 		return ""
 	}
@@ -478,7 +484,7 @@ func essentialPRBodyWithinPipelineBudget(body, generatedSections, pipelineMD str
 	if body != "" || generatedSections != "" {
 		prefixBudget -= len("\n\n")
 	}
-	if prefixBudget <= 0 || len(generatedSections) > prefixBudget {
+	if prefixBudget <= 0 {
 		return essentialPRBodyWithinBudget(body, generatedSections, maxBytes)
 	}
 	return essentialPRBodyWithinBudget(body, generatedSections, prefixBudget)
@@ -638,6 +644,17 @@ func splitPipelineSectionHeader(pipelineMD string) (string, string) {
 	if strings.HasPrefix(pipelineMD[headerEnd:], pipelineConfigSourcesPrefix) {
 		if configEnd := strings.Index(pipelineMD[headerEnd:], "\n\n"); configEnd >= 0 {
 			headerEnd += configEnd + len("\n\n")
+		}
+	}
+	// Generated attestations are fixed header data, not update details. Keep
+	// them when older human-readable rounds are truncated.
+	rest = pipelineMD[headerEnd:]
+	if strings.HasPrefix(rest, pipelineAttestationCommentPrefix) {
+		if end := strings.Index(rest, pipelineAttestationCommentClosingToken); end >= 0 {
+			headerEnd += end + len(pipelineAttestationCommentClosingToken)
+			if strings.HasPrefix(pipelineMD[headerEnd:], "\n\n") {
+				headerEnd += len("\n\n")
+			}
 		}
 	}
 	return pipelineMD[:headerEnd], pipelineMD[headerEnd:]

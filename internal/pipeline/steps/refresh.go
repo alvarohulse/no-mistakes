@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -466,6 +467,7 @@ Instructions:
 	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += configuredPromptSection(sctx, types.StepRefresh)
+	prompt = testguidance.LateRepairPrompt(string(types.StepRefresh), prompt)
 
 	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -558,6 +560,7 @@ Instructions:
 	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += configuredPromptSection(sctx, types.StepRefresh)
+	prompt = testguidance.LateRepairPrompt(string(types.StepRefresh), prompt)
 
 	_, err = sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -692,6 +695,8 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after refresh: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
+		oldHead := sctx.Run.HeadSHA
+		pipeline.RemapUncertifiedPipelineRangeAfterRebase(sctx, oldHead, headSHA)
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 			return nil, err

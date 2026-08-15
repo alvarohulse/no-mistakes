@@ -21,6 +21,7 @@ When set, everything else moves under this root:
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
 - Managed agent server PID records: `$NM_HOME/servers/`
+- Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
@@ -78,6 +79,28 @@ Alternatively, authenticate the Azure DevOps extension with `az devops login`.
 | Default | (none)                                             |
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/#azure-devops).
+
+## `GITHUB_TOKEN`
+
+GitHub token used to authenticate updater release requests.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+When set, the updater sends the token as a Bearer authorization header for release metadata requests, including background update checks, and release asset downloads. `GITHUB_TOKEN` takes precedence over `GH_TOKEN`; when neither variable is set, these requests remain anonymous. The token is not printed, logged, or persisted.
+
+## `GH_TOKEN`
+
+Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset or empty.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 

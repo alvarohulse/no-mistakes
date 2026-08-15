@@ -147,8 +147,11 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 		`)
 
 		manager := NewRunManager(database, p, nil)
-		events := make(chan ipc.Event, 1)
-		manager.subscribers[run.ID] = []chan<- ipc.Event{events}
+		mailbox := newEventMailbox(run.ID, 0)
+		if event, ok := mailbox.next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+			t.Fatalf("initial mailbox event = (%+v, %v), want stream gap", event, ok)
+		}
+		manager.subscribers[run.ID] = []*eventMailbox{mailbox}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		cancel(errors.New(types.RunCancelReasonAbortedByUser))
 		err = manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed"))
@@ -163,10 +166,10 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 		if got.Status != types.RunPending || run.Status != types.RunPending {
 			t.Fatalf("failed fallback status = database %s memory %s, want pending authority preserved", got.Status, run.Status)
 		}
-		select {
-		case event := <-events:
+		readCtx, stopRead := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer stopRead()
+		if event, ok := mailbox.next(readCtx); ok {
 			t.Fatalf("failed fallback broadcast false terminal event: %+v", event)
-		default:
 		}
 	})
 }

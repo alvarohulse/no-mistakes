@@ -28,6 +28,25 @@ func TestInsertReviewStepRoundPersistsNonAuthoritativeCandidate(t *testing.T) {
 	}
 }
 
+func TestReviewRoundPersistsExactReplayProvenance(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/review-provenance", "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "reviewed", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	_, err := d.InsertReviewStepRoundWithProvenance(step.ID, 1, "auto_fix", nil, nil, "reviewed", "starting", "trusted", []byte("agent: claude\n"), []byte("ignore_patterns: ['vendor']\n"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rounds[0]
+	if got.StartingHeadSHA == nil || *got.StartingHeadSHA != "starting" || got.TrustedConfigSHA == nil || *got.TrustedConfigSHA != "trusted" || string(got.GlobalConfigYAML) != "agent: claude\n" || string(got.RepoConfigYAML) != "ignore_patterns: ['vendor']\n" {
+		t.Fatalf("review provenance = %#v", got)
+	}
+}
+
 func TestStepRoundInsertAndGet(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -243,7 +262,7 @@ func TestStepRoundCascadeDelete(t *testing.T) {
 	}
 }
 
-func TestSetStepRoundSelectedFindingIDs(t *testing.T) {
+func TestSetStepRoundUserDecision(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
@@ -256,8 +275,9 @@ func TestSetStepRoundSelectedFindingIDs(t *testing.T) {
 	}
 
 	selected := `["review-1"]`
-	if err := d.SetStepRoundSelection(r.ID, &selected, RoundSelectionSourceUser); err != nil {
-		t.Fatalf("set selected: %v", err)
+	userFindings := `{"findings":[{"id":"user-1","source":"user","description":"missing check"}]}`
+	if err := d.SetStepRoundUserDecision(r.ID, &selected, RoundSelectionSourceUser, &userFindings); err != nil {
+		t.Fatalf("set user decision: %v", err)
 	}
 
 	rounds, err := d.GetRoundsByStep(step.ID)
@@ -273,10 +293,12 @@ func TestSetStepRoundSelectedFindingIDs(t *testing.T) {
 	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != RoundSelectionSourceUser {
 		t.Errorf("selection_source = %v, want %q", rounds[0].SelectionSource, RoundSelectionSourceUser)
 	}
+	if rounds[0].UserFindingsJSON == nil || *rounds[0].UserFindingsJSON != userFindings {
+		t.Errorf("user_findings_json = %v, want %q", rounds[0].UserFindingsJSON, userFindings)
+	}
 
-	// Clearing the selection resets the column to NULL.
-	if err := d.SetStepRoundSelection(r.ID, nil, RoundSelectionSourceUser); err != nil {
-		t.Fatalf("clear selected: %v", err)
+	if err := d.SetStepRoundUserDecision(r.ID, nil, RoundSelectionSourceUser, nil); err != nil {
+		t.Fatalf("clear user decision: %v", err)
 	}
 	rounds, err = d.GetRoundsByStep(step.ID)
 	if err != nil {
@@ -287,5 +309,8 @@ func TestSetStepRoundSelectedFindingIDs(t *testing.T) {
 	}
 	if rounds[0].SelectionSource != nil {
 		t.Errorf("expected nil selection_source after clear, got %v", rounds[0].SelectionSource)
+	}
+	if rounds[0].UserFindingsJSON != nil {
+		t.Errorf("expected nil user_findings_json after clear, got %v", rounds[0].UserFindingsJSON)
 	}
 }

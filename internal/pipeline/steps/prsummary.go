@@ -2,12 +2,14 @@ package steps
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,11 +19,13 @@ import (
 )
 
 const (
-	maxEmbeddedArtifactBytes          = 16 * 1024
-	maxEmbeddedArtifactsTotalBytes    = 32 * 1024
-	noMistakesPRSignature             = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
-	pipelineAgentTelemetryTableHeader = "| Step | Agent (via) | Nested agents |\n| --- | --- | --- |\n"
-	pipelineConfigSourcesPrefix       = "Config sources: "
+	maxEmbeddedArtifactBytes               = 16 * 1024
+	maxEmbeddedArtifactsTotalBytes         = 32 * 1024
+	noMistakesPRSignature                  = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
+	pipelineAgentTelemetryTableHeader      = "| Step | Agent (via) | Nested agents |\n| --- | --- | --- |\n"
+	pipelineConfigSourcesPrefix            = "Config sources: "
+	pipelineAttestationCommentPrefix       = "<!-- no-mistakes-pipeline-attestation:v1 "
+	pipelineAttestationCommentClosingToken = " -->"
 )
 
 func configSourcesSummary(sources []db.ConfigSource) string {
@@ -42,6 +46,15 @@ func configSourcesSummary(sources []db.ConfigSource) string {
 	return pipelineConfigSourcesPrefix + strings.Join(labels, ", ") + "\n\n"
 }
 
+type pipelineAttestation struct {
+	HeadSHA string                    `json:"head_sha"`
+	Steps   []pipelineAttestationStep `json:"steps"`
+}
+
+type pipelineAttestationStep struct {
+	Step   types.StepName   `json:"step"`
+	Status types.StepStatus `json:"status"`
+}
 type testingArtifactRenderState struct {
 	remainingEmbeddedBytes int
 }
@@ -54,19 +67,23 @@ type testingSummaryOptions struct {
 	summaryParagraph     bool
 	omitOutcome          bool
 	repoRoot             string
-	// evidenceDir is this run's own evidence directory. The temp evidence
-	// root is shared by every run on the machine, so validating against the
-	// root would let one run's agent name another run's artifact and have
-	// its contents published in this PR body.
-	evidenceDir string
+	// evidenceRoot is the run's evidence directory. Together with repoRoot it
+	// is the allowlist for absolute artifact paths an agent reported: a path
+	// under neither is dropped rather than rendered into the PR body. Empty
+	// disables the evidence half of the allowlist, which fails closed.
+	evidenceRoot string
+	// evidence links artifacts published to the repository's orphan evidence
+	// branch. It is nil when nothing was published, and the artifacts then
+	// render as local paths rather than as links that would not resolve.
+	evidence *evidenceLinks
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
-func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound) (string, string) {
-	return buildPipelineSummary(steps, rounds, nil, types.RefreshStrategyRebase)
+func BuildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string) (string, string) {
+	return buildPipelineSummary(steps, rounds, nil, types.RefreshStrategyRebase, headSHA)
 }
 
-func buildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, strategy types.RefreshStrategy) (string, string) {
+func buildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, invocations []db.AgentInvocation, strategy types.RefreshStrategy, headSHA string) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -91,6 +108,8 @@ func buildPipelineSummary(steps []*db.StepResult, rounds map[string][]*db.StepRo
 	var b strings.Builder
 	b.WriteString("## Pipeline\n\n")
 	b.WriteString(noMistakesPRSignature)
+	b.WriteString("\n\n")
+	b.WriteString(buildPipelineAttestation(steps, headSHA))
 	b.WriteString("\n\n")
 	b.WriteString(agentTelemetryTable(invocations, strategy))
 	for i, detail := range detailBlocks {
@@ -129,6 +148,33 @@ func agentTelemetryTable(invocations []db.AgentInvocation, strategy types.Refres
 	return b.String()
 }
 
+// buildPipelineAttestation records the exact step lifecycle snapshot available
+// when no-mistakes writes the PR body.
+func buildPipelineAttestation(steps []*db.StepResult, headSHA string) string {
+	attestation := pipelineAttestation{
+		HeadSHA: headSHA,
+		Steps:   make([]pipelineAttestationStep, 0, len(steps)),
+	}
+	for _, sr := range steps {
+		if sr == nil {
+			continue
+		}
+		attestation.Steps = append(attestation.Steps, pipelineAttestationStep{Step: sr.StepName, Status: sr.Status})
+	}
+	sort.SliceStable(attestation.Steps, func(i, j int) bool {
+		left, right := attestation.Steps[i].Step, attestation.Steps[j].Step
+		if left.Order() != right.Order() {
+			return left.Order() < right.Order()
+		}
+		return left < right
+	})
+	payload, err := json.Marshal(attestation)
+	if err != nil {
+		return ""
+	}
+	return pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken
+}
+
 func agentObservationsLabel(invocation db.AgentInvocation) string {
 	if !invocation.AgentObservationsReported {
 		return "-"
@@ -165,13 +211,14 @@ func BuildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 	return buildTestingSummary(steps, rounds, testingSummaryOptions{includeTestedDetails: true})
 }
 
-func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceDir string) string {
+func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, evidence *evidenceLinks) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.compactArtifacts = true
 	opts.summaryParagraph = true
 	opts.omitOutcome = true
 	opts.repoRoot = repoRoot
-	opts.evidenceDir = evidenceDir
+	opts.evidenceRoot = evidenceRoot
+	opts.evidence = evidence
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -578,7 +625,10 @@ func artifactFilesystemPath(p string, opts testingSummaryOptions) string {
 	if !filepath.IsAbs(p) {
 		return ""
 	}
-	if _, ok := artifactPathRelativeToRoot(p, opts.evidenceDir); !ok {
+	if opts.evidenceRoot == "" {
+		return ""
+	}
+	if _, ok := artifactPathRelativeToRoot(p, opts.evidenceRoot); !ok {
 		return ""
 	}
 	return p
@@ -651,6 +701,10 @@ func trimUTF8Start(data []byte) []byte {
 }
 
 func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
+	raw := isImageArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, artifact.Path)
+	if target := opts.evidence.target(artifact.Path, raw); target != "" {
+		return target
+	}
 	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
 	if repoPath == "" {
 		return ""
@@ -665,6 +719,9 @@ func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptio
 }
 
 func artifactLinkTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
+	if target := opts.evidence.target(artifact.Path, false); target != "" {
+		return target
+	}
 	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
 	if repoPath == "" {
 		return ""
@@ -701,8 +758,10 @@ func sanitizeAbsoluteArtifactPath(clean string, opts testingSummaryOptions) stri
 	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.repoRoot); ok {
 		return cleanedPath
 	}
-	if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.evidenceDir); ok {
-		return cleanedPath
+	if opts.evidenceRoot != "" {
+		if _, ok := artifactPathRelativeToRoot(cleanedPath, opts.evidenceRoot); ok {
+			return cleanedPath
+		}
 	}
 	return ""
 }
