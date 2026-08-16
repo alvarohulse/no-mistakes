@@ -64,6 +64,7 @@ type runPolicyResolution struct {
 	Policy               *resolvedPolicy
 	RefreshStrategy      types.RefreshStrategy
 	Steps                []pipeline.Step
+	PreparedPreflight    []runner.Prepared
 	HeadSHA              string
 	TrustedSHA           string
 	GateDir              string
@@ -168,6 +169,10 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 			return nil, fmt.Errorf("resolve agent routes: %w", err)
 		}
 	}
+	preparedPreflight, err := m.prepareResolvedPreflight(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	resolvedRouting, err := marshalResolvedAgentRouting(cfg, demo)
 	if err != nil {
 		return nil, err
@@ -190,6 +195,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		Policy:               policy,
 		RefreshStrategy:      resolvedRefreshStrategy,
 		Steps:                execSteps,
+		PreparedPreflight:    preparedPreflight,
 		HeadSHA:              candidateSHA,
 		TrustedSHA:           trustedSHA,
 		GateDir:              gateDir,
@@ -324,12 +330,25 @@ func pushedConfigUsesDifferentTrustedControls(pushed, effective *config.RepoConf
 		return false
 	}
 	return !pushed.Commands.Equal(effective.Commands) ||
+		!runnerCommandListsEqual(pushed.Preflight, effective.Preflight) ||
 		pushed.Hooks != effective.Hooks ||
 		pushed.Agent != effective.Agent ||
 		!agentListsEqual(pushed.Agents, effective.Agents) ||
 		!stepAgentRoutesEqual(pushed.ConfiguredStepAgents(), effective.ConfiguredStepAgents()) ||
 		!stepModelRoutesEqual(pushed.ConfiguredStepModels(), effective.ConfiguredStepModels()) ||
 		!reviewCandidateRoutesEqual(pushed.Review, effective.Review)
+}
+
+func runnerCommandListsEqual(left, right []runner.Command) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !left[i].Equal(right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveGlobalOverride matches the run's registered repository against the

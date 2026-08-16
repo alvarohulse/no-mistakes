@@ -48,6 +48,10 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
+	preflightTimeout time.Duration
+	preparePreflight func(context.Context, runner.Command, runner.Spec, runner.ExecuteOptions) (runner.Prepared, error)
+	executePreflight func(context.Context, runner.Prepared, runner.ExecuteOptions) (runner.Result, error)
+
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
@@ -74,18 +78,28 @@ type RunManager struct {
 // past the cap is an ordinary error, never unbounded growth.
 const maxSubscribersPerRun = 32
 
+const (
+	defaultPreflightTimeout = 30 * time.Second
+	preflightOutputLimit    = 8 * 1024
+)
+
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
-		db:            database,
-		paths:         p,
-		steps:         stepFactory,
+		executors:        make(map[string]*pipeline.Executor),
+		cancels:          make(map[string]context.CancelCauseFunc),
+		dones:            make(map[string]chan struct{}),
+		db:               database,
+		paths:            p,
+		steps:            stepFactory,
+		preflightTimeout: defaultPreflightTimeout,
+		preparePreflight: runner.Prepare,
+		executePreflight: func(ctx context.Context, prepared runner.Prepared, options runner.ExecuteOptions) (runner.Result, error) {
+			return prepared.Execute(ctx, options)
+		},
 		subscribers:   make(map[string][]*eventMailbox),
 		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
@@ -1151,6 +1165,10 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			resolved.releaseTrustedRef(context.Background())
 		}
 	}()
+	if err := m.executeResolvedPreflight(ctx, resolved, repo.WorkingPath); err != nil {
+		trackStartFailure("preflight")
+		return "", err
+	}
 
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)

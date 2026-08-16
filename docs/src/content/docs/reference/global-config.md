@@ -102,6 +102,8 @@ prompts:
 
 overrides:
   example/project:
+    preflight:
+      - test -n "$HOME"
     commands:
       build: "make build"
     prompts:

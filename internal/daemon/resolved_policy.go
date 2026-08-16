@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 3
+	resolvedPolicyVersion     = 4
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -31,6 +31,7 @@ type resolvedPolicy struct {
 	Managed                bool                   `json:"managed"`
 	Binary                 resolvedPolicyBinary   `json:"binary"`
 	Steps                  []resolvedPolicyStep   `json:"steps"`
+	Preflight              []runner.Command       `json:"preflight"`
 	Commands               resolvedPolicyCommands `json:"commands"`
 	Routing                resolvedAgentRouting   `json:"routing"`
 	Runner                 resolvedPolicyRunner   `json:"runner"`
@@ -245,7 +246,8 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 	return nil
 }
 
-// Versions 1 and 2 predate managed routing or resolved runner provenance. Their
+// Versions 1 through 3 predate managed routing, resolved runner provenance, or
+// trusted preflight. Their
 // missing fields decode to legacy zero values; only schema versions need
 // normalization before semantic comparison with a policy rebuilt by this binary.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
@@ -254,8 +256,9 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 			policy.Routing.Version = resolvedAgentRoutingVersion
 		}
 	}
-	if policy.Version == 1 || policy.Version == 2 {
+	if policy.Version >= 1 && policy.Version <= 3 {
 		policy.Version = resolvedPolicyVersion
+		policy.Preflight = []runner.Command{}
 	}
 }
 
@@ -288,10 +291,11 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 		return nil, fmt.Errorf("resolved policy skip list contains a step outside the pipeline")
 	}
 	policy := &resolvedPolicy{
-		Version: resolvedPolicyVersion,
-		Managed: cfg.Managed,
-		Binary:  resolvedPolicyBinary{Version: buildinfo.CurrentVersion(), BuildSHA: buildinfo.Commit},
-		Steps:   resolvedSteps,
+		Version:   resolvedPolicyVersion,
+		Managed:   cfg.Managed,
+		Binary:    resolvedPolicyBinary{Version: buildinfo.CurrentVersion(), BuildSHA: buildinfo.Commit},
+		Steps:     resolvedSteps,
+		Preflight: canonicalResolvedCommands(cfg.Preflight),
 		Commands: resolvedPolicyCommands{
 			Build: cfg.Commands.Build, Test: cfg.Commands.Test, Lint: cfg.Commands.Lint, Format: cfg.Commands.Format,
 			PostWorktree: cfg.Hooks.PostWorktree, PRBody: cfg.Hooks.PRBody, Definitions: cfg.Commands.StructuredDefinitions(),
@@ -342,7 +346,7 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 }
 
 func (p *resolvedPolicy) validate() error {
-	if p.Version != 1 && p.Version != 2 && p.Version != resolvedPolicyVersion {
+	if p.Version < 1 || p.Version > resolvedPolicyVersion {
 		return fmt.Errorf("resolved policy version %d is unsupported", p.Version)
 	}
 	if strings.TrimSpace(p.Binary.Version) == "" || strings.TrimSpace(p.Binary.BuildSHA) == "" {
@@ -383,6 +387,17 @@ func (p *resolvedPolicy) validate() error {
 		}
 		if err := definition.ValidateRunners(); err != nil {
 			return fmt.Errorf("resolved policy command definition %q: %w", name, err)
+		}
+	}
+	if p.Version == resolvedPolicyVersion && p.Preflight == nil {
+		return fmt.Errorf("resolved policy preflight commands are missing")
+	}
+	for i, command := range p.Preflight {
+		if command.IsZero() {
+			return fmt.Errorf("resolved policy preflight command %d is empty", i+1)
+		}
+		if err := command.ValidateRunners(); err != nil {
+			return fmt.Errorf("resolved policy preflight command %d: %w", i+1, err)
 		}
 	}
 	if err := p.Routing.validate(); err != nil {
@@ -457,6 +472,17 @@ func resolvedPolicyRunnerFromConfig(cfg *config.Config) resolvedPolicyRunner {
 		Args:          append([]string(nil), resolved.Args...),
 		Version:       version,
 	}
+}
+
+func canonicalResolvedCommands(commands []runner.Command) []runner.Command {
+	if len(commands) == 0 {
+		return []runner.Command{}
+	}
+	canonical := make([]runner.Command, len(commands))
+	for i, command := range commands {
+		canonical[i] = command.Canonical()
+	}
+	return canonical
 }
 
 func (r resolvedPolicyRunner) validate() error {

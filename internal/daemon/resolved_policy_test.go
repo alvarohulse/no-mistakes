@@ -153,6 +153,40 @@ func TestValidateResolvedPolicyAcceptsVersionTwoLegacyRunner(t *testing.T) {
 	}
 }
 
+func TestValidateResolvedPolicyAcceptsVersionThreeWithoutPreflight(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	policySteps := []pipeline.Step{policyTestStep{name: types.StepReview}}
+	policy, err := resolvedPolicyFromConfig(cfg, nil, policySteps, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 3
+	policy.Preflight = nil
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+	if err := validateResolvedPolicy(cfg, run, policySteps); err != nil {
+		t.Fatalf("version-three policy rejected: %v", err)
+	}
+}
+
+func TestResolvedPolicyCarriesCanonicalPreflightCommands(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	cfg.Preflight = []runner.Command{{
+		Run:    "echo ready",
+		Runner: &runner.Spec{Executable: "zsh", Args: []string{"-lc"}},
+	}}
+	encoded, _, err := marshalResolvedPolicy(cfg, nil, []pipeline.Step{policyTestStep{name: types.StepReview}}, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(encoded, `"preflight":[{"run":"echo ready","runner":{"executable":"zsh","args":["-lc"]}}]`) {
+		t.Fatalf("resolved policy omitted canonical preflight: %s", encoded)
+	}
+}
+
 func TestResolvedPolicyCarriesRunnerProvenanceAndStructuredCommands(t *testing.T) {
 	cfg := resolvedRoutingTestConfig()
 	repo, err := config.LoadRepoFromBytes([]byte(`

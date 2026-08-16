@@ -323,6 +323,27 @@ This schema is active for trusted preflight commands. Build, Test, Lint, and For
 
 Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
 
+### preflight
+
+An ordered list of deterministic environment checks. Each entry accepts the same scalar or structured command form shown above.
+
+```yaml
+preflight:
+  - test -n "$HOME"
+  - run: command -v git
+    runner: {executable: zsh, args: [-lc]}
+    windows: Get-Command git | Out-Null
+```
+
+no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Failure diagnostics are secret-redacted, control-sanitized, and bounded, and identify the command index plus resolved command/runner source.
+
+A top-level global `preflight` is rejected. Use a trusted default-branch repo config or a matching machine-owned `overrides.<owner>/<repo>.preflight` list. A machine override replaces the full committed list; an explicit empty list clears it.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `structured command[]` |
+| Default | Empty                  |
+
 ### commands.build
 
 Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.

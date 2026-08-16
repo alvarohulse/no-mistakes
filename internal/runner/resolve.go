@@ -165,7 +165,7 @@ func resolveSpec(ctx context.Context, spec Spec, source, platform string, deps r
 	}
 	version, err := deps.probeVersion(ctx, kind, path)
 	if err != nil {
-		return Provenance{}, "", fmt.Errorf("probe runner version %q: %w", path, err)
+		return Provenance{}, "", fmt.Errorf("probe runner version for %q: %w", spec.Executable, err)
 	}
 	if err := ValidateVersion(version); err != nil {
 		return Provenance{}, "", err

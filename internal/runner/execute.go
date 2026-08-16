@@ -139,7 +139,7 @@ func executeArgv(ctx context.Context, argv []string, options ExecuteOptions, std
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return capturedResult(output, exitErr.ExitCode()), nil
 		}
-		return capturedResult(output, -1), fmt.Errorf("launch runner %q: %w", argv[0], err)
+		return capturedResult(output, -1), fmt.Errorf("launch runner: %w", err)
 	}
 	return capturedResult(output, 0), nil
 }

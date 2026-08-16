@@ -181,10 +181,12 @@ type RepoConfig struct {
 	Agent          types.AgentName   `yaml:"agent"`
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
+	Preflight      []runner.Command  `yaml:"preflight"`
 	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{build,test,lint,format}, hooks.{post_worktree,pr_body}, agent, and every step agent route) from a contributor's
+	// fields (commands.{build,test,lint,format}, preflight,
+	// hooks.{post_worktree,pr_body}, agent, and every step agent route) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -234,29 +236,31 @@ type RepoConfig struct {
 // fields that must never leak into captured eval provenance.
 func (c RepoConfig) MarshalYAML() (any, error) {
 	type repoConfigYAML struct {
-		Agent                  agentList    `yaml:"agent,omitempty"`
-		Commands               Commands     `yaml:"commands,omitempty"`
-		Hooks                  Hooks        `yaml:"hooks,omitempty"`
-		IgnorePatterns         []string     `yaml:"ignore_patterns,omitempty"`
-		AllowRepoCommands      bool         `yaml:"allow_repo_commands,omitempty"`
-		AutoFix                AutoFixRaw   `yaml:"auto_fix,omitempty"`
-		Commit                 CommitRaw    `yaml:"commit,omitempty"`
-		Intent                 IntentRaw    `yaml:"intent,omitempty"`
-		Refresh                RefreshRaw   `yaml:"refresh,omitempty"`
-		Review                 ReviewRaw    `yaml:"review,omitempty"`
-		Build                  StepAgentRaw `yaml:"build,omitempty"`
-		Test                   TestRaw      `yaml:"test,omitempty"`
-		Document               DocumentRaw  `yaml:"document,omitempty"`
-		Lint                   StepAgentRaw `yaml:"lint,omitempty"`
-		PR                     StepAgentRaw `yaml:"pr,omitempty"`
-		CI                     CIRaw        `yaml:"ci,omitempty"`
-		Prompts                PromptConfig `yaml:"prompts,omitempty"`
-		DisableProjectSettings bool         `yaml:"disable_project_settings,omitempty"`
-		NoCI                   bool         `yaml:"no_ci,omitempty"`
+		Agent                  agentList        `yaml:"agent,omitempty"`
+		Commands               Commands         `yaml:"commands,omitempty"`
+		Preflight              []runner.Command `yaml:"preflight,omitempty"`
+		Hooks                  Hooks            `yaml:"hooks,omitempty"`
+		IgnorePatterns         []string         `yaml:"ignore_patterns,omitempty"`
+		AllowRepoCommands      bool             `yaml:"allow_repo_commands,omitempty"`
+		AutoFix                AutoFixRaw       `yaml:"auto_fix,omitempty"`
+		Commit                 CommitRaw        `yaml:"commit,omitempty"`
+		Intent                 IntentRaw        `yaml:"intent,omitempty"`
+		Refresh                RefreshRaw       `yaml:"refresh,omitempty"`
+		Review                 ReviewRaw        `yaml:"review,omitempty"`
+		Build                  StepAgentRaw     `yaml:"build,omitempty"`
+		Test                   TestRaw          `yaml:"test,omitempty"`
+		Document               DocumentRaw      `yaml:"document,omitempty"`
+		Lint                   StepAgentRaw     `yaml:"lint,omitempty"`
+		PR                     StepAgentRaw     `yaml:"pr,omitempty"`
+		CI                     CIRaw            `yaml:"ci,omitempty"`
+		Prompts                PromptConfig     `yaml:"prompts,omitempty"`
+		DisableProjectSettings bool             `yaml:"disable_project_settings,omitempty"`
+		NoCI                   bool             `yaml:"no_ci,omitempty"`
 	}
 	return repoConfigYAML{
 		Agent:                  agentList(stepAgentNames(c.Agent, c.Agents)),
 		Commands:               c.Commands,
+		Preflight:              cloneRunnerCommands(c.Preflight, false),
 		Hooks:                  c.Hooks,
 		IgnorePatterns:         c.IgnorePatterns,
 		AllowRepoCommands:      c.AllowRepoCommands,
@@ -679,28 +683,29 @@ func RenderedInstructions(instructions string) string {
 }
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList     `yaml:"agent"`
-		Commands               Commands      `yaml:"commands"`
-		Hooks                  Hooks         `yaml:"hooks"`
-		IgnorePatterns         []string      `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool          `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw    `yaml:"auto_fix"`
-		Commit                 CommitRaw     `yaml:"commit"`
-		Intent                 IntentRaw     `yaml:"intent"`
-		Refresh                *RefreshRaw   `yaml:"refresh"`
-		LegacyRebase           *StepAgentRaw `yaml:"rebase"`
-		Review                 ReviewRaw     `yaml:"review"`
-		Build                  StepAgentRaw  `yaml:"build"`
-		Test                   TestRaw       `yaml:"test"`
-		Document               DocumentRaw   `yaml:"document"`
-		Lint                   StepAgentRaw  `yaml:"lint"`
-		PR                     StepAgentRaw  `yaml:"pr"`
-		CI                     CIRaw         `yaml:"ci"`
-		Prompts                PromptConfig  `yaml:"prompts"`
-		DisableProjectSettings bool          `yaml:"disable_project_settings"`
-		NoCI                   bool          `yaml:"no_ci"`
-		LegacyEval             any           `yaml:"eval"`
-		LegacyRepoBinding      any           `yaml:"repo"`
+		Agent                  agentList        `yaml:"agent"`
+		Commands               Commands         `yaml:"commands"`
+		Preflight              []runner.Command `yaml:"preflight"`
+		Hooks                  Hooks            `yaml:"hooks"`
+		IgnorePatterns         []string         `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw       `yaml:"auto_fix"`
+		Commit                 CommitRaw        `yaml:"commit"`
+		Intent                 IntentRaw        `yaml:"intent"`
+		Refresh                *RefreshRaw      `yaml:"refresh"`
+		LegacyRebase           *StepAgentRaw    `yaml:"rebase"`
+		Review                 ReviewRaw        `yaml:"review"`
+		Build                  StepAgentRaw     `yaml:"build"`
+		Test                   TestRaw          `yaml:"test"`
+		Document               DocumentRaw      `yaml:"document"`
+		Lint                   StepAgentRaw     `yaml:"lint"`
+		PR                     StepAgentRaw     `yaml:"pr"`
+		CI                     CIRaw            `yaml:"ci"`
+		Prompts                PromptConfig     `yaml:"prompts"`
+		DisableProjectSettings bool             `yaml:"disable_project_settings"`
+		NoCI                   bool             `yaml:"no_ci"`
+		LegacyEval             any              `yaml:"eval"`
+		LegacyRepoBinding      any              `yaml:"repo"`
 	}
 	var raw repoConfigRaw
 	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
@@ -710,6 +715,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Commands = raw.Commands
+	c.Preflight = cloneRunnerCommands(raw.Preflight, false)
 	c.Hooks = raw.Hooks
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
@@ -762,6 +768,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("commands.format") {
 		out.Commands.setFormat(out.Commands.FormatCommand().Overlay(override.Commands.FormatCommand()))
+	}
+	if override.has("preflight") {
+		out.Preflight = cloneRunnerCommands(override.Preflight, false)
 	}
 	if override.has("hooks.post_worktree") {
 		out.Hooks.PostWorktree = override.Hooks.PostWorktree
@@ -1037,6 +1046,7 @@ func cloneRepoConfig(src *RepoConfig) *RepoConfig {
 	out := *src
 	out.Agents = copyAgents(src.Agents)
 	out.Commands = src.Commands.Clone()
+	out.Preflight = cloneRunnerCommands(src.Preflight, false)
 	out.IgnorePatterns = copyStrings(src.IgnorePatterns)
 	out.Intent.Agents = copyAgents(src.Intent.Agents)
 	out.Intent.DisabledReaders = copyStrings(src.Intent.DisabledReaders)
@@ -1067,6 +1077,21 @@ func copyStrings(values []string) []string {
 	out := make([]string, len(values))
 	copy(out, values)
 	return out
+}
+
+func cloneRunnerCommands(commands []runner.Command, canonical bool) []runner.Command {
+	if commands == nil {
+		return nil
+	}
+	cloned := make([]runner.Command, len(commands))
+	for i, command := range commands {
+		if canonical {
+			cloned[i] = command.Canonical()
+		} else {
+			cloned[i] = command.Clone()
+		}
+	}
+	return cloned
 }
 
 func copyReviewCandidates(candidates []ReviewCandidate) []ReviewCandidate {
@@ -1381,6 +1406,7 @@ type Config struct {
 	LogLevel                string
 	SessionReuse            bool
 	Commands                Commands
+	Preflight               []runner.Command
 	Hooks                   Hooks
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
@@ -3313,8 +3339,8 @@ func validatePathInstructionGlob(pattern string) error {
 // EffectiveRepoConfig returns the repo config that should drive the pipeline
 // given a pushed-branch copy and the trusted default-branch copy.
 //
-// The code-executing selection fields - Commands and Hooks (run verbatim via
-// sh -c on the daemon host), Agent/Agents, every per-step agent/model route,
+// The code-executing selection fields - Commands, Preflight, and Hooks (run
+// verbatim on the daemon host), Agent/Agents, every per-step agent/model route,
 // and the Review candidate pool (select which processes launch with the
 // maintainer's credentials, including fallback lists and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
@@ -3382,6 +3408,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	}
 	if trusted != nil {
 		effective.Commands = trusted.Commands.Clone()
+		effective.Preflight = cloneRunnerCommands(trusted.Preflight, false)
 		effective.Hooks = trusted.Hooks
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
@@ -3405,6 +3432,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Prompts = trusted.Prompts
 	} else {
 		effective.Commands = Commands{}
+		effective.Preflight = nil
 		effective.Hooks = Hooks{}
 		effective.Agent = ""
 		effective.Agents = nil
@@ -3786,6 +3814,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		LogLevel:                global.LogLevel,
 		SessionReuse:            global.SessionReuse,
 		Commands:                repo.Commands.Clone(),
+		Preflight:               cloneRunnerCommands(repo.Preflight, true),
 		Hooks:                   hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
