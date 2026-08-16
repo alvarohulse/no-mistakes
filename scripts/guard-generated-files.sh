@@ -495,14 +495,15 @@ $audit_commit_graph
 EOF
 }
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-  fail "usage: guard-generated-files.sh <base-sha> <head-sha> <canonical-upstream-url> [authenticated-pending-release-sha]"
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+  fail "usage: guard-generated-files.sh <base-sha> <head-sha> <canonical-upstream-url> <release-attestation-url> [authenticated-pending-release-sha]"
 fi
 
 BASE_SHA=$1
 HEAD_SHA=$2
 CANONICAL_UPSTREAM_URL=$3
-PENDING_RELEASE_SHA=${4-}
+RELEASE_ATTESTATION_URL=$4
+PENDING_RELEASE_SHA=${5-}
 CANONICAL_REF=refs/no-mistakes/guard-generated-files/canonical-main
 pending_release_candidate=
 expected_files=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md | LC_ALL=C sort)
@@ -541,13 +542,17 @@ if ! generated_entries_are_regular "$base_entries" || ! generated_entries_are_re
   fail "the PR base and head must contain both generated files as regular non-executable blobs"
 fi
 
-if ! git fetch --no-tags --force --prune "$CANONICAL_UPSTREAM_URL" \
-  "+refs/heads/main:${CANONICAL_REF}" \
-  "+${PROVENANCE_TAG_PREFIX}/*:${PROVENANCE_REF_PREFIX}/*"; then
+if ! git fetch --no-tags --force "$CANONICAL_UPSTREAM_URL" \
+  "+refs/heads/main:${CANONICAL_REF}"; then
   fail "could not fetch canonical upstream main"
 fi
 if ! canonical_main=$(git rev-parse --verify "${CANONICAL_REF}^{commit}"); then
   fail "canonical upstream main did not resolve to a commit"
+fi
+
+if ! git fetch --no-tags --force --prune "$RELEASE_ATTESTATION_URL" \
+  "+${PROVENANCE_TAG_PREFIX}/*:${PROVENANCE_REF_PREFIX}/*"; then
+  fail "could not fetch release attestations"
 fi
 
 if ! authenticated_release_refs=$(git for-each-ref \
@@ -671,14 +676,6 @@ while [ "$#" -gt 0 ]; do
   if ! candidate_tuple=$(generated_entries_tuple "$candidate_entries"); then
     exit 1
   fi
-  if ! is_ancestor "$commit" "$PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT"; then
-    if ! printf '%s\n' "$authenticated_candidate_records" | awk -v tuple="$candidate_tuple" '
-      NF == 2 && $2 == tuple { found = 1 }
-      END { exit found ? 0 : 1 }
-    '; then
-      fail "canonical release candidate lacks authenticated release provenance"
-    fi
-  fi
   if [ -z "$canonical_candidate_records" ]; then
     canonical_candidate_records="${commit} ${candidate_tuple}"
   else
@@ -686,6 +683,27 @@ while [ "$#" -gt 0 ]; do
 ${commit} ${candidate_tuple}"
   fi
 done
+
+while IFS=' ' read -r authenticated_sha authenticated_tuple; do
+  if [ -z "$authenticated_sha" ]; then
+    continue
+  fi
+  if printf '%s\n' "$canonical_candidate_records" | awk -v tuple="$authenticated_tuple" '
+    NF == 2 && $2 == tuple { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    continue
+  fi
+  canonical_candidates="${canonical_candidates} ${authenticated_sha}"
+  if [ -z "$canonical_candidate_records" ]; then
+    canonical_candidate_records="${authenticated_sha} ${authenticated_tuple}"
+  else
+    canonical_candidate_records="${canonical_candidate_records}
+${authenticated_sha} ${authenticated_tuple}"
+  fi
+done <<EOF
+$authenticated_candidate_records
+EOF
 
 if ! duplicate_candidate_tuple=$(printf '%s\n' "$canonical_candidate_records" | awk '
   NF == 2 { count[$2]++ }
