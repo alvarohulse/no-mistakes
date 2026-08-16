@@ -670,7 +670,7 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		"Fetched pull request head does not match the event",
 		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
 		"https://github.com/kunchenguid/no-mistakes.git",
-		`"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"`,
+		"https://github.com/alvarohulse/no-mistakes.git",
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("trusted workflow must contain %q", want)
