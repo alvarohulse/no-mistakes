@@ -55,6 +55,13 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertFails(fixture.upstream)
 	})
 
+	t.Run("deleting a generated file fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.git(fixture.pr, "rm", "CHANGELOG.md")
+		fixture.git(fixture.pr, "commit", "-q", "-m", "docs: delete changelog")
+		fixture.assertFails(fixture.upstream)
+	})
+
 	t.Run("upstream sync with many canonical commits and releases passes", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
@@ -154,6 +161,14 @@ func TestGeneratedFileGuard(t *testing.T) {
 		leftMerge := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", left, "-p", right, "-m", "merge left"))
 		rightMerge := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", right, "-p", left, "-m", "merge right"))
 		fixture.assertFailsBetween(leftMerge, rightMerge, filepath.Join(t.TempDir(), "missing-upstream"))
+	})
+
+	t.Run("malformed commit selectors fail closed", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		head := strings.TrimSpace(fixture.git(fixture.pr, "rev-parse", "HEAD"))
+		missingUpstream := filepath.Join(t.TempDir(), "missing-upstream")
+		fixture.assertFailsBetween("not-a-commit", head, missingUpstream)
+		fixture.assertFailsBetween(fixture.base, "not-a-commit", missingUpstream)
 	})
 }
 
