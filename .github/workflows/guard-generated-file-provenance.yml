@@ -26,6 +26,12 @@ jobs:
         run: |
           set -eu
 
+          checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$checked_out_base" != "$BASE_SHA" ]; then
+            echo "::error::Checked-out pull request base does not match the event" >&2
+            exit 1
+          fi
+
           case "$PR_NUMBER" in
             ''|*[!0-9]*)
               echo "::error::Pull request number is not numeric" >&2
@@ -43,8 +49,8 @@ jobs:
           fi
 
           trusted_script="${RUNNER_TEMP}/guard-generated-files.sh"
-          git show "${BASE_SHA}:scripts/guard-generated-files.sh" > "$trusted_script"
+          git show "${checked_out_base}:scripts/guard-generated-files.sh" > "$trusted_script"
           sh "$trusted_script" \
-            "$BASE_SHA" \
+            "$checked_out_base" \
             "$HEAD_SHA" \
             "https://github.com/kunchenguid/no-mistakes.git"

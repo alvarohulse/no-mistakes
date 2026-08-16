@@ -51,6 +51,14 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertPasses(fixture.upstream)
 	})
 
+	t.Run("merge commit carrying canonical release entries passes", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.commit(fixture.pr, "feat: fork source change", map[string]string{"fork.txt": "feature\n"})
+		fixture.mergeCanonicalMainWithCommit()
+		fixture.assertPasses(fixture.upstream)
+	})
+
 	t.Run("ambiguous matching releases fail", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
@@ -64,6 +72,15 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
 		fixture.commit(fixture.pr, "docs: copy release files", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("fork commit restoring an older canonical release fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.commit(fixture.upstream, "chore(main): release 1.2.0", guardReleaseFiles(guardChangelogV2, guardManifestV2))
+		fixture.mergeCanonicalMain()
+		fixture.commit(fixture.pr, "docs: restore older release files", guardReleaseFiles(guardChangelogV1, guardManifestV1))
 		fixture.assertFails(fixture.upstream)
 	})
 
@@ -101,6 +118,16 @@ func TestGeneratedFileGuard(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "missing-upstream")
 		fixture.assertFails(missing)
 	})
+
+	t.Run("multiple merge bases fail before the no-change fast path", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		tree := strings.TrimSpace(fixture.git(fixture.pr, "rev-parse", "HEAD^{tree}"))
+		left := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", fixture.base, "-m", "left"))
+		right := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", fixture.base, "-m", "right"))
+		leftMerge := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", left, "-p", right, "-m", "merge left"))
+		rightMerge := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", right, "-p", left, "-m", "merge right"))
+		fixture.assertFailsBetween(leftMerge, rightMerge, filepath.Join(t.TempDir(), "missing-upstream"))
+	})
 }
 
 func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
@@ -112,9 +139,12 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		"contents: read",
 		"persist-credentials: false",
 		"ref: ${{ github.event.pull_request.base.sha }}",
+		"checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')",
+		`[ "$checked_out_base" != "$BASE_SHA" ]`,
+		"Checked-out pull request base does not match the event",
 		"refs/pull/${PR_NUMBER}/head",
 		"Fetched pull request head does not match the event",
-		`git show "${BASE_SHA}:scripts/guard-generated-files.sh"`,
+		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
 		"https://github.com/kunchenguid/no-mistakes.git",
 	} {
 		if !strings.Contains(workflow, want) {
@@ -124,6 +154,7 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	for _, forbidden := range []string{
 		"github.event.pull_request.head.repo.clone_url",
 		"github.event.pull_request.head.ref",
+		`git show "${BASE_SHA}:scripts/guard-generated-files.sh"`,
 	} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("trusted workflow must not use untrusted value %q", forbidden)
@@ -189,6 +220,12 @@ func (f *generatedGuardFixture) mergeCanonicalMain() {
 	f.git(f.pr, "merge", "--ff-only", "FETCH_HEAD")
 }
 
+func (f *generatedGuardFixture) mergeCanonicalMainWithCommit() {
+	f.t.Helper()
+	f.git(f.pr, "fetch", "-q", f.upstream, "main")
+	f.git(f.pr, "merge", "--no-ff", "-m", "Merge canonical main", "FETCH_HEAD")
+}
+
 func (f *generatedGuardFixture) assertPasses(upstream string) {
 	f.t.Helper()
 	output, err := f.run(upstream)
@@ -205,12 +242,25 @@ func (f *generatedGuardFixture) assertFails(upstream string) {
 	}
 }
 
+func (f *generatedGuardFixture) assertFailsBetween(base, head, upstream string) {
+	f.t.Helper()
+	output, err := f.runBetween(base, head, upstream)
+	if err == nil {
+		f.t.Fatalf("guard should fail\n%s", output)
+	}
+}
+
 func (f *generatedGuardFixture) run(upstream string) (string, error) {
 	f.t.Helper()
 	head := strings.TrimSpace(f.git(f.pr, "rev-parse", "HEAD"))
+	return f.runBetween(f.base, head, upstream)
+}
+
+func (f *generatedGuardFixture) runBetween(base, head, upstream string) (string, error) {
+	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", f.script, f.base, head, upstream)
+	cmd := exec.CommandContext(ctx, "sh", f.script, base, head, upstream)
 	cmd.Dir = f.pr
 	cmd.Env = guardCommandEnv()
 	output, err := cmd.CombinedOutput()
