@@ -64,14 +64,24 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		t.Fatal("release workflow must be able to attest the exact generated head")
 	}
 	for _, required := range []string{
-		"steps.release.outputs.prs_created == 'true'",
-		"RELEASE_PR: ${{ steps.release.outputs.pr }}",
+		"skip-github-pull-request: true",
+		"steps.release_pr.outputs.prs_created == 'true'",
+		"RELEASE_PR: ${{ steps.release_pr.outputs.pr }}",
+		"actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+		"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+		"node-version: 20",
+		"working-directory: .github/release-please-reproducer",
+		"npm ci --ignore-scripts",
 		"expected_head_ref=release-please--branches--main",
+		`repos/${GITHUB_REPOSITORY}/git/ref/heads/main`,
+		`node .github/release-please-reproducer/produce-release-pr.mjs \`,
 		`repos/${GITHUB_REPOSITORY}/pulls/${pr_number}`,
 		`refs/pull/${pr_number}/head`,
 		`[ "$base_sha" != "$GITHUB_SHA" ]`,
 		`[ "$fetched_head" != "$head_sha" ]`,
 		`git show "${GITHUB_SHA}:scripts/guard-generated-files.sh"`,
+		`git show "${GITHUB_SHA}:scripts/verify-release-please-output.sh"`,
+		`sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"`,
 		`"$GITHUB_SHA"`,
 		`"$head_sha"`,
 		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
@@ -83,12 +93,63 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"steps.release.outputs.prs_created",
 		"steps.release.outputs.pr.sha",
 		"github.event.pull_request",
+		"reproduce.mjs",
 	} {
 		if strings.Contains(block, forbidden) {
 			t.Errorf("release-please job must not trust unavailable or unrelated metadata %q", forbidden)
 		}
+	}
+
+	orderedOperations := []string{
+		"node .github/release-please-reproducer/produce-release-pr.mjs",
+		`require_live_main "before attestation verification"`,
+		`sh "$trusted_script"`,
+		`sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"`,
+		"latest_head_sha=$(gh api",
+		`require_live_main "before attestation publication"`,
+		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
+	}
+	previous := -1
+	for _, operation := range orderedOperations {
+		position := strings.Index(block, operation)
+		if position == -1 {
+			t.Fatalf("release workflow must contain ordered operation %q", operation)
+		}
+		if position <= previous {
+			t.Fatalf("release workflow operation %q is out of order", operation)
+		}
+		previous = position
+	}
+}
+
+func TestReleasePleaseProducerCapturesPublishedOutput(t *testing.T) {
+	producer := guardReadFile(t, ".github/release-please-reproducer/produce-release-pr.mjs")
+
+	for _, required := range []string{
+		"github.buildChangeSet = async",
+		"capturedChangeSets.push(changes)",
+		"await manifest.createPullRequests()",
+		"await github.getBranchSha(baseBranch)",
+		"expectedBaseSHA",
+		"await writeFile",
+		"process.env.GITHUB_OUTPUT",
+	} {
+		if !strings.Contains(producer, required) {
+			t.Errorf("release-please producer must contain %q", required)
+		}
+	}
+	if strings.Contains(producer, "buildPullRequests()") {
+		t.Fatal("release-please producer must capture the publishing invocation, not rebuild output afterward")
+	}
+
+	intercept := strings.Index(producer, "github.buildChangeSet = async")
+	publish := strings.Index(producer, "await manifest.createPullRequests()")
+	persist := strings.Index(producer, "await writeFile")
+	if intercept == -1 || publish == -1 || persist == -1 || intercept >= publish || publish >= persist {
+		t.Fatal("release-please producer must intercept, publish, then persist the exact published output")
 	}
 }
 

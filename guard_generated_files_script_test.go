@@ -565,6 +565,51 @@ func TestGeneratedFileGuard(t *testing.T) {
 	})
 }
 
+func TestReleasePleaseOutputVerifierRejectsReplacementHead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-please output verifier is a POSIX shell script")
+	}
+
+	repo := t.TempDir()
+	guardGit(t, repo, "init", "-q")
+	guardGit(t, repo, "config", "user.email", "release-test@example.com")
+	guardGit(t, repo, "config", "user.name", "Release Test")
+	guardWriteFile(t, repo, "CHANGELOG.md", "# Changelog\n")
+	guardWriteFile(t, repo, ".release-please-manifest.json", "{\".\":\"1.0.0\"}\n")
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "commit", "-q", "-m", "chore: base")
+	base := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+
+	expected := t.TempDir()
+	guardWriteFile(t, expected, "CHANGELOG.md", "# Changelog\n\n## 1.1.0\n")
+	guardWriteFile(t, expected, ".release-please-manifest.json", "{\".\":\"1.1.0\"}\n")
+	guardWriteFile(t, repo, "CHANGELOG.md", "# Changelog\n\n## 1.1.0\n")
+	guardWriteFile(t, repo, ".release-please-manifest.json", "{\".\":\"1.1.0\"}\n")
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 1.1.0")
+	generatedHead := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+
+	output, err := runReleasePleaseOutputVerifier(t, repo, generatedHead, expected)
+	if err != nil {
+		t.Fatalf("verifier should accept captured producer release blobs: %v\n%s", err, output)
+	}
+
+	guardGit(t, repo, "switch", "-q", "--detach", base)
+	guardWriteFile(t, repo, "CHANGELOG.md", "forged release\n")
+	guardWriteFile(t, repo, ".release-please-manifest.json", "{\".\":\"99.0.0\"}\n")
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 99.0.0")
+	replacementHead := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+
+	output, err = runReleasePleaseOutputVerifier(t, repo, replacementHead, expected)
+	if err == nil {
+		t.Fatalf("verifier should reject a force-pushed replacement head\n%s", output)
+	}
+	if !strings.Contains(output, "does not match captured release-please producer output") {
+		t.Fatalf("verifier failure = %q, want captured-output mismatch", output)
+	}
+}
+
 func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	workflow := strings.ReplaceAll(guardReadFile(t, ".github/workflows/guard-generated-file-provenance.yml"), "\r\n", "\n")
 
@@ -841,6 +886,24 @@ func runGeneratedGuard(t *testing.T, repo, script, base, head, upstream string, 
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("generated-file guard exceeded its deadline: %v\n%s", ctx.Err(), output)
+	}
+	return string(output), err
+}
+
+func runReleasePleaseOutputVerifier(t *testing.T, repo, head, expected string) (string, error) {
+	t.Helper()
+	script, err := filepath.Abs(filepath.Join("scripts", "verify-release-please-output.sh"))
+	if err != nil {
+		t.Fatalf("resolve release-please output verifier: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", script, head, expected)
+	cmd.Dir = repo
+	cmd.Env = guardCommandEnv()
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("release-please output verifier exceeded its deadline: %v\n%s", ctx.Err(), output)
 	}
 	return string(output), err
 }
