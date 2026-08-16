@@ -152,6 +152,23 @@ canonical_candidate_for_tuple() {
   canonical_tuple_candidate=$1
 }
 
+trusted_floor_for_entries() {
+  trusted_floor_for_entries_value=$1
+  trusted_floor_for_entries_label=$2
+
+  if [ "$trusted_floor_for_entries_value" = "$bootstrap_entries" ]; then
+    trusted_entries_floor=$bootstrap_floor
+    return 0
+  fi
+  if ! trusted_floor_for_entries_tuple=$(generated_entries_tuple "$trusted_floor_for_entries_value"); then
+    exit 1
+  fi
+  canonical_candidate_for_tuple \
+    "$trusted_floor_for_entries_tuple" \
+    "$trusted_floor_for_entries_label"
+  trusted_entries_floor=$canonical_tuple_candidate
+}
+
 is_trusted_base_first_parent_commit() {
   case "${trusted_base_first_parent_commit_set} " in
     *" $1 "*) return 0 ;;
@@ -298,9 +315,6 @@ EOF
       canonical_candidate_for_tuple "$transition_tuple" "trusted base rewrite"
       transition_candidate=$canonical_tuple_candidate
     else
-      if [ "$commit_entries" = "$first_parent_entries" ]; then
-        continue
-      fi
       matches_parent=false
       for parent in "$@"; do
         if ! parent_entries=$(generated_entries "$parent"); then
@@ -313,10 +327,29 @@ EOF
       if [ "$matches_parent" = false ]; then
         fail "merge commit synthesizes generated entries not present in any parent"
       fi
-      derive_provenance "$commit" "trusted base generated-changing merge commit" true
-      transition_candidate=$provenance_floor
-      if ! transition_tuple=$(generated_entries_tuple "$commit_entries"); then
-        exit 1
+
+      transition_changed=true
+      if [ "$commit_entries" = "$first_parent_entries" ]; then
+        transition_candidate=$trusted_base_floor
+        transition_changed=false
+      else
+        trusted_floor_for_entries "$commit_entries" "trusted base generated-changing merge commit"
+        transition_candidate=$trusted_entries_floor
+        if ! transition_tuple=$(generated_entries_tuple "$commit_entries"); then
+          exit 1
+        fi
+      fi
+      for parent in "$@"; do
+        if ! parent_entries=$(generated_entries "$parent"); then
+          fail "could not inspect generated entries in a trusted base merge parent"
+        fi
+        trusted_floor_for_entries "$parent_entries" "trusted base merge parent"
+        if ! is_ancestor "$trusted_entries_floor" "$transition_candidate"; then
+          fail "trusted base generated files roll back canonical provenance"
+        fi
+      done
+      if [ "$transition_changed" = false ]; then
+        continue
       fi
     fi
 
@@ -388,6 +421,16 @@ EOF
       if [ "$audit_commits_trust" = untrusted ] && [ "$audited_generated_change_count" -gt "$MAX_PR_GENERATED_CHANGES" ]; then
         fail "${audit_commits_label} has too many generated-file changes"
       fi
+      if [ "$audit_commits_trust" = trusted ]; then
+        trusted_floor_for_entries "$parent_entries" "${audit_commits_label} commit parent"
+        trusted_parent_floor=$trusted_entries_floor
+        trusted_floor_for_entries "$commit_entries" "${audit_commits_label} rewrite"
+        trusted_commit_floor=$trusted_entries_floor
+        if ! is_ancestor "$trusted_parent_floor" "$trusted_commit_floor"; then
+          fail "trusted base generated files roll back canonical provenance"
+        fi
+        continue
+      fi
       if ! is_canonical_candidate "$commit"; then
         fail "generated files changed in a noncanonical commit"
       fi
@@ -423,6 +466,20 @@ EOF
     audited_generated_change_count=$((audited_generated_change_count + 1))
     if [ "$audit_commits_trust" = untrusted ] && [ "$audited_generated_change_count" -gt "$MAX_PR_GENERATED_CHANGES" ]; then
       fail "${audit_commits_label} has too many generated-file changes"
+    fi
+    if [ "$audit_commits_trust" = trusted ]; then
+      trusted_floor_for_entries "$commit_entries" "${audit_commits_label} merge commit"
+      trusted_merge_floor=$trusted_entries_floor
+      for parent in "$@"; do
+        if ! parent_entries=$(generated_entries "$parent"); then
+          fail "could not inspect generated entries in a ${audit_commits_label} merge parent"
+        fi
+        trusted_floor_for_entries "$parent_entries" "${audit_commits_label} merge parent"
+        if ! is_ancestor "$trusted_entries_floor" "$trusted_merge_floor"; then
+          fail "trusted base generated files roll back canonical provenance"
+        fi
+      done
+      continue
     fi
     if [ "$audit_commits_trust" = untrusted ] && preserves_base_provenance "$commit"; then
       continue

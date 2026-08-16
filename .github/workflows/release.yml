@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,11 +22,95 @@ jobs:
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # GITHUB_TOKEN suppresses pull-request workflow events. Verify and attest
+      # the exact generated head here instead of trusting mutable PR metadata.
+      - uses: actions/checkout@v6
+        if: steps.release.outputs.prs_created == 'true'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Attest exact release-please head
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+
+          expected_head_ref=release-please--branches--main
+          pr_number=$(jq -er '.number | select(type == "number" and . > 0)' <<<"$RELEASE_PR")
+          action_base_ref=$(jq -er '.baseBranchName | select(type == "string")' <<<"$RELEASE_PR")
+          action_head_ref=$(jq -er '.headBranchName | select(type == "string")' <<<"$RELEASE_PR")
+          if [ "$action_base_ref" != main ] || [ "$action_head_ref" != "$expected_head_ref" ]; then
+            echo "::error::release-please reported an unexpected base or head branch" >&2
+            exit 1
+          fi
+          case "$pr_number" in
+            ''|*[!0-9]*)
+              echo "::error::release-please pull request number is not numeric" >&2
+              exit 1
+              ;;
+          esac
+
+          hosted_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}")
+          hosted_number=$(jq -er '.number' <<<"$hosted_pr")
+          hosted_state=$(jq -er '.state' <<<"$hosted_pr")
+          hosted_base_ref=$(jq -er '.base.ref' <<<"$hosted_pr")
+          hosted_head_ref=$(jq -er '.head.ref' <<<"$hosted_pr")
+          hosted_head_repo=$(jq -er '.head.repo.full_name' <<<"$hosted_pr")
+          base_sha=$(jq -er '.base.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$hosted_pr")
+          head_sha=$(jq -er '.head.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' <<<"$hosted_pr")
+          if [ "$hosted_number" != "$pr_number" ] || [ "$hosted_state" != open ] || \
+            [ "$hosted_base_ref" != main ] || [ "$hosted_head_ref" != "$expected_head_ref" ] || \
+            [ "$hosted_head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::hosted pull request does not match the release-please output" >&2
+            exit 1
+          fi
+          if [ "$base_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::release-please head is not based on the triggering main commit" >&2
+            exit 1
+          fi
+
+          checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$checked_out_base" != "$GITHUB_SHA" ]; then
+            echo "::error::checked-out release base does not match the triggering commit" >&2
+            exit 1
+          fi
+          release_head_ref=refs/no-mistakes/release-please/exact-head
+          git fetch --no-tags --force origin \
+            "+refs/pull/${pr_number}/head:${release_head_ref}"
+          fetched_head=$(git rev-parse --verify "${release_head_ref}^{commit}")
+          if [ "$fetched_head" != "$head_sha" ]; then
+            echo "::error::fetched release-please head does not match the hosted pull request" >&2
+            exit 1
+          fi
+
+          trusted_script="${RUNNER_TEMP}/guard-generated-files.sh"
+          git show "${GITHUB_SHA}:scripts/guard-generated-files.sh" > "$trusted_script"
+          sh "$trusted_script" \
+            "$GITHUB_SHA" \
+            "$head_sha" \
+            "https://github.com/kunchenguid/no-mistakes.git" \
+            "$head_sha"
+
+          latest_head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')
+          if [ "$latest_head_sha" != "$head_sha" ]; then
+            echo "::error::release-please head changed during provenance verification" >&2
+            exit 1
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${head_sha}" \
+            -f state=success \
+            -f context='Generated files must not be hand-edited' \
+            -f description='Verified by the trusted release workflow' \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
   # macOS artifacts are built and Developer ID signed on a macOS runner (codesign
   # is macOS-only). Signing happens before archiving and before the checksums job
