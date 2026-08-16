@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -65,8 +66,11 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 	if !strings.Contains(content, "statuses: write") {
 		t.Fatal("release workflow must be able to attest the exact generated head")
 	}
-	if !strings.Contains(releaseBlock, "skip-github-pull-request: true") {
-		t.Fatal("release-please action must delegate pull request publication to the provenance job")
+	if !strings.Contains(releaseBlock, "node .github/release-please-reproducer/create-release.mjs") {
+		t.Fatal("release-please must create releases through the exact-SHA runner")
+	}
+	if strings.Contains(releaseBlock, "googleapis/release-please-action@") {
+		t.Fatal("release-please must not use the live-branch action for release mutation")
 	}
 	if !strings.Contains(block, "needs: release-please") {
 		t.Fatal("release provenance must run after release creation")
@@ -173,13 +177,25 @@ func TestReleasePleaseProducerCapturesPublishedOutput(t *testing.T) {
 	}
 }
 
+func TestReleasePleaseExactReleaseMutationBoundary(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("exact release runner tests require Node.js")
+	}
+
+	cmd := exec.Command("node", "--test", ".github/release-please-reproducer/exact-release.test.mjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exact release runner tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	wf := loadReleaseWorkflowDoc(t)
 	releaseJob := wf.Jobs["release-please"]
 	if releaseJob == nil {
 		t.Fatal("release workflow must define release-please")
 	}
-	if len(releaseJob.Steps) != 6 {
+	if len(releaseJob.Steps) != 8 {
 		t.Fatalf("release-please must contain the release action and deterministic state recovery, found %d steps", len(releaseJob.Steps))
 	}
 	if releaseJob.Steps[0].Uses != "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" {
@@ -188,19 +204,27 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	if !strings.Contains(releaseJob.Steps[1].Run, "scripts/resolve-release-state.sh") {
 		t.Fatal("release-please must resolve exact state before any mutation")
 	}
-	if !strings.Contains(releaseJob.Steps[2].If, "github.run_attempt == 1") || !strings.Contains(releaseJob.Steps[2].Run, "git/ref/heads/main") {
-		t.Fatal("release-please must bind first-attempt mutation to the triggering main commit")
+	if !strings.Contains(releaseJob.Steps[2].If, "github.run_attempt != 1") ||
+		!strings.Contains(releaseJob.Steps[2].If, "release_state == 'none'") ||
+		!strings.Contains(releaseJob.Steps[2].Run, "exit 1") {
+		t.Fatal("release-please must fail closed when a rerun has no exact release to recover")
 	}
-	if releaseJob.Steps[3].Uses != "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071" {
-		t.Fatalf("release-please must keep the pinned release action, got %q", releaseJob.Steps[3].Uses)
+	if releaseJob.Steps[3].Uses != "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38" {
+		t.Fatalf("release-please must use the pinned Node setup action, got %q", releaseJob.Steps[3].Uses)
 	}
-	if !strings.Contains(releaseJob.Steps[3].If, "github.run_attempt == 1") || !strings.Contains(releaseJob.Steps[3].If, "release_state == 'none'") {
-		t.Fatalf("release action must run only for a first-attempt missing release, got if %q", releaseJob.Steps[3].If)
+	if !strings.Contains(releaseJob.Steps[4].Run, "npm ci --ignore-scripts") {
+		t.Fatal("release-please must install the pinned base-owned dependency graph")
 	}
-	if !strings.Contains(releaseJob.Steps[4].Run, "git fetch --force --tags origin") {
+	if !strings.Contains(releaseJob.Steps[5].If, "github.run_attempt == 1") ||
+		!strings.Contains(releaseJob.Steps[5].If, "release_state == 'none'") ||
+		!strings.Contains(releaseJob.Steps[5].Run, "create-release.mjs") ||
+		!strings.Contains(releaseJob.Steps[5].Run, `"$GITHUB_SHA"`) {
+		t.Fatalf("release mutation must be bound to the triggering commit, got step %#v", releaseJob.Steps[5])
+	}
+	if !strings.Contains(releaseJob.Steps[6].Run, "git fetch --force --tags origin") {
 		t.Fatal("release-please must refresh tags created after the triggering commit checkout")
 	}
-	if !strings.Contains(releaseJob.Steps[5].Run, "scripts/resolve-release-state.sh") {
+	if !strings.Contains(releaseJob.Steps[7].Run, "scripts/resolve-release-state.sh") {
 		t.Fatal("release-please must resolve the exact final state after the release action")
 	}
 
@@ -376,7 +400,8 @@ func TestReleaseWorkflowDoesNotOverrideReleaseType(t *testing.T) {
 	if strings.Contains(block, "release-type:") {
 		t.Fatalf("release workflow must not override release-type; release-please should read it from release-please-config.json")
 	}
-	if !strings.Contains(block, "config-file: release-please-config.json") {
+	runner := guardReadFile(t, ".github/release-please-reproducer/create-release.mjs")
+	if !strings.Contains(runner, `"release-please-config.json"`) {
 		t.Fatalf("release workflow must point release-please at release-please-config.json")
 	}
 }
