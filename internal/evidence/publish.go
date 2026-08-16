@@ -213,7 +213,7 @@ func remoteTip(ctx context.Context, repoDir, pushURL, branch string) (sha string
 			}
 		}
 	}()
-	if _, err := git.Run(ctx, repoDir, "fetch", "--no-tags", "--force", pushURL, "+refs/heads/"+branch+":"+fetchRef); err != nil {
+	if err := git.FetchRemoteBranchToPrivateRef(ctx, repoDir, pushURL, branch, fetchRef); err != nil {
 		return "", fmt.Errorf("fetch evidence branch %s: %w", branch, err)
 	}
 	sha, err = git.Run(ctx, repoDir, "rev-parse", "--verify", fetchRef+"^{commit}")
