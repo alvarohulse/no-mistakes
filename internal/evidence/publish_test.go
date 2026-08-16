@@ -235,6 +235,33 @@ func TestPublish_DoesNotCollideWithAnotherPublicationFetchRef(t *testing.T) {
 	}
 }
 
+func TestPublish_DoesNotUseFetchHead(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	first := writeEvidence(t, t.TempDir(), map[string]string{"round-1.txt": "first\n"})
+	if _, err := Publish(context.Background(), baseRequest(remote, work, first)); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	fetchHead := filepath.Join(runGit(t, work, "rev-parse", "--absolute-git-dir"), "FETCH_HEAD")
+	wantFetchHead := []byte("another fetch owns this state\n")
+	if err := os.WriteFile(fetchHead, wantFetchHead, 0o644); err != nil {
+		t.Fatalf("write FETCH_HEAD: %v", err)
+	}
+	if err := os.WriteFile(fetchHead+".lock", []byte("locked\n"), 0o644); err != nil {
+		t.Fatalf("lock FETCH_HEAD: %v", err)
+	}
+
+	second := writeEvidence(t, t.TempDir(), map[string]string{"round-2.txt": "second\n"})
+	if _, err := Publish(context.Background(), baseRequest(remote, work, second)); err != nil {
+		t.Fatalf("second publish contended on FETCH_HEAD: %v", err)
+	}
+	if got, err := os.ReadFile(fetchHead); err != nil {
+		t.Fatalf("read FETCH_HEAD: %v", err)
+	} else if string(got) != string(wantFetchHead) {
+		t.Fatalf("FETCH_HEAD changed to %q, want %q", got, wantFetchHead)
+	}
+}
+
 func TestPublish_UnchangedEvidenceReusesTheExistingCommit(t *testing.T) {
 	remote, work := newRepoWithRemote(t)
 	source := writeEvidence(t, t.TempDir(), map[string]string{"proof.txt": "ok\n"})
