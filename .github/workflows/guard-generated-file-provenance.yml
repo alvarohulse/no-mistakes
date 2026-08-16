@@ -12,6 +12,9 @@ jobs:
     name: Generated files must not be hand-edited
     runs-on: ubuntu-latest
     steps:
+      # Security boundary: pull_request_target has repository authority. Treat
+      # the PR head only as data and execute only code read from the exact,
+      # verified event base; never check out or execute PR-head code here.
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
