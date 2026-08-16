@@ -24,6 +24,9 @@ func newReviewPoolAgent(candidates []agent.Agent, pick reviewCandidatePicker) ag
 	if len(candidates) == 0 {
 		return nil
 	}
+	if pick == nil {
+		pick = secureReviewCandidatePicker
+	}
 	return &reviewPoolAgent{candidates: append([]agent.Agent(nil), candidates...), pick: pick}
 }
 

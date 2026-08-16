@@ -232,10 +232,24 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 	if err != nil {
 		return err
 	}
+	normalizeResolvedPolicyForComparison(expected)
 	if !reflect.DeepEqual(*actual, *expected) {
 		return fmt.Errorf("resolved policy differs from launch")
 	}
 	return nil
+}
+
+// Version 1 predates managed routing and Review candidate pools. Its missing
+// fields already decode to their legacy zero values; only schema versions need
+// normalization before semantic comparison with a policy rebuilt by this binary.
+func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
+	if policy.Version != 1 {
+		return
+	}
+	policy.Version = resolvedPolicyVersion
+	if policy.Routing.Version == 1 {
+		policy.Routing.Version = resolvedAgentRoutingVersion
+	}
 }
 
 func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, steps []pipeline.Step, skipped []types.StepName, refreshStrategy types.RefreshStrategy, demo bool) (*resolvedPolicy, error) {
@@ -345,6 +359,11 @@ func (p *resolvedPolicy) validate() error {
 	}
 	if err := p.Routing.validate(); err != nil {
 		return err
+	}
+	if p.Managed && !p.Routing.Demo {
+		if err := p.Routing.validateManaged(); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(p.Runner.Kind) == "" || strings.TrimSpace(p.Runner.Platform) == "" || strings.TrimSpace(p.Runner.Version) == "" {
 		return fmt.Errorf("resolved policy runner identity is incomplete")

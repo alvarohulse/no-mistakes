@@ -804,7 +804,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName), nil)
 	reviewer := stepAgent
-	var reviewAdversary agent.Agent
 	if stepName == types.StepReview {
 		if len(e.agents.ReviewCandidates) > 0 {
 			if e.config == nil || len(e.config.ReviewCandidates) != len(e.agents.ReviewCandidates) {
@@ -817,7 +816,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 			reviewer = newReviewPoolAgent(candidates, e.reviewCandidatePicker)
 		}
-		reviewAdversary = instrumentAgent(e.agents.AdversaryForReview(), nil)
 	}
 	ciReady := run.CIReadyAt != nil
 	ciReadyNoCI := run.CIReadyNoCI
@@ -837,7 +835,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:          workDir,
 		Agent:            stepAgent,
 		Reviewer:         reviewer,
-		ReviewAdversary:  reviewAdversary,
 		Config:           e.config,
 		DB:               e.db,
 		StepResultID:     sr.ID,

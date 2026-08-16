@@ -323,7 +323,7 @@ func pushedConfigUsesDifferentTrustedControls(pushed, effective *config.RepoConf
 		!agentListsEqual(pushed.Agents, effective.Agents) ||
 		!stepAgentRoutesEqual(pushed.ConfiguredStepAgents(), effective.ConfiguredStepAgents()) ||
 		!stepModelRoutesEqual(pushed.ConfiguredStepModels(), effective.ConfiguredStepModels()) ||
-		!reviewAdversaryRoutesEqual(pushed.Review, effective.Review)
+		!reviewCandidateRoutesEqual(pushed.Review, effective.Review)
 }
 
 // resolveGlobalOverride matches the run's registered repository against the

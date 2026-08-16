@@ -27,12 +27,7 @@ type AgentRoutes struct {
 	Default          agent.Agent
 	ByStep           map[types.StepName]agent.Agent
 	ReviewCandidates []agent.Agent
-	ReviewAdversary  agent.Agent
 }
-
-// AdversaryForReview returns the separately configured high-risk reviewer.
-// It is deliberately not part of the primary Review fallback list.
-func (r AgentRoutes) AdversaryForReview() agent.Agent { return r.ReviewAdversary }
 
 // AgentForStep returns the configured step route or the run-wide fallback.
 func (r AgentRoutes) AgentForStep(step types.StepName) agent.Agent {
@@ -50,7 +45,6 @@ type StepContext struct {
 	WorkDir               string
 	Agent                 agent.Agent
 	Reviewer              agent.Agent
-	ReviewAdversary       agent.Agent
 	Config                *config.Config
 	DB                    *db.DB
 	Log                   func(string) // discrete log line (newline-terminated, user-visible + file)

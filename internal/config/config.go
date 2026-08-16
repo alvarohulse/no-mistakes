@@ -307,8 +307,8 @@ func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
 }
 
 // ModelRoute is a controller-known model identity for one pipeline route.
-// Vendor is explicit because deriving it from Name could silently classify a
-// same-vendor adversarial pair as independent when model naming changes.
+// Vendor is explicit because deriving it from Name would make persisted
+// routing ambiguous when model naming changes.
 type ModelRoute struct {
 	Name   string `yaml:"name"`
 	Vendor string `yaml:"vendor"`
@@ -420,9 +420,6 @@ func (c ReviewCandidate) Validate() error {
 type ReviewRaw struct {
 	StepAgentRaw
 	Candidates       []ReviewCandidate `yaml:"candidates"`
-	AdversaryAgent   types.AgentName   `yaml:"-"`
-	AdversaryAgents  []types.AgentName `yaml:"-"`
-	AdversaryModel   ModelRoute        `yaml:"adversary_model"`
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
 }
 
@@ -431,38 +428,34 @@ func (c ReviewRaw) MarshalYAML() (any, error) {
 		Agent            agentList         `yaml:"agent,omitempty"`
 		Model            ModelRoute        `yaml:"model,omitempty"`
 		Candidates       []ReviewCandidate `yaml:"candidates,omitempty"`
-		AdversaryAgent   agentList         `yaml:"adversary_agent,omitempty"`
-		AdversaryModel   ModelRoute        `yaml:"adversary_model,omitempty"`
 		PathInstructions []PathInstruction `yaml:"path_instructions,omitempty"`
 	}{
 		Agent:            agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:            c.Model,
 		Candidates:       append([]ReviewCandidate(nil), c.Candidates...),
-		AdversaryAgent:   agentList(stepAgentNames(c.AdversaryAgent, c.AdversaryAgents)),
-		AdversaryModel:   c.AdversaryModel,
 		PathInstructions: c.PathInstructions,
 	}, nil
 }
 
 func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
-		Agent            agentList         `yaml:"agent"`
-		Model            ModelRoute        `yaml:"model"`
-		Candidates       []ReviewCandidate `yaml:"candidates"`
-		AdversaryAgent   agentList         `yaml:"adversary_agent"`
-		AdversaryModel   ModelRoute        `yaml:"adversary_model"`
-		PathInstructions []PathInstruction `yaml:"path_instructions"`
+		Agent                agentList         `yaml:"agent"`
+		Model                ModelRoute        `yaml:"model"`
+		Candidates           []ReviewCandidate `yaml:"candidates"`
+		LegacyAdversaryAgent any               `yaml:"adversary_agent"`
+		LegacyAdversaryModel any               `yaml:"adversary_model"`
+		PathInstructions     []PathInstruction `yaml:"path_instructions"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
+	}
+	if raw.LegacyAdversaryAgent != nil || raw.LegacyAdversaryModel != nil {
+		return fmt.Errorf("review.adversary_agent and review.adversary_model were removed; configure review.candidates instead")
 	}
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
 	c.Candidates = append([]ReviewCandidate(nil), raw.Candidates...)
-	c.AdversaryAgent = firstAgent(raw.AdversaryAgent)
-	c.AdversaryAgents = copyAgents(raw.AdversaryAgent)
-	c.AdversaryModel = raw.AdversaryModel
 	c.PathInstructions = raw.PathInstructions
 	return nil
 }
@@ -841,13 +834,6 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("review.candidates") {
 		out.Review.Candidates = copyReviewCandidates(override.Review.Candidates)
-	}
-	if override.has("review.adversary_agent") {
-		out.Review.AdversaryAgent = override.Review.AdversaryAgent
-		out.Review.AdversaryAgents = copyAgents(override.Review.AdversaryAgents)
-	}
-	if override.has("review.adversary_model") {
-		out.Review.AdversaryModel = override.Review.AdversaryModel
 	}
 	if override.has("review.path_instructions") {
 		out.Review.PathInstructions = append([]PathInstruction(nil), override.Review.PathInstructions...)
@@ -1280,8 +1266,6 @@ type Config struct {
 	StepAgents              map[types.StepName][]types.AgentName
 	StepModels              map[types.StepName]ModelRoute
 	ReviewCandidates        []ReviewCandidate
-	ReviewAdversaryAgents   []types.AgentName
-	ReviewAdversaryModel    ModelRoute
 	ACPXPath                string
 	ACPRegistryOverrides    map[string]string
 	AgentPathOverride       map[string]string
@@ -1950,6 +1934,10 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
+# Opt in to a complete route policy. Managed mode rejects every unclassified
+# pipeline step and every model-invoking step without an explicit agent/model.
+# managed: true
+
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. A model is a typed name plus an
 # explicit lowercase vendor; adapters translate it through their verified
@@ -1959,10 +1947,14 @@ agent: auto
 # Unconfigured steps inherit the run-wide agent and its default model.
 # Supported sections: intent, refresh, review, build, test, document, lint, pr, ci.
 # review:
-#   agent: claude
-#   model: {name: claude-opus-5, vendor: anthropic}
-#   adversary_agent: codex
-#   adversary_model: {name: gpt-5.6-sol, vendor: openai}
+#   agent: cursor # stable fixer route
+#   model: {name: gpt-5.6-luna-medium, vendor: openai}
+#   candidates:
+#     - agent: claude
+#       model: {name: claude-opus-5, vendor: anthropic}
+#     - agent: cursor
+#       model: {name: grok-4.6, vendor: xai}
+#       optional: true
 
 # Optional path to the user-installed acpx binary for acp:<target> agents
 # acpx_path: acpx
@@ -2261,9 +2253,6 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		}
 		c.StepAgents[step] = resolved
 	}
-	if err := c.resolveReviewAdversary(ctx, lookPath); err != nil {
-		return err
-	}
 	if err := c.resolveReviewCandidates(ctx, lookPath); err != nil {
 		return err
 	}
@@ -2381,30 +2370,6 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 		return fmt.Errorf("no usable review candidates remain after removing unavailable optional routes")
 	}
 	c.ReviewCandidates = resolvedCandidates
-	return nil
-}
-
-func (c *Config) resolveReviewAdversary(ctx context.Context, lookPath func(string) (string, error)) error {
-	hasAgents := len(c.ReviewAdversaryAgents) > 0
-	hasModel := c.ReviewAdversaryModel.Name != ""
-	if !hasAgents && !hasModel {
-		return nil
-	}
-	if !hasAgents || !hasModel {
-		return fmt.Errorf("resolve review adversary route: review.adversary_agent and review.adversary_model must be configured together")
-	}
-	primaryModel := c.StepModels[types.StepReview]
-	if primaryModel.Name == "" {
-		return fmt.Errorf("resolve review adversary route: review.model is required so the controller can verify the adversarial pair")
-	}
-	if primaryModel.Vendor == c.ReviewAdversaryModel.Vendor {
-		return fmt.Errorf("resolve review adversary route: adversarial review must be cross-vendor, but both models declare vendor %q", primaryModel.Vendor)
-	}
-	resolved, err := c.resolveAgents(ctx, c.ReviewAdversaryAgents, c.ReviewAdversaryModel, lookPath)
-	if err != nil {
-		return fmt.Errorf("resolve review adversary route: %w", err)
-	}
-	c.ReviewAdversaryAgents = resolved
 	return nil
 }
 
@@ -3237,9 +3202,8 @@ func validatePathInstructionGlob(pattern string) error {
 //
 // The code-executing selection fields - Commands and Hooks (run verbatim via
 // sh -c on the daemon host), Agent/Agents, every per-step agent/model route,
-// and the Review adversary route (select which
-// processes launch with the maintainer's credentials, including fallback lists
-// and acp: targets) - are
+// and the Review candidate pool (select which processes launch with the
+// maintainer's credentials, including fallback lists and acp: targets) - are
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Prompts follow the same
 // opt-in boundary. Refresh strategy, document instructions, review path
@@ -3359,9 +3323,6 @@ func copyReviewRaw(src ReviewRaw) ReviewRaw {
 	return ReviewRaw{
 		StepAgentRaw:     copyStepAgentRaw(src.StepAgentRaw),
 		Candidates:       copyReviewCandidates(src.Candidates),
-		AdversaryAgent:   src.AdversaryAgent,
-		AdversaryAgents:  copyAgents(src.AdversaryAgents),
-		AdversaryModel:   src.AdversaryModel,
 		PathInstructions: append([]PathInstruction(nil), src.PathInstructions...),
 	}
 }
@@ -3701,8 +3662,6 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		StepAgents:              global.configuredStepAgents(),
 		StepModels:              global.configuredStepModels(),
 		ReviewCandidates:        copyReviewCandidates(global.Review.Candidates),
-		ReviewAdversaryAgents:   copyAgents(global.Review.AdversaryAgents),
-		ReviewAdversaryModel:    global.Review.AdversaryModel,
 		ACPXPath:                global.ACPXPath,
 		ACPRegistryOverrides:    global.ACPRegistryOverrides,
 		AgentPathOverride:       global.AgentPathOverride,
@@ -3747,13 +3706,6 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	if repo.Review.Candidates != nil {
 		cfg.ReviewCandidates = copyReviewCandidates(repo.Review.Candidates)
 	}
-	if len(repo.Review.AdversaryAgents) > 0 {
-		cfg.ReviewAdversaryAgents = copyAgents(repo.Review.AdversaryAgents)
-	}
-	if repo.Review.AdversaryModel.Name != "" {
-		cfg.ReviewAdversaryModel = repo.Review.AdversaryModel
-	}
-
 	return cfg
 }
 

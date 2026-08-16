@@ -479,14 +479,6 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 		}
 		routes.routes.ReviewCandidates = append(routes.routes.ReviewCandidates, routed)
 	}
-	if len(cfg.ReviewAdversaryAgents) > 0 {
-		adversary, routeErr := build(cfg.ReviewAdversaryAgents, cfg.ReviewAdversaryModel)
-		if routeErr != nil {
-			_ = routes.Close()
-			return nil, fmt.Errorf("create review adversary route: %w", routeErr)
-		}
-		routes.routes.ReviewAdversary = adversary
-	}
 	return routes, nil
 }
 
@@ -649,8 +641,16 @@ func stepModelRoutesEqual(a, b map[types.StepName]config.ModelRoute) bool {
 	return true
 }
 
-func reviewAdversaryRoutesEqual(a, b config.ReviewRaw) bool {
-	return agentListsEqual(a.AdversaryAgents, b.AdversaryAgents) && a.AdversaryModel == b.AdversaryModel
+func reviewCandidateRoutesEqual(a, b config.ReviewRaw) bool {
+	if len(a.Candidates) != len(b.Candidates) {
+		return false
+	}
+	for i := range a.Candidates {
+		if a.Candidates[i] != b.Candidates[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Subscribe registers a subscriber mailbox for a run.

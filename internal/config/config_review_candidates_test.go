@@ -38,6 +38,20 @@ review:
 	}
 }
 
+func TestLoadGlobal_RejectsDuplicateReviewCandidates(t *testing.T) {
+	_, err := LoadGlobalFromBytes([]byte(`
+review:
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("LoadGlobalFromBytes() error = %v, want duplicate-candidate refusal", err)
+	}
+}
+
 func TestLoadRepo_ReviewCandidateSchemaIsStrict(t *testing.T) {
 	tests := []struct {
 		name string
@@ -119,6 +133,24 @@ func TestResolveAgent_ReviewCandidatesRespectRequiredAndOptionalAvailability(t *
 		want := []ReviewCandidate{{Agent: types.AgentCodex, Model: ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}}}
 		if !reflect.DeepEqual(cfg.ReviewCandidates, want) {
 			t.Fatalf("resolved candidates = %#v, want %#v", cfg.ReviewCandidates, want)
+		}
+	})
+
+	t.Run("catalog probe failure is not treated as optional absence", func(t *testing.T) {
+		originalProbe := loadReviewCandidateModelCatalog
+		loadReviewCandidateModelCatalog = func(context.Context, types.AgentName, string) (map[string]bool, error) {
+			return nil, exec.ErrNotFound
+		}
+		t.Cleanup(func() { loadReviewCandidateModelCatalog = originalProbe })
+
+		cfg := completeManagedConfig()
+		cfg.ReviewCandidates = []ReviewCandidate{
+			{Agent: types.AgentCodex, Model: ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+			{Agent: types.AgentCursor, Model: ModelRoute{Name: "grok-4.6", Vendor: "xai"}, Optional: true},
+		}
+		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) { return "/usr/bin/" + bin, nil })
+		if err == nil || !strings.Contains(err.Error(), "probe review candidate") {
+			t.Fatalf("ResolveAgent() error = %v, want catalog probe failure", err)
 		}
 	})
 

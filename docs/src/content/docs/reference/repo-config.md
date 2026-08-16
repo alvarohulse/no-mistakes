@@ -6,9 +6,9 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review adversary route, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -30,10 +30,21 @@ Repo-specific values that cannot be committed to the default branch (for example
 agent: codex
 
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
+  # Optional trusted guidance scoped to changed paths.
+  path_instructions:
+    - path: "internal/scm/**"
+      instructions: |
+        Any URL or error string that can carry credentials must go through internal/safeurl.
+    - path: "docs/**"
+      instructions: |
+        Prose changes only. Do not request test coverage.
 
 refresh:
   strategy: merge
@@ -57,17 +68,6 @@ ignore_patterns:
 document:
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
-
-# Optional extra review guidance, scoped to the paths a change touches.
-# Read only from the trusted default branch.
-review:
-  path_instructions:
-    - path: "internal/scm/**"
-      instructions: |
-        Any URL or error string that can carry credentials must go through internal/safeurl.
-    - path: "docs/**"
-      instructions: |
-        Prose changes only. Do not request test coverage.
 
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
@@ -159,7 +159,7 @@ ci:
   agent: codex
 ```
 
-Unconfigured steps inherit the run-wide route. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review's durable reviewer/fixer sessions use only the Review route, and invocation telemetry records the concrete provider used after fallback.
+Unconfigured steps inherit the run-wide route unless global `managed: true` requires an explicit one. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review candidates run cold; only the stable fixer route may keep a durable session. Invocation telemetry records the concrete selected provider.
 
 Set `<step>.model` to a typed model identity with both an exact backend model name and an explicit vendor:
 
@@ -177,17 +177,25 @@ Each supported backend receives the model through its verified interface, with t
 
 ACP targets, including `acp:cursor`, accept bracket-free model families. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native Cursor continues accepting its parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
 
-For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
+To distribute fresh full reviews independently from the stable fixer route, configure a Review candidate pool:
 
 ```yaml
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
+    - agent: cursor
+      model: {name: grok-4.6, vendor: xai}
+      optional: true
 ```
 
-`review.adversary_agent` accepts the same scalar or ordered availability-fallback form as `agent`, but it is not part of `review.agent`'s invocation fallback list. Both model objects are required, and their declared vendors must differ. The controller runs the adversary only after the primary Review returns `risk_level: high`, in a cold session isolated from the primary reviewer/fixer sessions, then merges and namespaces its findings into the same Review gate. Low- and medium-risk reviews do not invoke it.
+`review.candidates` is a closed quality-routing pool, not an ordered availability fallback. Every candidate names exactly one concrete harness and complete model identity. Unavailable required candidates fail policy resolution; unavailable optional candidates are removed, including native Cursor models absent from its reported catalog. Catalog probe errors fail closed, and an empty usable pool is rejected. Every full Review and rereview selects uniformly from the final pool and runs cold under `/review-changes`; `review.agent` and `review.model` remain the stable fixer route. Each review invocation records both the final pool and selected harness/model.
+
+The removed `review.adversary_agent` and `review.adversary_model` fields are rejected with a migration hint.
 
 When `commands.build`, `commands.test`, or `commands.lint` is empty, that step's route plans one exact command in a read-only agent pass. The pipeline executes and records the plan, and the same route owns any repair before the pipeline reruns the command.
 
@@ -213,7 +221,7 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review adversary route, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
@@ -599,7 +607,7 @@ Global prompt config and repo prompt config combine in this order:
 | `prompts.shared` | Every pipeline model prompt |
 | `prompts.intent` | Intent summarization and disambiguation |
 | `prompts.refresh` | Refresh (rebase or merge) conflict resolution |
-| `prompts.review` | Review, adversarial review, and review-fix prompts |
+| `prompts.review` | Full Review/rereview and review-fix prompts |
 | `prompts.build` | Build verification and build-fix prompts |
 | `prompts.test` | Test evidence and test-fix prompts |
 | `prompts.document` | Documentation update prompt |

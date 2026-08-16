@@ -121,18 +121,21 @@ Repo config takes precedence over global config.
 agent: [codex, claude]
 ```
 
-### Per-step model and high-risk adversary
+### Per-step model and Review candidates
 
 ```yaml
 # .no-mistakes.yaml
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
 ```
 
-The controller runs the separately routed adversary only when the primary Review reports high risk. The vendors must differ, and the adversary never shares the primary's durable reviewer or fixer session. ACP routes with composable target commands accept bare model families; bracketed variants fail before work starts because ACP may silently normalize them.
+The controller selects one configured candidate for every cold full review and rereview; the ordinary Review route remains the stable fixer. Candidate reviews apply the installed `/review-changes` contract and never share the fixer's durable session. ACP routes with composable target commands accept bare model families; bracketed variants fail before work starts because ACP may silently normalize them.
 
 ### Optional ACP target
 

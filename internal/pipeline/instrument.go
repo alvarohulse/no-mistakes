@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -17,9 +18,9 @@ import (
 
 // perfRecordingAgent decorates the step agent to persist one local
 // agent_invocations row per invocation: identity, purpose, session mode,
-// timing, exit status, and token usage. Recording is local-only and
-// best-effort: a failed insert never fails the invocation, and no
-// per-invocation record leaves the machine.
+// timing, exit status, and token usage. Recording is local-only and usually
+// best-effort. A selected full-review route is the exception: its receipt is
+// inserted before launch and must be finalized before the review can pass.
 type perfRecordingAgent struct {
 	inner               agent.Agent
 	db                  *db.DB
@@ -48,6 +49,10 @@ func (a *perfRecordingAgent) SupportsSessionProvider(provider string) bool {
 }
 
 func (a *perfRecordingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if len(a.reviewCandidatePool) > 0 {
+		return a.runWithRequiredReviewReceipt(ctx, opts)
+	}
+
 	attempts := 0
 	previous := opts.OnAttempt
 	opts.OnAttempt = func(attempt agent.Attempt) {
@@ -58,21 +63,78 @@ func (a *perfRecordingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agen
 		attemptOpts := opts
 		attemptOpts.Session = attempt.Session
 		attemptOpts.SessionFallback = attempt.SessionFallback
-		a.record(ctx, attemptOpts, attempt.Agent, attempt.Result, attempt.Err, attempt.StartedAt, attempt.CompletedAt)
+		a.recordBestEffort(ctx, attemptOpts, attempt.Agent, attempt.Result, attempt.Err, attempt.StartedAt, attempt.CompletedAt)
 	}
 	start := time.Now()
 	result, err := a.inner.Run(ctx, opts)
 	if attempts == 0 {
-		a.record(ctx, opts, a.inner.Name(), result, err, start, time.Now())
+		a.recordBestEffort(ctx, opts, a.inner.Name(), result, err, start, time.Now())
 	}
 	return result, err
 }
 
-func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, agentName string, result *agent.Result, runErr error, startedAt, completedAt time.Time) {
+func (a *perfRecordingAgent) runWithRequiredReviewReceipt(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if a.db == nil {
+		return nil, fmt.Errorf("persist review selection receipt: database is unavailable")
+	}
+	startedAt := time.Now()
+	pending := a.newInvocation(ctx, opts, a.inner.Name(), nil, nil, startedAt, startedAt)
+	pending.ExitStatus = "started"
+	persisted, err := a.db.InsertAgentInvocation(pending)
+	if err != nil {
+		return nil, fmt.Errorf("persist review selection receipt: %w", err)
+	}
+
+	attempts := 0
+	var receiptErr error
+	previous := opts.OnAttempt
+	opts.OnAttempt = func(attempt agent.Attempt) {
+		if previous != nil {
+			previous(attempt)
+		}
+		attempts++
+		attemptOpts := opts
+		attemptOpts.Session = attempt.Session
+		attemptOpts.SessionFallback = attempt.SessionFallback
+		completed := a.newInvocation(ctx, attemptOpts, attempt.Agent, attempt.Result, attempt.Err, attempt.StartedAt, attempt.CompletedAt)
+		if attempts == 1 {
+			completed.ID = persisted.ID
+			_, receiptErr = a.db.UpdateAgentInvocation(completed)
+			return
+		}
+		a.insertBestEffort(completed)
+	}
+
+	result, runErr := a.inner.Run(ctx, opts)
+	if attempts == 0 {
+		completed := a.newInvocation(ctx, opts, a.inner.Name(), result, runErr, startedAt, time.Now())
+		completed.ID = persisted.ID
+		_, receiptErr = a.db.UpdateAgentInvocation(completed)
+	}
+	if receiptErr != nil {
+		finalizeErr := fmt.Errorf("finalize review selection receipt: %w", receiptErr)
+		if runErr != nil {
+			return result, errors.Join(runErr, finalizeErr)
+		}
+		return result, finalizeErr
+	}
+	return result, runErr
+}
+
+func (a *perfRecordingAgent) recordBestEffort(ctx context.Context, opts agent.RunOpts, agentName string, result *agent.Result, runErr error, startedAt, completedAt time.Time) {
 	if a.db == nil {
 		return
 	}
+	a.insertBestEffort(a.newInvocation(ctx, opts, agentName, result, runErr, startedAt, completedAt))
+}
 
+func (a *perfRecordingAgent) insertBestEffort(inv db.AgentInvocation) {
+	if _, dbErr := a.db.InsertAgentInvocation(inv); dbErr != nil {
+		slog.Warn("failed to record agent invocation", "step", a.stepName, "error", dbErr)
+	}
+}
+
+func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOpts, agentName string, result *agent.Result, runErr error, startedAt, completedAt time.Time) db.AgentInvocation {
 	purpose := opts.Purpose
 	if purpose == "" {
 		purpose = string(a.stepName)
@@ -120,9 +182,7 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 		}
 	}
 
-	if _, dbErr := a.db.InsertAgentInvocation(inv); dbErr != nil {
-		slog.Warn("failed to record agent invocation", "step", a.stepName, "error", dbErr)
-	}
+	return inv
 }
 
 // recordResult folds a successful (or partially successful) result's identity,

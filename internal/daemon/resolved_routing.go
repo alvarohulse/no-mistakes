@@ -62,6 +62,9 @@ func restoreResolvedAgentRouting(cfg *config.Config, persisted *string, demo boo
 	if snapshot.Demo != demo {
 		return false, fmt.Errorf("resolved agent routing mode changed since launch")
 	}
+	if snapshot.ReviewAdversary != nil {
+		return false, fmt.Errorf("resolved agent routing uses removed native review adversary; abort the legacy run and start a fresh review-candidate run")
+	}
 	if snapshot.Demo {
 		return false, nil
 	}
@@ -82,15 +85,6 @@ func restoreResolvedAgentRouting(cfg *config.Config, persisted *string, demo boo
 			Agent:    candidate.Agent,
 			Model:    config.ModelRoute{Name: candidate.Model.Name, Vendor: candidate.Model.Vendor},
 			Optional: candidate.Optional,
-		}
-	}
-	cfg.ReviewAdversaryAgents = nil
-	cfg.ReviewAdversaryModel = config.ModelRoute{}
-	if snapshot.ReviewAdversary != nil {
-		cfg.ReviewAdversaryAgents = append([]types.AgentName(nil), snapshot.ReviewAdversary.Agents...)
-		cfg.ReviewAdversaryModel = config.ModelRoute{
-			Name:   snapshot.ReviewAdversary.Model.Name,
-			Vendor: snapshot.ReviewAdversary.Model.Vendor,
 		}
 	}
 	return false, nil
@@ -170,15 +164,6 @@ func resolvedAgentRoutingFromConfig(cfg *config.Config, demo bool) (*resolvedAge
 			Optional: candidate.Optional,
 		})
 	}
-	if len(cfg.ReviewAdversaryAgents) > 0 || cfg.ReviewAdversaryModel.Name != "" {
-		snapshot.ReviewAdversary = &resolvedAgentRoute{
-			Agents: append([]types.AgentName(nil), cfg.ReviewAdversaryAgents...),
-			Model: resolvedAgentModel{
-				Name:   cfg.ReviewAdversaryModel.Name,
-				Vendor: cfg.ReviewAdversaryModel.Vendor,
-			},
-		}
-	}
 	if err := snapshot.validate(); err != nil {
 		return nil, err
 	}
@@ -227,10 +212,35 @@ func (r *resolvedAgentRouting) validate() error {
 		seenCandidates[key] = true
 	}
 	if r.ReviewAdversary != nil {
+		if r.Version >= resolvedAgentRoutingVersion {
+			return fmt.Errorf("resolved agent routing version %d contains removed review adversary", r.Version)
+		}
 		if err := validateResolvedAgents("review adversary", r.ReviewAdversary.Agents); err != nil {
 			return err
 		}
 		if err := validateResolvedModel("review adversary", r.ReviewAdversary.Model, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *resolvedAgentRouting) validateManaged() error {
+	if len(r.ReviewCandidates) == 0 {
+		return fmt.Errorf("managed resolved routing has an empty review candidate pool")
+	}
+	for _, step := range types.AllSteps() {
+		if step == types.StepPush {
+			continue
+		}
+		route, ok := r.StepRoutes[step]
+		if !ok {
+			return fmt.Errorf("managed resolved routing is missing %s route", step)
+		}
+		if err := validateResolvedAgents(string(step), route.Agents); err != nil {
+			return err
+		}
+		if err := validateResolvedModel(string(step), route.Model, true); err != nil {
 			return err
 		}
 	}

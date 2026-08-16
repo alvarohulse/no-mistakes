@@ -10,11 +10,19 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 
 agent: auto
 
+managed: false
+
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
+    - agent: cursor
+      model: {name: grok-4.6, vendor: xai}
+      optional: true
 
 acpx_path: acpx
 
@@ -99,6 +107,15 @@ overrides:
 
 ## Fields
 
+### managed
+
+Opt in to a complete, fail-closed route policy. When `true`, every model-invoking step must declare both an explicit concrete agent route and model identity; `push` remains model-free. The Review step must also declare a non-empty `review.candidates` pool. A newly added pipeline step fails policy resolution until it is explicitly classified. The default `false` preserves inherited run-wide routing.
+
+|         |         |
+| ------- | ------- |
+| Type    | `bool`  |
+| Default | `false` |
+
 ### agent
 
 Default agent for all repos and setup-wizard suggestions. Can be overridden per-repo.
@@ -141,7 +158,7 @@ test:
   agent: pi
 ```
 
-An unconfigured step inherits the run-wide `agent`. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. Review session reuse stays scoped to the selected Review route.
+An unconfigured step inherits the run-wide `agent` unless `managed: true` requires an explicit route. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. For Review, `review.agent` and `review.model` are the stable fixer route when a candidate pool is configured.
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
 `<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. Repo model routes override matching global model routes. Each supported backend receives the model through its verified interface on every invocation and fix round; the first-class field wins over a model default in `agent_args_override`. `push` has no agent or model route.
@@ -154,7 +171,9 @@ review:
 
 Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameter overrides. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
 
-`review.adversary_agent` and `review.adversary_model` configure a separate cross-vendor route that runs only after primary Review reports `risk_level: high`. It is not a fallback entry: the adversary runs in addition to the primary, in a separate cold session, and its findings merge into Review. The primary and adversary model vendors must differ.
+`review.candidates` is a closed full-review pool, not an ordered fallback list. Every entry names one explicit `agent` and complete `model`; `agent: auto` and duplicate pairs are rejected. Set `optional: true` only for a route that may legitimately be absent. Policy resolution removes an optional route whose harness is unavailable or whose exact native Cursor model is absent from `cursor-agent models`; required absence and catalog-probe errors fail before run creation. At least one usable candidate must remain. Every initial full review and rereview selects one usable candidate uniformly at random, runs it cold under the `/review-changes` contract, and records the final pool plus selected route. The fixer route remains stable across rounds.
+
+The removed `review.adversary_agent` and `review.adversary_model` fields now fail config parsing with a migration hint to use `review.candidates`.
 
 ACP targets accept a first-class bare model family such as `claude-opus-5` when no-mistakes can compose a raw target command; `acp:cursor` receives `cursor-agent --model claude-opus-5 acp`. Any name containing `[` or `]` is refused for ACP during launch-time config validation because Cursor ACP normalizes parameterized variants to the family default. Native Cursor continues to accept the exact parameterized model string.
 

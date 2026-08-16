@@ -61,7 +61,7 @@ type AgentInvocation struct {
 	StepName string
 	Round    int
 	// Purpose is the pipeline duty served: review, review-fix,
-	// review-adversary, test-evidence, document, pr, intent, a
+	// test-evidence, document, pr, intent, a
 	// `<step>-plan` read-only command plan, or a step-derived default.
 	Purpose string
 	Agent   string
@@ -97,7 +97,7 @@ type AgentInvocation struct {
 	StartedAt       int64
 	CompletedAt     int64
 	DurationMS      int64
-	ExitStatus      string // ok | error | cancelled
+	ExitStatus      string // started | ok | error | cancelled
 	FailureCategory string // parse | exit | spawn | cancelled | other ("" when ok)
 	InputTokens     int
 	OutputTokens    int
@@ -174,8 +174,10 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?`
 
-// InsertAgentInvocation records one completed agent invocation. Nil pointer
-// fields are stored as SQL NULL (database/sql dereferences non-nil pointers).
+// InsertAgentInvocation records an agent invocation. Review routing may insert
+// a started row before launching the selected harness, then finalize it with
+// UpdateAgentInvocation. Nil pointer fields are stored as SQL NULL
+// (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
 	if inv.InvocationMode == "" {
 		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
@@ -204,6 +206,58 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert agent invocation: %w", err)
+	}
+	return &inv, nil
+}
+
+// UpdateAgentInvocation finalizes a previously inserted invocation while
+// retaining its stable receipt identity.
+func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
+	if strings.TrimSpace(inv.ID) == "" {
+		return nil, fmt.Errorf("update agent invocation: id is required")
+	}
+	if inv.InvocationMode == "" {
+		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
+	}
+	observationsJSON, err := encodeAgentObservations(inv)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent observations: %w", err)
+	}
+	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
+	if err != nil {
+		return nil, fmt.Errorf("encode review candidate pool: %w", err)
+	}
+	result, err := d.sql.Exec(`UPDATE agent_invocations SET
+		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, invocation_mode = ?, agent_observations_json = ?, nested_agent_count = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		session_mode = ?, session_key = ?, fallback_reason = ?,
+		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
+		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
+		fresh_input_tokens = ?, reasoning_tokens = ?,
+		delta_input_tokens = ?, delta_output_tokens = ?, delta_cache_read_tokens = ?, delta_cache_creation_tokens = ?, reported_cost_usd = ?,
+		model_roundtrips = ?, tool_calls = ?,
+		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
+		workload_files = ?, workload_lines = ?, finding_count = ?
+		WHERE id = ?`,
+		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
+		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
+		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
+		inv.FreshInputTokens, inv.ReasoningTokens,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
+		inv.ModelRoundtrips, inv.ToolCalls,
+		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
+		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
+		inv.ID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update agent invocation: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update agent invocation rows affected: %w", err)
+	}
+	if updated != 1 {
+		return nil, fmt.Errorf("update agent invocation: expected 1 row, updated %d", updated)
 	}
 	return &inv, nil
 }

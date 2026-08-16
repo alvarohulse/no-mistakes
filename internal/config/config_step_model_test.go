@@ -19,8 +19,9 @@ refresh:
 review:
   agent: claude
   model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  candidates:
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
 test:
   model: {name: claude-fable-5, vendor: anthropic}
 document:
@@ -49,11 +50,9 @@ ci:
 	if got := cfg.ConfiguredStepModels(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConfiguredStepModels() = %#v, want %#v", got, want)
 	}
-	if got := cfg.Review.AdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentCodex}) {
-		t.Fatalf("review adversary agents = %v, want [codex]", got)
-	}
-	if got := cfg.Review.AdversaryModel; got != (ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}) {
-		t.Fatalf("review adversary model = %#v", got)
+	wantCandidates := []ReviewCandidate{{Agent: types.AgentCodex, Model: ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}}}
+	if got := cfg.Review.Candidates; !reflect.DeepEqual(got, wantCandidates) {
+		t.Fatalf("review candidates = %#v, want %#v", got, wantCandidates)
 	}
 }
 
@@ -127,50 +126,31 @@ review:
 	}
 }
 
-func TestMerge_ReviewAdversaryOverridesGlobalFieldByField(t *testing.T) {
+func TestMerge_ReviewCandidatesReplaceGlobalPool(t *testing.T) {
 	global, err := LoadGlobalFromBytes([]byte(`
 review:
   model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  candidates:
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	t.Run("model inherits agent", func(t *testing.T) {
-		repo, err := LoadRepoFromBytes([]byte(`
+	repo, err := LoadRepoFromBytes([]byte(`
 review:
-  adversary_model: {name: gemini-3.5-pro, vendor: google}
+  candidates:
+    - agent: pi
+      model: {name: gemini-3.5-pro, vendor: google}
 `))
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg := Merge(global, repo)
-		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentCodex}) {
-			t.Fatalf("adversary agents = %v, want [codex]", got)
-		}
-		if got := cfg.ReviewAdversaryModel; got != (ModelRoute{Name: "gemini-3.5-pro", Vendor: "google"}) {
-			t.Fatalf("adversary model = %#v", got)
-		}
-	})
-
-	t.Run("agent inherits model", func(t *testing.T) {
-		repo, err := LoadRepoFromBytes([]byte(`
-review:
-  adversary_agent: pi
-`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg := Merge(global, repo)
-		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentPi}) {
-			t.Fatalf("adversary agents = %v, want [pi]", got)
-		}
-		if got := cfg.ReviewAdversaryModel; got != (ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}) {
-			t.Fatalf("adversary model = %#v", got)
-		}
-	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Merge(global, repo)
+	want := []ReviewCandidate{{Agent: types.AgentPi, Model: ModelRoute{Name: "gemini-3.5-pro", Vendor: "google"}}}
+	if !reflect.DeepEqual(cfg.ReviewCandidates, want) {
+		t.Fatalf("review candidates = %#v, want %#v", cfg.ReviewCandidates, want)
+	}
 }
 
 func TestOverlayRepoConfig_ModelOverridePreservesSiblingRouteFields(t *testing.T) {
@@ -198,21 +178,17 @@ review:
 	}
 }
 
-func TestEffectiveRepoConfig_StepModelsAndAdversaryAreTrustedSelectors(t *testing.T) {
+func TestEffectiveRepoConfig_StepModelsAndCandidatesAreTrustedSelectors(t *testing.T) {
 	pushed := &RepoConfig{
 		Review: ReviewRaw{
-			StepAgentRaw:    StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}, Model: ModelRoute{Name: "hostile", Vendor: "hostile"}},
-			AdversaryAgent:  "acp:hostile-two",
-			AdversaryAgents: []types.AgentName{"acp:hostile-two"},
-			AdversaryModel:  ModelRoute{Name: "hostile-two", Vendor: "hostile-two"},
+			StepAgentRaw: StepAgentRaw{Agent: "acp:hostile", Agents: []types.AgentName{"acp:hostile"}, Model: ModelRoute{Name: "hostile", Vendor: "hostile"}},
+			Candidates:   []ReviewCandidate{{Agent: "acp:hostile-two", Model: ModelRoute{Name: "hostile-two", Vendor: "hostile-two"}}},
 		},
 	}
 	trusted := &RepoConfig{
 		Review: ReviewRaw{
-			StepAgentRaw:    StepAgentRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude}, Model: ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
-			AdversaryAgent:  types.AgentCodex,
-			AdversaryAgents: []types.AgentName{types.AgentCodex},
-			AdversaryModel:  ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"},
+			StepAgentRaw: StepAgentRaw{Agent: types.AgentClaude, Agents: []types.AgentName{types.AgentClaude}, Model: ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+			Candidates:   []ReviewCandidate{{Agent: types.AgentCodex, Model: ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}}},
 		},
 	}
 
@@ -368,41 +344,6 @@ func TestResolveAgent_ModelNarrowsAutoAndValidatesACP(t *testing.T) {
 			t.Fatalf("review agents = %v, want [cursor]", got)
 		}
 		wantProbes := []string{"codex", "claude", "pi", "copilot", "cursor-agent"}
-		if !reflect.DeepEqual(probed, wantProbes) {
-			t.Fatalf("probed = %v, want native-first %v", probed, wantProbes)
-		}
-	})
-
-	t.Run("review adversary auto selects native Cursor", func(t *testing.T) {
-		cfg := &Config{
-			Agent:  types.AgentCodex,
-			Agents: []types.AgentName{types.AgentCodex},
-			StepAgents: map[types.StepName][]types.AgentName{
-				types.StepReview: {types.AgentCodex},
-			},
-			StepModels: map[types.StepName]ModelRoute{
-				types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
-			},
-			ReviewAdversaryAgents: []types.AgentName{types.AgentAuto},
-			ReviewAdversaryModel:  ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"},
-		}
-		var probed []string
-		err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
-			probed = append(probed, bin)
-			switch bin {
-			case "codex", "acpx", "cursor-agent":
-				return "/usr/bin/" + bin, nil
-			default:
-				return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
-			}
-		})
-		if err != nil {
-			t.Fatalf("ResolveAgent() error = %v", err)
-		}
-		if got := cfg.ReviewAdversaryAgents; !reflect.DeepEqual(got, []types.AgentName{types.AgentCursor}) {
-			t.Fatalf("review adversary agents = %v, want [cursor]", got)
-		}
-		wantProbes := []string{"codex", "codex", "claude", "pi", "copilot", "cursor-agent"}
 		if !reflect.DeepEqual(probed, wantProbes) {
 			t.Fatalf("probed = %v, want native-first %v", probed, wantProbes)
 		}
@@ -573,18 +514,9 @@ func TestResolveAgent_ModelNarrowsAutoAndValidatesACP(t *testing.T) {
 	})
 }
 
-func TestResolveAgent_ReviewAdversaryMustBeCrossVendor(t *testing.T) {
-	cfg := &Config{
-		Agent:                 types.AgentClaude,
-		Agents:                []types.AgentName{types.AgentClaude},
-		StepModels:            map[types.StepName]ModelRoute{types.StepReview: {Name: "claude-opus-5", Vendor: "anthropic"}},
-		ReviewAdversaryAgents: []types.AgentName{types.AgentClaude},
-		ReviewAdversaryModel:  ModelRoute{Name: "claude-fable-5", Vendor: "anthropic"},
-	}
-	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
-		return "/fake/bin/" + bin, nil
-	})
-	if err == nil || !strings.Contains(err.Error(), "cross-vendor") {
-		t.Fatalf("ResolveAgent() error = %v, want cross-vendor refusal", err)
+func TestLoadRepo_RejectsRemovedReviewAdversaryWithMigrationHint(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("review:\n  adversary_agent: codex\n  adversary_model: {name: gpt-5.6-sol, vendor: openai}\n"))
+	if err == nil || !strings.Contains(err.Error(), "review.candidates") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want review.candidates migration hint", err)
 	}
 }
