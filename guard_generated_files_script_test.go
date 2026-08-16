@@ -20,6 +20,7 @@ const (
 	guardBootstrapCanonical              = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
 	guardBootstrapOlderCanonical         = "867d64d9c2df89f3f204ad1f5528e5bf7b460caa"
 	guardAdditionalTrustedHistoryCommits = 327
+	guardMaxPRCommits                    = 512
 	guardChangelogV1                     = "# Changelog\n\n## 1.1.0\n"
 	guardChangelogVMid                   = "# Changelog\n\n## 1.1.5\n"
 	guardChangelogV2                     = "# Changelog\n\n## 1.2.0\n"
@@ -255,6 +256,29 @@ func TestGeneratedFileGuard(t *testing.T) {
 		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
 		if err != nil {
 			t.Fatalf("guard should audit trusted history without a lifetime ceiling: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("PR history accepts the exact audit limit and rejects one more commit", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", guardBootstrapBase+"^{tree}"))
+		head := guardBootstrapBase
+		for i := 0; i < guardMaxPRCommits; i++ {
+			head = strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", head, "-m", fmt.Sprintf("chore: PR history %d", i)))
+		}
+
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
+		if err != nil {
+			t.Fatalf("guard should accept PR history at the audit limit: %v\n%s", err, output)
+		}
+
+		head = strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", head, "-m", "chore: exceed PR history limit"))
+		output, err = runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject PR history above the audit limit\n%s", output)
+		}
+		if !strings.Contains(output, "PR commits exceeds the audit limit") {
+			t.Fatalf("guard failure = %q, want PR history audit limit rejection", output)
 		}
 	})
 

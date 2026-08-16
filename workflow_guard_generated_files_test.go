@@ -30,9 +30,9 @@ func TestGuardGeneratedFilesWorkflowCoversReleasePleaseArtifacts(t *testing.T) {
 	}
 }
 
-// TestGuardGeneratedFilesWorkflowExemptsReleasePlease ensures the release
-// pipeline's own PR (which legitimately modifies the generated files) is
-// always allowed through.
+// TestGuardGeneratedFilesWorkflowExemptsReleasePlease pins the temporary bot
+// exemption in the legacy guard. Release PRs must independently pass the
+// base-controlled provenance guard.
 func TestGuardGeneratedFilesWorkflowExemptsReleasePlease(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/guard-generated-files.yml")
 	if err != nil {
