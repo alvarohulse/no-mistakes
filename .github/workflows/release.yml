@@ -27,21 +27,46 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
-      # GITHUB_TOKEN suppresses pull-request workflow events. Verify and attest
-      # the exact generated head here instead of trusting mutable PR metadata.
-      - uses: actions/checkout@v6
-        if: steps.release.outputs.prs_created == 'true'
+      # GITHUB_TOKEN suppresses pull-request workflow events. Produce the release
+      # PR through the same pinned release-please graph while retaining the exact
+      # generated blobs privately, then attest only a head matching those blobs.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Attest exact release-please head
-        if: steps.release.outputs.prs_created == 'true'
+      # This lockfile is seeded from the pinned action's package-lock and pruned
+      # to its release-please dependency, preserving the action's exact graph.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: .github/release-please-reproducer/package-lock.json
+
+      - name: Install release-please reproducer
+        working-directory: .github/release-please-reproducer
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Produce release-please pull request
+        id: release_pr
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          node .github/release-please-reproducer/produce-release-pr.mjs \
+            "$GITHUB_REPOSITORY" \
+            main \
+            "$GITHUB_SHA" \
+            "${RUNNER_TEMP}/release-please-output"
+
+      - name: Attest exact release-please head
+        if: steps.release_pr.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release_pr.outputs.pr }}
         run: |
           set -euo pipefail
 
@@ -59,6 +84,20 @@ jobs:
               exit 1
               ;;
           esac
+
+          require_live_main() {
+            phase=$1
+            live_main_sha=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+              --jq '.object.sha')
+            if [ "$live_main_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::main changed ${phase}; refusing to attest stale release output" >&2
+              exit 1
+            fi
+          }
+
+          expected_output_dir="${RUNNER_TEMP}/release-please-output"
+          require_live_main "before attestation verification"
 
           hosted_pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}")
           hosted_number=$(jq -er '.number' <<<"$hosted_pr")
@@ -101,11 +140,17 @@ jobs:
             "https://github.com/kunchenguid/no-mistakes.git" \
             "$head_sha"
 
+          trusted_output_verifier="${RUNNER_TEMP}/verify-release-please-output.sh"
+          git show "${GITHUB_SHA}:scripts/verify-release-please-output.sh" > \
+            "$trusted_output_verifier"
+          sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"
+
           latest_head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')
           if [ "$latest_head_sha" != "$head_sha" ]; then
             echo "::error::release-please head changed during provenance verification" >&2
             exit 1
           fi
+          require_live_main "before attestation publication"
           gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${head_sha}" \
             -f state=success \
             -f context='Generated files must not be hand-edited' \
