@@ -1,0 +1,65 @@
+name: Guard generated file provenance
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+concurrency:
+  group: guard-generated-file-provenance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Generated files must not be hand-edited
+    runs-on: ubuntu-latest
+    steps:
+      # Security boundary: pull_request_target has repository authority. Treat
+      # the PR head only as data and execute only code read from the exact,
+      # verified event base; never check out or execute PR-head code here.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release-please-generated file provenance
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+
+          checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$checked_out_base" != "$BASE_SHA" ]; then
+            echo "::error::Checked-out pull request base does not match the event" >&2
+            exit 1
+          fi
+
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::Pull request number is not numeric" >&2
+              exit 1
+              ;;
+          esac
+
+          pr_head_ref=refs/no-mistakes/guard-generated-files/pr-head
+          git fetch --no-tags --force origin \
+            "+refs/pull/${PR_NUMBER}/head:${pr_head_ref}"
+          fetched_head=$(git rev-parse --verify "${pr_head_ref}^{commit}")
+          if [ "$fetched_head" != "$HEAD_SHA" ]; then
+            echo "::error::Fetched pull request head does not match the event" >&2
+            exit 1
+          fi
+
+          trusted_script="${RUNNER_TEMP}/guard-generated-files.sh"
+          git show "${checked_out_base}:scripts/guard-generated-files.sh" > "$trusted_script"
+          sh "$trusted_script" \
+            "$checked_out_base" \
+            "$HEAD_SHA" \
+            "https://github.com/kunchenguid/no-mistakes.git" \
+            "https://github.com/alvarohulse/no-mistakes.git"

@@ -17,8 +17,9 @@ jobs:
   check:
     name: Generated files must not be hand-edited
     runs-on: ubuntu-latest
-    # release-please owns CHANGELOG.md and .release-please-manifest.json; its PR
-    # is the one legitimate place those files change, so we exempt its author.
+    # This legacy bootstrap guard cannot prove canonical-sync provenance. Keep
+    # the release bot exemptions until this workflow is retired in favor of the
+    # base-controlled provenance guard.
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'release-please[bot]'

@@ -28,14 +28,30 @@ jobs:
         run: go vet ./...
 
   test:
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: test (ubuntu-latest)
+          - os: macos-latest
+            name: test (macos-latest)
+          - os: windows-latest
+            name: test (windows-core)
+            shard: core
+          - os: windows-latest
+            name: test (windows-git)
+            shard: git
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # A single Windows ./... job repeatedly exceeded its cap without any test
+    # binary hitting -timeout. Split git-heavy packages from the remainder so
+    # each shard produces a real verdict; 40 minutes remains a runaway guard.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -45,9 +61,25 @@ jobs:
         if: runner.os != 'Windows'
         run: go test -race ./...
 
-      - name: Test on Windows
-        if: runner.os == 'Windows'
-        run: go test -v -timeout=15m ./...
+      # Keep this list in lockstep with NM_CI_WINDOWS_GIT_EXCLUDE below. The
+      # workflow contract test resolves both through go list and rejects drift.
+      - name: Test on Windows (git-heavy)
+        if: runner.os == 'Windows' && matrix.shard == 'git'
+        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/pipeline/steps ./internal/daemon
+
+      - name: Test on Windows (core)
+        if: runner.os == 'Windows' && matrix.shard == 'core'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|pipeline/steps|daemon)$'
+        run: |
+          $pkgs = go list ./...
+          $goListExitCode = $LASTEXITCODE
+          if ($goListExitCode -ne 0) {
+            exit $goListExitCode
+          }
+          $pkgs = $pkgs | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
+          go test -v -timeout=15m @pkgs
 
       - name: Build
         run: go build ./cmd/no-mistakes
