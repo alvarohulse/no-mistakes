@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -38,6 +39,33 @@ func TestParseSkipStepsCanonicalizesLegacyAliases(t *testing.T) {
 	want := []types.StepName{types.StepRefresh, types.StepCI}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseSkipSteps() = %v, want %v", got, want)
+	}
+}
+
+func TestParseAndFormatSkipStepsPreservesExplicitNone(t *testing.T) {
+	steps, err := parseSkipSteps("none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps == nil || len(steps) != 0 {
+		t.Fatalf("explicit none = %#v, want non-nil empty", steps)
+	}
+	options := formatSkipPushOptions(steps)
+	if len(options) != 1 || options[0] != "no-mistakes.skip=none" {
+		t.Fatalf("formatted explicit none = %#v", options)
+	}
+	parsed, err := parseSkipPushOptions(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed == nil || len(parsed) != 0 {
+		t.Fatalf("parsed explicit none = %#v, want non-nil empty", parsed)
+	}
+}
+
+func TestParseSkipStepsRejectsNoneCombinedWithSteps(t *testing.T) {
+	if _, err := parseSkipSteps("none,ci"); err == nil || !strings.Contains(err.Error(), "none cannot be combined") {
+		t.Fatalf("combined none error = %v", err)
 	}
 }
 

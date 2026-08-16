@@ -102,6 +102,8 @@ prompts:
 
 overrides:
   example/project:
+    pipeline:
+      skip_steps: [ci]
     preflight:
       - test -n "$HOME"
     commands:
@@ -618,6 +620,8 @@ Use an entry here for repo-specific values that cannot be committed to the repos
 overrides:
   example/project:
     agent: codex
+    pipeline:
+      skip_steps: [ci]
     commands:
       build: "go build ./..."
       lint: "make lint"
@@ -631,6 +635,14 @@ overrides:
 **Precedence.** A matching entry overlays the effective committed config after the [default-branch trust rules](/no-mistakes/reference/repo-config/) are applied: only fields explicitly present in the entry apply, and explicitly present empty values clear the committed value (for example `commands.test: ""` disables a committed test command). Fields absent from the entry keep the committed/trusted resolution, and the result then merges over this file's global defaults as usual.
 
 **Trust model.** Entries live in this machine-local file, which only the machine owner edits, so they sit on the trusted side of the pushed-branch boundary - a contributor's branch can neither add nor disturb them. Runs with a matching entry record their contributing config sources: the PR Pipeline section shows only generic source labels (including `global-override`) with 12-character digest prefixes, while the full digest, the matched key, and this file's path stay in the local state database. Recovery requires the launch-time global config digest and re-reads committed inputs from their launch-time Git refs, refusing drift instead of silently changing a run's config.
+
+#### `overrides.<owner>/<repo>.pipeline.skip_steps`
+
+Machine-owner policy for steps that should not run in one matching repository. Values use canonical pipeline names; the legacy `rebase` and `babysit` names normalize to `refresh` and `ci`, and duplicates are removed. This field is rejected in committed `.no-mistakes.yaml` files and as a global default: it is accepted only inside a matching `overrides` entry.
+
+Configured skips are defaults. An explicit run `--skip` list replaces them rather than merging with them, while `--skip=none` (or the Git push option `no-mistakes.skip=none`) clears them for that run. Every pre-run skipped step is persisted with either `global-override` or `run-request` as its source and appears that way in policy, status, and formatter contracts. Skipping Review is refused while Push remains enabled.
+
+Skipping `ci` disables only no-mistakes' internal forge watcher. The run completes when its remaining enabled steps pass; no CircleCI/GitHub/GitLab result is synthesized, and external required checks remain authoritative.
 
 ## Environment variables
 

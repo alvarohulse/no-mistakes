@@ -44,7 +44,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if encoded != encodedAgain || digest != digestAgain {
 		t.Fatalf("resolved policy is not canonical:\n%s\n%s\n%s\n%s", encoded, encodedAgain, digest, digestAgain)
 	}
-	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`} {
+	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`} {
 		if !strings.Contains(encoded, required) {
 			t.Errorf("resolved policy omitted %q:\n%s", required, encoded)
 		}
@@ -60,6 +60,28 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	}
 	if len(decoded.Steps) != 3 || decoded.Steps[1].Status != resolvedPolicyStepSkipped {
 		t.Fatalf("decoded steps = %#v", decoded.Steps)
+	}
+	if decoded.Steps[1].SkipSource != types.SkipSourceRunRequest {
+		t.Fatalf("decoded skip source = %q", decoded.Steps[1].SkipSource)
+	}
+}
+
+func TestValidateResolvedPolicyNormalizesVersionFourSkippedStepsToRunRequest(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	policySteps := []pipeline.Step{policyTestStep{name: types.StepBuild}}
+	policy, err := resolvedPolicyFromConfig(cfg, nil, policySteps, []types.StepName{types.StepBuild}, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 4
+	policy.Steps[0].SkipSource = ""
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+	if err := validateResolvedPolicy(cfg, run, policySteps); err != nil {
+		t.Fatalf("version-four skip receipt rejected: %v", err)
 	}
 }
 

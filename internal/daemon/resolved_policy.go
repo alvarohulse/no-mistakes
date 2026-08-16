@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 4
+	resolvedPolicyVersion     = 5
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -56,8 +56,9 @@ type resolvedPolicyBinary struct {
 }
 
 type resolvedPolicyStep struct {
-	Name   types.StepName `json:"name"`
-	Status string         `json:"status"`
+	Name       types.StepName   `json:"name"`
+	Status     string           `json:"status"`
+	SkipSource types.SkipSource `json:"skip_source,omitempty"`
 }
 
 type resolvedPolicyCommands struct {
@@ -229,27 +230,26 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 	if err != nil || legacy {
 		return err
 	}
-	var skipped []types.StepName
+	normalizeResolvedPolicyForComparison(expected)
+	var skipped []types.StepSkip
 	for _, step := range expected.Steps {
 		if step.Status == resolvedPolicyStepSkipped {
-			skipped = append(skipped, step.Name)
+			skipped = append(skipped, types.StepSkip{Step: step.Name, Source: step.SkipSource})
 		}
 	}
-	actual, err := resolvedPolicyFromConfig(cfg, run.ConfigSources, steps, skipped, run.RefreshStrategy, expected.Routing.Demo)
+	actual, err := resolvedPolicyFromConfigWithSkips(cfg, run.ConfigSources, steps, skipped, run.RefreshStrategy, expected.Routing.Demo)
 	if err != nil {
 		return err
 	}
-	normalizeResolvedPolicyForComparison(expected)
 	if !reflect.DeepEqual(*actual, *expected) {
 		return fmt.Errorf("resolved policy differs from launch")
 	}
 	return nil
 }
 
-// Versions 1 through 3 predate managed routing, resolved runner provenance, or
-// trusted preflight. Their
-// missing fields decode to legacy zero values; only schema versions need
-// normalization before semantic comparison with a policy rebuilt by this binary.
+// Versions 1 through 4 predate managed routing, resolved runner provenance,
+// trusted preflight, or source-aware skip receipts. Their missing fields decode
+// to legacy zero values and are normalized before semantic comparison.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	if policy.Version == 1 {
 		if policy.Routing.Version == 1 {
@@ -257,12 +257,27 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 		}
 	}
 	if policy.Version >= 1 && policy.Version <= 3 {
-		policy.Version = resolvedPolicyVersion
 		policy.Preflight = []runner.Command{}
+	}
+	if policy.Version >= 1 && policy.Version <= 4 {
+		for i := range policy.Steps {
+			if policy.Steps[i].Status == resolvedPolicyStepSkipped && policy.Steps[i].SkipSource == "" {
+				policy.Steps[i].SkipSource = types.SkipSourceRunRequest
+			}
+		}
+		policy.Version = resolvedPolicyVersion
 	}
 }
 
 func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, steps []pipeline.Step, skipped []types.StepName, refreshStrategy types.RefreshStrategy, demo bool) (*resolvedPolicy, error) {
+	receipts := make([]types.StepSkip, 0, len(skipped))
+	for _, step := range skipped {
+		receipts = append(receipts, types.StepSkip{Step: step.Canonical(), Source: types.SkipSourceRunRequest})
+	}
+	return resolvedPolicyFromConfigWithSkips(cfg, sources, steps, receipts, refreshStrategy, demo)
+}
+
+func resolvedPolicyFromConfigWithSkips(cfg *config.Config, sources []db.ConfigSource, steps []pipeline.Step, skipped []types.StepSkip, refreshStrategy types.RefreshStrategy, demo bool) (*resolvedPolicy, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("resolved policy config is nil")
 	}
@@ -270,9 +285,13 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 	if err != nil {
 		return nil, err
 	}
-	skipSet := make(map[types.StepName]bool, len(skipped))
-	for _, step := range skipped {
-		skipSet[step.Canonical()] = true
+	skipSet := make(map[types.StepName]types.SkipSource, len(skipped))
+	for _, receipt := range skipped {
+		name := receipt.Step.Canonical()
+		if !receipt.Source.Valid() {
+			return nil, fmt.Errorf("resolved policy skip %q has unsupported source %q", name, receipt.Source)
+		}
+		skipSet[name] = receipt.Source
 	}
 	resolvedSteps := make([]resolvedPolicyStep, 0, len(steps))
 	for _, step := range steps {
@@ -281,11 +300,12 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 		}
 		name := step.Name().Canonical()
 		status := resolvedPolicyStepEnabled
-		if skipSet[name] {
+		source, skipped := skipSet[name]
+		if skipped {
 			status = resolvedPolicyStepSkipped
 			delete(skipSet, name)
 		}
-		resolvedSteps = append(resolvedSteps, resolvedPolicyStep{Name: name, Status: status})
+		resolvedSteps = append(resolvedSteps, resolvedPolicyStep{Name: name, Status: status, SkipSource: source})
 	}
 	if len(skipSet) > 0 {
 		return nil, fmt.Errorf("resolved policy skip list contains a step outside the pipeline")
@@ -367,6 +387,17 @@ func (p *resolvedPolicy) validate() error {
 		if step.Status != resolvedPolicyStepEnabled && step.Status != resolvedPolicyStepSkipped {
 			return fmt.Errorf("resolved policy step %q has unsupported status %q", step.Name, step.Status)
 		}
+		if step.Status == resolvedPolicyStepEnabled && step.SkipSource != "" {
+			return fmt.Errorf("resolved policy enabled step %q has a skip source", step.Name)
+		}
+		if step.Status == resolvedPolicyStepSkipped {
+			if step.SkipSource == "" && p.Version == resolvedPolicyVersion {
+				return fmt.Errorf("resolved policy skipped step %q has no skip source", step.Name)
+			}
+			if step.SkipSource != "" && !step.SkipSource.Valid() {
+				return fmt.Errorf("resolved policy skipped step %q has unsupported source %q", step.Name, step.SkipSource)
+			}
+		}
 	}
 	for name, definition := range p.Commands.Definitions {
 		var legacy string
@@ -389,7 +420,7 @@ func (p *resolvedPolicy) validate() error {
 			return fmt.Errorf("resolved policy command definition %q: %w", name, err)
 		}
 	}
-	if p.Version == resolvedPolicyVersion && p.Preflight == nil {
+	if p.Version >= 4 && p.Preflight == nil {
 		return fmt.Errorf("resolved policy preflight commands are missing")
 	}
 	for i, command := range p.Preflight {

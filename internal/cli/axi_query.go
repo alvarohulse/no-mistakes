@@ -116,6 +116,10 @@ func runStateFingerprint(rv runView) string {
 		b.WriteString(step.Name)
 		b.WriteByte(':')
 		b.WriteString(step.Status)
+		if step.SkipSource != "" {
+			b.WriteByte(':')
+			b.WriteString(step.SkipSource)
+		}
 	}
 	return b.String()
 }

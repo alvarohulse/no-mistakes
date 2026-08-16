@@ -291,6 +291,32 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	}
 }
 
+func TestCompleteStepAsSkippedPersistsTypedSource(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/skip-source", "git@github.com:user/skip-source.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepAsSkipped(step.ID, types.SkipSourceGlobalOverride); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.StepStatusSkipped || got.SkipSource == nil || *got.SkipSource != string(types.SkipSourceGlobalOverride) {
+		t.Fatalf("skipped step = %+v", got)
+	}
+}
+
 func TestUpdateStepStatusWithDuration(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

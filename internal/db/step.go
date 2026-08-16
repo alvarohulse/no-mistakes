@@ -15,6 +15,7 @@ type StepResult struct {
 	StepName       types.StepName
 	StepOrder      int
 	Status         types.StepStatus
+	SkipSource     *string
 	ExitCode       *int
 	DurationMS     *int64
 	LogPath        *string
@@ -30,7 +31,7 @@ type StepResult struct {
 	AutoFixLimit   *int
 }
 
-const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, evidence_json, planned_command, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+const stepResultColumns = `id, run_id, step_name, step_order, status, skip_source, exit_code, duration_ms, log_path, findings_json, evidence_json, planned_command, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
 
 const MaxStepEvidenceBytes = 64 * 1024
 
@@ -116,7 +117,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+stepResultColumns+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.SkipSource, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -138,7 +139,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.SkipSource, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.EvidenceJSON, &s.PlannedCommand, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -325,6 +326,22 @@ func (d *DB) CompleteStepWithStatus(id string, status types.StepStatus, exitCode
 	)
 	if err != nil {
 		return fmt.Errorf("complete step: %w", err)
+	}
+	return nil
+}
+
+// CompleteStepAsSkipped persists a source-aware pre-run skip receipt.
+func (d *DB) CompleteStepAsSkipped(id string, source types.SkipSource) error {
+	if !source.Valid() {
+		return fmt.Errorf("complete skipped step: unsupported skip source %q", source)
+	}
+	ts := now()
+	_, err := d.sql.Exec(
+		`UPDATE step_results SET status = ?, skip_source = ?, exit_code = 0, duration_ms = 0, log_path = '', completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		types.StepStatusSkipped, source, ts, ts, fmt.Sprintf("status: %s", types.StepStatusSkipped), id,
+	)
+	if err != nil {
+		return fmt.Errorf("complete skipped step: %w", err)
 	}
 	return nil
 }

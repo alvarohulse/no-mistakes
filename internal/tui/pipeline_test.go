@@ -452,6 +452,19 @@ func TestModel_ApplyEvent_StepCompleted_FailedStoresError(t *testing.T) {
 	}
 }
 
+func TestRenderPipelineViewShowsConfiguredSkipSource(t *testing.T) {
+	source := string(types.SkipSourceGlobalOverride)
+	run := testRun()
+	run.Status = types.RunCompleted
+	steps := []ipc.StepResultInfo{{
+		StepName: types.StepCI, Status: types.StepStatusSkipped, SkipSource: &source,
+	}}
+	out := stripANSI(renderPipelineView(run, steps, 80, 0, 40))
+	if !strings.Contains(out, "CI") || !strings.Contains(out, "global-override") {
+		t.Fatalf("configured skip source missing from pipeline view:\n%s", out)
+	}
+}
+
 func TestModel_ApplyEvent_RunCompleted(t *testing.T) {
 	run := testRun()
 	m := NewModel("/tmp/sock", nil, run)

@@ -57,6 +57,18 @@ func TestRunViewFromDBRendersBuildStep(t *testing.T) {
 	}
 }
 
+func TestRunObjectRendersConfiguredSkipReceipt(t *testing.T) {
+	source := string(types.SkipSourceGlobalOverride)
+	run := &db.Run{ID: "r1", Branch: "feature/x", HeadSHA: "abcdef1234567890", Status: types.RunCompleted}
+	rv := runViewFromDB(run, []*db.StepResult{{
+		StepName: types.StepCI, Status: types.StepStatusSkipped, SkipSource: &source,
+	}})
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, "skip_receipts") || !strings.Contains(out, "ci,global-override") {
+		t.Fatalf("configured skip receipt missing from output:\n%s", out)
+	}
+}
+
 func TestPostWorktreeEnvironmentParkRendering(t *testing.T) {
 	parkedSince := time.Now().Unix()
 	errMsg := "post-worktree hook failed with exit code 23: authenticate first"

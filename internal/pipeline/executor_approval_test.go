@@ -226,6 +226,79 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 }
 
+func TestExecutor_ResumeAppliesPendingConfiguredSkipReceipt(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	lintResult, err := database.InsertStepResult(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciResult, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(lintResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"lint-1","severity":"warning","description":"decision","action":"ask-user"}]}`
+	if err := database.SetStepFindings(lintResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(lintResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(lintResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lint := &adaptiveCallStep{name: types.StepLint, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, fmt.Errorf("recovered gate must not rerun")
+	}}
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, fmt.Errorf("configured skipped CI must not run")
+	}}
+	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{lint, ci}, nil)
+	executor.SetStepSkips([]types.StepSkip{{Step: types.StepCI, Source: types.SkipSourceGlobalOverride}})
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(context.Background(), run, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepLint, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered lint gate never accepted approval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+
+	got, err := database.GetStepResult(ciResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.StepStatusSkipped || got.SkipSource == nil || *got.SkipSource != string(types.SkipSourceGlobalOverride) {
+		t.Fatalf("recovered CI result = %+v", got)
+	}
+}
+
 func TestExecutor_ResumeRestoresPrivatePlannedCommandForFix(t *testing.T) {
 	database, paths, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {

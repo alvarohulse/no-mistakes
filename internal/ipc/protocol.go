@@ -77,7 +77,7 @@ type PushReceivedParams struct {
 	Ref             string                `json:"ref"`
 	Old             string                `json:"old"`
 	New             string                `json:"new"`
-	SkipSteps       []types.StepName      `json:"skip_steps,omitempty"`
+	SkipSteps       []types.StepName      `json:"skip_steps"`
 	RefreshStrategy types.RefreshStrategy `json:"refresh_strategy,omitempty"`
 	StackedOn       string                `json:"stacked_on,omitempty"`
 	Intent          string                `json:"intent,omitempty"`
@@ -145,7 +145,7 @@ type RerunParams struct {
 	RepoID          string                `json:"repo_id"`
 	Branch          string                `json:"branch"`
 	PreviousRunID   string                `json:"previous_run_id,omitempty"`
-	SkipSteps       []types.StepName      `json:"skip_steps,omitempty"`
+	SkipSteps       []types.StepName      `json:"skip_steps"`
 	RefreshStrategy types.RefreshStrategy `json:"refresh_strategy,omitempty"`
 	StackedOn       string                `json:"stacked_on,omitempty"`
 	Intent          string                `json:"intent,omitempty"`
@@ -307,6 +307,7 @@ type StepResultInfo struct {
 	StepName         types.StepName   `json:"step_name"`
 	StepOrder        int              `json:"step_order"`
 	Status           types.StepStatus `json:"status"`
+	SkipSource       *string          `json:"skip_source,omitempty"`
 	ExitCode         *int             `json:"exit_code,omitempty"`
 	DurationMS       *int64           `json:"duration_ms,omitempty"`
 	FindingsJSON     *string          `json:"findings_json,omitempty"`

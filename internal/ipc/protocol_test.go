@@ -3,6 +3,7 @@ package ipc
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -322,6 +323,24 @@ func TestStepResultInfoLegacyRebaseNormalizesToRefresh(t *testing.T) {
 	}
 	if got.StepName != types.StepRefresh {
 		t.Fatalf("step name = %q, want refresh", got.StepName)
+	}
+}
+
+func TestRerunParamsPreserveExplicitEmptySkipList(t *testing.T) {
+	params := RerunParams{RepoID: "repo-1", Branch: "feature", SkipSteps: []types.StepName{}}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"skip_steps":[]`) {
+		t.Fatalf("encoded params = %s", data)
+	}
+	var got RerunParams
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SkipSteps == nil || len(got.SkipSteps) != 0 {
+		t.Fatalf("decoded skip steps = %#v, want non-nil empty", got.SkipSteps)
 	}
 }
 

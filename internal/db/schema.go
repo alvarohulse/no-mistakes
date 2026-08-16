@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     step_name        TEXT NOT NULL,
     step_order       INTEGER NOT NULL,
     status           TEXT NOT NULL DEFAULT 'pending',
+    skip_source      TEXT,
     exit_code        INTEGER,
     duration_ms      INTEGER,
     log_path         TEXT,
@@ -239,6 +240,7 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
 	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN skip_source TEXT`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,

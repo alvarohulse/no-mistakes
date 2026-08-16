@@ -178,6 +178,30 @@ func AllSteps() []StepName {
 	return []StepName{StepIntent, StepRefresh, StepReview, StepBuild, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 }
 
+// SkipSource identifies who selected a step before pipeline execution.
+type SkipSource string
+
+const (
+	SkipSourceRunRequest     SkipSource = "run-request"
+	SkipSourceGlobalOverride SkipSource = "global-override"
+)
+
+// Valid reports whether the source can be persisted as a pre-run skip receipt.
+func (s SkipSource) Valid() bool {
+	switch s {
+	case SkipSourceRunRequest, SkipSourceGlobalOverride:
+		return true
+	default:
+		return false
+	}
+}
+
+// StepSkip is the persisted pre-run decision for one skipped pipeline step.
+type StepSkip struct {
+	Step   StepName   `json:"step"`
+	Source SkipSource `json:"source"`
+}
+
 // StepStatus represents the lifecycle state of a pipeline step.
 type StepStatus string
 

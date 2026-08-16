@@ -24,6 +24,8 @@ The global config's [`overrides`](/no-mistakes/reference/global-config/#override
 
 Repo-specific values that cannot be committed to the default branch (for example canonical commands in a repository whose default branch you do not control) live in the global config's `overrides` map, keyed by the repository's `<owner>/<repo>` identity. Each entry uses this page's repo-config shape and overlays only the fields present in it, after the committed pushed/default trust resolution. The [Global Config Reference](/no-mistakes/reference/global-config/#overrides) owns the key syntax, identity matching, precedence, trust model, and recovery semantics.
 
+`pipeline.skip_steps` is the exception to the shared shape: it is machine-owner policy accepted only inside a matching global override. A committed repository config that declares it is rejected. See the global [`overrides`](/no-mistakes/reference/global-config/#overrides) reference.
+
 ```yaml
 # .no-mistakes.yaml
 

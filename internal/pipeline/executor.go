@@ -49,7 +49,7 @@ type Executor struct {
 	config *config.Config
 	agents AgentRoutes
 	steps  []Step
-	skips  map[types.StepName]bool
+	skips  map[types.StepName]types.SkipSource
 
 	onEvent               EventFunc
 	reviewCandidatePicker reviewCandidatePicker
@@ -80,13 +80,22 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
 func (e *Executor) SetSkippedSteps(steps []types.StepName) {
-	if len(steps) == 0 {
+	receipts := make([]types.StepSkip, 0, len(steps))
+	for _, step := range steps {
+		receipts = append(receipts, types.StepSkip{Step: step, Source: types.SkipSourceRunRequest})
+	}
+	e.SetStepSkips(receipts)
+}
+
+// SetStepSkips configures source-aware pre-run skip receipts.
+func (e *Executor) SetStepSkips(skips []types.StepSkip) {
+	if len(skips) == 0 {
 		e.skips = nil
 		return
 	}
-	e.skips = make(map[types.StepName]bool, len(steps))
-	for _, step := range steps {
-		e.skips[step] = true
+	e.skips = make(map[types.StepName]types.SkipSource, len(skips))
+	for _, receipt := range skips {
+		e.skips[receipt.Step.Canonical()] = receipt.Source
 	}
 }
 
@@ -217,14 +226,14 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 
 		sr := stepRecords[step.Name()]
-		if e.skips[step.Name()] {
+		if source, skipped := e.skips[step.Name().Canonical()]; skipped {
 			if step.Name() == types.StepIntent {
 				_ = e.db.SetStepEvidence(sr.ID, db.StepEvidence{Intent: &db.IntentEvidence{Reason: &db.IntentAbsenceReason{
 					Code: "step_skipped", Message: "Intent extraction was skipped by pipeline configuration.",
 				}}})
 			}
-			e.recordSkipExplanation(sr.ID, "Step was skipped before the run started because it was named in the run's skip list.")
-			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+			e.recordSkipExplanation(sr.ID, preRunSkipExplanation(source))
+			if err := e.db.CompleteStepAsSkipped(sr.ID, source); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", nil)
@@ -254,6 +263,13 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	return nil
+}
+
+func preRunSkipExplanation(source types.SkipSource) string {
+	if source == types.SkipSourceGlobalOverride {
+		return "Step was skipped before the run started by the matching machine-owned global override."
+	}
+	return "Step was skipped before the run started because it was named in the run request's skip list."
 }
 
 // recordSkipExplanation persists why a step was skipped so PR rendering can
@@ -608,6 +624,14 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
+		}
+		if source, skipped := e.skips[e.steps[index].Name().Canonical()]; skipped {
+			e.recordSkipExplanation(results[index].ID, preRunSkipExplanation(source))
+			if err := e.db.CompleteStepAsSkipped(results[index].ID, source); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err), ctx)
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
+			continue
 		}
 		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
 		if err != nil {

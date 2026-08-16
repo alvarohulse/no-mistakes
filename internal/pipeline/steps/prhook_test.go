@@ -374,6 +374,25 @@ func TestContractPipelineCarriesPRAndCISteps(t *testing.T) {
 	}
 }
 
+func TestContractPipelineCarriesConfiguredSkipSource(t *testing.T) {
+	t.Parallel()
+	source := string(types.SkipSourceGlobalOverride)
+	contract := BuildContract(ContractInput{
+		Run: &db.Run{ID: "run-1"},
+		Steps: []*db.StepResult{{
+			ID: "s1", StepName: types.StepCI, StepOrder: 10,
+			Status: types.StepStatusSkipped, SkipSource: &source,
+		}},
+	})
+	if contract.Sections.Pipeline == nil || len(contract.Sections.Pipeline.Steps) != 1 {
+		t.Fatalf("pipeline section = %+v", contract.Sections.Pipeline)
+	}
+	ci := contract.Sections.Pipeline.Steps[0]
+	if ci.Status != "skipped" || ci.SkipSource == nil || *ci.SkipSource != source {
+		t.Fatalf("configured CI skip = %+v", ci)
+	}
+}
+
 // The built-in Pipeline markdown keeps its own omission: this pins the two
 // renderings apart so a future edit cannot collapse them back together.
 func TestBuiltInPipelineSectionStillOmitsPRAndCI(t *testing.T) {

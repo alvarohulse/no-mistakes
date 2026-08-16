@@ -117,6 +117,7 @@ type recoveredRunPlan struct {
 	// recovery always populates agents so per-step routing remains authoritative.
 	agent agent.Agent
 	steps []pipeline.Step
+	skips []types.StepSkip
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -196,6 +197,10 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err := validateResolvedPolicy(cfg, run, execSteps); err != nil {
 		return nil, err
 	}
+	resolvedSkips, err := resolvedPolicySkips(run)
+	if err != nil {
+		return nil, err
+	}
 	agents, err := newPipelineAgentsWithEvidenceRoot(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
 	if err != nil {
 		return nil, err
@@ -218,7 +223,26 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		cfg:     cfg,
 		agents:  agents,
 		steps:   execSteps,
+		skips:   resolvedSkips,
 	}, nil
+}
+
+func resolvedPolicySkips(run *db.Run) ([]types.StepSkip, error) {
+	if run == nil {
+		return nil, fmt.Errorf("resolved policy run is nil")
+	}
+	policy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+	if err != nil || legacy {
+		return nil, err
+	}
+	normalizeResolvedPolicyForComparison(policy)
+	var skips []types.StepSkip
+	for _, step := range policy.Steps {
+		if step.Status == resolvedPolicyStepSkipped {
+			skips = append(skips, types.StepSkip{Step: step.Name, Source: step.SkipSource})
+		}
+	}
+	return skips, nil
 }
 
 func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.Agent) error {
@@ -548,6 +572,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutorWithAgentRoutes(m.db, m.paths, plan.cfg, agents.routes, plan.steps, m.broadcast)
+	executor.SetStepSkips(plan.skips)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -1273,7 +1298,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutorWithAgentRoutes(m.db, m.paths, cfg, agents.routes, execSteps, m.broadcast)
-	executor.SetSkippedSteps(skipSteps)
+	executor.SetStepSkips(resolved.Skips)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {

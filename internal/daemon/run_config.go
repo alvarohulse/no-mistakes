@@ -64,6 +64,7 @@ type runPolicyResolution struct {
 	Policy               *resolvedPolicy
 	RefreshStrategy      types.RefreshStrategy
 	Steps                []pipeline.Step
+	Skips                []types.StepSkip
 	PreparedPreflight    []runner.Prepared
 	HeadSHA              string
 	TrustedSHA           string
@@ -159,6 +160,10 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	if err := cfg.ValidateManagedStepPlan(stepNames); err != nil {
 		return nil, fmt.Errorf("resolve managed step plan: %w", err)
 	}
+	resolvedSkips := resolveRunStepSkips(skipped, cfg.ConfiguredSkipSteps)
+	if err := validateRunStepSkips(resolvedSkips, execSteps); err != nil {
+		return nil, err
+	}
 	resolvedRunner, err := runner.ResolveDefault(ctx, cfg.Runner)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default runner: %w", err)
@@ -178,7 +183,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, err
 	}
 	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
-	policy, err := resolvedPolicyFromConfig(cfg, sources, execSteps, skipped, resolvedRefreshStrategy, demo)
+	policy, err := resolvedPolicyFromConfigWithSkips(cfg, sources, execSteps, resolvedSkips, resolvedRefreshStrategy, demo)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +200,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		Policy:               policy,
 		RefreshStrategy:      resolvedRefreshStrategy,
 		Steps:                execSteps,
+		Skips:                resolvedSkips,
 		PreparedPreflight:    preparedPreflight,
 		HeadSHA:              candidateSHA,
 		TrustedSHA:           trustedSHA,
@@ -203,6 +209,50 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	}
 	keepTrustedRef = true
 	return resolved, nil
+}
+
+func resolveRunStepSkips(requested, configured []types.StepName) []types.StepSkip {
+	steps := configured
+	source := types.SkipSourceGlobalOverride
+	if requested != nil {
+		steps = requested
+		source = types.SkipSourceRunRequest
+	}
+	seen := make(map[types.StepName]bool, len(steps))
+	resolved := make([]types.StepSkip, 0, len(steps))
+	for _, step := range steps {
+		name := step.Canonical()
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		resolved = append(resolved, types.StepSkip{Step: name, Source: source})
+	}
+	return resolved
+}
+
+func validateRunStepSkips(skips []types.StepSkip, steps []pipeline.Step) error {
+	enabled := make(map[types.StepName]bool, len(steps))
+	for _, step := range steps {
+		if step != nil {
+			enabled[step.Name().Canonical()] = true
+		}
+	}
+	skipped := make(map[types.StepName]bool, len(skips))
+	for _, receipt := range skips {
+		if !receipt.Source.Valid() {
+			return fmt.Errorf("pipeline skip %q has unsupported source %q", receipt.Step, receipt.Source)
+		}
+		name := receipt.Step.Canonical()
+		if !enabled[name] {
+			return fmt.Errorf("resolved policy skip list contains a step outside the pipeline")
+		}
+		skipped[name] = true
+	}
+	if skipped[types.StepReview] && enabled[types.StepPush] && !skipped[types.StepPush] {
+		return fmt.Errorf("cannot skip review while push remains enabled")
+	}
+	return nil
 }
 
 func resolveBareCandidateCommit(ctx context.Context, gateDir, headSHA string) (string, error) {

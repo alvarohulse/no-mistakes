@@ -182,6 +182,7 @@ type RepoConfig struct {
 	Agents         []types.AgentName `yaml:"-"`
 	Commands       Commands          `yaml:"commands"`
 	Preflight      []runner.Command  `yaml:"preflight"`
+	Pipeline       PipelineRaw       `yaml:"pipeline"`
 	Hooks          Hooks             `yaml:"hooks"`
 	IgnorePatterns []string          `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
@@ -231,6 +232,54 @@ type RepoConfig struct {
 	present map[string]bool
 }
 
+// PipelineRaw is machine-owned per-repository pipeline policy. It is accepted
+// only when RepoConfig is nested under global overrides; committed repository
+// config is rejected by parseRepoConfig.
+type PipelineRaw struct {
+	SkipSteps []types.StepName `yaml:"skip_steps"`
+}
+
+func (p *PipelineRaw) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		SkipSteps []string `yaml:"skip_steps"`
+	}
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	seen := make(map[types.StepName]bool, len(raw.SkipSteps))
+	p.SkipSteps = make([]types.StepName, 0, len(raw.SkipSteps))
+	for _, value := range raw.SkipSteps {
+		trimmed := strings.TrimSpace(value)
+		step := types.StepName(trimmed).Canonical()
+		if !knownPipelineStep(step) {
+			return fmt.Errorf("unknown pipeline skip step %q", trimmed)
+		}
+		if seen[step] {
+			continue
+		}
+		seen[step] = true
+		p.SkipSteps = append(p.SkipSteps, step)
+	}
+	return nil
+}
+
+func (p PipelineRaw) clone() PipelineRaw {
+	return PipelineRaw{SkipSteps: cloneStepNames(p.SkipSteps)}
+}
+
+func (p PipelineRaw) IsZero() bool {
+	return p.SkipSteps == nil
+}
+
+func knownPipelineStep(step types.StepName) bool {
+	for _, known := range types.AllSteps() {
+		if step == known {
+			return true
+		}
+	}
+	return false
+}
+
 // MarshalYAML emits the same canonical shape accepted by LoadRepoFromBytes.
 // RepoConfig keeps normalized fallback lists and presence metadata in derived
 // fields that must never leak into captured eval provenance.
@@ -239,6 +288,7 @@ func (c RepoConfig) MarshalYAML() (any, error) {
 		Agent                  agentList        `yaml:"agent,omitempty"`
 		Commands               Commands         `yaml:"commands,omitempty"`
 		Preflight              []runner.Command `yaml:"preflight,omitempty"`
+		Pipeline               PipelineRaw      `yaml:"pipeline,omitempty"`
 		Hooks                  Hooks            `yaml:"hooks,omitempty"`
 		IgnorePatterns         []string         `yaml:"ignore_patterns,omitempty"`
 		AllowRepoCommands      bool             `yaml:"allow_repo_commands,omitempty"`
@@ -261,6 +311,7 @@ func (c RepoConfig) MarshalYAML() (any, error) {
 		Agent:                  agentList(stepAgentNames(c.Agent, c.Agents)),
 		Commands:               c.Commands,
 		Preflight:              cloneRunnerCommands(c.Preflight, false),
+		Pipeline:               c.Pipeline.clone(),
 		Hooks:                  c.Hooks,
 		IgnorePatterns:         c.IgnorePatterns,
 		AllowRepoCommands:      c.AllowRepoCommands,
@@ -686,6 +737,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Agent                  agentList        `yaml:"agent"`
 		Commands               Commands         `yaml:"commands"`
 		Preflight              []runner.Command `yaml:"preflight"`
+		Pipeline               PipelineRaw      `yaml:"pipeline"`
 		Hooks                  Hooks            `yaml:"hooks"`
 		IgnorePatterns         []string         `yaml:"ignore_patterns"`
 		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
@@ -716,6 +768,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Agents = copyAgents(raw.Agent)
 	c.Commands = raw.Commands
 	c.Preflight = cloneRunnerCommands(raw.Preflight, false)
+	c.Pipeline = raw.Pipeline.clone()
 	c.Hooks = raw.Hooks
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
@@ -771,6 +824,9 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	}
 	if override.has("preflight") {
 		out.Preflight = cloneRunnerCommands(override.Preflight, false)
+	}
+	if override.has("pipeline.skip_steps") {
+		out.Pipeline.SkipSteps = cloneStepNames(override.Pipeline.SkipSteps)
 	}
 	if override.has("hooks.post_worktree") {
 		out.Hooks.PostWorktree = override.Hooks.PostWorktree
@@ -1047,6 +1103,7 @@ func cloneRepoConfig(src *RepoConfig) *RepoConfig {
 	out.Agents = copyAgents(src.Agents)
 	out.Commands = src.Commands.Clone()
 	out.Preflight = cloneRunnerCommands(src.Preflight, false)
+	out.Pipeline = src.Pipeline.clone()
 	out.IgnorePatterns = copyStrings(src.IgnorePatterns)
 	out.Intent.Agents = copyAgents(src.Intent.Agents)
 	out.Intent.DisabledReaders = copyStrings(src.Intent.DisabledReaders)
@@ -1077,6 +1134,15 @@ func copyStrings(values []string) []string {
 	out := make([]string, len(values))
 	copy(out, values)
 	return out
+}
+
+func cloneStepNames(steps []types.StepName) []types.StepName {
+	if steps == nil {
+		return nil
+	}
+	cloned := make([]types.StepName, len(steps))
+	copy(cloned, steps)
+	return cloned
 }
 
 func cloneRunnerCommands(commands []runner.Command, canonical bool) []runner.Command {
@@ -1407,6 +1473,7 @@ type Config struct {
 	SessionReuse            bool
 	Commands                Commands
 	Preflight               []runner.Command
+	ConfiguredSkipSteps     []types.StepName
 	Hooks                   Hooks
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
@@ -3241,6 +3308,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := finalizeRepoConfig(cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if cfg.has("pipeline.skip_steps") {
+		return nil, fmt.Errorf("parse repo config: pipeline.skip_steps is allowed only in a machine-owned global override")
+	}
 
 	return cfg, nil
 }
@@ -3368,6 +3438,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		pushed = &RepoConfig{}
 	}
 	effective := *pushed
+	// Configured skips are machine-owner policy. The later global override
+	// layer may add them; neither committed branch copy can.
+	effective.Pipeline = PipelineRaw{}
 	if trusted != nil {
 		effective.Refresh.Strategy = trusted.Refresh.Strategy
 		effective.Document.Instructions = trusted.Document.Instructions
@@ -3815,6 +3888,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		SessionReuse:            global.SessionReuse,
 		Commands:                repo.Commands.Clone(),
 		Preflight:               cloneRunnerCommands(repo.Preflight, true),
+		ConfiguredSkipSteps:     cloneStepNames(repo.Pipeline.SkipSteps),
 		Hooks:                   hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,

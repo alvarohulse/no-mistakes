@@ -1024,6 +1024,7 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		StepName:       s.StepName,
 		StepOrder:      s.StepOrder,
 		Status:         s.Status,
+		SkipSource:     s.SkipSource,
 		ExitCode:       s.ExitCode,
 		DurationMS:     s.DurationMS,
 		FindingsJSON:   s.FindingsJSON,
