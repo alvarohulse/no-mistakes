@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -96,6 +97,7 @@ type GlobalConfig struct {
 	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
+	Runner                  runner.Spec         `yaml:"runner"`
 	CITimeout               time.Duration       `yaml:"-"`
 	StepQuietWarning        time.Duration       `yaml:"-"`
 	DaemonConnectTimeout    time.Duration       `yaml:"-"`
@@ -148,6 +150,7 @@ type globalConfigRaw struct {
 	ACPRegistryOverrides    map[string]string      `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string      `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string    `yaml:"agent_args_override"`
+	Runner                  runner.Spec            `yaml:"runner"`
 	CITimeout               string                 `yaml:"ci_timeout"`
 	DaemonConnectTimeout    string                 `yaml:"daemon_connect_timeout"`
 	ProcessTerminationGrace string                 `yaml:"process_termination_grace"`
@@ -749,16 +752,16 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 		out.Agents = copyAgents(override.Agents)
 	}
 	if override.has("commands.lint") {
-		out.Commands.Lint = override.Commands.Lint
+		out.Commands.setLint(out.Commands.LintCommand().Overlay(override.Commands.LintCommand()))
 	}
 	if override.has("commands.build") {
-		out.Commands.Build = override.Commands.Build
+		out.Commands.setBuild(out.Commands.BuildCommand().Overlay(override.Commands.BuildCommand()))
 	}
 	if override.has("commands.test") {
-		out.Commands.Test = override.Commands.Test
+		out.Commands.setTest(out.Commands.TestCommand().Overlay(override.Commands.TestCommand()))
 	}
 	if override.has("commands.format") {
-		out.Commands.Format = override.Commands.Format
+		out.Commands.setFormat(out.Commands.FormatCommand().Overlay(override.Commands.FormatCommand()))
 	}
 	if override.has("hooks.post_worktree") {
 		out.Hooks.PostWorktree = override.Hooks.PostWorktree
@@ -1033,6 +1036,7 @@ func (c *GlobalConfig) OverrideForRepoIdentity(identity string) (*RepoConfig, st
 func cloneRepoConfig(src *RepoConfig) *RepoConfig {
 	out := *src
 	out.Agents = copyAgents(src.Agents)
+	out.Commands = src.Commands.Clone()
 	out.IgnorePatterns = copyStrings(src.IgnorePatterns)
 	out.Intent.Agents = copyAgents(src.Intent.Agents)
 	out.Intent.DisabledReaders = copyStrings(src.Intent.DisabledReaders)
@@ -1115,10 +1119,109 @@ func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[stri
 
 // Commands holds optional per-repo command overrides.
 type Commands struct {
-	Lint   string `yaml:"lint"`
-	Build  string `yaml:"build"`
-	Test   string `yaml:"test"`
-	Format string `yaml:"format"`
+	// String fields are the compatibility projection consumed by existing
+	// pipeline steps until NM-13 migrates execution to runner.Command.
+	Lint   string `yaml:"-"`
+	Build  string `yaml:"-"`
+	Test   string `yaml:"-"`
+	Format string `yaml:"-"`
+
+	lintCommand   runner.Command
+	buildCommand  runner.Command
+	testCommand   runner.Command
+	formatCommand runner.Command
+}
+
+func (c *Commands) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		Lint   runner.Command `yaml:"lint"`
+		Build  runner.Command `yaml:"build"`
+		Test   runner.Command `yaml:"test"`
+		Format runner.Command `yaml:"format"`
+	}
+	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
+		return err
+	}
+	c.setLint(raw.Lint)
+	c.setBuild(raw.Build)
+	c.setTest(raw.Test)
+	c.setFormat(raw.Format)
+	return nil
+}
+
+func (c Commands) MarshalYAML() (any, error) {
+	return struct {
+		Lint   runner.Command `yaml:"lint,omitempty"`
+		Build  runner.Command `yaml:"build,omitempty"`
+		Test   runner.Command `yaml:"test,omitempty"`
+		Format runner.Command `yaml:"format,omitempty"`
+	}{
+		Lint: c.LintCommand(), Build: c.BuildCommand(), Test: c.TestCommand(), Format: c.FormatCommand(),
+	}, nil
+}
+
+func (c Commands) LintCommand() runner.Command   { return commandWithRun(c.lintCommand, c.Lint) }
+func (c Commands) BuildCommand() runner.Command  { return commandWithRun(c.buildCommand, c.Build) }
+func (c Commands) TestCommand() runner.Command   { return commandWithRun(c.testCommand, c.Test) }
+func (c Commands) FormatCommand() runner.Command { return commandWithRun(c.formatCommand, c.Format) }
+
+func (c Commands) Clone() Commands {
+	cloned := Commands{Lint: c.Lint, Build: c.Build, Test: c.Test, Format: c.Format}
+	cloned.lintCommand = c.LintCommand().Clone()
+	cloned.buildCommand = c.BuildCommand().Clone()
+	cloned.testCommand = c.TestCommand().Clone()
+	cloned.formatCommand = c.FormatCommand().Clone()
+	return cloned
+}
+
+func (c Commands) Equal(other Commands) bool {
+	return c.LintCommand().Equal(other.LintCommand()) && c.BuildCommand().Equal(other.BuildCommand()) &&
+		c.TestCommand().Equal(other.TestCommand()) && c.FormatCommand().Equal(other.FormatCommand())
+}
+
+func (c Commands) IsZero() bool {
+	return c.LintCommand().IsZero() && c.BuildCommand().IsZero() && c.TestCommand().IsZero() && c.FormatCommand().IsZero()
+}
+
+func (c Commands) StructuredDefinitions() map[string]runner.Command {
+	definitions := make(map[string]runner.Command)
+	for name, command := range map[string]runner.Command{
+		"lint": c.LintCommand(), "build": c.BuildCommand(), "test": c.TestCommand(), "format": c.FormatCommand(),
+	} {
+		if !command.Equal(runner.Command{Run: command.Run}) {
+			definitions[name] = command.Canonical()
+		}
+	}
+	if len(definitions) == 0 {
+		return nil
+	}
+	return definitions
+}
+
+func (c *Commands) setLint(command runner.Command) {
+	c.lintCommand = command.Clone()
+	c.Lint = command.Run
+}
+
+func (c *Commands) setBuild(command runner.Command) {
+	c.buildCommand = command.Clone()
+	c.Build = command.Run
+}
+
+func (c *Commands) setTest(command runner.Command) {
+	c.testCommand = command.Clone()
+	c.Test = command.Run
+}
+
+func (c *Commands) setFormat(command runner.Command) {
+	c.formatCommand = command.Clone()
+	c.Format = command.Run
+}
+
+func commandWithRun(command runner.Command, run string) runner.Command {
+	command = command.Clone()
+	command.Run = run
+	return command
 }
 
 // Hooks holds deterministic controller commands that run outside pipeline
@@ -1266,6 +1369,8 @@ type Config struct {
 	StepAgents              map[types.StepName][]types.AgentName
 	StepModels              map[types.StepName]ModelRoute
 	ReviewCandidates        []ReviewCandidate
+	Runner                  runner.Spec
+	ResolvedRunner          *runner.Provenance
 	ACPXPath                string
 	ACPRegistryOverrides    map[string]string
 	AgentPathOverride       map[string]string
@@ -1933,6 +2038,13 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # "acp:cursor" keeps the registered cursor-agent acp fallback through acpx
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
+
+# Optional machine-wide shell runner. The portable default is sh -c on POSIX
+# and noninteractive pwsh on Windows. Use argv fields; no shell splitting is
+# applied. Doggo can opt into its login environment explicitly:
+# runner:
+#   executable: zsh
+#   args: [-lc]
 
 # Opt in to a complete route policy. Managed mode rejects every unclassified
 # pipeline step and every model-invoking step without an explicit agent/model.
@@ -2967,6 +3079,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
+	cfg.Runner = raw.Runner.Clone()
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -3268,7 +3381,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		return &effective
 	}
 	if trusted != nil {
-		effective.Commands = trusted.Commands
+		effective.Commands = trusted.Commands.Clone()
 		effective.Hooks = trusted.Hooks
 		effective.Agent = trusted.Agent
 		effective.Agents = copyAgents(trusted.Agents)
@@ -3662,6 +3775,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		StepAgents:              global.configuredStepAgents(),
 		StepModels:              global.configuredStepModels(),
 		ReviewCandidates:        copyReviewCandidates(global.Review.Candidates),
+		Runner:                  global.Runner.Clone(),
 		ACPXPath:                global.ACPXPath,
 		ACPRegistryOverrides:    global.ACPRegistryOverrides,
 		AgentPathOverride:       global.AgentPathOverride,
@@ -3671,7 +3785,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ProcessTerminationGrace: global.ProcessTerminationGrace,
 		LogLevel:                global.LogLevel,
 		SessionReuse:            global.SessionReuse,
-		Commands:                repo.Commands,
+		Commands:                repo.Commands.Clone(),
 		Hooks:                   hooks,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
@@ -3689,7 +3803,6 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
 	}
-
 	if repo.Agent != "" {
 		cfg.Agent = repo.Agent
 		cfg.Agents = copyAgents(repo.Agents)

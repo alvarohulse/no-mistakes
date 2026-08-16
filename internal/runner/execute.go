@@ -27,14 +27,20 @@ type ExecuteOptions struct {
 	ExtraEnv                []string
 	Timeout                 time.Duration
 	ProcessTerminationGrace time.Duration
+	// OutputLimit bounds combined stdout/stderr retained in Result. Values at
+	// or below zero use the safe default; values above the hard cap are clamped.
+	OutputLimit int
 }
 
 // Result distinguishes an ordinary non-zero command exit from a launch or
 // lifecycle error.
 type Result struct {
-	Output   string
-	ExitCode int
+	Output    string
+	ExitCode  int
+	Truncated bool
 }
+
+const maxCapturedOutputBytes = 64 * 1024
 
 // Prepared is a resolved command whose syntax was checked by its exact shell.
 // Its fields stay private so callers cannot accidentally execute an unvalidated
@@ -74,7 +80,7 @@ func (p Prepared) Execute(ctx context.Context, options ExecuteOptions) (Result, 
 	if !p.validated {
 		return Result{}, fmt.Errorf("execute runner: command was not prepared")
 	}
-	return executeArgv(ctx, p.resolved.Argv, options, nil, 0)
+	return executeArgv(ctx, p.resolved.Argv, options, nil, outputLimit(options.OutputLimit))
 }
 
 // ValidateSyntax parses the command with the resolved shell without running
@@ -116,32 +122,37 @@ func executeArgv(ctx context.Context, argv []string, options ExecuteOptions, std
 		cmd.Env = mergeEnv(os.Environ(), options.ExtraEnv, runtime.GOOS)
 	}
 	shellenv.ConfigureShellCommand(cmd, options.ProcessTerminationGrace)
-	var output interface {
-		io.Writer
-		String() string
-	} = &bytes.Buffer{}
-	if outputLimit > 0 {
-		output = newBoundedBuffer(outputLimit)
-	}
+	output := newBoundedBuffer(outputLimit)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	err := shellenv.RunShellCommand(cmd)
 	if ctx.Err() != nil {
-		return Result{Output: output.String(), ExitCode: -1}, ctx.Err()
+		return capturedResult(output, -1), ctx.Err()
 	}
 	if runCtx.Err() != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return Result{Output: output.String(), ExitCode: -1}, fmt.Errorf("%w after %s", ErrTimeout, options.Timeout)
+			return capturedResult(output, -1), fmt.Errorf("%w after %s", ErrTimeout, options.Timeout)
 		}
-		return Result{Output: output.String(), ExitCode: -1}, runCtx.Err()
+		return capturedResult(output, -1), runCtx.Err()
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return Result{Output: output.String(), ExitCode: exitErr.ExitCode()}, nil
+			return capturedResult(output, exitErr.ExitCode()), nil
 		}
-		return Result{Output: output.String(), ExitCode: -1}, fmt.Errorf("launch runner %q: %w", argv[0], err)
+		return capturedResult(output, -1), fmt.Errorf("launch runner %q: %w", argv[0], err)
 	}
-	return Result{Output: output.String(), ExitCode: 0}, nil
+	return capturedResult(output, 0), nil
+}
+
+func outputLimit(requested int) int {
+	if requested <= 0 || requested > maxCapturedOutputBytes {
+		return maxCapturedOutputBytes
+	}
+	return requested
+}
+
+func capturedResult(output *boundedBuffer, exitCode int) Result {
+	return Result{Output: output.String(), ExitCode: exitCode, Truncated: output.Truncated()}
 }
 
 func (r Resolved) syntaxArgv() ([]string, error) {
@@ -187,6 +198,7 @@ func resolvedKind(resolved Resolved) shellKind {
 type boundedBuffer struct {
 	buffer    bytes.Buffer
 	remaining int
+	truncated bool
 }
 
 func newBoundedBuffer(limit int) *boundedBuffer {
@@ -196,10 +208,12 @@ func newBoundedBuffer(limit int) *boundedBuffer {
 func (b *boundedBuffer) Write(data []byte) (int, error) {
 	written := len(data)
 	if b.remaining <= 0 {
+		b.truncated = b.truncated || len(data) > 0
 		return written, nil
 	}
 	if len(data) > b.remaining {
 		data = data[:b.remaining]
+		b.truncated = true
 	}
 	_, _ = b.buffer.Write(data)
 	b.remaining -= len(data)
@@ -207,6 +221,8 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 func (b *boundedBuffer) String() string { return b.buffer.String() }
+
+func (b *boundedBuffer) Truncated() bool { return b.truncated }
 
 func mergeEnv(base, extra []string, platform string) []string {
 	merged := append([]string(nil), base...)

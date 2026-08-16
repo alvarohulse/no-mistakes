@@ -43,6 +43,28 @@ func (s *Spec) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// Clone returns an independently mutable runner specification.
+func (s Spec) Clone() Spec {
+	return Spec{Executable: s.Executable, Args: append([]string(nil), s.Args...), present: clonePresence(s.present)}
+}
+
+// Overlay applies only fields explicitly present in a parsed mapping. A
+// programmatically constructed spec replaces both fields.
+func (s Spec) Overlay(override Spec) Spec {
+	if override.present == nil {
+		return override.Clone()
+	}
+	result := s.Clone()
+	if override.present["executable"] {
+		result.Executable = override.Executable
+	}
+	if override.present["args"] {
+		result.Args = append([]string(nil), override.Args...)
+	}
+	result.present = nil
+	return result
+}
+
 // Override replaces a command string, a runner, or both for one platform.
 // Run is a pointer so an absent value inherits while an explicit empty value
 // remains distinguishable and is rejected only if that platform is resolved.
@@ -144,6 +166,20 @@ func (c Command) Clone() Command {
 	return cloned
 }
 
+// Canonical returns the semantic command without YAML presence metadata. Use
+// it at persistence boundaries so equivalent scalar/mapping inputs compare
+// identically after decoding.
+func (c Command) Canonical() Command {
+	canonical := c.Clone()
+	canonical.form = yamlFormUnknown
+	canonical.present = nil
+	clearSpecPresence(canonical.Runner)
+	clearOverridePresence(canonical.Linux)
+	clearOverridePresence(canonical.MacOS)
+	clearOverridePresence(canonical.Windows)
+	return canonical
+}
+
 // Equal compares command behavior rather than YAML spelling or presence
 // metadata, so a legacy scalar and an equivalent mapping are equal.
 func (c Command) Equal(other Command) bool {
@@ -156,11 +192,34 @@ func (c Command) IsZero() bool {
 	return c.Run == "" && c.Runner == nil && c.Linux == nil && c.MacOS == nil && c.Windows == nil
 }
 
+// ValidateRunners checks every configured runner, including inactive platform
+// overrides, before the command enters a persisted policy snapshot.
+func (c Command) ValidateRunners() error {
+	checks := []struct {
+		name string
+		spec *Spec
+	}{
+		{name: "inline", spec: c.Runner},
+		{name: "linux", spec: overrideRunner(c.Linux)},
+		{name: "macos", spec: overrideRunner(c.MacOS)},
+		{name: "windows", spec: overrideRunner(c.Windows)},
+	}
+	for _, check := range checks {
+		if check.spec == nil {
+			continue
+		}
+		if err := ValidateSpec(*check.spec); err != nil {
+			return fmt.Errorf("%s runner: %w", check.name, err)
+		}
+	}
+	return nil
+}
+
 // Overlay applies a parsed override without losing inherited nested fields.
 // Scalar values replace the whole command; mapping values merge only fields
 // explicitly present in YAML.
 func (c Command) Overlay(override Command) Command {
-	if override.form == yamlFormScalar {
+	if override.form == yamlFormScalar || override.form == yamlFormUnknown {
 		return override.Clone()
 	}
 	result := c.Clone()
@@ -190,8 +249,8 @@ func cloneSpec(spec *Spec) *Spec {
 	if spec == nil {
 		return nil
 	}
-	cloned := &Spec{Executable: spec.Executable, present: clonePresence(spec.present)}
-	cloned.Args = append([]string(nil), spec.Args...)
+	value := spec.Clone()
+	cloned := &value
 	return cloned
 }
 
@@ -207,6 +266,28 @@ func cloneOverride(override *Override) *Override {
 	return cloned
 }
 
+func clearSpecPresence(spec *Spec) {
+	if spec != nil {
+		spec.present = nil
+	}
+}
+
+func clearOverridePresence(override *Override) {
+	if override == nil {
+		return
+	}
+	override.form = yamlFormUnknown
+	override.present = nil
+	clearSpecPresence(override.Runner)
+}
+
+func overrideRunner(override *Override) *Spec {
+	if override == nil {
+		return nil
+	}
+	return override.Runner
+}
+
 func overlaySpec(base, override *Spec) *Spec {
 	if override == nil {
 		return nil
@@ -214,15 +295,8 @@ func overlaySpec(base, override *Spec) *Spec {
 	if base == nil {
 		return cloneSpec(override)
 	}
-	result := cloneSpec(base)
-	if override.present == nil || override.present["executable"] {
-		result.Executable = override.Executable
-	}
-	if override.present == nil || override.present["args"] {
-		result.Args = append([]string(nil), override.Args...)
-	}
-	result.present = nil
-	return result
+	result := base.Overlay(*override)
+	return &result
 }
 
 func overlayOverride(base, override *Override) *Override {

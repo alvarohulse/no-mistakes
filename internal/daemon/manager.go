@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -259,6 +260,13 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		}
 		if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 			return nil, err
+		}
+		if resolvedPolicy.Runner.SchemaVersion > 0 {
+			resolvedRunner, err := runner.ResolveDefault(ctx, cfg.Runner)
+			if err != nil {
+				return nil, fmt.Errorf("resolve recovered default runner: %w", err)
+			}
+			cfg.ResolvedRunner = &resolvedRunner
 		}
 		if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
 			return nil, err

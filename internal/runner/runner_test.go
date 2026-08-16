@@ -68,7 +68,7 @@ func TestResolveAppliesRunnerAndPlatformPrecedence(t *testing.T) {
 				platform: tt.platform,
 				lookPath: func(name string) (string, error) { return "/resolved/" + name, nil },
 				probeVersion: func(context.Context, shellKind, string) (*string, error) {
-					return stringPointer("test-shell 1.2.3"), nil
+					return stringPointer("1.2.3"), nil
 				},
 			})
 			if err != nil {
@@ -80,7 +80,7 @@ func TestResolveAppliesRunnerAndPlatformPrecedence(t *testing.T) {
 			if resolved.Provenance.Source != tt.wantSource || resolved.CommandSource != tt.wantCommand {
 				t.Fatalf("sources = runner %q command %q, want %q/%q", resolved.Provenance.Source, resolved.CommandSource, tt.wantSource, tt.wantCommand)
 			}
-			if resolved.Provenance.SchemaVersion != SchemaVersion || resolved.Provenance.Version == nil || *resolved.Provenance.Version != "test-shell 1.2.3" {
+			if resolved.Provenance.SchemaVersion != SchemaVersion || resolved.Provenance.Version == nil || *resolved.Provenance.Version != "1.2.3" {
 				t.Fatalf("provenance = %+v", resolved.Provenance)
 			}
 			if strings.HasPrefix(resolved.Provenance.Executable, "/resolved/") {
@@ -98,7 +98,7 @@ func TestResolveBuildsNonInteractivePowerShellArgv(t *testing.T) {
 	}, Spec{}, resolverDeps{
 		platform:     "windows",
 		lookPath:     func(name string) (string, error) { return `C:\\Tools\\` + name + ".exe", nil },
-		probeVersion: func(context.Context, shellKind, string) (*string, error) { return stringPointer("PowerShell 7.5"), nil },
+		probeVersion: func(context.Context, shellKind, string) (*string, error) { return stringPointer("7.5"), nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,16 +128,16 @@ func TestResolveRejectsInvalidCommandAndRunnerArgv(t *testing.T) {
 		{name: "empty command", command: Command{}, want: "command is empty"},
 		{name: "empty executable", command: Command{Run: "echo ok", Runner: &Spec{}}, want: "executable is empty"},
 		{name: "empty argument", command: Command{Run: "echo ok", Runner: &Spec{Executable: "zsh", Args: []string{""}}}, want: "argument 1 is empty"},
-		{name: "missing command flag", command: Command{Run: "echo ok", Runner: &Spec{Executable: "zsh", Args: []string{"-l"}}}, want: "must end with a command flag"},
-		{name: "interactive powershell", command: Command{Run: "echo ok", Runner: &Spec{Executable: "pwsh", Args: []string{"-Command"}}}, want: "-NonInteractive"},
-		{name: "unsupported shell", command: Command{Run: "echo ok", Runner: &Spec{Executable: "python", Args: []string{"-c"}}}, want: "unsupported runner"},
+		{name: "missing command flag", command: Command{Run: "echo ok", Runner: &Spec{Executable: "zsh", Args: []string{"-l"}}}, want: "supported argument shape"},
+		{name: "interactive powershell", command: Command{Run: "echo ok", Runner: &Spec{Executable: "pwsh", Args: []string{"-Command"}}}, want: "supported noninteractive argument shape"},
+		{name: "unsupported shell", command: Command{Run: "echo ok", Runner: &Spec{Executable: "python", Args: []string{"-c"}}}, want: "bare supported shell name"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := resolve(context.Background(), tt.command, Spec{}, resolverDeps{
 				platform:     "linux",
 				lookPath:     func(name string) (string, error) { return "/resolved/" + name, nil },
-				probeVersion: func(context.Context, shellKind, string) (*string, error) { return stringPointer("version"), nil },
+				probeVersion: func(context.Context, shellKind, string) (*string, error) { return stringPointer("1.0"), nil },
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("resolve() error = %v, want %q", err, tt.want)
@@ -188,6 +188,35 @@ func TestResolvedRunDistinguishesTimeoutLaunchAndExit(t *testing.T) {
 	}
 }
 
+func TestPreparedExecuteBoundsCapturedOutputAndReportsTruncation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	for _, tt := range []struct {
+		name      string
+		requested int
+		want      int
+	}{
+		{name: "smaller caller limit", requested: 1024, want: 1024},
+		{name: "safe default", requested: 0, want: maxCapturedOutputBytes},
+		{name: "hard cap", requested: 1024 * 1024, want: maxCapturedOutputBytes},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := Prepare(context.Background(), Command{Run: `head -c 131072 /dev/zero`}, Spec{}, ExecuteOptions{Timeout: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := prepared.Execute(context.Background(), ExecuteOptions{Timeout: time.Second, OutputLimit: tt.requested})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Output) != tt.want || !result.Truncated {
+				t.Fatalf("captured output = %d bytes, truncated=%t; want %d/true", len(result.Output), result.Truncated, tt.want)
+			}
+		})
+	}
+}
+
 func TestPreparedExecutePreservesParentCancellationIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fixture")
@@ -218,6 +247,64 @@ func TestPreparedExecuteMergesExtraEnvironment(t *testing.T) {
 	}
 	if !strings.HasSuffix(result.Output, ":ready") || strings.HasPrefix(result.Output, ":") {
 		t.Fatalf("merged environment output = %q", result.Output)
+	}
+	if result.Truncated {
+		t.Fatal("short output was reported as truncated")
+	}
+}
+
+func TestResolveRejectsUnsafePersistedRunnerIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		runner       Spec
+		probeVersion *string
+		want         string
+	}{
+		{
+			name:         "configured executable path",
+			runner:       Spec{Executable: "/tmp/private-token/zsh", Args: []string{"-lc"}},
+			probeVersion: stringPointer("5.9"),
+			want:         "bare supported shell name",
+		},
+		{
+			name:         "arbitrary shell argument",
+			runner:       Spec{Executable: "zsh", Args: []string{"--rcs=/tmp/private-token", "-lc"}},
+			probeVersion: stringPointer("5.9"),
+			want:         "supported argument shape",
+		},
+		{
+			name:         "arbitrary version output",
+			runner:       Spec{Executable: "zsh", Args: []string{"-lc"}},
+			probeVersion: stringPointer("secret-token 5.9"),
+			want:         "unsafe runner version",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolve(context.Background(), Command{Run: "echo ok"}, tt.runner, resolverDeps{
+				platform: "linux",
+				lookPath: func(name string) (string, error) { return "/resolved/" + filepath.Base(name), nil },
+				probeVersion: func(context.Context, shellKind, string) (*string, error) {
+					return tt.probeVersion, nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("resolve() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandValidateRunnersChecksInactivePlatformOverrides(t *testing.T) {
+	command := Command{
+		Run: "echo ok",
+		Windows: &Override{Runner: &Spec{
+			Executable: `C:\\private-token\\pwsh.exe`,
+			Args:       []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command"},
+		}},
+	}
+	if err := command.ValidateRunners(); err == nil || !strings.Contains(err.Error(), "windows runner") || !strings.Contains(err.Error(), "bare supported shell name") {
+		t.Fatalf("ValidateRunners() error = %v", err)
 	}
 }
 

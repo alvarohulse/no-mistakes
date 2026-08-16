@@ -10,6 +10,10 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 
 agent: auto
 
+runner:
+  executable: zsh
+  args: [-lc]
+
 managed: false
 
 review:
@@ -145,6 +149,17 @@ The list is filtered to entries available to the daemon at run startup, and the 
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
+
+### runner
+
+Machine-wide default shell runner for prepared commands. The value is argv-shaped: `executable` is a bare supported shell name, `args` is its supported command prefix, and the command string becomes the final argument. POSIX defaults to `sh -c`; Windows defaults to `pwsh -NoLogo -NoProfile -NonInteractive -Command`. Configure `zsh` with `[-lc]` explicitly when a machine policy intentionally requires login-shell initialization. POSIX runners accept only `[-c]` or `[-lc]`; PowerShell accepts only the documented noninteractive argument sequence. Paths and extra arguments are rejected so the persisted policy identity cannot retain machine paths or arbitrary values.
+
+Before execution, no-mistakes resolves the binary, records the canonical configured shell name, supported argument shape, platform, precedence source, and numeric shell version when one can be extracted, then validates command syntax with that shell. An unavailable binary, invalid argv, version-probe failure, or syntax failure is fatal; it never falls back to another shell. Resolved machine paths, full version output, and environment values are not persisted. Combined command diagnostics are bounded and report when truncation occurred.
+
+|         |                                      |
+| ------- | ------------------------------------ |
+| Type    | `{ executable: string, args: [] }`   |
+| Default | `sh -c` (POSIX), `pwsh` (Windows)    |
 
 ### Per-step agent and model routes
 

@@ -22,6 +22,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -157,6 +158,11 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	if err := cfg.ValidateManagedStepPlan(stepNames); err != nil {
 		return nil, fmt.Errorf("resolve managed step plan: %w", err)
 	}
+	resolvedRunner, err := runner.ResolveDefault(ctx, cfg.Runner)
+	if err != nil {
+		return nil, fmt.Errorf("resolve default runner: %w", err)
+	}
+	cfg.ResolvedRunner = &resolvedRunner
 	if !demo {
 		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
 			return nil, fmt.Errorf("resolve agent routes: %w", err)
@@ -317,7 +323,7 @@ func pushedConfigUsesDifferentTrustedControls(pushed, effective *config.RepoConf
 	if pushed == nil || effective == nil {
 		return false
 	}
-	return pushed.Commands != effective.Commands ||
+	return !pushed.Commands.Equal(effective.Commands) ||
 		pushed.Hooks != effective.Hooks ||
 		pushed.Agent != effective.Agent ||
 		!agentListsEqual(pushed.Agents, effective.Agents) ||

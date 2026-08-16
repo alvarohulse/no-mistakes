@@ -8,6 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -131,6 +132,108 @@ func TestValidateResolvedPolicyAcceptsVersionOneSnapshotWithoutAdversary(t *test
 	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
 	if err := validateResolvedPolicy(cfg, run, policySteps); err != nil {
 		t.Fatalf("version-one policy rejected: %v", err)
+	}
+}
+
+func TestValidateResolvedPolicyAcceptsVersionTwoLegacyRunner(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	policySteps := []pipeline.Step{policyTestStep{name: types.StepReview}, policyTestStep{name: types.StepBuild}}
+	policy, err := resolvedPolicyFromConfig(cfg, nil, policySteps, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 2
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+	if err := validateResolvedPolicy(cfg, run, policySteps); err != nil {
+		t.Fatalf("version-two policy rejected: %v", err)
+	}
+}
+
+func TestResolvedPolicyCarriesRunnerProvenanceAndStructuredCommands(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	repo, err := config.LoadRepoFromBytes([]byte(`
+commands:
+  build:
+    run: make build
+    runner: {executable: zsh, args: [-lc]}
+    linux: make build-linux
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Commands = repo.Commands
+	version := "5.8.1"
+	cfg.ResolvedRunner = &runner.Provenance{
+		SchemaVersion: runner.SchemaVersion,
+		Platform:      "linux",
+		Source:        runner.SourceDefault,
+		Executable:    "zsh",
+		Args:          []string{"-lc"},
+		Version:       &version,
+	}
+	policySteps := []pipeline.Step{policyTestStep{name: types.StepReview}, policyTestStep{name: types.StepBuild}}
+	encoded, digest, err := marshalResolvedPolicy(cfg, nil, policySteps, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{`"schema_version":1`, `"executable":"zsh"`, `"version":"5.8.1"`, `"definitions":{"build"`, `"linux":{"run":"make build-linux"`} {
+		if !strings.Contains(encoded, required) {
+			t.Fatalf("resolved policy omitted %s: %s", required, encoded)
+		}
+	}
+	if strings.Contains(encoded, "/usr/bin/zsh") {
+		t.Fatalf("resolved policy leaked machine path: %s", encoded)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+	if err := validateResolvedPolicy(cfg, run, policySteps); err != nil {
+		t.Fatalf("runner policy round trip failed: %v", err)
+	}
+	changedVersion := "5.9"
+	cfg.ResolvedRunner.Version = &changedVersion
+	if err := validateResolvedPolicy(cfg, run, policySteps); err == nil || !strings.Contains(err.Error(), "differs from launch") {
+		t.Fatalf("runner drift error = %v", err)
+	}
+}
+
+func TestDecodeResolvedPolicyRejectsInvalidRunnerProvenance(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	version := "zsh 5.8.1"
+	cfg.ResolvedRunner = &runner.Provenance{
+		SchemaVersion: runner.SchemaVersion + 1,
+		Platform:      "linux",
+		Source:        runner.SourceDefault,
+		Executable:    "zsh",
+		Args:          []string{"-lc"},
+		Version:       &version,
+	}
+	_, _, err := marshalResolvedPolicy(cfg, nil, []pipeline.Step{policyTestStep{name: types.StepReview}}, nil, types.RefreshStrategyRebase, false)
+	if err == nil || !strings.Contains(err.Error(), "runner schema version") {
+		t.Fatalf("marshal error = %v, want invalid runner schema", err)
+	}
+}
+
+func TestResolvedPolicyRejectsUnsafeInactiveRunnerDefinition(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	repo, loadErr := config.LoadRepoFromBytes([]byte(`
+commands:
+  build:
+    run: make build
+    windows:
+      runner:
+        executable: C:\\private-token\\pwsh.exe
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+`))
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	cfg.Commands = repo.Commands
+	_, _, err := marshalResolvedPolicy(cfg, nil, []pipeline.Step{policyTestStep{name: types.StepReview}}, nil, types.RefreshStrategyRebase, false)
+	if err == nil || !strings.Contains(err.Error(), "windows runner") || !strings.Contains(err.Error(), "bare supported shell name") {
+		t.Fatalf("marshal error = %v", err)
 	}
 }
 

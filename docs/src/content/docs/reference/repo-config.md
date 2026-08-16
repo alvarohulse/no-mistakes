@@ -295,13 +295,41 @@ This field is honored **only from the trusted default-branch copy** of `.no-mist
 A pushed branch cannot enable it or disable a trusted opt-in.
 If the trusted commit or its present config file cannot be read and parsed, the run aborts rather than guessing that the option is disabled.
 
+### Structured command form
+
+Every `commands.*` value keeps accepting its legacy scalar string. It can also use the shared structured shape:
+
+```yaml
+commands:
+  build:
+    run: make build
+    runner: {executable: zsh, args: [-lc]}
+    linux:
+      run: make build-linux
+    macos:
+      runner: {executable: zsh, args: [-lc]}
+    windows:
+      run: npm run build:windows
+      runner:
+        executable: pwsh
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+```
+
+Platform fields override `run` and `runner` independently. Resolution precedence is the matching `linux`/`macos`/`windows` field, the command's inline `runner`, the global default runner, then the portable product default. Scalar machine overrides still replace or clear the entire command; mapping overrides merge only explicitly present nested fields.
+
+Runner identities use the same secret-free contract as the global default: `sh`, `bash`, or `zsh` with `[-c]` or `[-lc]`, and `pwsh` or `powershell` with `[-NoLogo, -NoProfile, -NonInteractive, -Command]`. Executable paths and extra arguments are rejected, including in inactive platform overrides, because the full structured definition is persisted in the resolved policy.
+
+This schema is active for trusted preflight commands. Build, Test, Lint, and Format retain their existing `sh -c` / `cmd.exe /c` execution path until their dedicated migration; for those four fields, structured runner/platform metadata is preserved and explained but the compatibility `run` value remains the executed command.
+
+Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
+
 ### commands.build
 
 Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans the appropriate build command) |
 
 When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding and kept in full in the Build step log.
@@ -332,7 +360,7 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans the smallest relevant test command) |
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
@@ -348,7 +376,7 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans a lint command) |
 
 When set, the lint step runs this exact command and checks the exit code.
@@ -360,7 +388,7 @@ Formatter command run before the push step commits agent fixes.
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (no separate push-step formatter) |
 
 This remains separate from the Lint step's planned or configured command.

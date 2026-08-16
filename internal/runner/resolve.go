@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -14,6 +14,9 @@ import (
 )
 
 const versionProbeTimeout = 5 * time.Second
+
+var runnerVersionPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,3}$`)
+var runnerVersionSearchPattern = regexp.MustCompile(`[0-9]+(?:\.[0-9]+){1,3}`)
 
 type shellKind string
 
@@ -164,6 +167,9 @@ func resolveSpec(ctx context.Context, spec Spec, source, platform string, deps r
 	if err != nil {
 		return Provenance{}, "", fmt.Errorf("probe runner version %q: %w", path, err)
 	}
+	if err := ValidateVersion(version); err != nil {
+		return Provenance{}, "", err
+	}
 	return Provenance{
 		SchemaVersion: SchemaVersion,
 		Platform:      platform,
@@ -191,45 +197,47 @@ func validateSpec(spec Spec) (shellKind, error) {
 		}
 	}
 
-	name := strings.ToLower(filepath.Base(executable))
-	name = strings.TrimSuffix(name, ".exe")
+	name := strings.ToLower(executable)
 	switch name {
 	case "sh", "bash", "zsh":
-		if !endsWithPOSIXCommandFlag(spec.Args) {
-			return "", fmt.Errorf("runner %s arguments must end with a command flag such as -c or -lc", name)
+		if len(spec.Args) != 1 || (spec.Args[0] != "-c" && spec.Args[0] != "-lc") {
+			return "", fmt.Errorf("runner %s must use a supported argument shape: -c or -lc", name)
 		}
 		return shellPOSIX, nil
 	case "pwsh", "powershell":
-		if !containsFold(spec.Args, "-NonInteractive") {
-			return "", fmt.Errorf("runner %s arguments must include -NonInteractive", name)
+		want := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command"}
+		if len(spec.Args) != len(want) {
+			return "", fmt.Errorf("runner %s must use the supported noninteractive argument shape", name)
 		}
-		if len(spec.Args) == 0 || !strings.EqualFold(spec.Args[len(spec.Args)-1], "-Command") {
-			return "", fmt.Errorf("runner %s arguments must end with -Command", name)
+		for i := range want {
+			if !strings.EqualFold(spec.Args[i], want[i]) {
+				return "", fmt.Errorf("runner %s must use the supported noninteractive argument shape", name)
+			}
 		}
 		return shellPowerShell, nil
 	default:
-		return "", fmt.Errorf("unsupported runner %q; use sh, bash, zsh, pwsh, or powershell", spec.Executable)
+		return "", fmt.Errorf("runner executable must be a bare supported shell name (sh, bash, zsh, pwsh, or powershell), got %q", spec.Executable)
 	}
 }
 
-func endsWithPOSIXCommandFlag(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	last := args[len(args)-1]
-	if last == "-c" {
-		return true
-	}
-	return strings.HasPrefix(last, "-") && !strings.HasPrefix(last, "--") && strings.Contains(last[1:], "c")
+// ValidateSpec rejects runner material that cannot be persisted as a
+// secret-free, machine-independent policy identity.
+func ValidateSpec(spec Spec) error {
+	_, err := validateSpec(spec)
+	return err
 }
 
-func containsFold(values []string, expected string) bool {
-	for _, value := range values {
-		if strings.EqualFold(value, expected) {
-			return true
-		}
+// ValidateVersion accepts only the numeric identity extracted from a shell's
+// version output. The full command output can contain machine paths or other
+// arbitrary text and must never enter a policy snapshot.
+func ValidateVersion(version *string) error {
+	if version == nil {
+		return nil
 	}
-	return false
+	if !runnerVersionPattern.MatchString(*version) {
+		return fmt.Errorf("unsafe runner version %q; expected a numeric dotted version", *version)
+	}
+	return nil
 }
 
 func normalizePlatform(platform string) (string, error) {
@@ -279,12 +287,7 @@ func probeShellVersion(ctx context.Context, kind shellKind, executable string) (
 		}
 		return nil, err
 	}
-	version := strings.Join(strings.Fields(output.String()), " ")
-	const maxVersionRunes = 256
-	runes := []rune(version)
-	if len(runes) > maxVersionRunes {
-		version = string(runes[:maxVersionRunes])
-	}
+	version := runnerVersionSearchPattern.FindString(output.String())
 	if version == "" {
 		return nil, nil
 	}

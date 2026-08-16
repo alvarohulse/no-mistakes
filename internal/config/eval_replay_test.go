@@ -58,7 +58,7 @@ func TestEvalReplayConfigRoundTripsOnlyRequiredReviewInputs(t *testing.T) {
 	if !reflect.DeepEqual(replayed.Review.PathInstructions, cfg.Review.PathInstructions) {
 		t.Fatalf("replayed path instructions = %#v", replayed.Review.PathInstructions)
 	}
-	if replayed.AgentPathOverride != nil || replayed.AgentArgsOverride != nil || replayed.Commands != (Commands{}) || replayed.Hooks != (Hooks{}) || replayed.Test.Evidence.LocalRoot != "" {
+	if replayed.AgentPathOverride != nil || replayed.AgentArgsOverride != nil || !replayed.Commands.IsZero() || replayed.Hooks != (Hooks{}) || replayed.Test.Evidence.LocalRoot != "" {
 		t.Fatalf("replayed config retained non-review inputs: %#v", replayed)
 	}
 }

@@ -16,11 +16,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	resolvedPolicyVersion     = 2
+	resolvedPolicyVersion     = 3
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -59,18 +60,23 @@ type resolvedPolicyStep struct {
 }
 
 type resolvedPolicyCommands struct {
-	Build        string `json:"build"`
-	Test         string `json:"test"`
-	Lint         string `json:"lint"`
-	Format       string `json:"format"`
-	PostWorktree string `json:"post_worktree"`
-	PRBody       string `json:"pr_body"`
+	Build        string                    `json:"build"`
+	Test         string                    `json:"test"`
+	Lint         string                    `json:"lint"`
+	Format       string                    `json:"format"`
+	PostWorktree string                    `json:"post_worktree"`
+	PRBody       string                    `json:"pr_body"`
+	Definitions  map[string]runner.Command `json:"definitions,omitempty"`
 }
 
 type resolvedPolicyRunner struct {
-	Kind     string `json:"kind"`
-	Platform string `json:"platform"`
-	Version  string `json:"version"`
+	SchemaVersion int      `json:"schema_version,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
+	Platform      string   `json:"platform"`
+	Source        string   `json:"source,omitempty"`
+	Executable    string   `json:"executable,omitempty"`
+	Args          []string `json:"args,omitempty"`
+	Version       *string  `json:"version"`
 }
 
 type resolvedPolicyBudgets struct {
@@ -239,16 +245,17 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 	return nil
 }
 
-// Version 1 predates managed routing and Review candidate pools. Its missing
-// fields already decode to their legacy zero values; only schema versions need
+// Versions 1 and 2 predate managed routing or resolved runner provenance. Their
+// missing fields decode to legacy zero values; only schema versions need
 // normalization before semantic comparison with a policy rebuilt by this binary.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
-	if policy.Version != 1 {
-		return
+	if policy.Version == 1 {
+		if policy.Routing.Version == 1 {
+			policy.Routing.Version = resolvedAgentRoutingVersion
+		}
 	}
-	policy.Version = resolvedPolicyVersion
-	if policy.Routing.Version == 1 {
-		policy.Routing.Version = resolvedAgentRoutingVersion
+	if policy.Version == 1 || policy.Version == 2 {
+		policy.Version = resolvedPolicyVersion
 	}
 }
 
@@ -287,10 +294,10 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 		Steps:   resolvedSteps,
 		Commands: resolvedPolicyCommands{
 			Build: cfg.Commands.Build, Test: cfg.Commands.Test, Lint: cfg.Commands.Lint, Format: cfg.Commands.Format,
-			PostWorktree: cfg.Hooks.PostWorktree, PRBody: cfg.Hooks.PRBody,
+			PostWorktree: cfg.Hooks.PostWorktree, PRBody: cfg.Hooks.PRBody, Definitions: cfg.Commands.StructuredDefinitions(),
 		},
 		Routing: *routing,
-		Runner:  resolvedPolicyRunner{Kind: "legacy-platform-default", Platform: runtime.GOOS, Version: "1"},
+		Runner:  resolvedPolicyRunnerFromConfig(cfg),
 		Budgets: resolvedPolicyBudgets{
 			AutoFix: resolvedPolicyAutoFix{
 				Lint: cfg.AutoFix.Lint, Build: cfg.AutoFix.Build, Test: cfg.AutoFix.Test, Review: cfg.AutoFix.Review,
@@ -335,7 +342,7 @@ func resolvedPolicyFromConfig(cfg *config.Config, sources []db.ConfigSource, ste
 }
 
 func (p *resolvedPolicy) validate() error {
-	if p.Version != 1 && p.Version != resolvedPolicyVersion {
+	if p.Version != 1 && p.Version != 2 && p.Version != resolvedPolicyVersion {
 		return fmt.Errorf("resolved policy version %d is unsupported", p.Version)
 	}
 	if strings.TrimSpace(p.Binary.Version) == "" || strings.TrimSpace(p.Binary.BuildSHA) == "" {
@@ -357,6 +364,27 @@ func (p *resolvedPolicy) validate() error {
 			return fmt.Errorf("resolved policy step %q has unsupported status %q", step.Name, step.Status)
 		}
 	}
+	for name, definition := range p.Commands.Definitions {
+		var legacy string
+		switch name {
+		case "build":
+			legacy = p.Commands.Build
+		case "test":
+			legacy = p.Commands.Test
+		case "lint":
+			legacy = p.Commands.Lint
+		case "format":
+			legacy = p.Commands.Format
+		default:
+			return fmt.Errorf("resolved policy contains unsupported command definition %q", name)
+		}
+		if definition.Run != legacy || definition.Equal(runner.Command{Run: definition.Run}) {
+			return fmt.Errorf("resolved policy command definition %q is inconsistent", name)
+		}
+		if err := definition.ValidateRunners(); err != nil {
+			return fmt.Errorf("resolved policy command definition %q: %w", name, err)
+		}
+	}
 	if err := p.Routing.validate(); err != nil {
 		return err
 	}
@@ -365,8 +393,8 @@ func (p *resolvedPolicy) validate() error {
 			return err
 		}
 	}
-	if strings.TrimSpace(p.Runner.Kind) == "" || strings.TrimSpace(p.Runner.Platform) == "" || strings.TrimSpace(p.Runner.Version) == "" {
-		return fmt.Errorf("resolved policy runner identity is incomplete")
+	if err := p.Runner.validate(); err != nil {
+		return err
 	}
 	if _, err := types.ParseRefreshStrategy(string(p.RefreshStrategy)); err != nil || p.RefreshStrategy == "" {
 		return fmt.Errorf("resolved policy refresh strategy is invalid")
@@ -406,6 +434,49 @@ func (p *resolvedPolicy) validate() error {
 				return fmt.Errorf("resolved policy global override source is incomplete")
 			}
 		}
+	}
+	return nil
+}
+
+func resolvedPolicyRunnerFromConfig(cfg *config.Config) resolvedPolicyRunner {
+	if cfg.ResolvedRunner == nil {
+		version := "1"
+		return resolvedPolicyRunner{Kind: "legacy-platform-default", Platform: runtime.GOOS, Version: &version}
+	}
+	resolved := cfg.ResolvedRunner
+	var version *string
+	if resolved.Version != nil {
+		value := *resolved.Version
+		version = &value
+	}
+	return resolvedPolicyRunner{
+		SchemaVersion: resolved.SchemaVersion,
+		Platform:      resolved.Platform,
+		Source:        resolved.Source,
+		Executable:    resolved.Executable,
+		Args:          append([]string(nil), resolved.Args...),
+		Version:       version,
+	}
+}
+
+func (r resolvedPolicyRunner) validate() error {
+	if r.SchemaVersion == 0 {
+		if strings.TrimSpace(r.Kind) == "" || strings.TrimSpace(r.Platform) == "" || r.Version == nil || strings.TrimSpace(*r.Version) == "" {
+			return fmt.Errorf("resolved policy runner identity is incomplete")
+		}
+		return nil
+	}
+	if r.SchemaVersion != runner.SchemaVersion {
+		return fmt.Errorf("resolved policy runner schema version %d is unsupported", r.SchemaVersion)
+	}
+	if r.Kind != "" || strings.TrimSpace(r.Platform) == "" || strings.TrimSpace(r.Source) == "" || strings.TrimSpace(r.Executable) == "" || len(r.Args) == 0 {
+		return fmt.Errorf("resolved policy runner provenance is incomplete")
+	}
+	if err := runner.ValidateSpec(runner.Spec{Executable: r.Executable, Args: r.Args}); err != nil {
+		return fmt.Errorf("resolved policy runner provenance: %w", err)
+	}
+	if err := runner.ValidateVersion(r.Version); err != nil {
+		return fmt.Errorf("resolved policy runner provenance: %w", err)
 	}
 	return nil
 }
