@@ -35,6 +35,13 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertFails(fixture.upstream)
 	})
 
+	t.Run("altered then restored generated entry fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.pr, "docs: edit changelog", map[string]string{"CHANGELOG.md": "manual\n"})
+		fixture.commit(fixture.pr, "docs: restore changelog", map[string]string{"CHANGELOG.md": "# Changelog\n"})
+		fixture.assertFails(fixture.upstream)
+	})
+
 	t.Run("renaming a generated file fails", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.git(fixture.pr, "mv", "CHANGELOG.md", "CHANGELOG.old")
@@ -158,6 +165,30 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("trusted workflow must not use untrusted value %q", forbidden)
+		}
+	}
+
+	baseValidation := `checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')
+          if [ "$checked_out_base" != "$BASE_SHA" ]; then
+            echo "::error::Checked-out pull request base does not match the event" >&2
+            exit 1
+          fi`
+	validationStart := strings.Index(workflow, baseValidation)
+	if validationStart == -1 {
+		t.Fatal("trusted workflow must validate the checked-out base before using it")
+	}
+	validationEnd := validationStart + len(baseValidation)
+	for _, operation := range []string{
+		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
+		`sh "$trusted_script"`,
+	} {
+		operationStart := strings.Index(workflow, operation)
+		if operationStart == -1 {
+			t.Errorf("trusted workflow must contain %q", operation)
+			continue
+		}
+		if operationStart < validationEnd {
+			t.Errorf("trusted workflow must validate the checked-out base before %q", operation)
 		}
 	}
 }

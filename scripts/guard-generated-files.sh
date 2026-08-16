@@ -42,21 +42,33 @@ set -- $merge_bases
 if [ "$#" -ne 1 ]; then
   fail "PR base and head must have exactly one merge base"
 fi
-merge_base=$1
 
-if ! files=$(git diff --no-renames --name-only "$merge_base" "$HEAD_SHA"); then
-  fail "could not compute the PR file list"
+if ! pr_commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}"); then
+  fail "could not enumerate PR commits"
 fi
 
 generated_files_changed=false
-while IFS= read -r path; do
-  if [ "$path" = CHANGELOG.md ] || [ "$path" = .release-please-manifest.json ]; then
+for commit in $pr_commits; do
+  if ! commit_and_parents=$(git rev-list --parents -n 1 "$commit"); then
+    fail "could not inspect PR commit parents"
+  fi
+  set -- $commit_and_parents
+  if [ "$1" != "$commit" ]; then
+    fail "could not verify PR commit identity"
+  fi
+  if [ "$#" -lt 2 ]; then
+    fail "PR commit has no parent"
+  fi
+  first_parent=$2
+  if ! changed_generated_files=$(git diff --no-renames --name-only \
+    "$first_parent" "$commit" -- CHANGELOG.md .release-please-manifest.json); then
+    fail "could not inspect generated entries in PR history"
+  fi
+  if [ -n "$changed_generated_files" ]; then
     generated_files_changed=true
     break
   fi
-done <<EOF
-$files
-EOF
+done
 
 if [ "$generated_files_changed" = false ]; then
   echo "No release-please-generated files modified. OK."
@@ -69,9 +81,6 @@ if ! git fetch --no-tags --force "$CANONICAL_UPSTREAM_URL" \
 fi
 if ! canonical_main=$(git rev-parse --verify "${CANONICAL_REF}^{commit}"); then
   fail "canonical upstream main did not resolve to a commit"
-fi
-if ! pr_commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}"); then
-  fail "could not enumerate PR commits"
 fi
 
 expected_files=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md | LC_ALL=C sort)
