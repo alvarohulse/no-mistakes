@@ -36,6 +36,9 @@ func TestResolveReleaseState(t *testing.T) {
 			t.Fatalf("recover exact draft: %v\n%s", err, output)
 		}
 		fixture.assertRelease(t, outputs)
+		if calls := fixture.ghCalls(t); calls != "api --paginate --slurp repos/owner/repo/releases?per_page=100" {
+			t.Fatalf("hosted release lookup = %q, want paginated release enumeration", calls)
+		}
 	})
 
 	t.Run("does not recover a tag from an older commit", func(t *testing.T) {
@@ -77,6 +80,20 @@ func TestResolveReleaseState(t *testing.T) {
 		}
 		if outputs["release_created"] != "false" {
 			t.Fatalf("release_created = %q, want false", outputs["release_created"])
+		}
+	})
+
+	t.Run("rejects ambiguous hosted state for the exact tag", func(t *testing.T) {
+		fixture := newReleaseStateFixture(t, true)
+		first := releaseStateDraftJSON()
+		second := releaseStateDraftJSON()
+		second["id"] = 456
+		_, output, err := fixture.runReleases("", "", "", first, second)
+		if err == nil {
+			t.Fatalf("resolver should reject ambiguous exact-tag releases\n%s", output)
+		}
+		if !strings.Contains(output, "hosted release state is ambiguous") {
+			t.Fatalf("resolver failure = %q, want ambiguous-state error", output)
 		}
 	})
 
@@ -136,7 +153,6 @@ func TestResolveReleaseState(t *testing.T) {
 			name   string
 			mutate func(map[string]any)
 		}{
-			{name: "wrong tag", mutate: func(release map[string]any) { release["tag_name"] = "v9.9.9" }},
 			{name: "prerelease", mutate: func(release map[string]any) { release["prerelease"] = true }},
 			{name: "wrong author", mutate: func(release map[string]any) {
 				release["author"] = map[string]any{"login": "maintainer", "type": "User"}
@@ -160,12 +176,25 @@ func TestResolveReleaseState(t *testing.T) {
 
 	t.Run("fails when an exact tag has no hosted release", func(t *testing.T) {
 		fixture := newReleaseStateFixture(t, true)
-		_, output, err := fixture.runWithGHExit("", "", "", 1)
+		unrelated := releaseStateDraftJSON()
+		unrelated["tag_name"] = "v9.9.9"
+		_, output, err := fixture.run("", "", "", unrelated)
 		if err == nil {
 			t.Fatalf("resolver should reject an exact tag without a release\n%s", output)
 		}
 		if !strings.Contains(output, "exact release tag exists without a readable hosted release") {
 			t.Fatalf("resolver failure = %q, want partial-release error", output)
+		}
+	})
+
+	t.Run("fails when hosted releases cannot be enumerated", func(t *testing.T) {
+		fixture := newReleaseStateFixture(t, true)
+		_, output, err := fixture.runWithGHExit("", "", "", 1)
+		if err == nil {
+			t.Fatalf("resolver should reject an unreadable release inventory\n%s", output)
+		}
+		if !strings.Contains(output, "could not enumerate hosted releases") {
+			t.Fatalf("resolver failure = %q, want release-enumeration error", output)
 		}
 	})
 }
@@ -209,7 +238,11 @@ func newReleaseStateFixture(t *testing.T, tagTrigger bool) *releaseStateFixture 
 }
 
 func (f *releaseStateFixture) run(actionCreated, actionTag, actionVersion string, release map[string]any) (map[string]string, string, error) {
-	data, err := json.Marshal(release)
+	return f.runReleases(actionCreated, actionTag, actionVersion, release)
+}
+
+func (f *releaseStateFixture) runReleases(actionCreated, actionTag, actionVersion string, releases ...map[string]any) (map[string]string, string, error) {
+	data, err := json.Marshal([][]map[string]any{releases})
 	if err != nil {
 		return nil, "", err
 	}

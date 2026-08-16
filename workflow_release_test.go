@@ -92,6 +92,9 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		`"$GITHUB_SHA"`,
 		`"$head_sha"`,
 		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
+		`refs/tags/no-mistakes/generated-file-provenance/${head_sha}`,
+		`repos/${GITHUB_REPOSITORY}/git/refs`,
+		`repos/${GITHUB_REPOSITORY}/git/ref/tags/no-mistakes/generated-file-provenance/${head_sha}`,
 		"Generated files must not be hand-edited",
 		"latest_head_sha",
 	} {
@@ -117,6 +120,7 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		`sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"`,
 		"latest_head_sha=$(gh api",
 		`require_live_main "before attestation publication"`,
+		`attestation_ref="refs/tags/no-mistakes/generated-file-provenance/${head_sha}"`,
 		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
 	}
 	previous := -1
@@ -194,15 +198,9 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 		if job == nil {
 			t.Fatalf("release workflow must define %s", name)
 		}
-		hasProvenanceNeed := false
-		for _, need := range job.needs() {
-			if need == "release-pr-provenance" {
-				hasProvenanceNeed = true
-				break
-			}
-		}
-		if !hasProvenanceNeed {
-			t.Errorf("%s must wait for release provenance", name)
+		needs := job.needs()
+		if len(needs) != 1 || needs[0] != "release-please" {
+			t.Errorf("%s needs = %v, want [release-please] so draft recovery is independent", name, needs)
 		}
 	}
 }

@@ -95,24 +95,48 @@ if [ "$tag_sha" != "$trigger_sha" ]; then
   exit 0
 fi
 
-release_json=$(mktemp)
+release_pages=$(mktemp)
+release_matches=$(mktemp)
 cleanup() {
-  rm -f "$release_json"
+  rm -f "$release_pages" "$release_matches"
 }
 trap cleanup 0 1 2 15
 
-if ! gh api "repos/${repository}/releases/tags/${expected_tag}" > "$release_json"; then
-  fail 'exact release tag exists without a readable hosted release'
+if ! gh api --paginate --slurp \
+  "repos/${repository}/releases?per_page=100" > "$release_pages"; then
+  fail 'could not enumerate hosted releases'
 fi
 
+if ! jq -e --arg tag "$expected_tag" '
+  if type == "array" and all(.[]; type == "array")
+  then [.[][] | select(.tag_name == $tag)]
+  else error("invalid release inventory")
+  end
+' "$release_pages" > "$release_matches" 2>/dev/null; then
+  fail 'hosted release inventory is invalid'
+fi
+
+release_count=$(jq -er 'length' "$release_matches" 2>/dev/null) ||
+  fail 'hosted release inventory is invalid'
+case "$release_count" in
+  0)
+    fail 'exact release tag exists without a readable hosted release'
+    ;;
+  1) ;;
+  *)
+    fail 'hosted release state is ambiguous for the exact release tag'
+    ;;
+esac
+
 release_draft=$(jq -er --arg tag "$expected_tag" '
-  if type == "object" and
-    (.id | type == "number") and (.id > 0) and
-    (.tag_name == $tag) and (.draft | type == "boolean")
-  then (.draft | tostring)
+  .[0] as $release |
+  if ($release | type == "object") and
+    ($release.id | type == "number") and ($release.id > 0) and
+    ($release.tag_name == $tag) and ($release.draft | type == "boolean")
+  then ($release.draft | tostring)
   else error("invalid release")
   end
-' "$release_json" 2>/dev/null) ||
+' "$release_matches" 2>/dev/null) ||
   fail 'exact draft release does not match the trusted release-please contract'
 
 if [ "$release_draft" = false ]; then
@@ -124,12 +148,15 @@ if [ "$release_draft" = false ]; then
 fi
 
 if ! jq -e --arg tag "$expected_tag" '
-  type == "object" and
-  (.id | type == "number") and (.id > 0) and
-  (.tag_name == $tag) and (.draft == true) and (.prerelease == false) and
-  (.author | type == "object") and
-  (.author.login == "github-actions[bot]") and (.author.type == "Bot")
-' "$release_json" >/dev/null; then
+  .[0] as $release |
+  ($release | type == "object") and
+  ($release.id | type == "number") and ($release.id > 0) and
+  ($release.tag_name == $tag) and ($release.draft == true) and
+  ($release.prerelease == false) and
+  ($release.author | type == "object") and
+  ($release.author.login == "github-actions[bot]") and
+  ($release.author.type == "Bot")
+' "$release_matches" >/dev/null; then
   fail 'exact draft release does not match the trusted release-please contract'
 fi
 

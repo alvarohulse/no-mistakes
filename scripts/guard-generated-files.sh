@@ -4,6 +4,8 @@ set -eu
 
 PROVENANCE_BOOTSTRAP_COMMIT=cf50e0a35e0e635d114dbaeedd496374482d2c16
 PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT=db354ad276cb8dce961802d7091a5d618b2417b2
+PROVENANCE_TAG_PREFIX=refs/tags/no-mistakes/generated-file-provenance
+PROVENANCE_REF_PREFIX=refs/no-mistakes/guard-generated-files/authenticated-releases
 MAX_PR_COMMITS=512
 MAX_PR_COMMIT_PARENTS=32
 MAX_PR_GENERATED_CHANGES=128
@@ -503,6 +505,7 @@ CANONICAL_UPSTREAM_URL=$3
 PENDING_RELEASE_SHA=${4-}
 CANONICAL_REF=refs/no-mistakes/guard-generated-files/canonical-main
 pending_release_candidate=
+expected_files=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md | LC_ALL=C sort)
 
 if ! verified_base=$(git rev-parse --verify "${BASE_SHA}^{commit}"); then
   fail "PR base is not a commit"
@@ -538,15 +541,69 @@ if ! generated_entries_are_regular "$base_entries" || ! generated_entries_are_re
   fail "the PR base and head must contain both generated files as regular non-executable blobs"
 fi
 
-if ! git fetch --no-tags --force "$CANONICAL_UPSTREAM_URL" \
-  "+refs/heads/main:${CANONICAL_REF}"; then
+if ! git fetch --no-tags --force --prune "$CANONICAL_UPSTREAM_URL" \
+  "+refs/heads/main:${CANONICAL_REF}" \
+  "+${PROVENANCE_TAG_PREFIX}/*:${PROVENANCE_REF_PREFIX}/*"; then
   fail "could not fetch canonical upstream main"
 fi
 if ! canonical_main=$(git rev-parse --verify "${CANONICAL_REF}^{commit}"); then
   fail "canonical upstream main did not resolve to a commit"
 fi
 
-expected_files=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md | LC_ALL=C sort)
+if ! authenticated_release_refs=$(git for-each-ref \
+  --format='%(refname) %(objecttype) %(objectname)' \
+  "${PROVENANCE_REF_PREFIX}/"); then
+  fail "could not enumerate authenticated release provenance"
+fi
+authenticated_candidate_records=
+while IFS=' ' read -r authenticated_ref authenticated_type authenticated_sha; do
+  if [ -z "$authenticated_ref" ]; then
+    continue
+  fi
+  case "$authenticated_ref" in
+    "${PROVENANCE_REF_PREFIX}/"*) ;;
+    *) fail "authenticated release provenance has an invalid ref" ;;
+  esac
+  authenticated_ref_sha=${authenticated_ref#"${PROVENANCE_REF_PREFIX}/"}
+  if ! printf '%s\n' "$authenticated_ref_sha" | grep -Eq '^[0-9a-f]{40}$' ||
+    [ "$authenticated_type" != commit ] ||
+    [ "$authenticated_sha" != "$authenticated_ref_sha" ]; then
+    fail "authenticated release provenance does not name its exact commit"
+  fi
+  if ! authenticated_commit_and_parent=$(git rev-list --parents -n 1 "$authenticated_sha"); then
+    fail "could not inspect authenticated release provenance"
+  fi
+  set -- $authenticated_commit_and_parent
+  if [ "$#" -ne 2 ] || [ "$1" != "$authenticated_sha" ]; then
+    fail "authenticated release provenance must identify a single-parent commit"
+  fi
+  authenticated_parent=$2
+  if ! authenticated_files=$(git diff --no-renames --name-only \
+    "$authenticated_parent" "$authenticated_sha"); then
+    fail "could not inspect authenticated release provenance files"
+  fi
+  authenticated_files=$(printf '%s\n' "$authenticated_files" | LC_ALL=C sort)
+  if [ "$authenticated_files" != "$expected_files" ]; then
+    fail "authenticated release provenance must change only the generated files"
+  fi
+  if ! authenticated_entries=$(generated_entries "$authenticated_sha"); then
+    fail "could not inspect authenticated release provenance entries"
+  fi
+  if ! generated_entries_are_regular "$authenticated_entries"; then
+    fail "authenticated release provenance entries must be regular non-executable blobs"
+  fi
+  if ! authenticated_tuple=$(generated_entries_tuple "$authenticated_entries"); then
+    exit 1
+  fi
+  if [ -z "$authenticated_candidate_records" ]; then
+    authenticated_candidate_records="${authenticated_sha} ${authenticated_tuple}"
+  else
+    authenticated_candidate_records="${authenticated_candidate_records}
+${authenticated_sha} ${authenticated_tuple}"
+  fi
+done <<EOF
+$authenticated_release_refs
+EOF
 
 if ! canonical_generated_commits=$(git rev-list \
   --full-history \
@@ -613,6 +670,14 @@ while [ "$#" -gt 0 ]; do
   canonical_candidates="${canonical_candidates} ${commit}"
   if ! candidate_tuple=$(generated_entries_tuple "$candidate_entries"); then
     exit 1
+  fi
+  if ! is_ancestor "$commit" "$PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT"; then
+    if ! printf '%s\n' "$authenticated_candidate_records" | awk -v tuple="$candidate_tuple" '
+      NF == 2 && $2 == tuple { found = 1 }
+      END { exit found ? 0 : 1 }
+    '; then
+      fail "canonical release candidate lacks authenticated release provenance"
+    fi
   fi
   if [ -z "$canonical_candidate_records" ]; then
     canonical_candidate_records="${commit} ${candidate_tuple}"

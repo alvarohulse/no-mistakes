@@ -19,6 +19,7 @@ const (
 	guardBootstrapAdoptionParent         = "51463ebddddce564f122f6b3cfbc74af22cafd4d"
 	guardBootstrapCanonical              = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
 	guardBootstrapOlderCanonical         = "867d64d9c2df89f3f204ad1f5528e5bf7b460caa"
+	guardProvenanceTagPrefix             = "no-mistakes/generated-file-provenance/"
 	guardAdditionalTrustedHistoryCommits = 327
 	guardMaxPRCommits                    = 512
 	guardChangelogV1                     = "# Changelog\n\n## 1.1.0\n"
@@ -71,6 +72,37 @@ func TestGeneratedFileGuard(t *testing.T) {
 		output, err := runGeneratedGuard(t, fixture.pr, fixture.script, fixture.base, head, fixture.upstream, head)
 		if err == nil {
 			t.Fatalf("guard should reject an authenticated pending release with source changes\n%s", output)
+		}
+	})
+
+	t.Run("authenticated pending release remains trusted after a host rewrite", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		pending := fixture.commit(fixture.pr, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		output, err := runGeneratedGuard(t, fixture.pr, fixture.script, fixture.base, pending, fixture.upstream, pending)
+		if err != nil {
+			t.Fatalf("guard should accept the authenticated pending release: %v\n%s", err, output)
+		}
+		fixture.git(fixture.pr, "tag", guardProvenanceTagPrefix+pending, pending)
+
+		rewritten := fixture.commit(fixture.upstream, "chore: host rewrite pending release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "reset", "--hard", "FETCH_HEAD")
+		fixture.base = rewritten
+		fixture.commit(fixture.pr, "feat: source after release", map[string]string{"source.txt": "feature\n"})
+
+		output, err = fixture.run(fixture.upstream)
+		if err == nil {
+			t.Fatalf("guard should reject a rewritten release without durable provenance\n%s", output)
+		}
+		if !strings.Contains(output, "lacks authenticated release provenance") {
+			t.Fatalf("guard failure = %q, want missing durable provenance", output)
+		}
+
+		fixture.git(fixture.upstream, "fetch", "-q", fixture.pr,
+			"refs/tags/"+guardProvenanceTagPrefix+pending+":refs/tags/"+guardProvenanceTagPrefix+pending)
+		output, err = fixture.run(fixture.upstream)
+		if err != nil {
+			t.Fatalf("guard should accept the durably authenticated release rewrite: %v\n%s", err, output)
 		}
 	})
 
@@ -451,8 +483,10 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.git(fixture.upstream, "switch", "-q", "-c", "duplicate-left", fixture.base)
 		left := fixture.commit(fixture.upstream, "chore(main): left release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.upstream, "tag", guardProvenanceTagPrefix+left, left)
 		fixture.git(fixture.upstream, "switch", "-q", "-c", "duplicate-right", fixture.base)
 		right := fixture.commit(fixture.upstream, "chore(main): right release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.upstream, "tag", guardProvenanceTagPrefix+right, right)
 		tree := strings.TrimSpace(fixture.git(fixture.upstream, "rev-parse", left+"^{tree}"))
 		base := strings.TrimSpace(fixture.git(fixture.upstream, "commit-tree", tree, "-p", left, "-p", right, "-m", "Merge duplicate releases"))
 		fixture.git(fixture.upstream, "update-ref", "refs/heads/main", base)
@@ -753,7 +787,10 @@ func addGeneratedGuardCanonicalSuccessor(t *testing.T, repo, upstream string) st
 	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
 	guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 1.43.0")
 	candidate := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
-	guardGit(t, "", "--git-dir="+upstream, "fetch", "-q", repo, "refs/heads/canonical-successor:refs/heads/main")
+	provenanceTag := "refs/tags/" + guardProvenanceTagPrefix + candidate
+	guardGit(t, repo, "tag", guardProvenanceTagPrefix+candidate, candidate)
+	guardGit(t, "", "--git-dir="+upstream, "fetch", "-q", repo,
+		"refs/heads/canonical-successor:refs/heads/main", provenanceTag+":"+provenanceTag)
 	return candidate
 }
 
@@ -789,7 +826,15 @@ func (f *generatedGuardFixture) commit(repo, message string, files map[string]st
 	}
 	f.git(repo, "add", "--all")
 	f.git(repo, "commit", "-q", "-m", message)
-	return strings.TrimSpace(f.git(repo, "rev-parse", "HEAD"))
+	commit := strings.TrimSpace(f.git(repo, "rev-parse", "HEAD"))
+	if repo == f.upstream && strings.HasPrefix(message, "chore(main): release ") && len(files) == 2 {
+		_, hasChangelog := files["CHANGELOG.md"]
+		_, hasManifest := files[".release-please-manifest.json"]
+		if hasChangelog && hasManifest {
+			f.git(repo, "tag", guardProvenanceTagPrefix+commit, commit)
+		}
+	}
+	return commit
 }
 
 func (f *generatedGuardFixture) mergeCanonicalMain() {

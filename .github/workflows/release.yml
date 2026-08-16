@@ -175,6 +175,27 @@ jobs:
             exit 1
           fi
           require_live_main "before attestation publication"
+          attestation_ref="refs/tags/no-mistakes/generated-file-provenance/${head_sha}"
+          attestation_create_error=
+          if ! attestation_create_error=$(gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="$attestation_ref" \
+            -f sha="$head_sha" 2>&1); then
+            if ! existing_attestation=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/no-mistakes/generated-file-provenance/${head_sha}"); then
+              printf '%s\n' "$attestation_create_error" >&2
+              echo "::error::could not persist release provenance" >&2
+              exit 1
+            fi
+            if ! jq -e --arg ref "$attestation_ref" --arg sha "$head_sha" '
+              type == "object" and .ref == $ref and
+              .object.type == "commit" and .object.sha == $sha
+            ' <<<"$existing_attestation" >/dev/null; then
+              printf '%s\n' "$attestation_create_error" >&2
+              echo "::error::existing release provenance does not match the exact head" >&2
+              exit 1
+            fi
+          fi
           gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${head_sha}" \
             -f state=success \
             -f context='Generated files must not be hand-edited' \
@@ -192,7 +213,6 @@ jobs:
     environment: release-signing
     needs:
       - release-please
-      - release-pr-provenance
     if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: false
@@ -382,7 +402,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - release-please
-      - release-pr-provenance
     if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: false
