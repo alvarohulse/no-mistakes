@@ -419,13 +419,16 @@ no-mistakes stats
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
-Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's step, harness invocation mode, observed nested agent identities and their invocation modes, per-round token deltas next to the raw (cumulative for resumed sessions) counters, tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.
-Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`; the legacy raw input, output, and cache-read counters remain numeric.
+Use `--run <id>` to inspect one run's binary/build identity, ordered steps and rounds, configured skip receipts, policy and config digests, Review candidate pool and selected route, and individual agent invocations. Invocation detail includes the step, purpose, harness invocation mode, provider/model, observed nested agent identities, per-round token deltas next to raw counters, reported cost, tool-category breakdown, workload size, finding count, and fallback reason. It also shows the nullable total time parked at approval gates and implies `--agents`.
+Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`. Reported raw input, output, and cache-read counters remain visible and may be cumulative; when the matching per-round meter is absent, the audit does not reinterpret a legacy database zero as reported usage.
 
 ```sh
 no-mistakes stats --agents
 no-mistakes stats --run <id>
+no-mistakes stats --run <id> --format json
 ```
+
+`--format` accepts `text` (the default) or `json` for `--run`. JSON is the normative, versioned machine contract. Its aggregate delta-token and harness-reported-cost metrics include `reported`/`total` coverage and remain `null` when coverage is incomplete or an independent database aggregate does not match the emitted invocation rows. `integrity_errors` explains those conditions and policy drift in stored steps, skip sources, and managed Review receipts. The report never fills missing per-round usage from raw cumulative counters, and legacy `parked_ms: null` remains unknown instead of becoming zero.
 
 The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body publishes only a bounded subset of it.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).

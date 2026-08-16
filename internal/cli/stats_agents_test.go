@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -181,5 +183,82 @@ func TestStatsRunLabelsHistoricalRefreshInvocationFromRunStrategy(t *testing.T) 
 	}
 	if !strings.Contains(out.String(), "Merge") || strings.Contains(out.String(), "rebase") {
 		t.Fatalf("historical invocation did not use strategy-aware display label:\n%s", out.String())
+	}
+}
+
+func TestStatsRunJSONUsesCanonicalRunAudit(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepoWithID("repo-json", "/tmp/repo-json", "https://github.com/test/repo-json", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/json", "abc", "def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	if _, err := database.InsertAgentInvocation(db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI, SessionMode: db.InvocationModeCold,
+		StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+		DeltaInputTokens: &zero, DeltaOutputTokens: &zero, DeltaCacheReadTokens: &zero, DeltaCacheCreationTokens: &zero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeCmd("stats", "--run", run.ID, "--format", "json")
+	if err != nil {
+		t.Fatalf("stats --run --format json: %v\n%s", err, out)
+	}
+	var audit runstats.RunAudit
+	if err := json.Unmarshal([]byte(out), &audit); err != nil {
+		t.Fatalf("decode canonical audit: %v\n%s", err, out)
+	}
+	if audit.SchemaVersion != runstats.SchemaVersion || audit.Run.ID != run.ID || audit.Run.NoMistakesVersion == nil || audit.Run.NoMistakesBuildSHA == nil || audit.Metrics.DeltaInputTokens.Value == nil || *audit.Metrics.DeltaInputTokens.Value != 0 {
+		t.Fatalf("run audit = %+v", audit)
+	}
+	if strings.Contains(out, "/tmp/repo-json") {
+		t.Fatalf("run audit leaked repository path: %s", out)
+	}
+}
+
+func TestStatsJSONRequiresRun(t *testing.T) {
+	t.Setenv("NM_HOME", t.TempDir())
+	out, err := executeCmd("stats", "--format", "json")
+	if err == nil || !strings.Contains(err.Error(), "requires --run") {
+		t.Fatalf("stats --format json = error %v output %q", err, out)
+	}
+}
+
+func TestStatsRunJSONAcceptsExplicitAgentsFlag(t *testing.T) {
+	t.Setenv("NM_HOME", t.TempDir())
+	_, database, err := openResources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepoWithID("repo-json-agents", "/tmp/repo-json-agents", "https://github.com/test/repo-json-agents", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/json-agents", "abc", "def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeCmd("stats", "--agents", "--run", run.ID, "--format", "json")
+	if err != nil {
+		t.Fatalf("stats --agents --run --format json: %v\n%s", err, out)
 	}
 }

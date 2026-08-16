@@ -284,6 +284,49 @@ func (d *DB) GetAgentInvocationsByRun(runID string) ([]AgentInvocation, error) {
 	return invocations, rows.Err()
 }
 
+// AgentInvocationAuditTotals is an independent SQL aggregate used to verify
+// that a run audit's emitted invocation rows and totals agree.
+type AgentInvocationAuditTotals struct {
+	Rows                       int
+	DeltaInputReported         int
+	DeltaInputSum              *int64
+	DeltaOutputReported        int
+	DeltaOutputSum             *int64
+	DeltaCacheReadReported     int
+	DeltaCacheReadSum          *int64
+	DeltaCacheCreationReported int
+	DeltaCacheCreationSum      *int64
+	ReportedCostReported       int
+	ReportedCostSum            *float64
+}
+
+// GetAgentInvocationAuditTotals returns nullable per-round-meter aggregates.
+// SUM remains nullable: no reported rows is unknown, not zero.
+func (d *DB) GetAgentInvocationAuditTotals(runID string) (AgentInvocationAuditTotals, error) {
+	var totals AgentInvocationAuditTotals
+	err := d.sql.QueryRow(`
+		SELECT COUNT(*),
+		       COUNT(delta_input_tokens), SUM(delta_input_tokens),
+		       COUNT(delta_output_tokens), SUM(delta_output_tokens),
+		       COUNT(delta_cache_read_tokens), SUM(delta_cache_read_tokens),
+		       COUNT(delta_cache_creation_tokens), SUM(delta_cache_creation_tokens),
+		       COUNT(reported_cost_usd), SUM(reported_cost_usd)
+		FROM agent_invocations
+		WHERE run_id = ?`, runID,
+	).Scan(
+		&totals.Rows,
+		&totals.DeltaInputReported, &totals.DeltaInputSum,
+		&totals.DeltaOutputReported, &totals.DeltaOutputSum,
+		&totals.DeltaCacheReadReported, &totals.DeltaCacheReadSum,
+		&totals.DeltaCacheCreationReported, &totals.DeltaCacheCreationSum,
+		&totals.ReportedCostReported, &totals.ReportedCostSum,
+	)
+	if err != nil {
+		return AgentInvocationAuditTotals{}, fmt.Errorf("get agent invocation audit totals: %w", err)
+	}
+	return totals, nil
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

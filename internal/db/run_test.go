@@ -340,6 +340,32 @@ func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	}
 }
 
+func TestRunParkedDurationAuditPreservesUnknownAndKnownZero(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/parked-audit", "git@github.com:user/parked-audit.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parkedMS, err := d.GetRunParkedMS(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parkedMS == nil || *parkedMS != 0 {
+		t.Fatalf("new run parked_ms = %v, want known zero", parkedMS)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET parked_ms = NULL WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	parkedMS, err = d.GetRunParkedMS(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parkedMS != nil {
+		t.Fatalf("legacy parked_ms = %v, want unknown", parkedMS)
+	}
+}
+
 func TestParkRunForEnvironmentFailureIsActiveAndStepIndependent(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

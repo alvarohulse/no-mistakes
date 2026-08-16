@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -26,19 +27,45 @@ const (
 func newStatsCmd() *cobra.Command {
 	var agents bool
 	var runID string
+	var format string
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Show historical no-mistakes usage stats",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackCommand("stats", func() error {
+				format = strings.ToLower(strings.TrimSpace(format))
+				if format == "" {
+					format = "text"
+				}
+				if format != "text" && format != "json" {
+					return fmt.Errorf("unsupported stats format %q (expected text or json)", format)
+				}
+				if format == "json" && runID == "" {
+					return fmt.Errorf("stats --format json requires --run")
+				}
 				_, database, err := openResources()
 				if err != nil {
 					return err
 				}
 				defer database.Close()
 
-				if agents || runID != "" {
+				if runID != "" {
+					audit, err := runstats.BuildRunAudit(database, runID)
+					if err != nil {
+						return err
+					}
+					if format == "json" {
+						encoded, err := audit.CanonicalJSON()
+						if err != nil {
+							return err
+						}
+						fmt.Fprintln(cmd.OutOrStdout(), encoded)
+						return nil
+					}
+					return renderRunAudit(cmd.OutOrStdout(), audit)
+				}
+				if agents {
 					return renderAgentPerfReport(cmd.OutOrStdout(), database, runID)
 				}
 
@@ -53,7 +80,8 @@ func newStatsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&agents, "agents", false, "show local agent performance telemetry (per-purpose invocation aggregates)")
-	cmd.Flags().StringVar(&runID, "run", "", "show one run's agent invocations and parked time (implies --agents)")
+	cmd.Flags().StringVar(&runID, "run", "", "show one run's steps, agent receipts, and parked time (implies --agents)")
+	cmd.Flags().StringVar(&format, "format", "text", "output format for --run: text or json")
 	return cmd
 }
 
@@ -109,39 +137,59 @@ func renderAgentPerfReport(w io.Writer, database *db.DB, runID string) error {
 }
 
 func renderRunAgentPerf(w io.Writer, database *db.DB, runID string) error {
-	run, err := database.GetRun(runID)
+	audit, err := runstats.BuildRunAudit(database, runID)
 	if err != nil {
-		return fmt.Errorf("get run: %w", err)
+		return err
 	}
-	if run == nil {
-		return fmt.Errorf("run %q not found", runID)
-	}
-	invocations, err := database.GetAgentInvocationsByRun(runID)
-	if err != nil {
-		return fmt.Errorf("get agent invocations: %w", err)
-	}
+	return renderRunAudit(w, audit)
+}
 
-	fmt.Fprintf(w, "run %s (%s), parked at gates %s total\n", run.ID, run.Status, formatMS(run.ParkedMS))
-	if len(invocations) == 0 {
+func renderRunAudit(w io.Writer, audit *runstats.RunAudit) error {
+	if audit == nil {
+		return fmt.Errorf("run audit is nil")
+	}
+	fmt.Fprintf(w, "run %s (%s), parked at gates %s total\n", audit.Run.ID, audit.Run.Status, optMS(audit.Run.ParkedMS))
+	fmt.Fprintf(w, "binary: %s (%s)\n", orUnknown(deref(audit.Run.NoMistakesVersion)), orUnknown(deref(audit.Run.NoMistakesBuildSHA)))
+	fmt.Fprintf(w, "policy digest: %s\n", orUnknown(deref(audit.Run.PolicyDigest)))
+	if len(audit.Run.ConfigSources) > 0 {
+		sources := make([]string, 0, len(audit.Run.ConfigSources))
+		for _, source := range audit.Run.ConfigSources {
+			sources = append(sources, source.Kind+"@"+source.Digest)
+		}
+		fmt.Fprintf(w, "config sources: %s\n", strings.Join(sources, ", "))
+	}
+	if len(audit.Steps) > 0 {
+		fmt.Fprintln(w)
+		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "STEP\tSTATUS\tSKIP SOURCE\tROUNDS\tDURATION")
+		for _, step := range audit.Steps {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
+				step.Name.DisplayName(audit.Run.RefreshStrategy), step.Status, optSkipSource(step.SkipSource), len(step.Rounds), optMS(step.DurationMS))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	if len(audit.Invocations) == 0 {
 		fmt.Fprintln(w, "no agent invocations recorded for this run")
-		return nil
+		return renderAuditMetrics(w, audit.Metrics, audit.IntegrityErrors)
 	}
 	fmt.Fprintln(w, "\"-\" means the field was not reported for that invocation (unknown), which is distinct from a recorded 0.")
 
 	// Table 1: session, timing split, activity, workload, and findings.
 	fmt.Fprintln(w)
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tAGENT\tINVOKED VIA\tNESTED AGENTS\tMODEL\tSESSION\tKEY\tDURATION\tMODEL\tSUBPROC\tRT\tTOOLS (w/t/e/r/g/o)\tFIND\tWORK (f/l)\tFALLBACK\tEXIT")
-	for _, inv := range invocations {
+	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tAGENT\tINVOKED VIA\tNESTED AGENTS\tMODEL\tPROVIDER\tREVIEW ROUTE\tSESSION\tKEY\tDURATION\tMODEL TIME\tSUBPROC\tRT\tTOOLS (w/t/e/r/g/o)\tFIND\tWORK (f/l)\tFALLBACK\tEXIT")
+	for _, inv := range audit.Invocations {
 		exit := inv.ExitStatus
-		if inv.FailureCategory != "" && inv.FailureCategory != inv.ExitStatus {
-			exit += "/" + inv.FailureCategory
+		if inv.FailureCategory != nil && *inv.FailureCategory != inv.ExitStatus {
+			exit += "/" + *inv.FailureCategory
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			types.StepName(inv.StepName).DisplayName(run.RefreshStrategy), inv.Round, inv.Purpose, inv.Agent, orUnknown(string(inv.InvocationMode)), formatAgentObservations(inv), orUnknown(inv.Model),
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.Agent, orUnknown(string(inv.InvocationMode)), formatAgentObservations(inv), orUnknown(deref(inv.Model)), orUnknown(deref(inv.Provider)), formatReviewReceipt(inv.Review),
 			inv.SessionMode, inv.SessionKey,
-			formatMS(inv.DurationMS), formatModelTime(inv), optMS(inv.SubprocessWaitMS),
-			optInt(inv.ModelRoundtrips), formatToolHistogram(inv), optInt(inv.FindingCount),
+			formatMS(inv.DurationMS), formatModelTime(inv), optMS(inv.Activity.SubprocessWaitMS),
+			optInt(inv.Activity.ModelRoundtrips), formatToolHistogram(inv), optInt(inv.Activity.FindingCount),
 			formatWorkload(inv), orUnknown(deref(inv.FallbackReason)), exit,
 		)
 	}
@@ -153,16 +201,19 @@ func renderRunAgentPerf(w io.Writer, database *db.DB, runID string) error {
 	// sessions) counters, so a cumulative counter cannot be misread as per-round.
 	fmt.Fprintln(w)
 	tw = tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tSESSION\tΔ IN (round)\tΔ OUT\tΔ CACHE RD\tIN (raw)\tOUT (raw)\tCACHE RD (raw)\tCACHE WR\tFRESH IN\tREASON")
-	for _, inv := range invocations {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n",
-			types.StepName(inv.StepName).DisplayName(run.RefreshStrategy), inv.Round, inv.Purpose, inv.SessionMode,
-			optInt(inv.DeltaInputTokens), optInt(inv.DeltaOutputTokens), optInt(inv.DeltaCacheReadTokens),
-			inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens,
-			optInt(inv.CacheCreationTokens), optInt(inv.FreshInputTokens), optInt(inv.ReasoningTokens),
+	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tSESSION\tΔ IN (round)\tΔ OUT\tΔ CACHE RD\tIN (raw)\tOUT (raw)\tCACHE RD (raw)\tCACHE WR\tFRESH IN\tREASON\tREPORTED COST")
+	for _, inv := range audit.Invocations {
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.SessionMode,
+			optInt(inv.DeltaUsage.InputTokens), optInt(inv.DeltaUsage.OutputTokens), optInt(inv.DeltaUsage.CacheReadTokens),
+			optInt(inv.RawUsage.InputTokens), optInt(inv.RawUsage.OutputTokens), optInt(inv.RawUsage.CacheReadTokens),
+			optInt(inv.RawUsage.CacheWriteTokens), optInt(inv.RawUsage.FreshInputTokens), optInt(inv.RawUsage.ReasoningTokens), optFloat(inv.ReportedCostUSD),
 		)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return renderAuditMetrics(w, audit.Metrics, audit.IntegrityErrors)
 }
 
 func formatMS(ms int64) string {
@@ -182,6 +233,13 @@ func optInt64(p *int64) string {
 		return "-"
 	}
 	return strconv.FormatInt(*p, 10)
+}
+
+func optFloat(p *float64) string {
+	if p == nil {
+		return "-"
+	}
+	return strconv.FormatFloat(*p, 'f', -1, 64)
 }
 
 // optMS renders a nullable duration: "-" when nil, else a rounded duration.
@@ -208,44 +266,89 @@ func orUnknown(s string) string {
 
 // formatModelTime shows model/reasoning wall-clock (duration minus subprocess
 // wait). It is unknown when the invocation reported no subprocess-wait split.
-func formatModelTime(inv db.AgentInvocation) string {
-	if inv.SubprocessWaitMS == nil {
+func formatModelTime(inv runstats.Invocation) string {
+	if inv.Activity.SubprocessWaitMS == nil {
 		return "-"
 	}
-	return formatMS(agent.ModelTimeMS(inv.DurationMS, *inv.SubprocessWaitMS))
+	return formatMS(agent.ModelTimeMS(inv.DurationMS, *inv.Activity.SubprocessWaitMS))
 }
 
 // formatToolHistogram renders "total w/t/e/r/g/o" or "-" when the invocation
 // reported no activity metrics.
-func formatToolHistogram(inv db.AgentInvocation) string {
-	if inv.ToolCalls == nil {
+func formatToolHistogram(inv runstats.Invocation) string {
+	if inv.Activity.ToolCalls == nil {
 		return "-"
 	}
-	return fmt.Sprintf("%d %s/%s/%s/%s/%s/%s", *inv.ToolCalls,
-		optInt(inv.ToolWaitCalls), optInt(inv.ToolTestLintCalls), optInt(inv.ToolEditCalls),
-		optInt(inv.ToolReadCalls), optInt(inv.ToolGitCalls), optInt(inv.ToolOtherCalls))
+	return fmt.Sprintf("%d %s/%s/%s/%s/%s/%s", *inv.Activity.ToolCalls,
+		optInt(inv.Activity.ToolWaitCalls), optInt(inv.Activity.ToolTestLintCalls), optInt(inv.Activity.ToolEditCalls),
+		optInt(inv.Activity.ToolReadCalls), optInt(inv.Activity.ToolGitCalls), optInt(inv.Activity.ToolOtherCalls))
 }
 
 // formatWorkload renders "files/lines" or "-" when unknown.
-func formatWorkload(inv db.AgentInvocation) string {
-	if inv.WorkloadFiles == nil && inv.WorkloadLines == nil {
+func formatWorkload(inv runstats.Invocation) string {
+	if inv.Activity.WorkloadFiles == nil && inv.Activity.WorkloadLines == nil {
 		return "-"
 	}
-	return fmt.Sprintf("%s/%s", optInt(inv.WorkloadFiles), optInt(inv.WorkloadLines))
+	return fmt.Sprintf("%s/%s", optInt(inv.Activity.WorkloadFiles), optInt(inv.Activity.WorkloadLines))
 }
 
-func formatAgentObservations(inv db.AgentInvocation) string {
-	if !inv.AgentObservationsReported {
+func formatAgentObservations(inv runstats.Invocation) string {
+	if !inv.NestedAgentsReported {
 		return "-"
 	}
-	if len(inv.AgentObservations) == 0 {
+	if len(inv.NestedAgents) == 0 {
 		return "none"
 	}
-	observations := make([]string, 0, len(inv.AgentObservations))
-	for _, observation := range inv.AgentObservations {
+	observations := make([]string, 0, len(inv.NestedAgents))
+	for _, observation := range inv.NestedAgents {
 		observations = append(observations, fmt.Sprintf("%s (%s)", observation.Identity, observation.InvocationMode))
 	}
 	return strings.Join(observations, ", ")
+}
+
+func optSkipSource(source *types.SkipSource) string {
+	if source == nil {
+		return "-"
+	}
+	return string(*source)
+}
+
+func formatReviewReceipt(receipt *runstats.ReviewReceipt) string {
+	if receipt == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d -> %s/%s", len(receipt.CandidatePool), receipt.Selected.Agent, orUnknown(deref(receipt.Selected.Model)))
+}
+
+func renderAuditMetrics(w io.Writer, metrics runstats.Metrics, integrityErrors []string) error {
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "METRIC\tVALUE\tCOVERAGE\tINTEGRITY")
+	rows := []struct {
+		name     string
+		value    string
+		coverage runstats.Coverage
+		error    *string
+	}{
+		{name: "delta_input_tokens", value: optInt64(metrics.DeltaInputTokens.Value), coverage: metrics.DeltaInputTokens.Coverage, error: metrics.DeltaInputTokens.IntegrityError},
+		{name: "delta_output_tokens", value: optInt64(metrics.DeltaOutputTokens.Value), coverage: metrics.DeltaOutputTokens.Coverage, error: metrics.DeltaOutputTokens.IntegrityError},
+		{name: "delta_cache_read_tokens", value: optInt64(metrics.DeltaCacheReadTokens.Value), coverage: metrics.DeltaCacheReadTokens.Coverage, error: metrics.DeltaCacheReadTokens.IntegrityError},
+		{name: "delta_cache_write_tokens", value: optInt64(metrics.DeltaCacheWriteTokens.Value), coverage: metrics.DeltaCacheWriteTokens.Coverage, error: metrics.DeltaCacheWriteTokens.IntegrityError},
+		{name: "reported_cost_usd", value: optFloat(metrics.ReportedCostUSD.Value), coverage: metrics.ReportedCostUSD.Coverage, error: metrics.ReportedCostUSD.IntegrityError},
+	}
+	for _, row := range rows {
+		fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%s\n", row.name, row.value, row.coverage.Reported, row.coverage.Total, orUnknown(deref(row.error)))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if len(integrityErrors) > 0 {
+		fmt.Fprintln(w, "integrity errors:")
+		for _, integrityError := range integrityErrors {
+			fmt.Fprintf(w, "- %s\n", integrityError)
+		}
+	}
+	return nil
 }
 
 func renderStatsDashboard(stats *db.Stats) string {

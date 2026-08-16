@@ -207,13 +207,28 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	}
 	r.Metadata = opts.Metadata
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, parked_ms, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), policyMarker, policyDigestMarker, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.CreatedAt, r.UpdatedAt, notePtr, opts.Metadata,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
 	return r, nil
+}
+
+// GetRunParkedMS returns the nullable stored parked duration without applying
+// the legacy GetRun projection's COALESCE. New runs store a concrete zero;
+// NULL therefore remains an honest pre-instrumentation unknown.
+func (d *DB) GetRunParkedMS(id string) (*int64, error) {
+	var parkedMS *int64
+	err := d.sql.QueryRow(`SELECT parked_ms FROM runs WHERE id = ?`, id).Scan(&parkedMS)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get run parked duration: %w", err)
+	}
+	return parkedMS, nil
 }
 
 // UpdateRunResolvedAgentRouting stores the resolved launch-time routing
