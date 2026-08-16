@@ -29,6 +29,12 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertPasses(filepath.Join(t.TempDir(), "missing-upstream"))
 	})
 
+	t.Run("source-only head behind the current base release fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.prepareStaleFeatureAndCurrentBase()
+		fixture.assertFails(fixture.upstream)
+	})
+
 	t.Run("manual generated edit fails", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.pr, "docs: edit changelog", map[string]string{"CHANGELOG.md": "manual\n"})

@@ -106,7 +106,17 @@ for commit in $pr_commits; do
   fi
 done
 
-if [ "$generated_files_touched" = false ]; then
+if ! base_entries=$(generated_entries "$BASE_SHA"); then
+  fail "could not inspect generated entries at the PR base"
+fi
+if ! head_entries=$(generated_entries "$HEAD_SHA"); then
+  fail "could not inspect generated entries at the PR head"
+fi
+if ! generated_entries_complete "$BASE_SHA" || ! generated_entries_complete "$HEAD_SHA"; then
+  fail "the PR base and head must contain both generated files"
+fi
+
+if [ "$generated_files_touched" = false ] && [ "$head_entries" = "$base_entries" ]; then
   echo "No release-please-generated files modified. OK."
   exit 0
 fi
@@ -165,16 +175,6 @@ for commit in $pr_commits; do
     fail "canonical release commit does not contain both generated files"
   fi
 done
-
-if ! base_entries=$(generated_entries "$BASE_SHA"); then
-  fail "could not inspect generated entries at the PR base"
-fi
-if ! head_entries=$(generated_entries "$HEAD_SHA"); then
-  fail "could not inspect generated entries at the PR head"
-fi
-if ! generated_entries_complete "$BASE_SHA" || ! generated_entries_complete "$HEAD_SHA"; then
-  fail "the PR base and head must contain both generated files"
-fi
 
 if [ "$head_entries" = "$base_entries" ]; then
   echo "Release-please-generated files exactly preserve the validated PR base. OK."
