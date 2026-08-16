@@ -43,26 +43,34 @@ jobs:
             "" \
             "$GITHUB_OUTPUT"
 
-      - name: Require triggering main before release mutation
+      - name: Refuse an empty-state rerun
+        if: github.run_attempt != 1 && steps.existing_release_state.outputs.release_state == 'none'
+        run: |
+          echo "::error::rerun has no exact draft or published release to recover" >&2
+          exit 1
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: .github/release-please-reproducer/package-lock.json
+
+      - name: Install release-please runner
+        if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
+        working-directory: .github/release-please-reproducer
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Create release for triggering commit
+        if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          live_main_sha=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
-            --jq '.object.sha')
-          if [ "$live_main_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::main changed before release creation; refusing to mutate a historical run" >&2
-            exit 1
-          fi
-
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
-        if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
-        id: release
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-          skip-github-pull-request: true
+          node .github/release-please-reproducer/create-release.mjs \
+            "$GITHUB_REPOSITORY" \
+            main \
+            "$GITHUB_SHA"
 
       - name: Refresh exact release tags
         run: git fetch --force --tags origin

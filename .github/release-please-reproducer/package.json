@@ -2,7 +2,7 @@
   "name": "no-mistakes-release-please-reproducer",
   "version": "1.0.0",
   "private": true,
-  "description": "Reproduces the output of the release workflow's pinned release-please action",
+  "description": "Runs the release workflow's pinned release-please dependency graph",
   "type": "module",
   "engines": {
     "node": ">=20"
