@@ -131,6 +131,20 @@ func goTestPackagePatterns(command workflowCommand) []string {
 	return patterns
 }
 
+func TestCIWorkflow_TestJobChecksOutFullHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range ciTestJob(t).Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			if step.With["fetch-depth"] != "0" {
+				t.Fatalf("test job checkout fetch-depth = %q, want 0 for historical guard fixtures", step.With["fetch-depth"])
+			}
+			return
+		}
+	}
+	t.Fatal("CI test job has no checkout step")
+}
+
 func TestCIWorkflow_WindowsShardsCoverEveryPackageWithinTheJobCap(t *testing.T) {
 	t.Parallel()
 
