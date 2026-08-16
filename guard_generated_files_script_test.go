@@ -173,7 +173,7 @@ func TestGeneratedFileGuard(t *testing.T) {
 }
 
 func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
-	workflow := guardReadFile(t, ".github/workflows/guard-generated-file-provenance.yml")
+	workflow := strings.ReplaceAll(guardReadFile(t, ".github/workflows/guard-generated-file-provenance.yml"), "\r\n", "\n")
 
 	for _, want := range []string{
 		"pull_request_target:",
