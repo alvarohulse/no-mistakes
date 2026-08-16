@@ -44,6 +44,7 @@ const manifest = await Manifest.fromManifest(
   baseBranch,
   "release-please-config.json",
   ".release-please-manifest.json",
+  { alwaysUpdate: true },
 );
 const pullRequests = await manifest.createPullRequests();
 await requireExpectedBase("after release-please production");

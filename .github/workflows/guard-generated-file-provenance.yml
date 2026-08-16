@@ -20,7 +20,7 @@ jobs:
       # Security boundary: pull_request_target has repository authority. Treat
       # the PR head only as data and execute only code read from the exact,
       # verified event base; never check out or execute PR-head code here.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
