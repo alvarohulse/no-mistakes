@@ -620,6 +620,7 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		"group: guard-generated-file-provenance-${{ github.event.pull_request.number }}",
 		"cancel-in-progress: true",
 		"contents: read",
+		"actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
 		"persist-credentials: false",
 		"ref: ${{ github.event.pull_request.base.sha }}",
 		"checked_out_base=$(git rev-parse --verify 'HEAD^{commit}')",
@@ -635,6 +636,7 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"actions/checkout@v6",
 		"github.event.pull_request.head.repo.clone_url",
 		"github.event.pull_request.head.ref",
 		"github.event.pull_request.user.login",

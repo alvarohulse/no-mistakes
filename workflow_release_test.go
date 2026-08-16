@@ -59,12 +59,18 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 	}
 
 	content := string(data)
-	block := extractJobBlock(t, content, "release-please")
+	releaseBlock := extractJobBlock(t, content, "release-please")
+	block := extractJobBlock(t, content, "release-pr-provenance")
 	if !strings.Contains(content, "statuses: write") {
 		t.Fatal("release workflow must be able to attest the exact generated head")
 	}
+	if !strings.Contains(releaseBlock, "skip-github-pull-request: true") {
+		t.Fatal("release-please action must delegate pull request publication to the provenance job")
+	}
+	if !strings.Contains(block, "needs: release-please") {
+		t.Fatal("release provenance must run after release creation")
+	}
 	for _, required := range []string{
-		"skip-github-pull-request: true",
 		"steps.release_pr.outputs.prs_created == 'true'",
 		"RELEASE_PR: ${{ steps.release_pr.outputs.pr }}",
 		"actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
@@ -89,7 +95,7 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		"latest_head_sha",
 	} {
 		if !strings.Contains(block, required) {
-			t.Errorf("release-please job must contain %q", required)
+			t.Errorf("release provenance job must contain %q", required)
 		}
 	}
 	for _, forbidden := range []string{
@@ -99,7 +105,7 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		"reproduce.mjs",
 	} {
 		if strings.Contains(block, forbidden) {
-			t.Errorf("release-please job must not trust unavailable or unrelated metadata %q", forbidden)
+			t.Errorf("release provenance job must not trust unavailable or unrelated metadata %q", forbidden)
 		}
 	}
 
@@ -129,6 +135,7 @@ func TestReleasePleaseProducerCapturesPublishedOutput(t *testing.T) {
 	producer := guardReadFile(t, ".github/release-please-reproducer/produce-release-pr.mjs")
 
 	for _, required := range []string{
+		"{ alwaysUpdate: true }",
 		"github.buildChangeSet = async",
 		"capturedChangeSets.push(changes)",
 		"await manifest.createPullRequests()",
@@ -150,6 +157,46 @@ func TestReleasePleaseProducerCapturesPublishedOutput(t *testing.T) {
 	persist := strings.Index(producer, "await writeFile")
 	if intercept == -1 || publish == -1 || persist == -1 || intercept >= publish || publish >= persist {
 		t.Fatal("release-please producer must intercept, publish, then persist the exact published output")
+	}
+}
+
+func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
+	wf := loadReleaseWorkflowDoc(t)
+	releaseJob := wf.Jobs["release-please"]
+	if releaseJob == nil {
+		t.Fatal("release workflow must define release-please")
+	}
+	if len(releaseJob.Steps) != 1 {
+		t.Fatalf("release-please must contain only the release action, found %d steps", len(releaseJob.Steps))
+	}
+	if releaseJob.Steps[0].Uses != "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071" {
+		t.Fatalf("release-please must keep the pinned release action, got %q", releaseJob.Steps[0].Uses)
+	}
+
+	provenanceJob := wf.Jobs["release-pr-provenance"]
+	if provenanceJob == nil {
+		t.Fatal("release workflow must isolate pull request provenance")
+	}
+	provenanceNeeds := provenanceJob.needs()
+	if len(provenanceNeeds) != 1 || provenanceNeeds[0] != "release-please" {
+		t.Fatalf("release provenance needs = %v, want [release-please]", provenanceNeeds)
+	}
+
+	for _, name := range []string{"build-darwin", "build-and-upload"} {
+		job := wf.Jobs[name]
+		if job == nil {
+			t.Fatalf("release workflow must define %s", name)
+		}
+		hasProvenanceNeed := false
+		for _, need := range job.needs() {
+			if need == "release-pr-provenance" {
+				hasProvenanceNeed = true
+				break
+			}
+		}
+		if !hasProvenanceNeed {
+			t.Errorf("%s must wait for release provenance", name)
+		}
 	}
 }
 
