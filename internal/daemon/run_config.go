@@ -72,6 +72,13 @@ type runPolicyResolution struct {
 	TrustedRef           string
 }
 
+type agentRouteResolutionError struct {
+	err error
+}
+
+func (e *agentRouteResolutionError) Error() string { return e.err.Error() }
+func (e *agentRouteResolutionError) Unwrap() error { return e.err }
+
 // ResolvePolicy resolves the current launch policy without creating a run or
 // worktree. Callers must supply a commit object ID already selected from the
 // registered gate; the resolver still verifies that exact object in the gate.
@@ -171,7 +178,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	cfg.ResolvedRunner = &resolvedRunner
 	if !demo {
 		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
-			return nil, fmt.Errorf("resolve agent routes: %w", err)
+			return nil, &agentRouteResolutionError{err: fmt.Errorf("resolve agent routes: %w", err)}
 		}
 	}
 	preparedPreflight, err := m.prepareResolvedPreflight(ctx, cfg)

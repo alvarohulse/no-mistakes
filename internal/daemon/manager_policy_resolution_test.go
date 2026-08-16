@@ -162,6 +162,26 @@ func TestStartRunRejectsMalformedGlobalConfigBeforeCreatingRun(t *testing.T) {
 	assertPolicyResolutionFailureHasNoSideEffects(t, p, database, repo, marker, step, err, "load global config")
 }
 
+func TestStartRunRecordsAgentRouteResolutionFailureBeforeExecution(t *testing.T) {
+	p, database, repo, marker := newPolicyResolutionFixture(t, "missing-agent-route")
+	missingAgent := filepath.Join(t.TempDir(), "missing-claude")
+	globalConfig := "agent: claude\nagent_path_override:\n  claude: " + yamlDoubleQuoted(missingAgent) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	_, runErr := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "missing agent route", "", "", "")
+	run := assertAgentRouteResolutionFailureRecordedWithoutExecution(t, p, database, repo, marker, step, runErr, "no runnable agent")
+	if run.HeadSHA != head || run.Branch != "main" {
+		t.Fatalf("run identity = %s %s, want main %s", run.Branch, run.HeadSHA, head)
+	}
+}
+
 func TestStartRunRejectsIncompleteManagedRoutesBeforeCreatingRun(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database, repo, marker := newPolicyResolutionFixture(t, "incomplete-managed-routes")
@@ -358,6 +378,31 @@ func assertPolicyResolutionFailureHasNoSideEffects(t *testing.T, p *paths.Paths,
 	if len(runs) != 0 {
 		t.Fatalf("runs = %d, want none", len(runs))
 	}
+	assertNoPolicyFailureExecutionSideEffects(t, p, database, repo, marker, step)
+}
+
+func assertAgentRouteResolutionFailureRecordedWithoutExecution(t *testing.T, p *paths.Paths, database *db.DB, repo *db.Repo, marker string, step *mockPassStep, runErr error, wantError string) *db.Run {
+	t.Helper()
+	if runErr == nil || !strings.Contains(runErr.Error(), wantError) {
+		t.Fatalf("error = %v, want %q", runErr, wantError)
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want one failed audit row", len(runs))
+	}
+	run := runs[0]
+	if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, wantError) || run.TerminalHeadVerifiedAt == nil {
+		t.Fatalf("run = %+v, want verified failed audit row containing %q", run, wantError)
+	}
+	assertNoPolicyFailureExecutionSideEffects(t, p, database, repo, marker, step)
+	return run
+}
+
+func assertNoPolicyFailureExecutionSideEffects(t *testing.T, p *paths.Paths, database *db.DB, repo *db.Repo, marker string, step *mockPassStep) {
+	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(p.WorktreesDir(), repo.ID))
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)

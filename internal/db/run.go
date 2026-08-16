@@ -161,7 +161,25 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // InsertRunWithOptions atomically creates a run with its refresh selection and
 // optional PR note.
 func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions) (*Run, error) {
+	return d.insertRunWithOptions(repoID, branch, headSHA, baseSHA, opts, types.RunPending, nil)
+}
+
+// InsertFailedRunWithOptions atomically records a pre-execution failure. It is
+// reserved for launch validation that has enough identity to audit the push
+// but must not create a worktree or start the pipeline.
+func (d *DB) InsertFailedRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions, failure string) (*Run, error) {
+	if strings.TrimSpace(failure) == "" {
+		return nil, fmt.Errorf("failed run error is empty")
+	}
+	return d.insertRunWithOptions(repoID, branch, headSHA, baseSHA, opts, types.RunFailed, &failure)
+}
+
+func (d *DB) insertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions, status types.RunStatus, runError *string) (*Run, error) {
 	ts := now()
+	var terminalHeadVerifiedAt *int64
+	if runError != nil && status == types.RunFailed {
+		terminalHeadVerifiedAt = &ts
+	}
 	strategy := opts.RefreshStrategy.OrDefault()
 	stackedOn := strings.TrimSpace(opts.StackedOn)
 	routingMarker := ""
@@ -176,22 +194,24 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
 	r := &Run{
-		ID:                   newID(),
-		RepoID:               repoID,
-		Branch:               branch,
-		HeadSHA:              headSHA,
-		BaseSHA:              baseSHA,
-		RefreshStrategy:      strategy,
-		StackedOn:            stackedOn,
-		ResolvedAgentRouting: &routingMarker,
-		ResolvedPolicy:       policyMarker,
-		ResolvedPolicyDigest: policyDigestMarker,
-		SubmittedHeadSHA:     &headSHA,
-		NoMistakesVersion:    &version,
-		NoMistakesBuildSHA:   &buildSHA,
-		Status:               types.RunPending,
-		CreatedAt:            ts,
-		UpdatedAt:            ts,
+		ID:                     newID(),
+		RepoID:                 repoID,
+		Branch:                 branch,
+		HeadSHA:                headSHA,
+		BaseSHA:                baseSHA,
+		RefreshStrategy:        strategy,
+		StackedOn:              stackedOn,
+		ResolvedAgentRouting:   &routingMarker,
+		ResolvedPolicy:         policyMarker,
+		ResolvedPolicyDigest:   policyDigestMarker,
+		SubmittedHeadSHA:       &headSHA,
+		NoMistakesVersion:      &version,
+		NoMistakesBuildSHA:     &buildSHA,
+		Status:                 status,
+		Error:                  runError,
+		TerminalHeadVerifiedAt: terminalHeadVerifiedAt,
+		CreatedAt:              ts,
+		UpdatedAt:              ts,
 	}
 	if opts.Intent != nil {
 		r.Intent = &opts.Intent.Summary
@@ -207,8 +227,8 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	}
 	r.Metadata = opts.Metadata
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, parked_ms, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), policyMarker, policyDigestMarker, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.CreatedAt, r.UpdatedAt, notePtr, opts.Metadata,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, parked_ms, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata, error, terminal_head_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), policyMarker, policyDigestMarker, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.CreatedAt, r.UpdatedAt, notePtr, opts.Metadata, runError, terminalHeadVerifiedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

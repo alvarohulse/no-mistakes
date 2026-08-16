@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1160,6 +1161,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			return "", fmt.Errorf("invalid stacked-on branch: %w", err)
 		}
 	}
+	runOptions := newRunOptions(intent, source, prNote, metadata, refreshStrategy, stackedOn)
 
 	// Serialize per repo+branch to prevent two concurrent pushes from both
 	// passing cancelActiveRuns and creating duplicate pipelines.
@@ -1182,6 +1184,12 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipSteps, refreshStrategy)
 	if err != nil {
 		trackStartFailure("resolve_policy")
+		var routeErr *agentRouteResolutionError
+		if errors.As(err, &routeErr) {
+			if _, recordErr := m.db.InsertFailedRunWithOptions(repo.ID, branch, headSHA, baseSHA, runOptions, err.Error()); recordErr != nil {
+				return "", fmt.Errorf("%w (record failed launch: %v)", err, recordErr)
+			}
+		}
 		return "", err
 	}
 	policyRefOwnedByRun := false
@@ -1203,25 +1211,8 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// intent (which falls back to transcript inference), the note has no
 	// fallback, so writing it in the same insert avoids ever creating a run that
 	// is missing its guaranteed PR-note content.
-	storedIntent := intent
-	if source != db.RunIntentSourceRerun {
-		storedIntent = strings.TrimSpace(storedIntent)
-	}
-	var runIntent *db.RunIntent
-	if strings.TrimSpace(storedIntent) != "" {
-		if source == "" {
-			source = db.RunIntentSourceAgent
-		}
-		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
-	}
-
-	run, err := m.db.InsertRunWithOptions(repo.ID, branch, resolved.HeadSHA, baseSHA, db.RunOptions{
-		PRNote:          strings.TrimSpace(prNote),
-		Metadata:        metadata,
-		RefreshStrategy: resolved.RefreshStrategy,
-		StackedOn:       stackedOn,
-		Intent:          runIntent,
-	})
+	runOptions.RefreshStrategy = resolved.RefreshStrategy
+	run, err := m.db.InsertRunWithOptions(repo.ID, branch, resolved.HeadSHA, baseSHA, runOptions)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1416,6 +1407,27 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	}()
 
 	return run.ID, nil
+}
+
+func newRunOptions(intent, source, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) db.RunOptions {
+	storedIntent := intent
+	if source != db.RunIntentSourceRerun {
+		storedIntent = strings.TrimSpace(storedIntent)
+	}
+	var runIntent *db.RunIntent
+	if strings.TrimSpace(storedIntent) != "" {
+		if source == "" {
+			source = db.RunIntentSourceAgent
+		}
+		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
+	}
+	return db.RunOptions{
+		PRNote:          strings.TrimSpace(prNote),
+		Metadata:        metadata,
+		RefreshStrategy: refreshStrategy,
+		StackedOn:       stackedOn,
+		Intent:          runIntent,
+	}
 }
 
 // evalAutoCaptureTimeout bounds one automatic collection pass. Collection is

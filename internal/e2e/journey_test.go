@@ -305,7 +305,7 @@ func runHappyPath(t *testing.T, agentName string) {
 		assertFailingBuildCommandRun(t, h)
 		assertBuildCommandAutoFixRun(t, h)
 		assertDifferentBranchDoesNotCancelActiveRun(t, h)
-		assertInvalidConfigPushCleansWorktree(t, h)
+		assertInvalidConfigPushCreatesNoRunOrWorktree(t, h)
 		assertDocumentMissingFindingsRun(t, h)
 		assertDocumentMalformedFindingRun(t, h)
 		assertDocumentLegacyFindingRun(t, h)
@@ -1490,7 +1490,7 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	}
 }
 
-func assertInvalidConfigPushCleansWorktree(t *testing.T, h *Harness) {
+func assertInvalidConfigPushCreatesNoRunOrWorktree(t *testing.T, h *Harness) {
 	t.Helper()
 	configPath := filepath.Join(h.NMHome, "config.yaml")
 	originalConfig, err := os.ReadFile(configPath)
@@ -1506,18 +1506,31 @@ func assertInvalidConfigPushCleansWorktree(t *testing.T, h *Harness) {
 		}
 	}()
 
+	runsBefore := len(h.Runs())
+	worktreeRoot := filepath.Join(paths.WithRoot(h.NMHome).WorktreesDir(), h.repoID())
+	entriesBefore, err := os.ReadDir(worktreeRoot)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read worktrees before invalid config push: %v", err)
+	}
 	h.CommitChange("invalid-config-cleanup", "invalid-config-cleanup.txt", "invalid config cleanup\n", "add invalid config cleanup")
 	h.PushToGate("invalid-config-cleanup")
-	run := h.WaitForRun("invalid-config-cleanup", 60*time.Second)
-	if run.Status != types.RunFailed {
-		t.Fatalf("invalid-config-cleanup run status = %s, want failed", run.Status)
+	if runsAfter := len(h.Runs()); runsAfter != runsBefore {
+		t.Fatalf("invalid config push created %d runs, want none", runsAfter-runsBefore)
 	}
-	if run.Error == nil || !strings.Contains(*run.Error, "parse global config") {
-		t.Fatalf("expected invalid-config-cleanup run error to mention parse global config, got %q", deref(run.Error))
+	notifyLog := filepath.Join(h.NMHome, "repos", h.repoID()+".git", "notify-push.log")
+	notifyData, err := os.ReadFile(notifyLog)
+	if err != nil {
+		t.Fatalf("read invalid config notification log: %v", err)
 	}
-	worktreeDir := paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), run.ID)
-	if _, err := os.Stat(worktreeDir); !os.IsNotExist(err) {
-		t.Fatalf("expected setup-failure worktree %s to be removed, stat err=%v", worktreeDir, err)
+	if !strings.Contains(string(notifyData), "parse global config") {
+		t.Fatalf("invalid config notification missing parse error:\n%s", notifyData)
+	}
+	entriesAfter, err := os.ReadDir(worktreeRoot)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read worktrees after invalid config push: %v", err)
+	}
+	if len(entriesAfter) != len(entriesBefore) {
+		t.Fatalf("invalid config push changed worktree count from %d to %d", len(entriesBefore), len(entriesAfter))
 	}
 }
 

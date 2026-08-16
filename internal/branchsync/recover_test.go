@@ -1044,6 +1044,36 @@ func TestUnmovedRunSelectionPrefersNewerAuthoritativeRuns(t *testing.T) {
 	})
 }
 
+func TestFailedAdmissionAuditRunReleasesWithoutShadowingActiveCustody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("released failure is user owned", func(t *testing.T) {
+		f := newUnmovedRecoverFixture(t, types.RunCancelled)
+		time.Sleep(1100 * time.Millisecond)
+		failed, err := f.db.InsertFailedRunWithOptions(f.repo.ID, "feature/recover", f.submitted, f.base, db.RunOptions{}, "agent route resolution failed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := f.service.InspectCached(f.ctx)
+		if state.Pipeline.RunID != failed.ID || state.State != StateUserOwned || state.Safety != "user_owned" {
+			t.Fatalf("failed admission state = %s/%s pipeline %#v", state.State, state.Safety, state.Pipeline)
+		}
+	})
+
+	t.Run("older active run remains authoritative", func(t *testing.T) {
+		f := newUnmovedRecoverFixture(t, types.RunRunning)
+		time.Sleep(1100 * time.Millisecond)
+		failed, err := f.db.InsertFailedRunWithOptions(f.repo.ID, "feature/recover", f.submitted, f.base, db.RunOptions{}, "agent route resolution failed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := f.service.InspectCached(f.ctx)
+		if state.Pipeline.RunID == failed.ID || state.Pipeline.RunID != f.run.ID || state.Safety != "blocked_pipeline_owned" {
+			t.Fatalf("selection after failed admission = %#v, want older active run %s", state.Pipeline, f.run.ID)
+		}
+	})
+}
+
 // TestUnmovedRunWrongContextsStayRefusedWithoutStamp: a different checked-out
 // branch and a detached HEAD keep their precise refusals, and neither path can
 // stamp custody on the stranded run.
