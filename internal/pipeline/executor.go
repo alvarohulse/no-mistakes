@@ -216,6 +216,14 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		if err != nil {
 			return e.failRun(run, repo, fmt.Errorf("insert step result: %w", err))
 		}
+		if source, skipped := e.skips[step.Name().Canonical()]; skipped {
+			if err := e.db.CompleteStepAsSkipped(sr.ID, source); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("persist skip receipt for step %s: %w", step.Name(), err))
+			}
+			sourceValue := string(source)
+			sr.Status = types.StepStatusSkipped
+			sr.SkipSource = &sourceValue
+		}
 		stepRecords[step.Name()] = sr
 	}
 
@@ -233,9 +241,6 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 				}}})
 			}
 			e.recordSkipExplanation(sr.ID, preRunSkipExplanation(source))
-			if err := e.db.CompleteStepAsSkipped(sr.ID, source); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
-			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", nil)
 			continue
 		}
@@ -603,7 +608,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			}
 			continue
 		}
-		if result.Status != types.StepStatusPending {
+		if result.Status != types.StepStatusPending && !persistedPreRunSkip(result) {
 			return nil, fmt.Errorf("recovered step %s is %s after approval gate", result.StepName, result.Status)
 		}
 	}
@@ -611,6 +616,13 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 		return nil, fmt.Errorf("recovered run has no approval gate")
 	}
 	return gate, nil
+}
+
+func persistedPreRunSkip(result *db.StepResult) bool {
+	if result == nil || result.Status != types.StepStatusSkipped || result.SkipSource == nil {
+		return false
+	}
+	return types.SkipSource(*result.SkipSource).Valid()
 }
 
 func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int) error {
@@ -622,16 +634,29 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
-		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
+		if index >= len(results) || results[index].StepName != e.steps[index].Name() {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
 		if source, skipped := e.skips[e.steps[index].Name().Canonical()]; skipped {
+			if persistedPreRunSkip(results[index]) {
+				if types.SkipSource(*results[index].SkipSource) != source {
+					return e.failRun(run, repo, fmt.Errorf("recovered skip source changed for step %s", e.steps[index].Name()), ctx)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
+				continue
+			}
+			if results[index].Status != types.StepStatusPending {
+				return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
+			}
 			e.recordSkipExplanation(results[index].ID, preRunSkipExplanation(source))
 			if err := e.db.CompleteStepAsSkipped(results[index].ID, source); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err), ctx)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
 			continue
+		}
+		if results[index].Status != types.StepStatusPending {
+			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
 		skipRemaining, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, stepExecutionState{})
 		if err != nil {
@@ -653,7 +678,14 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
 	}
 	for index := start; index < len(e.steps); index++ {
-		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
+		if index >= len(results) || results[index].StepName != e.steps[index].Name() {
+			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
+		}
+		if persistedPreRunSkip(results[index]) {
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
+			continue
+		}
+		if results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
 		}
 		e.recordSkipExplanation(results[index].ID, "Step did not run because an earlier step ended the run.")
@@ -1577,6 +1609,9 @@ func (e *Executor) emitStepEventWithFindingsAndError(eventType ipc.EventType, ru
 	if findings != "" {
 		event.Findings = &findings
 	}
+	if status == string(types.StepStatusSkipped) {
+		event.SkipSource = e.persistedSkipSource(run.ID, stepName)
+	}
 	e.onEvent(event)
 	if !shouldTrackStepTelemetry(eventType, status) {
 		return
@@ -1597,6 +1632,20 @@ func (e *Executor) emitStepEventWithFindingsAndError(eventType ipc.EventType, ru
 		fields["findings_count"] = findingsCount(findings)
 	}
 	telemetry.Track("step", fields)
+}
+
+func (e *Executor) persistedSkipSource(runID string, stepName types.StepName) *string {
+	steps, err := e.db.GetStepsByRun(runID)
+	if err != nil {
+		return nil
+	}
+	for _, step := range steps {
+		if step.StepName == stepName && step.SkipSource != nil {
+			source := *step.SkipSource
+			return &source
+		}
+	}
+	return nil
 }
 
 func (e *Executor) findingStatsForStep(runID string, stepName types.StepName) db.StepStats {

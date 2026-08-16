@@ -356,6 +356,7 @@ type Event struct {
 	RepoID           string          `json:"repo_id"`
 	StepName         *types.StepName `json:"step_name,omitempty"`
 	Status           *string         `json:"status,omitempty"`
+	SkipSource       *string         `json:"skip_source,omitempty"`
 	Error            *string         `json:"error,omitempty"`
 	Stream           *string         `json:"stream,omitempty"`
 	Content          *string         `json:"content,omitempty"`

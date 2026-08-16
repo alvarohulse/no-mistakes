@@ -110,6 +110,34 @@ func TestExecutor_PropagatesPRNoteToStepContext(t *testing.T) {
 	}
 }
 
+func TestExecutorPersistsFutureConfiguredSkipBeforeEarlierStepRuns(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	pr := &adaptiveCallStep{name: types.StepPR, fn: func(*StepContext) (*StepOutcome, error) {
+		results, err := database.GetStepsByRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, result := range results {
+			if result.StepName != types.StepCI {
+				continue
+			}
+			if result.Status != types.StepStatusSkipped || result.SkipSource == nil || *result.SkipSource != string(types.SkipSourceGlobalOverride) {
+				return nil, fmt.Errorf("future CI receipt = %+v", result)
+			}
+			return &StepOutcome{}, nil
+		}
+		return nil, fmt.Errorf("future CI step row is missing")
+	}}
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, fmt.Errorf("configured skipped CI executed")
+	}}
+	executor := NewExecutor(database, p, nil, nil, []Step{pr, ci}, nil)
+	executor.SetStepSkips([]types.StepSkip{{Step: types.StepCI, Source: types.SkipSourceGlobalOverride}})
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExecutor_SuccessfulStepsDoNotEmitTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

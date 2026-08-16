@@ -370,11 +370,12 @@ func TestEventTypes(t *testing.T) {
 		{
 			name: "step_completed",
 			event: Event{
-				Type:     EventStepCompleted,
-				RunID:    "run001",
-				RepoID:   "repo001",
-				StepName: ptrStepName(types.StepLint),
-				Status:   ptrStr(string(types.StepStatusCompleted)),
+				Type:       EventStepCompleted,
+				RunID:      "run001",
+				RepoID:     "repo001",
+				StepName:   ptrStepName(types.StepLint),
+				Status:     ptrStr(string(types.StepStatusSkipped)),
+				SkipSource: ptrStr(string(types.SkipSourceGlobalOverride)),
 			},
 		},
 		{

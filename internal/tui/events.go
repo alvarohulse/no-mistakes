@@ -90,6 +90,9 @@ func (m *Model) applyEvent(event ipc.Event) bool {
 		if event.StepName != nil && event.Status != nil {
 			m.updateStepStatus(*event.StepName, types.StepStatus(*event.Status))
 		}
+		if event.StepName != nil && event.SkipSource != nil {
+			m.setStepSkipSource(*event.StepName, event.SkipSource)
+		}
 		if event.StepName != nil && event.Error != nil {
 			m.setStepError(*event.StepName, event.Error)
 		}
@@ -321,6 +324,15 @@ func (m *Model) updateStepStatus(name types.StepName, status types.StepStatus) {
 			if status != types.StepStatusFixReview {
 				m.invalidateStepDiff(name)
 			}
+			return
+		}
+	}
+}
+
+func (m *Model) setStepSkipSource(name types.StepName, source *string) {
+	for i := range m.steps {
+		if m.steps[i].StepName == name {
+			m.steps[i].SkipSource = source
 			return
 		}
 	}

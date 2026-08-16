@@ -239,6 +239,9 @@ func TestExecutor_ResumeAppliesPendingConfiguredSkipReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := database.CompleteStepAsSkipped(ciResult.ID, types.SkipSourceGlobalOverride); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.StartStep(lintResult.ID); err != nil {
 		t.Fatal(err)
 	}
