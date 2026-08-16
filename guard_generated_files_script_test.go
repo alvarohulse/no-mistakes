@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,14 +13,18 @@ import (
 )
 
 const (
-	guardBootstrapBase      = "2f44ab72acf8c0a064330b668e676672335ebd98"
-	guardBootstrapCanonical = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
-	guardChangelogV1        = "# Changelog\n\n## 1.1.0\n"
-	guardChangelogVMid      = "# Changelog\n\n## 1.1.5\n"
-	guardChangelogV2        = "# Changelog\n\n## 1.2.0\n"
-	guardManifestV1         = "{\".\":\"1.1.0\"}\n"
-	guardManifestVMid       = "{\".\":\"1.1.5\"}\n"
-	guardManifestV2         = "{\".\":\"1.2.0\"}\n"
+	guardBootstrapBase                   = "2f44ab72acf8c0a064330b668e676672335ebd98"
+	guardBootstrapCanonical              = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
+	guardBootstrapOlderCanonical         = "867d64d9c2df89f3f204ad1f5528e5bf7b460caa"
+	guardAdditionalTrustedHistoryCommits = 327
+	guardChangelogV1                     = "# Changelog\n\n## 1.1.0\n"
+	guardChangelogVMid                   = "# Changelog\n\n## 1.1.5\n"
+	guardChangelogV2                     = "# Changelog\n\n## 1.2.0\n"
+	guardChangelogV3                     = "# Changelog\n\n## 1.3.0\n"
+	guardManifestV1                      = "{\".\":\"1.1.0\"}\n"
+	guardManifestVMid                    = "{\".\":\"1.1.5\"}\n"
+	guardManifestV2                      = "{\".\":\"1.2.0\"}\n"
+	guardManifestV3                      = "{\".\":\"1.3.0\"}\n"
 )
 
 func TestGeneratedFileGuard(t *testing.T) {
@@ -67,6 +72,70 @@ func TestGeneratedFileGuard(t *testing.T) {
 		}
 		if !strings.Contains(output, "generated files changed in a noncanonical commit") {
 			t.Fatalf("guard failure = %q, want noncanonical generated change", output)
+		}
+	})
+
+	t.Run("trusted bootstrap rejects an actual canonical release older than its floor", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		head := guardGeneratedMergeCommit(t, repo, guardBootstrapBase, guardBootstrapOlderCanonical)
+
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject a canonical release older than the bootstrap floor\n%s", output)
+		}
+	})
+
+	t.Run("trusted bootstrap accepts a commit-preserving canonical successor", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		head := guardGeneratedMergeCommit(t, repo, guardBootstrapBase, candidate)
+
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
+		if err != nil {
+			t.Fatalf("guard should accept a canonical successor: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted base accepts a host-rewritten canonical successor", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		base := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		guardWriteFile(t, repo, "source.txt", "feature\n")
+		guardGit(t, repo, "add", "source.txt")
+		guardGit(t, repo, "commit", "-q", "-m", "feat: change source")
+		head := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, head, upstream)
+		if err != nil {
+			t.Fatalf("guard should accept trusted host rewrite provenance: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("untrusted head rejects a host-equivalent canonical rewrite", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		head := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject rewritten provenance in an untrusted head\n%s", output)
+		}
+		if !strings.Contains(output, "generated files changed in a noncanonical commit") {
+			t.Fatalf("guard failure = %q, want noncanonical generated change", output)
+		}
+	})
+
+	t.Run("trusted base history has no fixed lifetime commit ceiling", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", guardBootstrapBase+"^{tree}"))
+		base := guardBootstrapBase
+		for i := 0; i < guardAdditionalTrustedHistoryCommits; i++ {
+			base = strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", base, "-m", fmt.Sprintf("chore: trusted history %d", i)))
+		}
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err != nil {
+			t.Fatalf("guard should audit trusted history without a lifetime ceiling: %v\n%s", err, output)
 		}
 	})
 
@@ -186,6 +255,16 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.commit(fixture.upstream, "chore(main): restore 1.1.0 release files", guardReleaseFiles(guardChangelogV1, guardManifestV1))
 		fixture.mergeCanonicalMain()
 		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("copied canonical tuple fails even when the final release is unique", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.commit(fixture.upstream, "chore(main): release 1.2.0", guardReleaseFiles(guardChangelogV2, guardManifestV2))
+		fixture.commit(fixture.upstream, "chore(main): copy release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.commit(fixture.upstream, "chore(main): release 1.3.0", guardReleaseFiles(guardChangelogV3, guardManifestV3))
+		fixture.mergeCanonicalMain()
+		fixture.assertFailsContaining(fixture.upstream, "generated-file tuple")
 	})
 
 	t.Run("copied canonical blobs without ancestry fail", func(t *testing.T) {
@@ -409,6 +488,36 @@ func newGeneratedGuardBootstrapFixture(t *testing.T) (string, string, string) {
 	guardGit(t, "", "clone", "-q", "--bare", ".", upstream)
 	guardGit(t, "", "--git-dir="+upstream, "update-ref", "refs/heads/main", guardBootstrapCanonical)
 	return repo, upstream, script
+}
+
+func addGeneratedGuardCanonicalSuccessor(t *testing.T, repo, upstream string) string {
+	t.Helper()
+	guardGit(t, repo, "switch", "-q", "-c", "canonical-successor", guardBootstrapCanonical)
+	guardWriteFile(t, repo, "CHANGELOG.md", guardChangelogV3)
+	guardWriteFile(t, repo, ".release-please-manifest.json", guardManifestV3)
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 1.43.0")
+	candidate := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+	guardGit(t, "", "--git-dir="+upstream, "fetch", "-q", repo, "refs/heads/canonical-successor:refs/heads/main")
+	return candidate
+}
+
+func guardGeneratedMergeCommit(t *testing.T, repo, base, candidate string) string {
+	t.Helper()
+	guardGit(t, repo, "switch", "-q", "--detach", base)
+	guardGit(t, repo, "checkout", candidate, "--", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	tree := strings.TrimSpace(guardGit(t, repo, "write-tree"))
+	return strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", base, "-p", candidate, "-m", "Merge canonical release"))
+}
+
+func guardGeneratedRewriteCommit(t *testing.T, repo, base, candidate string) string {
+	t.Helper()
+	guardGit(t, repo, "switch", "-q", "--detach", base)
+	guardGit(t, repo, "checkout", candidate, "--", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+	guardGit(t, repo, "commit", "-q", "-m", "chore: host rewrite canonical release")
+	return strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
 }
 
 func (f *generatedGuardFixture) configureRepo(repo string) {
