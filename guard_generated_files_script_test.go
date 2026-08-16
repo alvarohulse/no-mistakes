@@ -284,23 +284,6 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	}
 }
 
-func TestGeneratedFileGuardBootstrapRunsOnlyForPR40(t *testing.T) {
-	workflow := strings.ReplaceAll(guardReadFile(t, ".github/workflows/guard-generated-files.yml"), "\r\n", "\n")
-
-	for _, want := range []string{
-		"provenance-bootstrap:",
-		"name: Generated file provenance bootstrap",
-		"if: github.event.pull_request.number == 40",
-		"persist-credentials: false",
-		"sh scripts/guard-generated-files.sh",
-		"https://github.com/kunchenguid/no-mistakes.git",
-	} {
-		if !strings.Contains(workflow, want) {
-			t.Errorf("bootstrap workflow must contain %q", want)
-		}
-	}
-}
-
 type generatedGuardFixture struct {
 	t        *testing.T
 	script   string
