@@ -51,6 +51,20 @@ func ciTestJob(t *testing.T) *wfJob {
 	return job
 }
 
+func TestCIWorkflow_TestJobChecksOutFullHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range ciTestJob(t).Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			if step.With["fetch-depth"] != "0" {
+				t.Fatalf("test job checkout fetch-depth = %q, want 0 for historical guard fixtures", step.With["fetch-depth"])
+			}
+			return
+		}
+	}
+	t.Fatal("CI test job has no checkout step")
+}
+
 type workflowCommand struct {
 	step int
 	line int
@@ -225,7 +239,9 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		t.Fatal("Windows tests must split git-heavy packages from the remainder")
 	}
 
-	exclude := windowsGitExcludePattern(t, job.Steps[coreCommand.step])
+	coreStep := job.Steps[coreCommand.step]
+	assertWindowsCorePackageEnumeration(t, coreStep)
+	exclude := windowsGitExcludePattern(t, coreStep)
 	all := goListPackages(t, "./...")
 	gitFromFilter := filterPackages(all, exclude, true)
 	coreFromFilter := filterPackages(all, exclude, false)
@@ -254,6 +270,19 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
 		t.Fatalf("Windows shards must cover every package: union %v, go list ./... %v", union, all)
+	}
+}
+
+func assertWindowsCorePackageEnumeration(t *testing.T, step wfStep) {
+	t.Helper()
+	goList := strings.Index(step.Run, "$pkgs = go list ./...")
+	exitCode := strings.Index(step.Run, "$goListExitCode = $LASTEXITCODE")
+	failureCheck := strings.Index(step.Run, "if ($goListExitCode -ne 0)")
+	failureExit := strings.Index(step.Run, "exit $goListExitCode")
+	filter := strings.Index(step.Run, "$pkgs = $pkgs | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }")
+	goTest := strings.Index(step.Run, "go test -v -timeout=15m @pkgs")
+	if goList == -1 || exitCode < goList || failureCheck < exitCode || failureExit < failureCheck || filter < failureExit || goTest < filter {
+		t.Fatalf("Windows core shard must fail closed on go list before filtering packages:\n%s", step.Run)
 	}
 }
 

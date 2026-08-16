@@ -262,12 +262,19 @@ Safest local verification sequence after non-trivial changes:
 
 **macOS Release Signing (permanent identity)**
 
-- Every official macOS release artifact - both `darwin/arm64` and `darwin/amd64` - is Developer ID Application signed on a macOS runner with a fixed identifier, hardened runtime, secure timestamp, and no entitlements, then strictly verified before it is archived or checksummed; the Linux and Windows release paths are unchanged.
+- Every official macOS release artifact - both `darwin/arm64` and `darwin/amd64` - is Developer ID Application signed on a macOS runner with a fixed identifier, hardened runtime, secure timestamp, and no entitlements, then strictly verified before it is archived or checksummed. Linux and Windows artifacts remain unsigned.
 - The executable identifier `com.kunchenguid.no-mistakes` and Team ID `9T2J7MNUP9` are the permanent Developer ID identity and MUST NEVER change: they are the invariant of the identity-based designated requirement that lets macOS permission grants survive `no-mistakes update`, so changing either resets every grant once.
 - Signing runs only in the darwin build job gated behind the `release-signing` GitHub environment; the certificate is the base64 `CSC_LINK` secret unlocked with `CSC_KEY_PASSWORD`, imported into an ephemeral keychain with a runtime-generated password that is deleted on success and failure, and no other job may reference those secrets.
 - Signing happens before tarball creation and checksum generation, and the verify gate fails the release closed on any missing or ambiguous signature, wrong Team ID, non-permanent identifier, content-based (`cdhash`) requirement, missing hardened runtime or timestamp, or wrong architecture.
 - Mechanics live in `.github/workflows/release.yml`; the contract is pinned by the root `TestReleaseWorkflow*` static tests in `workflow_release_signing_test.go`, and secret values are never recorded here or in any test fixture.
 - Notarization, stapling, a PKG, Homebrew, and universal binaries are intentionally out of scope for this phase.
+
+**Generated-File Provenance and Release Recovery**
+
+- `.github/workflows/guard-generated-file-provenance.yml` is a privileged `pull_request_target` boundary: treat every PR field and head commit as data, verify the exact event base and fetched head identities, and execute only the guard script read from the verified base. Never check out or execute PR-head code there.
+- `scripts/guard-generated-files.sh` accepts only the `CHANGELOG.md` plus `.release-please-manifest.json` tuple carried by canonical upstream history, the explicitly authenticated pending Release Please head, or an exact durable release-head tag fetched from the trusted `alvarohulse/no-mistakes` publisher. Keep its pinned bootstrap/adoption, full trusted-history audit, monotonic rewrite provenance, and bounded untrusted-PR audit fail-closed; deleted attestations, forged or ambiguous tuples, and rollbacks must fail closed.
+- `.github/workflows/release.yml` authenticates the pending Release Please head through the pinned, base-owned dependency graph and publishes both the status and durable provenance tag for that exact SHA. A full rerun may recover only the unique GitHub-Actions-authored draft whose manifest tag resolves to the triggering `main` SHA; already-published releases emit no release output, ambiguous state fails closed, every build job checks out the resolved release SHA, and privileged actions stay pinned by commit SHA.
+- Regressions: `guard_generated_files_script_test.go`, `release_state_script_test.go`, and `workflow_release_test.go`.
 
 **When Making Changes**
 

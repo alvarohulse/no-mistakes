@@ -1,0 +1,13 @@
+{
+  "name": "no-mistakes-release-please-reproducer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runs the release workflow's pinned release-please dependency graph",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "release-please": "17.3.0"
+  }
+}

@@ -62,6 +62,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -113,7 +115,12 @@ jobs:
         env:
           NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps|daemon|eval)$'
         run: |
-          $pkgs = go list ./... | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
+          $pkgs = go list ./...
+          $goListExitCode = $LASTEXITCODE
+          if ($goListExitCode -ne 0) {
+            exit $goListExitCode
+          }
+          $pkgs = $pkgs | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
           go test -v -timeout=15m @pkgs
 
       - name: Build
