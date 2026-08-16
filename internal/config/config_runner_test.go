@@ -54,6 +54,16 @@ commands:
 	}
 }
 
+func TestLoadRepo_CommandsPreserveLegacyTypedScalar(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte("commands:\n  lint: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Commands.Lint != "true" {
+		t.Fatalf("commands.lint = %q, want legacy shell command true", cfg.Commands.Lint)
+	}
+}
+
 func TestLoadRepo_RejectsUnknownStructuredCommandFields(t *testing.T) {
 	for _, input := range []string{
 		"commands:\n  test:\n    command: make test\n",

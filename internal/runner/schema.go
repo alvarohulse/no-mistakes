@@ -124,10 +124,14 @@ func (c *Command) UnmarshalYAML(value *yaml.Node) error {
 			c.present = map[string]bool{"run": true}
 			return nil
 		}
-		if value.Tag != "!!str" {
-			return fmt.Errorf("command must be a string or mapping")
+		// The legacy string fields accepted YAML-typed scalars such as an
+		// unquoted `true` and decoded them to their source text. Preserve that
+		// behavior while adding the structured mapping form.
+		var run string
+		if err := value.Decode(&run); err != nil {
+			return fmt.Errorf("command must be a scalar or mapping: %w", err)
 		}
-		*c = Command{Run: value.Value, form: yamlFormScalar, present: map[string]bool{"run": true}}
+		*c = Command{Run: run, form: yamlFormScalar, present: map[string]bool{"run": true}}
 		return nil
 	}
 	if err := rejectUnknownMappingFields(value, "command", "run", "runner", "linux", "macos", "windows"); err != nil {
