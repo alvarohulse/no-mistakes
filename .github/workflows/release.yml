@@ -56,6 +56,7 @@ jobs:
   release-pr-provenance:
     runs-on: ubuntu-latest
     needs: release-please
+    if: needs.release-please.outputs.release_created != 'true'
     steps:
       # GITHUB_TOKEN suppresses pull-request workflow events. Produce the release
       # PR through the same pinned release-please graph while retaining the exact
