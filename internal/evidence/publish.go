@@ -2,6 +2,9 @@ package evidence
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -20,11 +23,6 @@ const (
 	maxFiles      = 500
 	maxTotalBytes = int64(256 << 20)
 	maxFileBytes  = int64(64 << 20)
-
-	// fetchRef is a scratch ref used to bring the remote evidence tip into the
-	// local object store. Only the resolved sha is used afterwards, so a
-	// concurrent run overwriting the ref cannot redirect this publish.
-	fetchRef = "refs/no-mistakes/evidence-fetch"
 
 	scratchIndexName = "no-mistakes-evidence-index"
 )
@@ -192,7 +190,7 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 // object store, or "" when the branch does not exist yet. A failure to read
 // the remote is an error: publishing onto a branch whose current state is
 // unknown is exactly the case that must not proceed.
-func remoteTip(ctx context.Context, repoDir, pushURL, branch string) (string, error) {
+func remoteTip(ctx context.Context, repoDir, pushURL, branch string) (sha string, resultErr error) {
 	out, err := git.Run(ctx, repoDir, "ls-remote", "--heads", pushURL, "refs/heads/"+branch)
 	if err != nil {
 		return "", fmt.Errorf("read evidence branch %s on %s: %w", branch, safeurl.Redact(pushURL), err)
@@ -200,14 +198,37 @@ func remoteTip(ctx context.Context, repoDir, pushURL, branch string) (string, er
 	if strings.TrimSpace(out) == "" {
 		return "", nil
 	}
+	fetchRef, err := newEvidenceFetchRef()
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if _, cleanupErr := git.Run(context.Background(), repoDir, "update-ref", "-d", fetchRef); cleanupErr != nil {
+			cleanupErr = fmt.Errorf("delete evidence fetch ref %s: %w", fetchRef, cleanupErr)
+			if resultErr != nil {
+				resultErr = errors.Join(resultErr, cleanupErr)
+			} else {
+				sha = ""
+				resultErr = cleanupErr
+			}
+		}
+	}()
 	if _, err := git.Run(ctx, repoDir, "fetch", "--no-tags", "--force", pushURL, "+refs/heads/"+branch+":"+fetchRef); err != nil {
 		return "", fmt.Errorf("fetch evidence branch %s: %w", branch, err)
 	}
-	sha, err := git.Run(ctx, repoDir, "rev-parse", "--verify", fetchRef+"^{commit}")
+	sha, err = git.Run(ctx, repoDir, "rev-parse", "--verify", fetchRef+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve fetched evidence branch %s: %w", branch, err)
 	}
 	return sha, nil
+}
+
+func newEvidenceFetchRef() (string, error) {
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return "", fmt.Errorf("allocate evidence fetch ref: %w", err)
+	}
+	return "refs/no-mistakes/evidence-fetch-" + hex.EncodeToString(suffix[:]), nil
 }
 
 // assertEvidenceBranch refuses a branch that exists but is not a no-mistakes

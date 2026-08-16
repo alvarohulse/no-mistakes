@@ -606,6 +606,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			_ = agents.Close()
 			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.closeSubscribers(plan.run.ID)
+			m.sweepRunWorktreeProcesses(plan.workDir)
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
 			}

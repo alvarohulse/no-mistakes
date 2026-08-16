@@ -225,6 +225,33 @@ func TestBuildRunAuditReportsPolicyAndStoredStepMismatch(t *testing.T) {
 	}
 }
 
+func TestBuildRunAuditAcceptsSourceLessRuntimeSkip(t *testing.T) {
+	database, run := newAuditRun(t)
+	policy := `{"version":5,"steps":[{"name":"ci","status":"enabled"}]}`
+	digest := sha256.Sum256([]byte(policy))
+	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(ci.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	audit, err := BuildRunAudit(database, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.IntegrityErrors) != 0 {
+		t.Fatalf("runtime skip produced integrity errors: %v", audit.IntegrityErrors)
+	}
+	if len(audit.SkipReceipts) != 0 || audit.Steps[0].SkipSource != nil {
+		t.Fatalf("runtime skip produced a planned receipt: %+v", audit)
+	}
+}
+
 func TestBuildRunAuditReportsReviewSelectionOutsideCandidatePool(t *testing.T) {
 	database, run := newAuditRun(t)
 	provider := "openai"
