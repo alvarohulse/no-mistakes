@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	guardChangelogV1   = "# Changelog\n\n## 1.1.0\n"
-	guardChangelogVMid = "# Changelog\n\n## 1.1.5\n"
-	guardChangelogV2   = "# Changelog\n\n## 1.2.0\n"
-	guardManifestV1    = "{\".\":\"1.1.0\"}\n"
-	guardManifestVMid  = "{\".\":\"1.1.5\"}\n"
-	guardManifestV2    = "{\".\":\"1.2.0\"}\n"
+	guardBootstrapBase      = "2f44ab72acf8c0a064330b668e676672335ebd98"
+	guardBootstrapCanonical = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
+	guardChangelogV1        = "# Changelog\n\n## 1.1.0\n"
+	guardChangelogVMid      = "# Changelog\n\n## 1.1.5\n"
+	guardChangelogV2        = "# Changelog\n\n## 1.2.0\n"
+	guardManifestV1         = "{\".\":\"1.1.0\"}\n"
+	guardManifestVMid       = "{\".\":\"1.1.5\"}\n"
+	guardManifestV2         = "{\".\":\"1.2.0\"}\n"
 )
 
 func TestGeneratedFileGuard(t *testing.T) {
@@ -25,10 +27,47 @@ func TestGeneratedFileGuard(t *testing.T) {
 		t.Skip("generated-file guard is a POSIX shell script")
 	}
 
-	t.Run("source-only change passes without fetching upstream", func(t *testing.T) {
+	t.Run("source-only change passes after validating upstream provenance", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.pr, "feat: change source", map[string]string{"source.txt": "feature\n"})
-		fixture.assertPasses(filepath.Join(t.TempDir(), "missing-upstream"))
+		fixture.assertPasses(fixture.upstream)
+	})
+
+	t.Run("source-only change fails when upstream provenance is unavailable", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.pr, "feat: change source", map[string]string{"source.txt": "feature\n"})
+		fixture.assertFails(filepath.Join(t.TempDir(), "missing-upstream"))
+	})
+
+	t.Run("trusted bootstrap normalizes the historical base rollback", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, guardBootstrapBase, upstream)
+		if err != nil {
+			t.Fatalf("guard should accept the trusted bootstrap normalization: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted bootstrap audits later base history", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		guardGit(t, repo, "switch", "-q", "--detach", guardBootstrapBase)
+		guardWriteFile(t, repo, "CHANGELOG.md", "transient manual edit\n")
+		guardGit(t, repo, "add", "CHANGELOG.md")
+		guardGit(t, repo, "commit", "-q", "-m", "docs: edit generated file")
+		guardGit(t, repo, "checkout", guardBootstrapBase, "--", "CHANGELOG.md")
+		guardGit(t, repo, "commit", "-q", "-m", "docs: restore generated file")
+		base := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		guardWriteFile(t, repo, "source.txt", "feature\n")
+		guardGit(t, repo, "add", "source.txt")
+		guardGit(t, repo, "commit", "-q", "-m", "feat: change source")
+		head := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, head, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject transient generated edits in base history\n%s", output)
+		}
+		if !strings.Contains(output, "generated files changed in a noncanonical commit") {
+			t.Fatalf("guard failure = %q, want noncanonical generated change", output)
+		}
 	})
 
 	t.Run("source-only head behind the current base release fails", func(t *testing.T) {
@@ -87,7 +126,7 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.git(fixture.pr, "reset", "--hard", fixture.base)
 		fixture.commit(fixture.pr, "chore: edit manifest", map[string]string{".release-please-manifest.json": "{\".\":\"right\"}\n"})
 		fixture.git(fixture.pr, "merge", "--no-ff", "-m", "Merge synthetic generated entries", left)
-		fixture.assertFailsContaining(filepath.Join(t.TempDir(), "missing-upstream"), "merge commit synthesizes generated entries")
+		fixture.assertFailsContaining(fixture.upstream, "merge commit synthesizes generated entries")
 	})
 
 	t.Run("merge carrying the current base release entries passes", func(t *testing.T) {
@@ -226,6 +265,19 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertFailsBetween("not-a-commit", head, missingUpstream)
 		fixture.assertFailsBetween(fixture.base, "not-a-commit", missingUpstream)
 	})
+
+	t.Run("commits with excessive parents fail closed", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		tree := strings.TrimSpace(fixture.git(fixture.pr, "write-tree"))
+		mergeArgs := []string{"commit-tree", tree}
+		for i := 0; i < 33; i++ {
+			parent := strings.TrimSpace(fixture.git(fixture.pr, "commit-tree", tree, "-p", fixture.base, "-m", strings.Repeat("parent", i+1)))
+			mergeArgs = append(mergeArgs, "-p", parent)
+		}
+		mergeArgs = append(mergeArgs, "-m", "merge")
+		head := strings.TrimSpace(fixture.git(fixture.pr, mergeArgs...))
+		fixture.assertFailsBetweenContaining(fixture.base, head, fixture.upstream, "commit has too many parents")
+	})
 }
 
 func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
@@ -264,11 +316,33 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
             echo "::error::Checked-out pull request base does not match the event" >&2
             exit 1
           fi`
-	validationStart := strings.Index(workflow, baseValidation)
-	if validationStart == -1 {
+	baseValidationStart := strings.Index(workflow, baseValidation)
+	if baseValidationStart == -1 {
 		t.Fatal("trusted workflow must validate the checked-out base before using it")
 	}
-	validationEnd := validationStart + len(baseValidation)
+	headValidation := `case "$PR_NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::Pull request number is not numeric" >&2
+              exit 1
+              ;;
+          esac
+
+          pr_head_ref=refs/no-mistakes/guard-generated-files/pr-head
+          git fetch --no-tags --force origin \
+            "+refs/pull/${PR_NUMBER}/head:${pr_head_ref}"
+          fetched_head=$(git rev-parse --verify "${pr_head_ref}^{commit}")
+          if [ "$fetched_head" != "$HEAD_SHA" ]; then
+            echo "::error::Fetched pull request head does not match the event" >&2
+            exit 1
+          fi`
+	headValidationStart := strings.Index(workflow, headValidation)
+	if headValidationStart == -1 {
+		t.Fatal("trusted workflow must validate the numeric pull request head before using it")
+	}
+	validationEnd := headValidationStart + len(headValidation)
+	if baseValidationStart+len(baseValidation) > validationEnd {
+		validationEnd = baseValidationStart + len(baseValidation)
+	}
 	for _, operation := range []string{
 		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
 		`sh "$trusted_script"`,
@@ -317,6 +391,24 @@ func newGeneratedGuardFixture(t *testing.T) *generatedGuardFixture {
 	fixture.git("", "clone", "-q", fixture.upstream, fixture.pr)
 	fixture.configureRepo(fixture.pr)
 	return fixture
+}
+
+func newGeneratedGuardBootstrapFixture(t *testing.T) (string, string, string) {
+	t.Helper()
+	script, err := filepath.Abs(filepath.Join("scripts", "guard-generated-files.sh"))
+	if err != nil {
+		t.Fatalf("resolve guard script: %v", err)
+	}
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	upstream := filepath.Join(root, "upstream.git")
+	guardGit(t, "", "clone", "-q", ".", repo)
+	guardGit(t, repo, "config", "user.email", "guard-test@example.com")
+	guardGit(t, repo, "config", "user.name", "Guard Test")
+	guardGit(t, repo, "config", "commit.gpgsign", "false")
+	guardGit(t, "", "clone", "-q", "--bare", ".", upstream)
+	guardGit(t, "", "--git-dir="+upstream, "update-ref", "refs/heads/main", guardBootstrapCanonical)
+	return repo, upstream, script
 }
 
 func (f *generatedGuardFixture) configureRepo(repo string) {
@@ -393,6 +485,17 @@ func (f *generatedGuardFixture) assertFailsBetween(base, head, upstream string) 
 	}
 }
 
+func (f *generatedGuardFixture) assertFailsBetweenContaining(base, head, upstream, want string) {
+	f.t.Helper()
+	output, err := f.runBetween(base, head, upstream)
+	if err == nil {
+		f.t.Fatalf("guard should fail\n%s", output)
+	}
+	if !strings.Contains(output, want) {
+		f.t.Fatalf("guard failure = %q, want it to contain %q", output, want)
+	}
+}
+
 func (f *generatedGuardFixture) run(upstream string) (string, error) {
 	f.t.Helper()
 	head := strings.TrimSpace(f.git(f.pr, "rev-parse", "HEAD"))
@@ -401,10 +504,15 @@ func (f *generatedGuardFixture) run(upstream string) (string, error) {
 
 func (f *generatedGuardFixture) runBetween(base, head, upstream string) (string, error) {
 	f.t.Helper()
+	return runGeneratedGuard(f.t, f.pr, f.script, base, head, upstream)
+}
+
+func runGeneratedGuard(t *testing.T, repo, script, base, head, upstream string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", f.script, base, head, upstream)
-	cmd.Dir = f.pr
+	cmd := exec.CommandContext(ctx, "sh", script, base, head, upstream)
+	cmd.Dir = repo
 	cmd.Env = guardCommandEnv()
 	output, err := cmd.CombinedOutput()
 	return string(output), err
@@ -412,6 +520,11 @@ func (f *generatedGuardFixture) runBetween(base, head, upstream string) (string,
 
 func (f *generatedGuardFixture) git(dir string, args ...string) string {
 	f.t.Helper()
+	return guardGit(f.t, dir, args...)
+}
+
+func guardGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmdArgs := args
@@ -422,7 +535,7 @@ func (f *generatedGuardFixture) git(dir string, args ...string) string {
 	cmd.Env = guardCommandEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		f.t.Fatalf("git %s: %v\n%s", strings.Join(cmdArgs, " "), err, output)
+		t.Fatalf("git %s: %v\n%s", strings.Join(cmdArgs, " "), err, output)
 	}
 	return string(output)
 }
