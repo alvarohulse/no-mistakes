@@ -166,7 +166,7 @@ jobs:
             "$GITHUB_SHA" \
             "$head_sha" \
             "https://github.com/kunchenguid/no-mistakes.git" \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" \
+            "https://github.com/alvarohulse/no-mistakes.git" \
             "$head_sha"
 
           trusted_output_verifier="${RUNNER_TEMP}/verify-release-please-output.sh"

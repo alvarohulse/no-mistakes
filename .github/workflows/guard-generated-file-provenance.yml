@@ -62,4 +62,4 @@ jobs:
             "$checked_out_base" \
             "$HEAD_SHA" \
             "https://github.com/kunchenguid/no-mistakes.git" \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            "https://github.com/alvarohulse/no-mistakes.git"
