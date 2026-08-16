@@ -18,9 +18,10 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
+      release_created: ${{ steps.release_state.outputs.release_created }}
+      tag_name: ${{ steps.release_state.outputs.tag_name }}
+      version: ${{ steps.release_state.outputs.version }}
+      release_sha: ${{ steps.release_state.outputs.release_sha }}
     steps:
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
@@ -28,6 +29,25 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-pull-request: true
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve exact release state
+        id: release_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh scripts/resolve-release-state.sh \
+            "$GITHUB_REPOSITORY" \
+            "$GITHUB_SHA" \
+            "${{ steps.release.outputs.release_created }}" \
+            "${{ steps.release.outputs.tag_name }}" \
+            "${{ steps.release.outputs.version }}" \
+            "$GITHUB_OUTPUT"
 
   release-pr-provenance:
     runs-on: ubuntu-latest
@@ -183,11 +203,11 @@ jobs:
           - goos: darwin
             goarch: arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.release_sha }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
 
@@ -343,7 +363,7 @@ jobs:
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: gh release upload "$TAG" "$ARCHIVE" --clobber
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ env.ARCHIVE }}
@@ -377,11 +397,11 @@ jobs:
           - goos: windows
             goarch: arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.release_sha }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
 
@@ -424,7 +444,7 @@ jobs:
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: gh release upload "$TAG" "$ARCHIVE" --clobber
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
           path: ${{ env.ARCHIVE }}
@@ -442,7 +462,7 @@ jobs:
       needs.build-and-upload.result == 'success' &&
       needs.release-please.outputs.release_created == 'true'
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
