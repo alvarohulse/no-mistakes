@@ -52,6 +52,46 @@ func TestReleaseWorkflowRunsReleasePleaseWithoutValidationGuards(t *testing.T) {
 	}
 }
 
+func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+
+	content := string(data)
+	block := extractJobBlock(t, content, "release-please")
+	if !strings.Contains(content, "statuses: write") {
+		t.Fatal("release workflow must be able to attest the exact generated head")
+	}
+	for _, required := range []string{
+		"steps.release.outputs.prs_created == 'true'",
+		"RELEASE_PR: ${{ steps.release.outputs.pr }}",
+		"expected_head_ref=release-please--branches--main",
+		`repos/${GITHUB_REPOSITORY}/pulls/${pr_number}`,
+		`refs/pull/${pr_number}/head`,
+		`[ "$base_sha" != "$GITHUB_SHA" ]`,
+		`[ "$fetched_head" != "$head_sha" ]`,
+		`git show "${GITHUB_SHA}:scripts/guard-generated-files.sh"`,
+		`"$GITHUB_SHA"`,
+		`"$head_sha"`,
+		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
+		"Generated files must not be hand-edited",
+		"latest_head_sha",
+	} {
+		if !strings.Contains(block, required) {
+			t.Errorf("release-please job must contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"steps.release.outputs.pr.sha",
+		"github.event.pull_request",
+	} {
+		if strings.Contains(block, forbidden) {
+			t.Errorf("release-please job must not trust unavailable or unrelated metadata %q", forbidden)
+		}
+	}
+}
+
 func TestReleaseWorkflowBuildStartsOnlyWhenReleaseIsCreated(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {

@@ -198,6 +198,53 @@ func TestGeneratedFileGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("trusted base merge cannot discard a newer canonical side release", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", guardBootstrapBase+"^{tree}"))
+		base := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", guardBootstrapBase, "-p", candidate, "-m", "Discard newer canonical side release"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject a trusted merge that discards newer canonical provenance\n%s", output)
+		}
+		if !strings.Contains(output, "roll back canonical provenance") {
+			t.Fatalf("guard failure = %q, want canonical rollback rejection", output)
+		}
+	})
+
+	t.Run("trusted base merge can adopt monotonic rewritten side provenance", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		rewrite := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", rewrite+"^{tree}"))
+		base := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", guardBootstrapBase, "-p", rewrite, "-m", "Adopt rewritten canonical side release"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err != nil {
+			t.Fatalf("guard should accept a trusted merge that adopts monotonic rewritten provenance: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted side merge preserves rewritten provenance", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		rewrite := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		guardGit(t, repo, "switch", "-q", "-c", "stale-rewrite-side", guardBootstrapBase)
+		guardWriteFile(t, repo, "side.txt", "side\n")
+		guardGit(t, repo, "add", "side.txt")
+		guardGit(t, repo, "commit", "-q", "-m", "feat: stale side change")
+		staleSide := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", rewrite+"^{tree}"))
+		sideMerge := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", rewrite, "-p", staleSide, "-m", "Merge stale side into rewritten provenance"))
+		base := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", rewrite, "-p", sideMerge, "-m", "Merge trusted rewritten side history"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err != nil {
+			t.Fatalf("guard should preserve logical rewrite provenance in trusted side history: %v\n%s", err, output)
+		}
+	})
+
 	t.Run("PR merge preserves rewritten base provenance", func(t *testing.T) {
 		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
 		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
@@ -535,11 +582,6 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		"Checked-out pull request base does not match the event",
 		"refs/pull/${PR_NUMBER}/head",
 		"Fetched pull request head does not match the event",
-		"github.event.pull_request.head.repo.full_name == github.repository",
-		"startsWith(github.event.pull_request.head.ref, 'release-please--branches--main--components--')",
-		"github.event.pull_request.user.login == 'github-actions[bot]'",
-		"github.event.pull_request.user.login == 'release-please[bot]'",
-		`"$PENDING_RELEASE_SHA"`,
 		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
 		"https://github.com/kunchenguid/no-mistakes.git",
 	} {
@@ -549,6 +591,9 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"github.event.pull_request.head.repo.clone_url",
+		"github.event.pull_request.head.ref",
+		"github.event.pull_request.user.login",
+		"PENDING_RELEASE_SHA",
 		`git show "${BASE_SHA}:scripts/guard-generated-files.sh"`,
 	} {
 		if strings.Contains(workflow, forbidden) {
