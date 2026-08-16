@@ -14,6 +14,8 @@ import (
 
 const (
 	guardBootstrapBase                   = "2f44ab72acf8c0a064330b668e676672335ebd98"
+	guardBootstrapCommit                 = "cf50e0a35e0e635d114dbaeedd496374482d2c16"
+	guardBootstrapAdoptionParent         = "51463ebddddce564f122f6b3cfbc74af22cafd4d"
 	guardBootstrapCanonical              = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
 	guardBootstrapOlderCanonical         = "867d64d9c2df89f3f204ad1f5528e5bf7b460caa"
 	guardAdditionalTrustedHistoryCommits = 327
@@ -49,6 +51,34 @@ func TestGeneratedFileGuard(t *testing.T) {
 		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, guardBootstrapBase, upstream)
 		if err != nil {
 			t.Fatalf("guard should accept the trusted bootstrap normalization: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted bootstrap rejects a mainline adoption with different entries", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		guardGit(t, repo, "switch", "-q", "--detach", guardBootstrapAdoptionParent)
+		guardWriteFile(t, repo, "CHANGELOG.md", "tampered adoption\n")
+		guardGit(t, repo, "add", "CHANGELOG.md")
+		tree := strings.TrimSpace(guardGit(t, repo, "write-tree"))
+		base := strings.TrimSpace(guardGit(
+			t,
+			repo,
+			"commit-tree",
+			tree,
+			"-p",
+			guardBootstrapAdoptionParent,
+			"-p",
+			guardBootstrapCommit,
+			"-m",
+			"Merge altered provenance bootstrap",
+		))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject an altered bootstrap adoption\n%s", output)
+		}
+		if !strings.Contains(output, "adoption anchor does not preserve the bootstrap entries") {
+			t.Fatalf("guard failure = %q, want altered adoption rejection", output)
 		}
 	})
 
@@ -108,6 +138,21 @@ func TestGeneratedFileGuard(t *testing.T) {
 		output, err := runGeneratedGuard(t, repo, script, base, head, upstream)
 		if err != nil {
 			t.Fatalf("guard should accept trusted host rewrite provenance: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted base rejects a non-monotonic host rewrite", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		newerBase := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		base := guardGeneratedRewriteCommit(t, repo, newerBase, guardBootstrapCanonical)
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject non-monotonic trusted rewrite provenance\n%s", output)
+		}
+		if !strings.Contains(output, "roll back canonical provenance") {
+			t.Fatalf("guard failure = %q, want canonical rollback rejection", output)
 		}
 	})
 

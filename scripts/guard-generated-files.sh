@@ -3,12 +3,9 @@
 set -eu
 
 PROVENANCE_BOOTSTRAP_COMMIT=cf50e0a35e0e635d114dbaeedd496374482d2c16
-MAX_AUDITED_COMMITS=512
-MAX_CANONICAL_CANDIDATES=512
-MAX_CANONICAL_COMMITS=4096
-MAX_COMMIT_PARENTS=32
-MAX_GENERATED_CHANGES=128
-MAX_GRAPH_COMMITS=4096
+MAX_PR_COMMITS=512
+MAX_PR_COMMIT_PARENTS=32
+MAX_PR_GENERATED_CHANGES=128
 
 fail() {
   printf '::error::%s\n' "$*" >&2
@@ -42,6 +39,15 @@ generated_entries_are_regular() {
   done
   [ "$generated_entries_are_regular_changelog" = true ] &&
     [ "$generated_entries_are_regular_manifest" = true ]
+}
+
+generated_entries_tuple() {
+  generated_entries_tuple_entries=$1
+  set -- $generated_entries_tuple_entries
+  if [ "$#" -ne 8 ]; then
+    fail "could not form the generated-file entry tuple"
+  fi
+  printf '%s:%s:%s:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
 }
 
 is_ancestor() {
@@ -78,11 +84,8 @@ candidate_ancestors() {
   if [ -z "$candidate_ancestors_candidates" ]; then
     return 0
   fi
-  if ! candidate_ancestors_history=$(bounded_rev_list \
-    "provenance ancestry" \
-    "$MAX_GRAPH_COMMITS" \
-    "$candidate_ancestors_treeish"); then
-    exit 1
+  if ! candidate_ancestors_history=$(git rev-list "$candidate_ancestors_treeish"); then
+    fail "could not enumerate provenance ancestry"
   fi
   if ! candidate_ancestors_result=$(
     {
@@ -107,9 +110,33 @@ is_canonical_candidate() {
   esac
 }
 
+canonical_candidate_for_tuple() {
+  canonical_candidate_for_tuple_value=$1
+  canonical_candidate_for_tuple_label=$2
+
+  if ! canonical_candidate_for_tuple_matches=$(printf '%s\n' "$canonical_candidate_records" | awk -v tuple="$canonical_candidate_for_tuple_value" '
+    NF == 2 && $2 == tuple { print $1 }
+  '); then
+    fail "could not match ${canonical_candidate_for_tuple_label} to canonical provenance"
+  fi
+  set -- $canonical_candidate_for_tuple_matches
+  if [ "$#" -ne 1 ]; then
+    fail "generated files changed in a noncanonical commit: ${canonical_candidate_for_tuple_label} must match exactly one canonical generated-file tuple"
+  fi
+  canonical_tuple_candidate=$1
+}
+
+is_trusted_base_first_parent_commit() {
+  case "${trusted_base_first_parent_commit_set} " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 derive_provenance() {
   derive_provenance_treeish=$1
   derive_provenance_label=$2
+  derive_provenance_require_candidate=${3-false}
 
   if ! derive_provenance_entries=$(generated_entries "$derive_provenance_treeish"); then
     fail "could not inspect generated entries for ${derive_provenance_label}"
@@ -119,6 +146,45 @@ derive_provenance() {
     "$derive_provenance_treeish" \
     "$canonical_candidates"); then
     exit 1
+  fi
+
+  if ! derive_provenance_tuple=$(generated_entries_tuple "$derive_provenance_entries"); then
+    exit 1
+  fi
+  if ! derive_provenance_tuple_state=$(
+    {
+      printf '%s\n' "$canonical_candidate_records"
+      printf '%s\n' __CANDIDATE_ANCESTORS__
+      printf '%s\n' "$derive_provenance_ancestors"
+    } | awk -v target="$derive_provenance_tuple" '
+      $0 == "__CANDIDATE_ANCESTORS__" { in_ancestors = 1; next }
+      !in_ancestors && NF == 2 { tuples[$1] = $2; next }
+      in_ancestors && ($1 in tuples) {
+        carried[tuples[$1]]++
+        if (tuples[$1] == target) matching++
+      }
+      END {
+        duplicate = "-"
+        for (tuple in carried) {
+          if (carried[tuple] > 1) {
+            duplicate = tuple
+            break
+          }
+        }
+        print matching + 0, duplicate
+      }
+    '
+  ); then
+    fail "could not validate canonical generated-file tuple uniqueness"
+  fi
+  set -- $derive_provenance_tuple_state
+  derive_provenance_matching_count=$1
+  derive_provenance_duplicate_tuple=$2
+  if [ "$derive_provenance_duplicate_tuple" != - ]; then
+    fail "${derive_provenance_label} carries more than one canonical release candidate for a generated-file tuple"
+  fi
+  if [ "$derive_provenance_require_candidate" = true ] && [ "$derive_provenance_matching_count" -ne 1 ]; then
+    fail "${derive_provenance_label} must carry exactly one canonical release candidate for its generated-file tuple"
   fi
 
   derive_provenance_latest=
@@ -154,9 +220,100 @@ derive_provenance() {
   fi
 }
 
+audit_trusted_base_first_parent() {
+  audit_trusted_base_first_parent_list=$1
+  trusted_base_floor=$2
+  trusted_base_transition_tuples=
+
+  if [ -z "$audit_trusted_base_first_parent_list" ]; then
+    return 0
+  fi
+  if ! trusted_base_first_parent_graph=$(
+    printf '%s\n' "$audit_trusted_base_first_parent_list" |
+      git rev-list --parents --no-walk=unsorted --stdin
+  ); then
+    fail "could not inspect trusted base first-parent history"
+  fi
+  if ! trusted_base_first_parent_graph_commits=$(awk '{ print $1 }' <<EOF
+$trusted_base_first_parent_graph
+EOF
+  ); then
+    fail "could not verify trusted base first-parent history"
+  fi
+  if [ "$trusted_base_first_parent_graph_commits" != "$audit_trusted_base_first_parent_list" ]; then
+    fail "could not verify trusted base first-parent history"
+  fi
+
+  while IFS= read -r commit_and_parents; do
+    set -- $commit_and_parents
+    commit=$1
+    shift
+    if [ "$#" -lt 1 ]; then
+      fail "trusted base first-parent commit has no parent"
+    fi
+    first_parent=$1
+    if ! commit_entries=$(generated_entries "$commit"); then
+      fail "could not inspect generated entries in trusted base first-parent history"
+    fi
+    if ! first_parent_entries=$(generated_entries "$first_parent"); then
+      fail "could not inspect generated entries in a trusted base first parent"
+    fi
+
+    if [ "$#" -eq 1 ]; then
+      if [ "$commit_entries" = "$first_parent_entries" ]; then
+        continue
+      fi
+      if ! generated_entries_are_regular "$commit_entries"; then
+        fail "trusted base rewrite entries must be regular non-executable blobs"
+      fi
+      if ! transition_tuple=$(generated_entries_tuple "$commit_entries"); then
+        exit 1
+      fi
+      canonical_candidate_for_tuple "$transition_tuple" "trusted base rewrite"
+      transition_candidate=$canonical_tuple_candidate
+    else
+      matches_parent=false
+      differs_from_parent=false
+      for parent in "$@"; do
+        if ! parent_entries=$(generated_entries "$parent"); then
+          fail "could not inspect generated entries in a trusted base merge parent"
+        fi
+        if [ "$commit_entries" = "$parent_entries" ]; then
+          matches_parent=true
+        else
+          differs_from_parent=true
+        fi
+      done
+      if [ "$matches_parent" = false ]; then
+        fail "merge commit synthesizes generated entries not present in any parent"
+      fi
+      if [ "$differs_from_parent" = false ]; then
+        continue
+      fi
+      derive_provenance "$commit" "trusted base generated-changing merge commit" true
+      transition_candidate=$provenance_floor
+      if ! transition_tuple=$(generated_entries_tuple "$commit_entries"); then
+        exit 1
+      fi
+    fi
+
+    if ! is_ancestor "$trusted_base_floor" "$transition_candidate"; then
+      fail "trusted base generated files roll back canonical provenance"
+    fi
+    case " $trusted_base_transition_tuples " in
+      *" $transition_tuple "*) fail "trusted base reuses a canonical generated-file tuple" ;;
+    esac
+    trusted_base_transition_tuples="${trusted_base_transition_tuples} ${transition_tuple}"
+    trusted_base_floor=$transition_candidate
+  done <<EOF
+$trusted_base_first_parent_graph
+EOF
+}
+
 audit_commits() {
   audit_commits_list=$1
   audit_commits_label=$2
+  audit_commits_trust=$3
   audited_generated_files_touched=false
   audited_generated_change_count=0
 
@@ -186,8 +343,11 @@ EOF
     if [ "$#" -lt 1 ]; then
       fail "${audit_commits_label} commit has no parent"
     fi
-    if [ "$#" -gt "$MAX_COMMIT_PARENTS" ]; then
+    if [ "$audit_commits_trust" = untrusted ] && [ "$#" -gt "$MAX_PR_COMMIT_PARENTS" ]; then
       fail "${audit_commits_label} commit has too many parents"
+    fi
+    if [ "$audit_commits_trust" = trusted ] && is_trusted_base_first_parent_commit "$commit"; then
+      continue
     fi
     if ! commit_entries=$(generated_entries "$commit"); then
       fail "could not inspect generated entries in a ${audit_commits_label} commit"
@@ -202,12 +362,13 @@ EOF
       fi
       audited_generated_files_touched=true
       audited_generated_change_count=$((audited_generated_change_count + 1))
-      if [ "$audited_generated_change_count" -gt "$MAX_GENERATED_CHANGES" ]; then
+      if [ "$audit_commits_trust" = untrusted ] && [ "$audited_generated_change_count" -gt "$MAX_PR_GENERATED_CHANGES" ]; then
         fail "${audit_commits_label} has too many generated-file changes"
       fi
       if ! is_canonical_candidate "$commit"; then
         fail "generated files changed in a noncanonical commit"
       fi
+      derive_provenance "$commit" "${audit_commits_label} generated-changing commit" true
       continue
     fi
 
@@ -231,10 +392,10 @@ EOF
     fi
     audited_generated_files_touched=true
     audited_generated_change_count=$((audited_generated_change_count + 1))
-    if [ "$audited_generated_change_count" -gt "$MAX_GENERATED_CHANGES" ]; then
+    if [ "$audit_commits_trust" = untrusted ] && [ "$audited_generated_change_count" -gt "$MAX_PR_GENERATED_CHANGES" ]; then
       fail "${audit_commits_label} has too many generated-file changes"
     fi
-    derive_provenance "$commit" "${audit_commits_label} generated-changing merge commit"
+    derive_provenance "$commit" "${audit_commits_label} generated-changing merge commit" true
   done <<EOF
 $audit_commit_graph
 EOF
@@ -268,7 +429,7 @@ fi
 
 if ! pr_commits=$(bounded_rev_list \
   "PR commits" \
-  "$MAX_AUDITED_COMMITS" \
+  "$MAX_PR_COMMITS" \
   "${BASE_SHA}..${HEAD_SHA}"); then
   exit 1
 fi
@@ -293,24 +454,16 @@ fi
 
 expected_files=$(printf '%s\n' .release-please-manifest.json CHANGELOG.md | LC_ALL=C sort)
 
-if ! canonical_commits=$(bounded_rev_list \
-  "canonical upstream commits" \
-  "$MAX_CANONICAL_COMMITS" \
-  "$canonical_main"); then
-  exit 1
-fi
-if ! canonical_generated_commits=$(bounded_rev_list \
-  "canonical generated-file commits" \
-  "$MAX_CANONICAL_COMMITS" \
+if ! canonical_generated_commits=$(git rev-list \
   --full-history \
   "$canonical_main" \
   -- \
   CHANGELOG.md \
   .release-please-manifest.json); then
-  exit 1
+  fail "could not enumerate canonical generated-file commits"
 fi
 if ! canonical_commit_graph=$(
-  printf '%s\n' "$canonical_commits" |
+  printf '%s\n' "$canonical_generated_commits" |
     git rev-list --parents --no-walk=unsorted --stdin
 ); then
   fail "could not inspect canonical upstream commit parents"
@@ -321,13 +474,12 @@ EOF
 ); then
   fail "could not verify canonical upstream commit identities"
 fi
-if [ "$canonical_commit_graph_commits" != "$canonical_commits" ]; then
+if [ "$canonical_commit_graph_commits" != "$canonical_generated_commits" ]; then
   fail "could not verify canonical upstream commit identities"
 fi
-if canonical_candidate_pairs=$(awk -v max_parents="$MAX_COMMIT_PARENTS" '
+if canonical_candidate_pairs=$(awk '
   $0 == "__CANONICAL_COMMIT_GRAPH__" { in_graph = 1; next }
   !in_graph { generated[$1] = 1; next }
-  NF > max_parents + 1 { exit 2 }
   NF == 2 && ($1 in generated) { print $1, $2 }
 ' <<EOF
 $canonical_generated_commits
@@ -337,16 +489,11 @@ EOF
 ); then
   :
 else
-  canonical_candidate_pairs_status=$?
-  if [ "$canonical_candidate_pairs_status" -eq 2 ]; then
-    fail "canonical upstream commit has too many parents"
-  fi
   fail "could not select canonical upstream release candidates"
 fi
 
 canonical_candidates=
-canonical_candidate_count=0
-matching_head_candidates=
+canonical_candidate_records=
 
 set -- $canonical_candidate_pairs
 while [ "$#" -gt 0 ]; do
@@ -367,22 +514,16 @@ while [ "$#" -gt 0 ]; do
     continue
   fi
   canonical_candidates="${canonical_candidates} ${commit}"
-  canonical_candidate_count=$((canonical_candidate_count + 1))
-  if [ "$canonical_candidate_count" -gt "$MAX_CANONICAL_CANDIDATES" ]; then
-    fail "canonical upstream has too many release candidates"
+  if ! candidate_tuple=$(generated_entries_tuple "$candidate_entries"); then
+    exit 1
   fi
-
-  if [ "$candidate_entries" = "$head_entries" ]; then
-    matching_head_candidates="${matching_head_candidates} ${commit}"
+  if [ -z "$canonical_candidate_records" ]; then
+    canonical_candidate_records="${commit} ${candidate_tuple}"
+  else
+    canonical_candidate_records="${canonical_candidate_records}
+${commit} ${candidate_tuple}"
   fi
 done
-
-if ! matching_head_commits=$(candidate_ancestors "$HEAD_SHA" "$matching_head_candidates"); then
-  exit 1
-fi
-set -- $matching_head_commits
-matching_head_commit_count=$#
-matching_head_commit=${1-}
 
 bootstrap_carried=false
 if git cat-file -e "${PROVENANCE_BOOTSTRAP_COMMIT}^{commit}" 2>/dev/null; then
@@ -406,28 +547,73 @@ if [ "$bootstrap_carried" = true ]; then
   if ! generated_entries_are_regular "$bootstrap_entries"; then
     fail "trusted provenance bootstrap entries must be regular non-executable blobs"
   fi
-  if ! base_history_commits=$(bounded_rev_list \
-    "post-bootstrap base commits" \
-    "$MAX_AUDITED_COMMITS" \
-    "${PROVENANCE_BOOTSTRAP_COMMIT}..${BASE_SHA}"); then
-    exit 1
-  fi
-  audit_commits "$base_history_commits" "post-bootstrap base"
-  base_history_generated_files_touched=$audited_generated_files_touched
+  derive_provenance "$bootstrap_parent" "trusted provenance bootstrap parent" false
+  bootstrap_floor=$provenance_floor
 
-  if [ "$base_history_generated_files_touched" = false ] && [ "$base_entries" = "$bootstrap_entries" ]; then
-    derive_provenance "$bootstrap_parent" "trusted provenance bootstrap parent"
-    base_floor=$provenance_floor
-  else
-    derive_provenance "$BASE_SHA" "PR base"
-    base_floor=$provenance_floor
+  if ! base_first_parent_history=$(git rev-list --first-parent --reverse "$BASE_SHA"); then
+    fail "could not enumerate trusted base first-parent history"
   fi
+  if ! bootstrap_descendants=$(git rev-list \
+    --ancestry-path \
+    "${PROVENANCE_BOOTSTRAP_COMMIT}..${BASE_SHA}"); then
+    fail "could not enumerate trusted provenance bootstrap descendants"
+  fi
+  if ! trusted_base_adoption_anchor=$(
+    {
+      printf '%s\n' "$PROVENANCE_BOOTSTRAP_COMMIT"
+      printf '%s\n' "$bootstrap_descendants"
+      printf '%s\n' __BASE_FIRST_PARENT__
+      printf '%s\n' "$base_first_parent_history"
+    } | awk '
+      $0 == "__BASE_FIRST_PARENT__" { in_first_parent = 1; next }
+      !in_first_parent { descendants[$1] = 1; next }
+      $1 in descendants { print $1; exit }
+    '
+  ); then
+    fail "could not identify the trusted provenance mainline adoption anchor"
+  fi
+  if [ -z "$trusted_base_adoption_anchor" ]; then
+    fail "trusted provenance bootstrap has no base first-parent adoption anchor"
+  fi
+  if ! trusted_base_adoption_entries=$(generated_entries "$trusted_base_adoption_anchor"); then
+    fail "could not inspect the trusted provenance mainline adoption anchor"
+  fi
+  if [ "$trusted_base_adoption_entries" != "$bootstrap_entries" ]; then
+    fail "trusted provenance mainline adoption anchor does not preserve the bootstrap entries"
+  fi
+
+  if ! trusted_base_first_parent_after_anchor=$(git rev-list \
+    --first-parent \
+    --reverse \
+    "${trusted_base_adoption_anchor}..${BASE_SHA}"); then
+    fail "could not enumerate post-adoption base first-parent history"
+  fi
+  if [ -n "$trusted_base_first_parent_after_anchor" ]; then
+    trusted_base_first_parent_commits="${trusted_base_adoption_anchor}
+${trusted_base_first_parent_after_anchor}"
+  else
+    trusted_base_first_parent_commits=$trusted_base_adoption_anchor
+  fi
+  trusted_base_first_parent_commit_set=
+  for trusted_base_first_parent_commit in $trusted_base_first_parent_commits; do
+    trusted_base_first_parent_commit_set="${trusted_base_first_parent_commit_set} ${trusted_base_first_parent_commit}"
+  done
+
+  audit_trusted_base_first_parent "$trusted_base_first_parent_after_anchor" "$bootstrap_floor"
+  base_floor=$trusted_base_floor
+
+  if ! base_history_commits=$(git rev-list "${PROVENANCE_BOOTSTRAP_COMMIT}..${BASE_SHA}"); then
+    fail "could not enumerate post-bootstrap base commits"
+  fi
+  audit_commits "$base_history_commits" "post-bootstrap base" trusted
 else
-  derive_provenance "$BASE_SHA" "PR base"
+  trusted_base_first_parent_commits=
+  trusted_base_first_parent_commit_set=
+  derive_provenance "$BASE_SHA" "PR base" false
   base_floor=$provenance_floor
 fi
 
-audit_commits "$pr_commits" "PR"
+audit_commits "$pr_commits" "PR" untrusted
 generated_files_touched=$audited_generated_files_touched
 
 if [ "$generated_files_touched" = false ] && [ "$head_entries" = "$base_entries" ]; then
@@ -440,9 +626,8 @@ if [ "$head_entries" = "$base_entries" ]; then
   exit 0
 fi
 
-if [ "$matching_head_commit_count" -ne 1 ]; then
-  fail "generated files must exactly match one release-only commit carried from canonical upstream main"
-fi
+derive_provenance "$HEAD_SHA" "PR head" true
+matching_head_commit=$provenance_floor
 
 if ! is_ancestor "$base_floor" "$matching_head_commit"; then
   fail "generated files roll back the canonical release carried by the PR base"
