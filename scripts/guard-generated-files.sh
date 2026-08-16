@@ -3,6 +3,7 @@
 set -eu
 
 PROVENANCE_BOOTSTRAP_COMMIT=cf50e0a35e0e635d114dbaeedd496374482d2c16
+PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT=db354ad276cb8dce961802d7091a5d618b2417b2
 MAX_PR_COMMITS=512
 MAX_PR_COMMIT_PARENTS=32
 MAX_PR_GENERATED_CHANGES=128
@@ -104,10 +105,35 @@ candidate_ancestors() {
 }
 
 is_canonical_candidate() {
+  if [ -n "$pending_release_candidate" ] && [ "$1" = "$pending_release_candidate" ]; then
+    return 0
+  fi
   case " $canonical_candidates " in
     *" $1 "*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+preserves_base_provenance() {
+  preserves_base_provenance_commit=$1
+
+  if ! preserves_base_provenance_entries=$(generated_entries "$preserves_base_provenance_commit"); then
+    fail "could not inspect generated entries while preserving PR base provenance"
+  fi
+  if [ "$preserves_base_provenance_entries" != "$base_entries" ]; then
+    return 1
+  fi
+  if ! preserves_base_provenance_ancestors=$(candidate_ancestors \
+    "$preserves_base_provenance_commit" \
+    "$canonical_candidates"); then
+    exit 1
+  fi
+  for preserves_base_provenance_ancestor in $preserves_base_provenance_ancestors; do
+    if ! is_ancestor "$preserves_base_provenance_ancestor" "$base_floor"; then
+      return 1
+    fi
+  done
+  return 0
 }
 
 canonical_candidate_for_tuple() {
@@ -272,23 +298,20 @@ EOF
       canonical_candidate_for_tuple "$transition_tuple" "trusted base rewrite"
       transition_candidate=$canonical_tuple_candidate
     else
+      if [ "$commit_entries" = "$first_parent_entries" ]; then
+        continue
+      fi
       matches_parent=false
-      differs_from_parent=false
       for parent in "$@"; do
         if ! parent_entries=$(generated_entries "$parent"); then
           fail "could not inspect generated entries in a trusted base merge parent"
         fi
         if [ "$commit_entries" = "$parent_entries" ]; then
           matches_parent=true
-        else
-          differs_from_parent=true
         fi
       done
       if [ "$matches_parent" = false ]; then
         fail "merge commit synthesizes generated entries not present in any parent"
-      fi
-      if [ "$differs_from_parent" = false ]; then
-        continue
       fi
       derive_provenance "$commit" "trusted base generated-changing merge commit" true
       transition_candidate=$provenance_floor
@@ -368,7 +391,13 @@ EOF
       if ! is_canonical_candidate "$commit"; then
         fail "generated files changed in a noncanonical commit"
       fi
+      if [ -n "$pending_release_candidate" ] && [ "$commit" = "$pending_release_candidate" ]; then
+        continue
+      fi
       derive_provenance "$commit" "${audit_commits_label} generated-changing commit" true
+      if [ "$audit_commits_trust" = untrusted ] && ! is_ancestor "$base_floor" "$provenance_floor"; then
+        fail "PR generated files roll back canonical provenance"
+      fi
       continue
     fi
 
@@ -395,20 +424,28 @@ EOF
     if [ "$audit_commits_trust" = untrusted ] && [ "$audited_generated_change_count" -gt "$MAX_PR_GENERATED_CHANGES" ]; then
       fail "${audit_commits_label} has too many generated-file changes"
     fi
+    if [ "$audit_commits_trust" = untrusted ] && preserves_base_provenance "$commit"; then
+      continue
+    fi
     derive_provenance "$commit" "${audit_commits_label} generated-changing merge commit" true
+    if [ "$audit_commits_trust" = untrusted ] && ! is_ancestor "$base_floor" "$provenance_floor"; then
+      fail "PR generated files roll back canonical provenance"
+    fi
   done <<EOF
 $audit_commit_graph
 EOF
 }
 
-if [ "$#" -ne 3 ]; then
-  fail "usage: guard-generated-files.sh <base-sha> <head-sha> <canonical-upstream-url>"
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+  fail "usage: guard-generated-files.sh <base-sha> <head-sha> <canonical-upstream-url> [authenticated-pending-release-sha]"
 fi
 
 BASE_SHA=$1
 HEAD_SHA=$2
 CANONICAL_UPSTREAM_URL=$3
+PENDING_RELEASE_SHA=${4-}
 CANONICAL_REF=refs/no-mistakes/guard-generated-files/canonical-main
+pending_release_candidate=
 
 if ! verified_base=$(git rev-parse --verify "${BASE_SHA}^{commit}"); then
   fail "PR base is not a commit"
@@ -500,6 +537,9 @@ while [ "$#" -gt 0 ]; do
   commit=$1
   parent=$2
   shift 2
+  if [ "$commit" = "$PROVENANCE_BOOTSTRAP_COMMIT" ]; then
+    continue
+  fi
   if ! canonical_files=$(git diff --no-renames --name-only "$parent" "$commit"); then
     fail "could not inspect canonical upstream commit files"
   fi
@@ -525,96 +565,131 @@ ${commit} ${candidate_tuple}"
   fi
 done
 
-bootstrap_carried=false
-if git cat-file -e "${PROVENANCE_BOOTSTRAP_COMMIT}^{commit}" 2>/dev/null; then
-  if is_ancestor "$PROVENANCE_BOOTSTRAP_COMMIT" "$BASE_SHA"; then
-    bootstrap_carried=true
-  fi
+if ! duplicate_candidate_tuple=$(printf '%s\n' "$canonical_candidate_records" | awk '
+  NF == 2 { count[$2]++ }
+  END {
+    for (tuple in count) {
+      if (count[tuple] > 1) {
+        print tuple
+        exit
+      }
+    }
+  }
+'); then
+  fail "could not validate canonical generated-file tuple uniqueness"
+fi
+if [ -n "$duplicate_candidate_tuple" ]; then
+  fail "canonical upstream reuses a generated-file tuple"
 fi
 
-if [ "$bootstrap_carried" = true ]; then
-  if ! bootstrap_commit_and_parent=$(git rev-list --parents -n 1 "$PROVENANCE_BOOTSTRAP_COMMIT"); then
-    fail "could not inspect the trusted provenance bootstrap"
+if [ -n "$PENDING_RELEASE_SHA" ]; then
+  if ! verified_pending_release=$(git rev-parse --verify "${PENDING_RELEASE_SHA}^{commit}"); then
+    fail "authenticated pending release is not a commit"
   fi
-  set -- $bootstrap_commit_and_parent
-  if [ "$#" -ne 2 ] || [ "$1" != "$PROVENANCE_BOOTSTRAP_COMMIT" ]; then
-    fail "trusted provenance bootstrap must be a single-parent commit"
+  if [ "$verified_pending_release" != "$HEAD_SHA" ]; then
+    fail "authenticated pending release must be the exact PR head"
   fi
-  bootstrap_parent=$2
-  if ! bootstrap_entries=$(generated_entries "$PROVENANCE_BOOTSTRAP_COMMIT"); then
-    fail "could not inspect trusted provenance bootstrap entries"
+  if ! pending_release_commit_and_parent=$(git rev-list --parents -n 1 "$verified_pending_release"); then
+    fail "could not inspect the authenticated pending release"
   fi
-  if ! generated_entries_are_regular "$bootstrap_entries"; then
-    fail "trusted provenance bootstrap entries must be regular non-executable blobs"
+  set -- $pending_release_commit_and_parent
+  if [ "$#" -ne 2 ] || [ "$1" != "$verified_pending_release" ] || [ "$2" != "$BASE_SHA" ]; then
+    fail "authenticated pending release must be a single commit on the exact PR base"
   fi
-  derive_provenance "$bootstrap_parent" "trusted provenance bootstrap parent" false
-  bootstrap_floor=$provenance_floor
-
-  if ! base_first_parent_history=$(git rev-list --first-parent --reverse "$BASE_SHA"); then
-    fail "could not enumerate trusted base first-parent history"
+  if ! pending_release_files=$(git diff --no-renames --name-only "$BASE_SHA" "$verified_pending_release"); then
+    fail "could not inspect authenticated pending release files"
   fi
-  if ! bootstrap_descendants=$(git rev-list \
-    --ancestry-path \
-    "${PROVENANCE_BOOTSTRAP_COMMIT}..${BASE_SHA}"); then
-    fail "could not enumerate trusted provenance bootstrap descendants"
+  pending_release_files=$(printf '%s\n' "$pending_release_files" | LC_ALL=C sort)
+  if [ "$pending_release_files" != "$expected_files" ]; then
+    fail "authenticated pending release must change only the release-please-generated files"
   fi
-  if ! trusted_base_adoption_anchor=$(
-    {
-      printf '%s\n' "$PROVENANCE_BOOTSTRAP_COMMIT"
-      printf '%s\n' "$bootstrap_descendants"
-      printf '%s\n' __BASE_FIRST_PARENT__
-      printf '%s\n' "$base_first_parent_history"
-    } | awk '
-      $0 == "__BASE_FIRST_PARENT__" { in_first_parent = 1; next }
-      !in_first_parent { descendants[$1] = 1; next }
-      $1 in descendants { print $1; exit }
-    '
-  ); then
-    fail "could not identify the trusted provenance mainline adoption anchor"
+  if ! pending_release_entries=$(generated_entries "$verified_pending_release"); then
+    fail "could not inspect authenticated pending release entries"
   fi
-  if [ -z "$trusted_base_adoption_anchor" ]; then
-    fail "trusted provenance bootstrap has no base first-parent adoption anchor"
+  if ! generated_entries_are_regular "$pending_release_entries"; then
+    fail "authenticated pending release entries must be regular non-executable blobs"
   fi
-  if ! trusted_base_adoption_entries=$(generated_entries "$trusted_base_adoption_anchor"); then
-    fail "could not inspect the trusted provenance mainline adoption anchor"
+  if [ "$pending_release_entries" = "$base_entries" ]; then
+    fail "authenticated pending release must advance the generated files"
   fi
-  if [ "$trusted_base_adoption_entries" != "$bootstrap_entries" ]; then
-    fail "trusted provenance mainline adoption anchor does not preserve the bootstrap entries"
+  if ! pending_release_tuple=$(generated_entries_tuple "$pending_release_entries"); then
+    exit 1
   fi
-
-  if ! trusted_base_first_parent_after_anchor=$(git rev-list \
-    --first-parent \
-    --reverse \
-    "${trusted_base_adoption_anchor}..${BASE_SHA}"); then
-    fail "could not enumerate post-adoption base first-parent history"
+  if printf '%s\n' "$canonical_candidate_records" | awk -v tuple="$pending_release_tuple" '
+    NF == 2 && $2 == tuple { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    fail "authenticated pending release reuses a canonical generated-file tuple"
   fi
-  if [ -n "$trusted_base_first_parent_after_anchor" ]; then
-    trusted_base_first_parent_commits="${trusted_base_adoption_anchor}
-${trusted_base_first_parent_after_anchor}"
-  else
-    trusted_base_first_parent_commits=$trusted_base_adoption_anchor
-  fi
-  trusted_base_first_parent_commit_set=
-  for trusted_base_first_parent_commit in $trusted_base_first_parent_commits; do
-    trusted_base_first_parent_commit_set="${trusted_base_first_parent_commit_set} ${trusted_base_first_parent_commit}"
-  done
-
-  audit_trusted_base_first_parent "$trusted_base_first_parent_after_anchor" "$bootstrap_floor"
-  base_floor=$trusted_base_floor
-
-  if ! base_history_commits=$(git rev-list "${PROVENANCE_BOOTSTRAP_COMMIT}..${BASE_SHA}"); then
-    fail "could not enumerate post-bootstrap base commits"
-  fi
-  audit_commits "$base_history_commits" "post-bootstrap base" trusted
-else
-  trusted_base_first_parent_commits=
-  trusted_base_first_parent_commit_set=
-  derive_provenance "$BASE_SHA" "PR base" false
-  base_floor=$provenance_floor
+  pending_release_candidate=$verified_pending_release
 fi
+
+if ! bootstrap_commit_and_parent=$(git rev-list --parents -n 1 "$PROVENANCE_BOOTSTRAP_COMMIT"); then
+  fail "could not inspect the pinned provenance bootstrap"
+fi
+set -- $bootstrap_commit_and_parent
+if [ "$#" -ne 2 ] || [ "$1" != "$PROVENANCE_BOOTSTRAP_COMMIT" ]; then
+  fail "pinned provenance bootstrap must be a single-parent commit"
+fi
+bootstrap_parent=$2
+if ! bootstrap_entries=$(generated_entries "$PROVENANCE_BOOTSTRAP_COMMIT"); then
+  fail "could not inspect pinned provenance bootstrap entries"
+fi
+if ! generated_entries_are_regular "$bootstrap_entries"; then
+  fail "pinned provenance bootstrap entries must be regular non-executable blobs"
+fi
+if ! bootstrap_adoption_entries=$(generated_entries "$PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT"); then
+  fail "could not inspect the pinned provenance mainline adoption"
+fi
+if [ "$bootstrap_adoption_entries" != "$bootstrap_entries" ]; then
+  fail "pinned provenance mainline adoption does not preserve the bootstrap entries"
+fi
+if ! is_ancestor "$PROVENANCE_BOOTSTRAP_COMMIT" "$PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT"; then
+  fail "pinned provenance mainline adoption does not carry the bootstrap"
+fi
+if ! base_first_parent_history=$(git rev-list --first-parent "$BASE_SHA"); then
+  fail "could not enumerate trusted base first-parent history"
+fi
+base_carries_pinned_adoption=false
+for base_first_parent_commit in $base_first_parent_history; do
+  if [ "$base_first_parent_commit" = "$PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT" ]; then
+    base_carries_pinned_adoption=true
+    break
+  fi
+done
+if [ "$base_carries_pinned_adoption" = false ]; then
+  fail "trusted base does not carry the exact pinned provenance adoption on its first-parent history"
+fi
+
+derive_provenance "$bootstrap_parent" "pinned provenance bootstrap parent" false
+bootstrap_floor=$provenance_floor
+
+if ! trusted_base_first_parent_after_anchor=$(git rev-list \
+  --first-parent \
+  --reverse \
+  "${PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT}..${BASE_SHA}"); then
+  fail "could not enumerate post-adoption base first-parent history"
+fi
+trusted_base_first_parent_commit_set=
+for trusted_base_first_parent_commit in $trusted_base_first_parent_after_anchor; do
+  trusted_base_first_parent_commit_set="${trusted_base_first_parent_commit_set} ${trusted_base_first_parent_commit}"
+done
+
+audit_trusted_base_first_parent "$trusted_base_first_parent_after_anchor" "$bootstrap_floor"
+base_floor=$trusted_base_floor
+
+if ! base_history_commits=$(git rev-list "${PROVENANCE_BOOTSTRAP_ADOPTION_COMMIT}..${BASE_SHA}"); then
+  fail "could not enumerate post-adoption base commits"
+fi
+audit_commits "$base_history_commits" "post-adoption base" trusted
 
 audit_commits "$pr_commits" "PR" untrusted
 generated_files_touched=$audited_generated_files_touched
+
+if [ -n "$pending_release_candidate" ]; then
+  echo "Release-please-generated files match authenticated pending release ${pending_release_candidate}. OK."
+  exit 0
+fi
 
 if [ "$generated_files_touched" = false ] && [ "$head_entries" = "$base_entries" ]; then
   echo "No release-please-generated files modified. OK."

@@ -3,6 +3,11 @@ name: Guard generated file provenance
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+concurrency:
+  group: guard-generated-file-provenance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -26,6 +31,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PENDING_RELEASE_SHA: ${{ github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release-please--branches--main--components--') && (github.event.pull_request.user.login == 'github-actions[bot]' || github.event.pull_request.user.login == 'release-please[bot]') && github.event.pull_request.head.sha || '' }}
         run: |
           set -eu
 
@@ -56,4 +62,5 @@ jobs:
           sh "$trusted_script" \
             "$checked_out_base" \
             "$HEAD_SHA" \
-            "https://github.com/kunchenguid/no-mistakes.git"
+            "https://github.com/kunchenguid/no-mistakes.git" \
+            "$PENDING_RELEASE_SHA"

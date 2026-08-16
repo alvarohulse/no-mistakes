@@ -15,6 +15,7 @@ import (
 const (
 	guardBootstrapBase                   = "2f44ab72acf8c0a064330b668e676672335ebd98"
 	guardBootstrapCommit                 = "cf50e0a35e0e635d114dbaeedd496374482d2c16"
+	guardBootstrapAdoption               = "db354ad276cb8dce961802d7091a5d618b2417b2"
 	guardBootstrapAdoptionParent         = "51463ebddddce564f122f6b3cfbc74af22cafd4d"
 	guardBootstrapCanonical              = "aba31dbf93993ac4e8ab7b468982a7dad08e938e"
 	guardBootstrapOlderCanonical         = "867d64d9c2df89f3f204ad1f5528e5bf7b460caa"
@@ -46,6 +47,32 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertFails(filepath.Join(t.TempDir(), "missing-upstream"))
 	})
 
+	t.Run("authenticated pending release passes before canonical merge", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		head := fixture.commit(fixture.pr, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+
+		output, err := runGeneratedGuard(t, fixture.pr, fixture.script, fixture.base, head, fixture.upstream)
+		if err == nil {
+			t.Fatalf("guard should reject an unauthenticated pending release\n%s", output)
+		}
+		output, err = runGeneratedGuard(t, fixture.pr, fixture.script, fixture.base, head, fixture.upstream, head)
+		if err != nil {
+			t.Fatalf("guard should accept an authenticated pending release: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("authenticated pending release cannot bundle source changes", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		changes := guardReleaseFiles(guardChangelogV1, guardManifestV1)
+		changes["source.txt"] = "bundled source change\n"
+		head := fixture.commit(fixture.pr, "chore(main): release 1.1.0", changes)
+
+		output, err := runGeneratedGuard(t, fixture.pr, fixture.script, fixture.base, head, fixture.upstream, head)
+		if err == nil {
+			t.Fatalf("guard should reject an authenticated pending release with source changes\n%s", output)
+		}
+	})
+
 	t.Run("trusted bootstrap normalizes the historical base rollback", func(t *testing.T) {
 		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
 		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, guardBootstrapBase, upstream)
@@ -54,12 +81,9 @@ func TestGeneratedFileGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("trusted bootstrap rejects a mainline adoption with different entries", func(t *testing.T) {
+	t.Run("trusted bootstrap rejects a relocated mainline adoption", func(t *testing.T) {
 		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
-		guardGit(t, repo, "switch", "-q", "--detach", guardBootstrapAdoptionParent)
-		guardWriteFile(t, repo, "CHANGELOG.md", "tampered adoption\n")
-		guardGit(t, repo, "add", "CHANGELOG.md")
-		tree := strings.TrimSpace(guardGit(t, repo, "write-tree"))
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", guardBootstrapAdoption+"^{tree}"))
 		base := strings.TrimSpace(guardGit(
 			t,
 			repo,
@@ -68,17 +92,31 @@ func TestGeneratedFileGuard(t *testing.T) {
 			"-p",
 			guardBootstrapAdoptionParent,
 			"-p",
-			guardBootstrapCommit,
+			guardBootstrapAdoption,
 			"-m",
-			"Merge altered provenance bootstrap",
+			"Relocate provenance bootstrap adoption",
 		))
 
 		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
 		if err == nil {
-			t.Fatalf("guard should reject an altered bootstrap adoption\n%s", output)
+			t.Fatalf("guard should reject a relocated bootstrap adoption\n%s", output)
 		}
-		if !strings.Contains(output, "adoption anchor does not preserve the bootstrap entries") {
-			t.Fatalf("guard failure = %q, want altered adoption rejection", output)
+		if !strings.Contains(output, "exact pinned provenance adoption") {
+			t.Fatalf("guard failure = %q, want pinned adoption rejection", output)
+		}
+	})
+
+	t.Run("trusted bootstrap rejects a removed mainline adoption", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", guardBootstrapAdoption+"^{tree}"))
+		base := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", guardBootstrapAdoptionParent, "-m", "Replace provenance adoption"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err == nil {
+			t.Fatalf("guard should reject a removed bootstrap adoption\n%s", output)
+		}
+		if !strings.Contains(output, "exact pinned provenance adoption") {
+			t.Fatalf("guard failure = %q, want pinned adoption rejection", output)
 		}
 	})
 
@@ -141,6 +179,42 @@ func TestGeneratedFileGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("trusted base preserves rewritten provenance through a later merge", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		rewrite := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		guardGit(t, repo, "switch", "-q", "-c", "stale-side", guardBootstrapBase)
+		guardWriteFile(t, repo, "side.txt", "side\n")
+		guardGit(t, repo, "add", "side.txt")
+		guardGit(t, repo, "commit", "-q", "-m", "feat: stale side change")
+		side := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", rewrite+"^{tree}"))
+		base := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", rewrite, "-p", side, "-m", "Merge stale side"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, base, upstream)
+		if err != nil {
+			t.Fatalf("guard should preserve rewritten provenance through a trusted merge: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("PR merge preserves rewritten base provenance", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
+		base := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, candidate)
+		guardGit(t, repo, "switch", "-q", "-c", "stale-pr-side", guardBootstrapBase)
+		guardWriteFile(t, repo, "side.txt", "side\n")
+		guardGit(t, repo, "add", "side.txt")
+		guardGit(t, repo, "commit", "-q", "-m", "feat: stale PR side change")
+		side := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		tree := strings.TrimSpace(guardGit(t, repo, "rev-parse", base+"^{tree}"))
+		head := strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", base, "-p", side, "-m", "Merge stale PR side"))
+
+		output, err := runGeneratedGuard(t, repo, script, base, head, upstream)
+		if err != nil {
+			t.Fatalf("guard should preserve rewritten provenance through a PR merge: %v\n%s", err, output)
+		}
+	})
+
 	t.Run("trusted base rejects a non-monotonic host rewrite", func(t *testing.T) {
 		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
 		candidate := addGeneratedGuardCanonicalSuccessor(t, repo, upstream)
@@ -199,7 +273,7 @@ func TestGeneratedFileGuard(t *testing.T) {
 	t.Run("altered then restored generated entry fails", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.pr, "docs: edit changelog", map[string]string{"CHANGELOG.md": "manual\n"})
-		fixture.commit(fixture.pr, "docs: restore changelog", map[string]string{"CHANGELOG.md": "# Changelog\n"})
+		fixture.commit(fixture.pr, "docs: restore changelog", map[string]string{"CHANGELOG.md": fixture.baseChangelog})
 		fixture.assertFails(fixture.upstream)
 	})
 
@@ -300,6 +374,22 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.commit(fixture.upstream, "chore(main): restore 1.1.0 release files", guardReleaseFiles(guardChangelogV1, guardManifestV1))
 		fixture.mergeCanonicalMain()
 		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("duplicate tuples on disjoint canonical branches fail", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.git(fixture.upstream, "switch", "-q", "-c", "duplicate-left", fixture.base)
+		left := fixture.commit(fixture.upstream, "chore(main): left release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.upstream, "switch", "-q", "-c", "duplicate-right", fixture.base)
+		right := fixture.commit(fixture.upstream, "chore(main): right release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		tree := strings.TrimSpace(fixture.git(fixture.upstream, "rev-parse", left+"^{tree}"))
+		base := strings.TrimSpace(fixture.git(fixture.upstream, "commit-tree", tree, "-p", left, "-p", right, "-m", "Merge duplicate releases"))
+		fixture.git(fixture.upstream, "update-ref", "refs/heads/main", base)
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "reset", "--hard", "FETCH_HEAD")
+		fixture.base = base
+
+		fixture.assertFailsContaining(fixture.upstream, "reuses a generated-file tuple")
 	})
 
 	t.Run("copied canonical tuple fails even when the final release is unique", func(t *testing.T) {
@@ -410,6 +500,9 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	for _, want := range []string{
 		"pull_request_target:",
 		"types: [opened, synchronize, reopened, edited]",
+		"branches: [main]",
+		"group: guard-generated-file-provenance-${{ github.event.pull_request.number }}",
+		"cancel-in-progress: true",
 		"contents: read",
 		"persist-credentials: false",
 		"ref: ${{ github.event.pull_request.base.sha }}",
@@ -418,6 +511,11 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 		"Checked-out pull request base does not match the event",
 		"refs/pull/${PR_NUMBER}/head",
 		"Fetched pull request head does not match the event",
+		"github.event.pull_request.head.repo.full_name == github.repository",
+		"startsWith(github.event.pull_request.head.ref, 'release-please--branches--main--components--')",
+		"github.event.pull_request.user.login == 'github-actions[bot]'",
+		"github.event.pull_request.user.login == 'release-please[bot]'",
+		`"$PENDING_RELEASE_SHA"`,
 		`git show "${checked_out_base}:scripts/guard-generated-files.sh"`,
 		"https://github.com/kunchenguid/no-mistakes.git",
 	} {
@@ -427,7 +525,6 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"github.event.pull_request.head.repo.clone_url",
-		"github.event.pull_request.head.ref",
 		`git show "${BASE_SHA}:scripts/guard-generated-files.sh"`,
 	} {
 		if strings.Contains(workflow, forbidden) {
@@ -483,11 +580,12 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 }
 
 type generatedGuardFixture struct {
-	t        *testing.T
-	script   string
-	upstream string
-	pr       string
-	base     string
+	t             *testing.T
+	script        string
+	upstream      string
+	pr            string
+	base          string
+	baseChangelog string
 }
 
 func newGeneratedGuardFixture(t *testing.T) *generatedGuardFixture {
@@ -503,15 +601,11 @@ func newGeneratedGuardFixture(t *testing.T) *generatedGuardFixture {
 		upstream: filepath.Join(root, "upstream"),
 		pr:       filepath.Join(root, "pr"),
 	}
-	fixture.git("", "init", "-q", "-b", "main", fixture.upstream)
+	fixture.git("", "clone", "-q", ".", fixture.upstream)
 	fixture.configureRepo(fixture.upstream)
-	guardWriteFile(t, fixture.upstream, "CHANGELOG.md", "# Changelog\n")
-	guardWriteFile(t, fixture.upstream, ".release-please-manifest.json", "{\".\":\"1.0.0\"}\n")
-	guardWriteFile(t, fixture.upstream, "source.txt", "base\n")
-	fixture.git(fixture.upstream, "add", "--all")
-	fixture.git(fixture.upstream, "commit", "-q", "-m", "initial")
-	fixture.git(fixture.upstream, "commit", "-q", "--allow-empty", "-m", "base")
-	fixture.base = strings.TrimSpace(fixture.git(fixture.upstream, "rev-parse", "HEAD"))
+	fixture.git(fixture.upstream, "switch", "-q", "-C", "main", guardBootstrapBase)
+	fixture.base = guardBootstrapBase
+	fixture.baseChangelog = guardReadFile(t, filepath.Join(fixture.upstream, "CHANGELOG.md"))
 	fixture.git("", "clone", "-q", fixture.upstream, fixture.pr)
 	fixture.configureRepo(fixture.pr)
 	return fixture
@@ -661,14 +755,24 @@ func (f *generatedGuardFixture) runBetween(base, head, upstream string) (string,
 	return runGeneratedGuard(f.t, f.pr, f.script, base, head, upstream)
 }
 
-func runGeneratedGuard(t *testing.T, repo, script, base, head, upstream string) (string, error) {
+func runGeneratedGuard(t *testing.T, repo, script, base, head, upstream string, pending ...string) (string, error) {
 	t.Helper()
+	if len(pending) > 1 {
+		t.Fatalf("run generated-file guard with %d pending release SHAs", len(pending))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", script, base, head, upstream)
+	args := []string{script, base, head, upstream}
+	if len(pending) == 1 && pending[0] != "" {
+		args = append(args, pending[0])
+	}
+	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Dir = repo
 	cmd.Env = guardCommandEnv()
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("generated-file guard exceeded its deadline: %v\n%s", ctx.Err(), output)
+	}
 	return string(output), err
 }
 
