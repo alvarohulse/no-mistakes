@@ -17,25 +17,31 @@ fail() {
 
 generated_entries() {
   generated_entries_treeish=$1
-  for generated_entries_path in CHANGELOG.md .release-please-manifest.json; do
-    if ! generated_entries_entry=$(git ls-tree "$generated_entries_treeish" -- "$generated_entries_path"); then
-      return 1
-    fi
-    printf '%s\t%s\n' "$generated_entries_path" "$generated_entries_entry"
-  done
+  git ls-tree "$generated_entries_treeish" -- CHANGELOG.md .release-please-manifest.json
 }
 
-generated_entries_regular() {
-  generated_entries_regular_treeish=$1
-  for generated_entries_regular_path in CHANGELOG.md .release-please-manifest.json; do
-    if ! generated_entries_regular_entry=$(git ls-tree "$generated_entries_regular_treeish" -- "$generated_entries_regular_path"); then
+generated_entries_are_regular() {
+  generated_entries_are_regular_entries=$1
+  generated_entries_are_regular_changelog=false
+  generated_entries_are_regular_manifest=false
+
+  set -- $generated_entries_are_regular_entries
+  if [ "$#" -ne 8 ]; then
+    return 1
+  fi
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" != 100644 ] || [ "$2" != blob ]; then
       return 1
     fi
-    set -- $generated_entries_regular_entry
-    if [ "$#" -ne 4 ] || [ "$1" != 100644 ] || [ "$2" != blob ] || [ "$4" != "$generated_entries_regular_path" ]; then
-      return 1
-    fi
+    case "$4" in
+      CHANGELOG.md) generated_entries_are_regular_changelog=true ;;
+      .release-please-manifest.json) generated_entries_are_regular_manifest=true ;;
+      *) return 1 ;;
+    esac
+    shift 4
   done
+  [ "$generated_entries_are_regular_changelog" = true ] &&
+    [ "$generated_entries_are_regular_manifest" = true ]
 }
 
 is_ancestor() {
@@ -154,14 +160,28 @@ audit_commits() {
   audited_generated_files_touched=false
   audited_generated_change_count=0
 
-  for commit in $audit_commits_list; do
-    if ! commit_and_parents=$(git rev-list --parents -n 1 "$commit"); then
-      fail "could not inspect ${audit_commits_label} commit parents"
-    fi
+  if [ -z "$audit_commits_list" ]; then
+    return 0
+  fi
+  if ! audit_commit_graph=$(
+    printf '%s\n' "$audit_commits_list" |
+      git rev-list --parents --no-walk=unsorted --stdin
+  ); then
+    fail "could not inspect ${audit_commits_label} commit parents"
+  fi
+  if ! audit_commit_graph_commits=$(awk '{ print $1 }' <<EOF
+$audit_commit_graph
+EOF
+  ); then
+    fail "could not verify ${audit_commits_label} commit identities"
+  fi
+  if [ "$audit_commit_graph_commits" != "$audit_commits_list" ]; then
+    fail "could not verify ${audit_commits_label} commit identities"
+  fi
+
+  while IFS= read -r commit_and_parents; do
     set -- $commit_and_parents
-    if [ "$1" != "$commit" ]; then
-      fail "could not verify ${audit_commits_label} commit identity"
-    fi
+    commit=$1
     shift
     if [ "$#" -lt 1 ]; then
       fail "${audit_commits_label} commit has no parent"
@@ -215,7 +235,9 @@ audit_commits() {
       fail "${audit_commits_label} has too many generated-file changes"
     fi
     derive_provenance "$commit" "${audit_commits_label} generated-changing merge commit"
-  done
+  done <<EOF
+$audit_commit_graph
+EOF
 }
 
 if [ "$#" -ne 3 ]; then
@@ -257,7 +279,7 @@ fi
 if ! head_entries=$(generated_entries "$HEAD_SHA"); then
   fail "could not inspect generated entries at the PR head"
 fi
-if ! generated_entries_regular "$BASE_SHA" || ! generated_entries_regular "$HEAD_SHA"; then
+if ! generated_entries_are_regular "$base_entries" || ! generated_entries_are_regular "$head_entries"; then
   fail "the PR base and head must contain both generated files as regular non-executable blobs"
 fi
 
@@ -277,26 +299,60 @@ if ! canonical_commits=$(bounded_rev_list \
   "$canonical_main"); then
   exit 1
 fi
+if ! canonical_generated_commits=$(bounded_rev_list \
+  "canonical generated-file commits" \
+  "$MAX_CANONICAL_COMMITS" \
+  --full-history \
+  "$canonical_main" \
+  -- \
+  CHANGELOG.md \
+  .release-please-manifest.json); then
+  exit 1
+fi
+if ! canonical_commit_graph=$(
+  printf '%s\n' "$canonical_commits" |
+    git rev-list --parents --no-walk=unsorted --stdin
+); then
+  fail "could not inspect canonical upstream commit parents"
+fi
+if ! canonical_commit_graph_commits=$(awk '{ print $1 }' <<EOF
+$canonical_commit_graph
+EOF
+); then
+  fail "could not verify canonical upstream commit identities"
+fi
+if [ "$canonical_commit_graph_commits" != "$canonical_commits" ]; then
+  fail "could not verify canonical upstream commit identities"
+fi
+if canonical_candidate_pairs=$(awk -v max_parents="$MAX_COMMIT_PARENTS" '
+  $0 == "__CANONICAL_COMMIT_GRAPH__" { in_graph = 1; next }
+  !in_graph { generated[$1] = 1; next }
+  NF > max_parents + 1 { exit 2 }
+  NF == 2 && ($1 in generated) { print $1, $2 }
+' <<EOF
+$canonical_generated_commits
+__CANONICAL_COMMIT_GRAPH__
+$canonical_commit_graph
+EOF
+); then
+  :
+else
+  canonical_candidate_pairs_status=$?
+  if [ "$canonical_candidate_pairs_status" -eq 2 ]; then
+    fail "canonical upstream commit has too many parents"
+  fi
+  fail "could not select canonical upstream release candidates"
+fi
 
 canonical_candidates=
 canonical_candidate_count=0
 matching_head_candidates=
 
-for commit in $canonical_commits; do
-  if ! commit_and_parents=$(git rev-list --parents -n 1 "$commit"); then
-    fail "could not inspect canonical upstream commit parents"
-  fi
-  set -- $commit_and_parents
-  if [ "$1" != "$commit" ]; then
-    fail "could not verify canonical upstream commit identity"
-  fi
-  if [ "$#" -gt $((MAX_COMMIT_PARENTS + 1)) ]; then
-    fail "canonical upstream commit has too many parents"
-  fi
-  if [ "$#" -ne 2 ]; then
-    continue
-  fi
+set -- $canonical_candidate_pairs
+while [ "$#" -gt 0 ]; do
+  commit=$1
   parent=$2
+  shift 2
   if ! canonical_files=$(git diff --no-renames --name-only "$parent" "$commit"); then
     fail "could not inspect canonical upstream commit files"
   fi
@@ -304,11 +360,11 @@ for commit in $canonical_commits; do
   if [ "$canonical_files" != "$expected_files" ]; then
     continue
   fi
-  if ! generated_entries_regular "$commit"; then
-    continue
-  fi
   if ! candidate_entries=$(generated_entries "$commit"); then
     fail "could not inspect canonical release entries"
+  fi
+  if ! generated_entries_are_regular "$candidate_entries"; then
+    continue
   fi
   canonical_candidates="${canonical_candidates} ${commit}"
   canonical_candidate_count=$((canonical_candidate_count + 1))
@@ -347,7 +403,7 @@ if [ "$bootstrap_carried" = true ]; then
   if ! bootstrap_entries=$(generated_entries "$PROVENANCE_BOOTSTRAP_COMMIT"); then
     fail "could not inspect trusted provenance bootstrap entries"
   fi
-  if ! generated_entries_regular "$PROVENANCE_BOOTSTRAP_COMMIT"; then
+  if ! generated_entries_are_regular "$bootstrap_entries"; then
     fail "trusted provenance bootstrap entries must be regular non-executable blobs"
   fi
   if ! base_history_commits=$(bounded_rev_list \
