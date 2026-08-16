@@ -66,6 +66,20 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertPasses(fixture.upstream)
 	})
 
+	t.Run("merge carrying the current base release entries passes", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.prepareStaleFeatureAndCurrentBase()
+		fixture.git(fixture.pr, "merge", "--no-ff", "-m", "Merge current base", "FETCH_HEAD")
+		fixture.assertPasses(fixture.upstream)
+	})
+
+	t.Run("merge retaining stale first-parent release entries fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.prepareStaleFeatureAndCurrentBase()
+		fixture.git(fixture.pr, "merge", "--no-ff", "-s", "ours", "-m", "Merge current base", "FETCH_HEAD")
+		fixture.assertFails(fixture.upstream)
+	})
+
 	t.Run("ambiguous matching releases fail", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
@@ -255,6 +269,16 @@ func (f *generatedGuardFixture) mergeCanonicalMainWithCommit() {
 	f.t.Helper()
 	f.git(f.pr, "fetch", "-q", f.upstream, "main")
 	f.git(f.pr, "merge", "--no-ff", "-m", "Merge canonical main", "FETCH_HEAD")
+}
+
+func (f *generatedGuardFixture) prepareStaleFeatureAndCurrentBase() {
+	f.t.Helper()
+	f.commit(f.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+	f.git(f.pr, "fetch", "-q", f.upstream, "main")
+	f.git(f.pr, "reset", "--hard", "FETCH_HEAD")
+	f.commit(f.pr, "feat: fork source change", map[string]string{"fork.txt": "feature\n"})
+	f.base = f.commit(f.upstream, "chore(main): release 1.2.0", guardReleaseFiles(guardChangelogV2, guardManifestV2))
+	f.git(f.pr, "fetch", "-q", f.upstream, "main")
 }
 
 func (f *generatedGuardFixture) assertPasses(upstream string) {
