@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -166,11 +167,17 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	if releaseJob == nil {
 		t.Fatal("release workflow must define release-please")
 	}
-	if len(releaseJob.Steps) != 1 {
-		t.Fatalf("release-please must contain only the release action, found %d steps", len(releaseJob.Steps))
+	if len(releaseJob.Steps) != 3 {
+		t.Fatalf("release-please must contain the release action and deterministic state recovery, found %d steps", len(releaseJob.Steps))
 	}
 	if releaseJob.Steps[0].Uses != "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071" {
 		t.Fatalf("release-please must keep the pinned release action, got %q", releaseJob.Steps[0].Uses)
+	}
+	if releaseJob.Steps[1].Uses != "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" {
+		t.Fatalf("release-please must check out the triggering commit for state recovery, got %q", releaseJob.Steps[1].Uses)
+	}
+	if !strings.Contains(releaseJob.Steps[2].Run, "scripts/resolve-release-state.sh") {
+		t.Fatal("release-please must resolve a prior draft after the release action")
 	}
 
 	provenanceJob := wf.Jobs["release-pr-provenance"]
@@ -213,6 +220,56 @@ func TestReleaseWorkflowBuildStartsOnlyWhenReleaseIsCreated(t *testing.T) {
 	for _, unexpected := range []string{"!cancelled()", "needs.release-please.result == 'success'"} {
 		if strings.Contains(block, unexpected) {
 			t.Fatalf("build-and-upload must not keep the old skipped-validation guard %q", unexpected)
+		}
+	}
+}
+
+func TestReleaseWorkflowRecoversExactDraftOnFullRerun(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+
+	content := string(data)
+	releaseBlock := extractJobBlock(t, content, "release-please")
+	for _, required := range []string{
+		"release_created: ${{ steps.release_state.outputs.release_created }}",
+		"tag_name: ${{ steps.release_state.outputs.tag_name }}",
+		"version: ${{ steps.release_state.outputs.version }}",
+		"release_sha: ${{ steps.release_state.outputs.release_sha }}",
+		"scripts/resolve-release-state.sh",
+		`"${{ steps.release.outputs.release_created }}"`,
+		`"${{ steps.release.outputs.tag_name }}"`,
+		`"${{ steps.release.outputs.version }}"`,
+	} {
+		if !strings.Contains(releaseBlock, required) {
+			t.Errorf("release-please job must contain %q", required)
+		}
+	}
+
+	for _, job := range []string{"build-darwin", "build-and-upload"} {
+		block := extractJobBlock(t, content, job)
+		if !strings.Contains(block, "ref: ${{ needs.release-please.outputs.release_sha }}") {
+			t.Errorf("%s must build the exact recovered release commit", job)
+		}
+	}
+}
+
+func TestReleaseWorkflowPinsEveryActionByCommit(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+
+	immutableAction := regexp.MustCompile(`^[^@[:space:]]+@[0-9a-f]{40}$`)
+	for lineNumber, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "- uses:") {
+			continue
+		}
+		uses := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(trimmed, " #", 2)[0], "- uses:"))
+		if !immutableAction.MatchString(uses) {
+			t.Errorf("release workflow line %d uses mutable action ref %q", lineNumber+1, uses)
 		}
 	}
 }
