@@ -1754,7 +1754,7 @@ func assertExplicitAttachUsesRepoWideActiveRun(t *testing.T, h *Harness) {
 	t.Helper()
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-explicit-attach-slow-e2e\n  lint: true\n"
 	slowCommand := filepath.Join(h.BinDir, "nm-explicit-attach-slow-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
+	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
 		t.Fatalf("write explicit attach slow test command: %v", err)
 	}
 	h.CommitChange("explicit-attach-active", ".no-mistakes.yaml", config, "configure explicit attach slow test")
