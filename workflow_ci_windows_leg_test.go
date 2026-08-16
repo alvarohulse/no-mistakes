@@ -46,16 +46,25 @@ type workflowCommand struct {
 }
 
 func windowsOnly(condition string) bool {
+	value, ok := workflowConditionValue(condition, "runner.os")
+	return ok && value == "Windows"
+}
+
+func workflowConditionValue(condition, variable string) (string, bool) {
 	condition = strings.TrimSpace(condition)
 	condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
 	for _, part := range strings.Split(condition, "&&") {
 		fields := strings.Fields(strings.TrimSpace(part))
-		if len(fields) == 3 && fields[0] == "runner.os" && fields[1] == "==" &&
-			(fields[2] == "'Windows'" || fields[2] == `"Windows"`) {
-			return true
+		if len(fields) == 3 && fields[0] == variable && fields[1] == "==" {
+			return strings.Trim(fields[2], `'"`), true
 		}
 	}
-	return false
+	return "", false
+}
+
+func windowsShard(condition string) string {
+	shard, _ := workflowConditionValue(condition, "matrix.shard")
+	return shard
 }
 
 func windowsGoTestCommands(t *testing.T) []workflowCommand {
@@ -146,28 +155,41 @@ func TestCIWorkflow_WindowsShardsCoverEveryPackageWithinTheJobCap(t *testing.T) 
 	}
 
 	jobTimeout := time.Duration(job.TimeoutMinutes) * time.Minute
-	var gitCommand workflowCommand
-	var coreCommand workflowCommand
+	commandsByShard := map[string]workflowCommand{}
 	for _, command := range tests {
 		goTimeout := goTestTimeout(t, command)
 		if goTimeout >= jobTimeout {
 			t.Fatalf("go test -timeout is %s and the job cap is %s; a package timeout must produce evidence before job cancellation", goTimeout, jobTimeout)
 		}
+		shard := windowsShard(job.Steps[command.step].If)
+		if shard != "core" && shard != "git" {
+			t.Fatalf("Windows test step %d is not routed to exactly one known shard: %q", command.step, job.Steps[command.step].If)
+		}
+		if _, exists := commandsByShard[shard]; exists {
+			t.Fatalf("Windows shard %q has more than one go test invocation", shard)
+		}
+		commandsByShard[shard] = command
+
 		patterns := goTestPackagePatterns(command)
-		switch {
-		case slices.Contains(patterns, "./..."):
+		if slices.Contains(patterns, "./...") {
 			t.Fatalf("Windows shard at step %d still runs ./...", command.step)
-		case len(patterns) > 0:
-			gitCommand = command
-		default:
-			coreCommand = command
 		}
 	}
-	if gitCommand.name == "" || coreCommand.name == "" {
-		t.Fatal("Windows tests must split explicit git-heavy packages from a go-list remainder")
+	gitCommand, hasGitCommand := commandsByShard["git"]
+	coreCommand, hasCoreCommand := commandsByShard["core"]
+	if !hasGitCommand || !hasCoreCommand {
+		t.Fatalf("Windows tests must have one invocation per shard, got %v", commandsByShard)
+	}
+	if len(goTestPackagePatterns(gitCommand)) == 0 {
+		t.Fatal("Windows git shard must test explicit package patterns")
+	}
+	if !slices.Contains(coreCommand.args, "@pkgs") {
+		t.Fatalf("Windows core shard must test the filtered @pkgs list, got %#v", coreCommand.args)
 	}
 
-	exclude := windowsGitExcludePattern(t, job.Steps[coreCommand.step])
+	coreStep := job.Steps[coreCommand.step]
+	assertWindowsCorePackageEnumeration(t, coreStep)
+	exclude := windowsGitExcludePattern(t, coreStep)
 	all := goListPackages(t, "./...")
 	gitFromFilter := filterPackages(all, exclude, true)
 	coreFromFilter := filterPackages(all, exclude, false)
@@ -182,6 +204,19 @@ func TestCIWorkflow_WindowsShardsCoverEveryPackageWithinTheJobCap(t *testing.T) 
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
 		t.Fatalf("Windows shards must cover every package: union %v, go list ./... %v", union, all)
+	}
+}
+
+func assertWindowsCorePackageEnumeration(t *testing.T, step wfStep) {
+	t.Helper()
+	goList := strings.Index(step.Run, "$pkgs = go list ./...")
+	exitCode := strings.Index(step.Run, "$goListExitCode = $LASTEXITCODE")
+	failureCheck := strings.Index(step.Run, "if ($goListExitCode -ne 0)")
+	failureExit := strings.Index(step.Run, "exit $goListExitCode")
+	filter := strings.Index(step.Run, "$pkgs = $pkgs | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }")
+	goTest := strings.Index(step.Run, "go test -v -timeout=15m @pkgs")
+	if goList == -1 || exitCode < goList || failureCheck < exitCode || failureExit < failureCheck || filter < failureExit || goTest < filter {
+		t.Fatalf("Windows core shard must fail closed on go list before filtering packages:\n%s", step.Run)
 	}
 }
 

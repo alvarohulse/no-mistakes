@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	guardChangelogV1 = "# Changelog\n\n## 1.1.0\n"
-	guardChangelogV2 = "# Changelog\n\n## 1.2.0\n"
-	guardManifestV1  = "{\".\":\"1.1.0\"}\n"
-	guardManifestV2  = "{\".\":\"1.2.0\"}\n"
+	guardChangelogV1   = "# Changelog\n\n## 1.1.0\n"
+	guardChangelogVMid = "# Changelog\n\n## 1.1.5\n"
+	guardChangelogV2   = "# Changelog\n\n## 1.2.0\n"
+	guardManifestV1    = "{\".\":\"1.1.0\"}\n"
+	guardManifestVMid  = "{\".\":\"1.1.5\"}\n"
+	guardManifestV2    = "{\".\":\"1.2.0\"}\n"
 )
 
 func TestGeneratedFileGuard(t *testing.T) {
@@ -79,6 +81,15 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture.assertPasses(fixture.upstream)
 	})
 
+	t.Run("merge synthesizing entries from different parents fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		left := fixture.commit(fixture.pr, "docs: edit changelog", map[string]string{"CHANGELOG.md": "left\n"})
+		fixture.git(fixture.pr, "reset", "--hard", fixture.base)
+		fixture.commit(fixture.pr, "chore: edit manifest", map[string]string{".release-please-manifest.json": "{\".\":\"right\"}\n"})
+		fixture.git(fixture.pr, "merge", "--no-ff", "-m", "Merge synthetic generated entries", left)
+		fixture.assertFailsContaining(filepath.Join(t.TempDir(), "missing-upstream"), "merge commit synthesizes generated entries")
+	})
+
 	t.Run("merge carrying the current base release entries passes", func(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.prepareStaleFeatureAndCurrentBase()
@@ -90,6 +101,42 @@ func TestGeneratedFileGuard(t *testing.T) {
 		fixture := newGeneratedGuardFixture(t)
 		fixture.prepareStaleFeatureAndCurrentBase()
 		fixture.git(fixture.pr, "merge", "--no-ff", "-s", "ours", "-m", "Merge current base", "FETCH_HEAD")
+		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("later merge cannot restore an intermediate canonical release", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.base = fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "reset", "--hard", "FETCH_HEAD")
+		middle := fixture.commit(fixture.upstream, "chore(main): release 1.1.5", guardReleaseFiles(guardChangelogVMid, guardManifestVMid))
+		fixture.commit(fixture.upstream, "chore(main): release 1.2.0", guardReleaseFiles(guardChangelogV2, guardManifestV2))
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "switch", "-q", "-c", "stale-release", middle)
+		fixture.commit(fixture.pr, "feat: branch from intermediate release", map[string]string{"stale.txt": "feature\n"})
+		fixture.git(fixture.pr, "switch", "-q", "main")
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "merge", "--no-ff", "-m", "Merge current canonical main", "FETCH_HEAD")
+		fixture.git(fixture.pr, "merge", "--no-ff", "--no-commit", "-s", "ours", "stale-release")
+		fixture.git(fixture.pr, "checkout", "stale-release", "--", "CHANGELOG.md", ".release-please-manifest.json")
+		fixture.git(fixture.pr, "commit", "-q", "-m", "Merge stale release branch")
+		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("base rollback cannot lower its canonical provenance floor", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		middle := fixture.commit(fixture.upstream, "chore(main): release 1.1.5", guardReleaseFiles(guardChangelogVMid, guardManifestVMid))
+		fixture.commit(fixture.upstream, "chore(main): release 1.2.0", guardReleaseFiles(guardChangelogV2, guardManifestV2))
+		fixture.git(fixture.pr, "fetch", "-q", fixture.upstream, "main")
+		fixture.git(fixture.pr, "reset", "--hard", "FETCH_HEAD")
+		fixture.base = fixture.commit(fixture.pr, "docs: restore old base release", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.pr, "switch", "-q", "-c", "stale-release", middle)
+		fixture.commit(fixture.pr, "feat: branch from intermediate release", map[string]string{"stale.txt": "feature\n"})
+		fixture.git(fixture.pr, "switch", "-q", "main")
+		fixture.git(fixture.pr, "merge", "--no-ff", "--no-commit", "-s", "ours", "stale-release")
+		fixture.git(fixture.pr, "checkout", "stale-release", "--", "CHANGELOG.md", ".release-please-manifest.json")
+		fixture.git(fixture.pr, "commit", "-q", "-m", "Merge intermediate release branch")
 		fixture.assertFails(fixture.upstream)
 	})
 
@@ -123,6 +170,15 @@ func TestGeneratedFileGuard(t *testing.T) {
 		changes := guardReleaseFiles(guardChangelogV1, guardManifestV1)
 		changes["source.txt"] = "bundled source change\n"
 		fixture.commit(fixture.upstream, "chore(main): bundled release", changes)
+		fixture.mergeCanonicalMain()
+		fixture.assertFails(fixture.upstream)
+	})
+
+	t.Run("canonical release with executable generated entries fails", func(t *testing.T) {
+		fixture := newGeneratedGuardFixture(t)
+		fixture.commit(fixture.upstream, "chore(main): release 1.1.0", guardReleaseFiles(guardChangelogV1, guardManifestV1))
+		fixture.git(fixture.upstream, "update-index", "--chmod=+x", "CHANGELOG.md", ".release-please-manifest.json")
+		fixture.git(fixture.upstream, "commit", "-q", "--amend", "--no-edit")
 		fixture.mergeCanonicalMain()
 		fixture.assertFails(fixture.upstream)
 	})
@@ -228,6 +284,23 @@ func TestGeneratedFileGuardWorkflowIsBaseControlled(t *testing.T) {
 	}
 }
 
+func TestGeneratedFileGuardBootstrapRunsOnlyForPR40(t *testing.T) {
+	workflow := strings.ReplaceAll(guardReadFile(t, ".github/workflows/guard-generated-files.yml"), "\r\n", "\n")
+
+	for _, want := range []string{
+		"provenance-bootstrap:",
+		"name: Generated file provenance bootstrap",
+		"if: github.event.pull_request.number == 40",
+		"persist-credentials: false",
+		"sh scripts/guard-generated-files.sh",
+		"https://github.com/kunchenguid/no-mistakes.git",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("bootstrap workflow must contain %q", want)
+		}
+	}
+}
+
 type generatedGuardFixture struct {
 	t        *testing.T
 	script   string
@@ -315,6 +388,17 @@ func (f *generatedGuardFixture) assertFails(upstream string) {
 	output, err := f.run(upstream)
 	if err == nil {
 		f.t.Fatalf("guard should fail\n%s", output)
+	}
+}
+
+func (f *generatedGuardFixture) assertFailsContaining(upstream, want string) {
+	f.t.Helper()
+	output, err := f.run(upstream)
+	if err == nil {
+		f.t.Fatalf("guard should fail\n%s", output)
+	}
+	if !strings.Contains(output, want) {
+		f.t.Fatalf("guard failure = %q, want it to contain %q", output, want)
 	}
 }
 

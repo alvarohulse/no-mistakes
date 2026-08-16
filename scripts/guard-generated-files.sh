@@ -17,16 +17,87 @@ generated_entries() {
   done
 }
 
-generated_entries_complete() {
-  generated_entries_complete_treeish=$1
-  for generated_entries_complete_path in CHANGELOG.md .release-please-manifest.json; do
-    if ! generated_entries_complete_entry=$(git ls-tree "$generated_entries_complete_treeish" -- "$generated_entries_complete_path"); then
+generated_entries_regular() {
+  generated_entries_regular_treeish=$1
+  for generated_entries_regular_path in CHANGELOG.md .release-please-manifest.json; do
+    if ! generated_entries_regular_entry=$(git ls-tree "$generated_entries_regular_treeish" -- "$generated_entries_regular_path"); then
       return 1
     fi
-    if [ -z "$generated_entries_complete_entry" ]; then
+    set -- $generated_entries_regular_entry
+    if [ "$#" -ne 4 ] || [ "$1" != 100644 ] || [ "$2" != blob ] || [ "$4" != "$generated_entries_regular_path" ]; then
       return 1
     fi
   done
+}
+
+is_ancestor() {
+  if git merge-base --is-ancestor "$1" "$2"; then
+    return 0
+  else
+    is_ancestor_status=$?
+  fi
+  if [ "$is_ancestor_status" -eq 1 ]; then
+    return 1
+  fi
+  fail "could not verify canonical upstream ancestry"
+}
+
+derive_provenance() {
+  derive_provenance_treeish=$1
+  derive_provenance_label=$2
+
+  if ! derive_provenance_entries=$(generated_entries "$derive_provenance_treeish"); then
+    fail "could not inspect generated entries for ${derive_provenance_label}"
+  fi
+
+  derive_provenance_ancestors=
+  for derive_provenance_candidate in $canonical_candidates; do
+    if is_ancestor "$derive_provenance_candidate" "$derive_provenance_treeish"; then
+      derive_provenance_ancestors="${derive_provenance_ancestors} ${derive_provenance_candidate}"
+    fi
+  done
+
+  derive_provenance_latest=
+  derive_provenance_latest_count=0
+  for derive_provenance_candidate in $derive_provenance_ancestors; do
+    derive_provenance_superseded=false
+    for derive_provenance_successor in $derive_provenance_ancestors; do
+      if [ "$derive_provenance_candidate" = "$derive_provenance_successor" ]; then
+        continue
+      fi
+      if is_ancestor "$derive_provenance_candidate" "$derive_provenance_successor"; then
+        derive_provenance_superseded=true
+        break
+      fi
+    done
+    if [ "$derive_provenance_superseded" = false ]; then
+      derive_provenance_latest=$derive_provenance_candidate
+      derive_provenance_latest_count=$((derive_provenance_latest_count + 1))
+    fi
+  done
+
+  if [ "$derive_provenance_latest_count" -gt 1 ]; then
+    fail "${derive_provenance_label} has ambiguous canonical release provenance"
+  fi
+  if [ "$derive_provenance_latest_count" -eq 1 ]; then
+    provenance_floor=$derive_provenance_latest
+  else
+    if ! derive_provenance_carriers=$(git merge-base --all "$derive_provenance_treeish" "$canonical_main"); then
+      fail "could not determine the canonical carrier for ${derive_provenance_label}"
+    fi
+    set -- $derive_provenance_carriers
+    if [ "$#" -ne 1 ]; then
+      fail "${derive_provenance_label} must have exactly one canonical carrier"
+    fi
+    provenance_floor=$1
+  fi
+
+  if ! derive_provenance_floor_entries=$(generated_entries "$provenance_floor"); then
+    fail "could not inspect canonical provenance for ${derive_provenance_label}"
+  fi
+  if [ "$derive_provenance_entries" != "$derive_provenance_floor_entries" ]; then
+    fail "${derive_provenance_label} generated files do not match its latest canonical provenance"
+  fi
 }
 
 if [ "$#" -ne 3 ]; then
@@ -60,6 +131,7 @@ if ! pr_commits=$(git rev-list "${BASE_SHA}..${HEAD_SHA}"); then
 fi
 
 generated_files_touched=false
+generated_merges=
 for commit in $pr_commits; do
   if ! commit_and_parents=$(git rev-list --parents -n 1 "$commit"); then
     fail "could not inspect PR commit parents"
@@ -103,6 +175,7 @@ for commit in $pr_commits; do
   fi
   if [ "$differs_from_parent" = true ]; then
     generated_files_touched=true
+    generated_merges="${generated_merges} ${commit}"
   fi
 done
 
@@ -112,8 +185,8 @@ fi
 if ! head_entries=$(generated_entries "$HEAD_SHA"); then
   fail "could not inspect generated entries at the PR head"
 fi
-if ! generated_entries_complete "$BASE_SHA" || ! generated_entries_complete "$HEAD_SHA"; then
-  fail "the PR base and head must contain both generated files"
+if ! generated_entries_regular "$BASE_SHA" || ! generated_entries_regular "$HEAD_SHA"; then
+  fail "the PR base and head must contain both generated files as regular non-executable blobs"
 fi
 
 if [ "$generated_files_touched" = false ] && [ "$head_entries" = "$base_entries" ]; then
@@ -154,14 +227,8 @@ for commit in $pr_commits; do
     continue
   fi
 
-  if git merge-base --is-ancestor "$commit" "$canonical_main"; then
-    :
-  else
-    ancestor_status=$?
-    if [ "$ancestor_status" -eq 1 ]; then
-      fail "generated files changed in a noncanonical commit"
-    fi
-    fail "could not verify canonical upstream ancestry"
+  if ! is_ancestor "$commit" "$canonical_main"; then
+    fail "generated files changed in a noncanonical commit"
   fi
 
   if ! canonical_files=$(git diff --no-renames --name-only "$parent" "$commit"); then
@@ -171,22 +238,16 @@ for commit in $pr_commits; do
   if [ "$canonical_files" != "$expected_files" ]; then
     fail "canonical generated-file change is not a single-parent release-only commit"
   fi
-  if ! generated_entries_complete "$commit"; then
-    fail "canonical release commit does not contain both generated files"
+  if ! generated_entries_regular "$commit"; then
+    fail "canonical release commit does not contain both generated files as regular non-executable blobs"
   fi
 done
-
-if [ "$head_entries" = "$base_entries" ]; then
-  echo "Release-please-generated files exactly preserve the validated PR base. OK."
-  exit 0
-fi
 
 if ! canonical_commits=$(git rev-list "$canonical_main"); then
   fail "could not enumerate canonical upstream commits"
 fi
 
-matching_base_commit=
-matching_base_commit_count=0
+canonical_candidates=
 matching_head_commit=
 matching_head_commit_count=0
 
@@ -209,71 +270,40 @@ for commit in $canonical_commits; do
   if [ "$canonical_files" != "$expected_files" ]; then
     continue
   fi
-  if ! generated_entries_complete "$commit"; then
+  if ! generated_entries_regular "$commit"; then
     continue
   fi
   if ! candidate_entries=$(generated_entries "$commit"); then
     fail "could not inspect canonical release entries"
   fi
+  canonical_candidates="${canonical_candidates} ${commit}"
 
-  if [ "$candidate_entries" = "$base_entries" ]; then
-    if git merge-base --is-ancestor "$commit" "$BASE_SHA"; then
-      matching_base_commit=$commit
-      matching_base_commit_count=$((matching_base_commit_count + 1))
-    else
-      ancestor_status=$?
-      if [ "$ancestor_status" -ne 1 ]; then
-        fail "could not verify base release ancestry"
-      fi
-    fi
-  fi
   if [ "$candidate_entries" = "$head_entries" ]; then
-    if git merge-base --is-ancestor "$commit" "$HEAD_SHA"; then
+    if is_ancestor "$commit" "$HEAD_SHA"; then
       matching_head_commit=$commit
       matching_head_commit_count=$((matching_head_commit_count + 1))
-    else
-      ancestor_status=$?
-      if [ "$ancestor_status" -ne 1 ]; then
-        fail "could not verify head release ancestry"
-      fi
     fi
   fi
 done
+
+derive_provenance "$BASE_SHA" "PR base"
+base_floor=$provenance_floor
+
+for commit in $generated_merges; do
+  derive_provenance "$commit" "generated-changing merge commit"
+done
+
+if [ "$head_entries" = "$base_entries" ]; then
+  echo "Release-please-generated files exactly preserve the validated PR base. OK."
+  exit 0
+fi
 
 if [ "$matching_head_commit_count" -ne 1 ]; then
   fail "generated files must exactly match one release-only commit carried from canonical upstream main"
 fi
 
-if [ "$matching_base_commit_count" -gt 1 ]; then
-  fail "PR base generated files have ambiguous canonical release provenance"
-fi
-if [ "$matching_base_commit_count" -eq 1 ]; then
-  base_floor=$matching_base_commit
-else
-  if ! base_carriers=$(git merge-base --all "$BASE_SHA" "$canonical_main"); then
-    fail "could not determine the canonical PR base carrier"
-  fi
-  set -- $base_carriers
-  if [ "$#" -ne 1 ]; then
-    fail "PR base must have exactly one canonical carrier"
-  fi
-  base_floor=$1
-  if ! base_floor_entries=$(generated_entries "$base_floor"); then
-    fail "could not inspect the canonical PR base carrier"
-  fi
-  if [ "$base_floor_entries" != "$base_entries" ]; then
-    fail "PR base generated files do not have canonical provenance"
-  fi
-fi
-
-if git merge-base --is-ancestor "$base_floor" "$matching_head_commit"; then
-  :
-else
-  ancestor_status=$?
-  if [ "$ancestor_status" -eq 1 ]; then
-    fail "generated files roll back the canonical release carried by the PR base"
-  fi
-  fail "could not compare PR base and head release provenance"
+if ! is_ancestor "$base_floor" "$matching_head_commit"; then
+  fail "generated files roll back the canonical release carried by the PR base"
 fi
 
 echo "Release-please-generated files match canonical upstream commit ${matching_head_commit}. OK."
