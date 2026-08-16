@@ -18,28 +18,58 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
+      release_state: ${{ steps.release_state.outputs.release_state }}
       release_created: ${{ steps.release_state.outputs.release_created }}
       tag_name: ${{ steps.release_state.outputs.tag_name }}
       version: ${{ steps.release_state.outputs.version }}
       release_sha: ${{ steps.release_state.outputs.release_sha }}
     steps:
-      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
-        id: release
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-          skip-github-pull-request: true
-
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      # On a full rerun, Release Please can report no new release even though
-      # the exact draft from the first attempt still needs its artifacts. Recover
-      # only the unique Actions-authored draft whose manifest tag resolves to
-      # this triggering SHA; published or unrelated state must not be rebuilt.
+      - name: Resolve existing exact release state
+        id: existing_release_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh scripts/resolve-release-state.sh \
+            "$GITHUB_REPOSITORY" \
+            "$GITHUB_SHA" \
+            "" \
+            "" \
+            "" \
+            "$GITHUB_OUTPUT"
+
+      - name: Require triggering main before release mutation
+        if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          live_main_sha=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            --jq '.object.sha')
+          if [ "$live_main_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::main changed before release creation; refusing to mutate a historical run" >&2
+            exit 1
+          fi
+
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        if: github.run_attempt == 1 && steps.existing_release_state.outputs.release_state == 'none'
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
+
+      - name: Refresh exact release tags
+        run: git fetch --force --tags origin
+
+      # Full reruns are read-only. They recover only the unique Actions-authored
+      # draft whose manifest tag resolves to this triggering SHA; published or
+      # unrelated state is a no-op.
       - name: Resolve exact release state
         id: release_state
         env:
@@ -56,7 +86,7 @@ jobs:
   release-pr-provenance:
     runs-on: ubuntu-latest
     needs: release-please
-    if: needs.release-please.outputs.release_created != 'true'
+    if: github.run_attempt == 1 && needs.release-please.outputs.release_state == 'none'
     steps:
       # GITHUB_TOKEN suppresses pull-request workflow events. Produce the release
       # PR through the same pinned release-please graph while retaining the exact
@@ -96,6 +126,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_PR: ${{ steps.release_pr.outputs.pr }}
+          HEAD_RETAINED: ${{ steps.release_pr.outputs.head_retained }}
+          RETAINED_HEAD_SHA: ${{ steps.release_pr.outputs.retained_head_sha }}
         run: |
           set -euo pipefail
 
@@ -163,12 +195,31 @@ jobs:
 
           trusted_script="${RUNNER_TEMP}/guard-generated-files.sh"
           git show "${GITHUB_SHA}:scripts/guard-generated-files.sh" > "$trusted_script"
-          sh "$trusted_script" \
-            "$GITHUB_SHA" \
-            "$head_sha" \
-            "https://github.com/kunchenguid/no-mistakes.git" \
-            "https://github.com/alvarohulse/no-mistakes.git" \
-            "$head_sha"
+          case "$HEAD_RETAINED" in
+            true)
+              if [ "$RETAINED_HEAD_SHA" != "$head_sha" ]; then
+                echo "::error::retained release-please head changed before verification" >&2
+                exit 1
+              fi
+              sh "$trusted_script" \
+                "$GITHUB_SHA" \
+                "$head_sha" \
+                "https://github.com/kunchenguid/no-mistakes.git" \
+                "https://github.com/alvarohulse/no-mistakes.git"
+              ;;
+            false)
+              sh "$trusted_script" \
+                "$GITHUB_SHA" \
+                "$head_sha" \
+                "https://github.com/kunchenguid/no-mistakes.git" \
+                "https://github.com/alvarohulse/no-mistakes.git" \
+                "$head_sha"
+              ;;
+            *)
+              echo "::error::release-please producer returned an invalid retained-head state" >&2
+              exit 1
+              ;;
+          esac
 
           trusted_output_verifier="${RUNNER_TEMP}/verify-release-please-output.sh"
           git show "${GITHUB_SHA}:scripts/verify-release-please-output.sh" > \

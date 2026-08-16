@@ -7,7 +7,9 @@ fail() {
 }
 
 emit_no_release() {
+  release_state=$1
   printf '%s\n' \
+    "release_state=${release_state}" \
     'release_created=false' \
     'tag_name=' \
     'version=' \
@@ -78,7 +80,7 @@ if [ "$tag_lookup_status" -eq 1 ]; then
   if [ "$action_created" = true ]; then
     fail 'release-please reported a release without the expected exact tag'
   fi
-  emit_no_release
+  emit_no_release none
   exit 0
 fi
 if [ "$tag_lookup_status" -ne 0 ]; then
@@ -91,7 +93,7 @@ if [ "$tag_sha" != "$trigger_sha" ]; then
   if [ "$action_created" = true ]; then
     fail 'release-please reported a release without the expected exact tag'
   fi
-  emit_no_release
+  emit_no_release none
   exit 0
 fi
 
@@ -143,7 +145,7 @@ if [ "$release_draft" = false ]; then
   if [ "$action_created" = true ]; then
     fail 'release-please outputs are inconsistent with the hosted release'
   fi
-  emit_no_release
+  emit_no_release published
   exit 0
 fi
 
@@ -161,6 +163,7 @@ if ! jq -e --arg tag "$expected_tag" '
 fi
 
 printf '%s\n' \
+  'release_state=draft' \
   'release_created=true' \
   "tag_name=${expected_tag}" \
   "version=${manifest_version}" \

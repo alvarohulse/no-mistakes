@@ -74,6 +74,8 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 	for _, required := range []string{
 		"steps.release_pr.outputs.prs_created == 'true'",
 		"RELEASE_PR: ${{ steps.release_pr.outputs.pr }}",
+		"HEAD_RETAINED: ${{ steps.release_pr.outputs.head_retained }}",
+		"RETAINED_HEAD_SHA: ${{ steps.release_pr.outputs.retained_head_sha }}",
 		"actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
 		"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
 		"node-version: 20",
@@ -89,6 +91,7 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		`git show "${GITHUB_SHA}:scripts/guard-generated-files.sh"`,
 		`git show "${GITHUB_SHA}:scripts/verify-release-please-output.sh"`,
 		`sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"`,
+		`[ "$RETAINED_HEAD_SHA" != "$head_sha" ]`,
 		`"$GITHUB_SHA"`,
 		`"$head_sha"`,
 		"https://github.com/alvarohulse/no-mistakes.git",
@@ -143,7 +146,11 @@ func TestReleasePleaseProducerCapturesPublishedOutput(t *testing.T) {
 	for _, required := range []string{
 		"{ alwaysUpdate: true }",
 		"github.buildChangeSet = async",
+		"github.updatePullRequest = async",
 		"capturedChangeSets.push(changes)",
+		"retainableAttestedHead(number, changes)",
+		`TRUSTED_ATTESTATION_REPOSITORY = "alvarohulse/no-mistakes"`,
+		`setOutput("head_retained", retainedHeadSHA ? "true" : "false")`,
 		"await manifest.createPullRequests()",
 		"await github.getBranchSha(baseBranch)",
 		"expectedBaseSHA",
@@ -172,17 +179,29 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	if releaseJob == nil {
 		t.Fatal("release workflow must define release-please")
 	}
-	if len(releaseJob.Steps) != 3 {
+	if len(releaseJob.Steps) != 6 {
 		t.Fatalf("release-please must contain the release action and deterministic state recovery, found %d steps", len(releaseJob.Steps))
 	}
-	if releaseJob.Steps[0].Uses != "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071" {
-		t.Fatalf("release-please must keep the pinned release action, got %q", releaseJob.Steps[0].Uses)
+	if releaseJob.Steps[0].Uses != "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" {
+		t.Fatalf("release-please must first check out the triggering commit, got %q", releaseJob.Steps[0].Uses)
 	}
-	if releaseJob.Steps[1].Uses != "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" {
-		t.Fatalf("release-please must check out the triggering commit for state recovery, got %q", releaseJob.Steps[1].Uses)
+	if !strings.Contains(releaseJob.Steps[1].Run, "scripts/resolve-release-state.sh") {
+		t.Fatal("release-please must resolve exact state before any mutation")
 	}
-	if !strings.Contains(releaseJob.Steps[2].Run, "scripts/resolve-release-state.sh") {
-		t.Fatal("release-please must resolve a prior draft after the release action")
+	if !strings.Contains(releaseJob.Steps[2].If, "github.run_attempt == 1") || !strings.Contains(releaseJob.Steps[2].Run, "git/ref/heads/main") {
+		t.Fatal("release-please must bind first-attempt mutation to the triggering main commit")
+	}
+	if releaseJob.Steps[3].Uses != "googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071" {
+		t.Fatalf("release-please must keep the pinned release action, got %q", releaseJob.Steps[3].Uses)
+	}
+	if !strings.Contains(releaseJob.Steps[3].If, "github.run_attempt == 1") || !strings.Contains(releaseJob.Steps[3].If, "release_state == 'none'") {
+		t.Fatalf("release action must run only for a first-attempt missing release, got if %q", releaseJob.Steps[3].If)
+	}
+	if !strings.Contains(releaseJob.Steps[4].Run, "git fetch --force --tags origin") {
+		t.Fatal("release-please must refresh tags created after the triggering commit checkout")
+	}
+	if !strings.Contains(releaseJob.Steps[5].Run, "scripts/resolve-release-state.sh") {
+		t.Fatal("release-please must resolve the exact final state after the release action")
 	}
 
 	provenanceJob := wf.Jobs["release-pr-provenance"]
@@ -193,8 +212,8 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	if len(provenanceNeeds) != 1 || provenanceNeeds[0] != "release-please" {
 		t.Fatalf("release provenance needs = %v, want [release-please]", provenanceNeeds)
 	}
-	if !strings.Contains(provenanceJob.If, "needs.release-please.outputs.release_created != 'true'") {
-		t.Fatalf("release provenance must skip exact draft creation and recovery, got if %q", provenanceJob.If)
+	if !strings.Contains(provenanceJob.If, "github.run_attempt == 1") || !strings.Contains(provenanceJob.If, "release_state == 'none'") {
+		t.Fatalf("release provenance must skip reruns, draft recovery, and published releases, got if %q", provenanceJob.If)
 	}
 
 	for _, name := range []string{"build-darwin", "build-and-upload"} {
@@ -235,6 +254,7 @@ func TestReleaseWorkflowRecoversExactDraftOnFullRerun(t *testing.T) {
 	content := string(data)
 	releaseBlock := extractJobBlock(t, content, "release-please")
 	for _, required := range []string{
+		"release_state: ${{ steps.release_state.outputs.release_state }}",
 		"release_created: ${{ steps.release_state.outputs.release_created }}",
 		"tag_name: ${{ steps.release_state.outputs.tag_name }}",
 		"version: ${{ steps.release_state.outputs.version }}",
@@ -243,6 +263,8 @@ func TestReleaseWorkflowRecoversExactDraftOnFullRerun(t *testing.T) {
 		`"${{ steps.release.outputs.release_created }}"`,
 		`"${{ steps.release.outputs.tag_name }}"`,
 		`"${{ steps.release.outputs.version }}"`,
+		"github.run_attempt == 1",
+		"steps.existing_release_state.outputs.release_state == 'none'",
 	} {
 		if !strings.Contains(releaseBlock, required) {
 			t.Errorf("release-please job must contain %q", required)

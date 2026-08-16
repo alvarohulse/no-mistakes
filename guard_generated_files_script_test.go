@@ -26,10 +26,12 @@ const (
 	guardChangelogVMid                   = "# Changelog\n\n## 1.1.5\n"
 	guardChangelogV2                     = "# Changelog\n\n## 1.2.0\n"
 	guardChangelogV3                     = "# Changelog\n\n## 1.3.0\n"
+	guardChangelogV4                     = "# Changelog\n\n## 1.4.0\n"
 	guardManifestV1                      = "{\".\":\"1.1.0\"}\n"
 	guardManifestVMid                    = "{\".\":\"1.1.5\"}\n"
 	guardManifestV2                      = "{\".\":\"1.2.0\"}\n"
 	guardManifestV3                      = "{\".\":\"1.3.0\"}\n"
+	guardManifestV4                      = "{\".\":\"1.4.0\"}\n"
 )
 
 func TestGeneratedFileGuard(t *testing.T) {
@@ -217,6 +219,31 @@ func TestGeneratedFileGuard(t *testing.T) {
 		output, err := runGeneratedGuard(t, repo, script, base, head, upstream)
 		if err != nil {
 			t.Fatalf("guard should accept trusted host rewrite provenance: %v\n%s", err, output)
+		}
+	})
+
+	t.Run("trusted base follows attested provenance across host rewrites", func(t *testing.T) {
+		repo, upstream, script := newGeneratedGuardBootstrapFixture(t)
+		guardGit(t, repo, "switch", "-q", "--detach", guardBootstrapBase)
+		guardWriteFile(t, repo, "CHANGELOG.md", guardChangelogV3)
+		guardWriteFile(t, repo, ".release-please-manifest.json", guardManifestV3)
+		guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+		guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 1.3.0")
+		firstRelease := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		guardGit(t, repo, "tag", guardProvenanceTagPrefix+firstRelease, firstRelease)
+
+		firstRewrite := guardGeneratedRewriteCommit(t, repo, guardBootstrapBase, firstRelease)
+		guardWriteFile(t, repo, "CHANGELOG.md", guardChangelogV4)
+		guardWriteFile(t, repo, ".release-please-manifest.json", guardManifestV4)
+		guardGit(t, repo, "add", "CHANGELOG.md", ".release-please-manifest.json")
+		guardGit(t, repo, "commit", "-q", "-m", "chore(main): release 1.4.0")
+		secondRelease := strings.TrimSpace(guardGit(t, repo, "rev-parse", "HEAD"))
+		guardGit(t, repo, "tag", guardProvenanceTagPrefix+secondRelease, secondRelease)
+
+		base := guardGeneratedRewriteCommit(t, repo, firstRewrite, secondRelease)
+		output, err := runGeneratedGuardWithAttestations(t, repo, script, base, base, upstream, repo)
+		if err != nil {
+			t.Fatalf("guard should follow authenticated predecessor provenance across rewrites: %v\n%s", err, output)
 		}
 	})
 

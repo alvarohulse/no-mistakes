@@ -65,6 +65,56 @@ is_ancestor() {
   fail "could not verify canonical upstream ancestry"
 }
 
+provenance_precedes() {
+  provenance_precedes_older=$1
+  provenance_precedes_newer=$2
+
+  if is_ancestor "$provenance_precedes_older" "$provenance_precedes_newer"; then
+    return 0
+  fi
+
+  provenance_precedes_current=$provenance_precedes_newer
+  provenance_precedes_seen=
+  while :; do
+    case " $provenance_precedes_seen " in
+      *" $provenance_precedes_current "*) fail "canonical generated-file provenance lineage is cyclic" ;;
+    esac
+    provenance_precedes_seen="${provenance_precedes_seen} ${provenance_precedes_current}"
+    if ! provenance_precedes_parent_matches=$(printf '%s\n' "$canonical_candidate_parent_records" | awk -v candidate="$provenance_precedes_current" '
+      NF == 2 && $1 == candidate { print $2 }
+    '); then
+      fail "could not inspect canonical generated-file provenance lineage"
+    fi
+    set -- $provenance_precedes_parent_matches
+    if [ "$#" -eq 0 ]; then
+      return 1
+    fi
+    if [ "$#" -ne 1 ]; then
+      fail "canonical generated-file provenance lineage is ambiguous"
+    fi
+    provenance_precedes_parent_tuple=$1
+    if [ "$provenance_precedes_parent_tuple" = - ]; then
+      return 1
+    fi
+    if ! provenance_precedes_candidates=$(printf '%s\n' "$canonical_candidate_records" | awk -v tuple="$provenance_precedes_parent_tuple" '
+      NF == 2 && $2 == tuple { print $1 }
+    '); then
+      fail "could not inspect canonical generated-file provenance lineage"
+    fi
+    set -- $provenance_precedes_candidates
+    if [ "$#" -eq 0 ]; then
+      return 1
+    fi
+    if [ "$#" -ne 1 ]; then
+      fail "canonical generated-file provenance lineage is ambiguous"
+    fi
+    provenance_precedes_current=$1
+    if [ "$provenance_precedes_current" = "$provenance_precedes_older" ]; then
+      return 0
+    fi
+  done
+}
+
 bounded_rev_list() {
   bounded_rev_list_label=$1
   bounded_rev_list_limit=$2
@@ -131,7 +181,7 @@ preserves_base_provenance() {
     exit 1
   fi
   for preserves_base_provenance_ancestor in $preserves_base_provenance_ancestors; do
-    if ! is_ancestor "$preserves_base_provenance_ancestor" "$base_floor"; then
+    if ! provenance_precedes "$preserves_base_provenance_ancestor" "$base_floor"; then
       return 1
     fi
   done
@@ -346,7 +396,7 @@ EOF
           fail "could not inspect generated entries in a trusted base merge parent"
         fi
         trusted_floor_for_entries "$parent_entries" "trusted base merge parent"
-        if ! is_ancestor "$trusted_entries_floor" "$transition_candidate"; then
+        if ! provenance_precedes "$trusted_entries_floor" "$transition_candidate"; then
           fail "trusted base generated files roll back canonical provenance"
         fi
       done
@@ -355,7 +405,7 @@ EOF
       fi
     fi
 
-    if ! is_ancestor "$trusted_base_floor" "$transition_candidate"; then
+    if ! provenance_precedes "$trusted_base_floor" "$transition_candidate"; then
       fail "trusted base generated files roll back canonical provenance"
     fi
     case " $trusted_base_transition_tuples " in
@@ -428,7 +478,7 @@ EOF
         trusted_parent_floor=$trusted_entries_floor
         trusted_floor_for_entries "$commit_entries" "${audit_commits_label} rewrite"
         trusted_commit_floor=$trusted_entries_floor
-        if ! is_ancestor "$trusted_parent_floor" "$trusted_commit_floor"; then
+        if ! provenance_precedes "$trusted_parent_floor" "$trusted_commit_floor"; then
           fail "trusted base generated files roll back canonical provenance"
         fi
         continue
@@ -440,7 +490,7 @@ EOF
         continue
       fi
       derive_provenance "$commit" "${audit_commits_label} generated-changing commit" true
-      if [ "$audit_commits_trust" = untrusted ] && ! is_ancestor "$base_floor" "$provenance_floor"; then
+      if [ "$audit_commits_trust" = untrusted ] && ! provenance_precedes "$base_floor" "$provenance_floor"; then
         fail "PR generated files roll back canonical provenance"
       fi
       continue
@@ -477,7 +527,7 @@ EOF
           fail "could not inspect generated entries in a ${audit_commits_label} merge parent"
         fi
         trusted_floor_for_entries "$parent_entries" "${audit_commits_label} merge parent"
-        if ! is_ancestor "$trusted_entries_floor" "$trusted_merge_floor"; then
+        if ! provenance_precedes "$trusted_entries_floor" "$trusted_merge_floor"; then
           fail "trusted base generated files roll back canonical provenance"
         fi
       done
@@ -487,7 +537,7 @@ EOF
       continue
     fi
     derive_provenance "$commit" "${audit_commits_label} generated-changing merge commit" true
-    if [ "$audit_commits_trust" = untrusted ] && ! is_ancestor "$base_floor" "$provenance_floor"; then
+    if [ "$audit_commits_trust" = untrusted ] && ! provenance_precedes "$base_floor" "$provenance_floor"; then
       fail "PR generated files roll back canonical provenance"
     fi
   done <<EOF
@@ -583,6 +633,15 @@ while IFS=' ' read -r authenticated_ref authenticated_type authenticated_sha; do
     fail "authenticated release provenance must identify a single-parent commit"
   fi
   authenticated_parent=$2
+  if ! authenticated_parent_entries=$(generated_entries "$authenticated_parent"); then
+    fail "could not inspect authenticated release provenance parent entries"
+  fi
+  if ! generated_entries_are_regular "$authenticated_parent_entries"; then
+    fail "authenticated release provenance parent entries must be regular non-executable blobs"
+  fi
+  if ! authenticated_parent_tuple=$(generated_entries_tuple "$authenticated_parent_entries"); then
+    exit 1
+  fi
   if ! authenticated_files=$(git diff --no-renames --name-only \
     "$authenticated_parent" "$authenticated_sha"); then
     fail "could not inspect authenticated release provenance files"
@@ -601,10 +660,10 @@ while IFS=' ' read -r authenticated_ref authenticated_type authenticated_sha; do
     exit 1
   fi
   if [ -z "$authenticated_candidate_records" ]; then
-    authenticated_candidate_records="${authenticated_sha} ${authenticated_tuple}"
+    authenticated_candidate_records="${authenticated_sha} ${authenticated_tuple} ${authenticated_parent_tuple}"
   else
     authenticated_candidate_records="${authenticated_candidate_records}
-${authenticated_sha} ${authenticated_tuple}"
+${authenticated_sha} ${authenticated_tuple} ${authenticated_parent_tuple}"
   fi
 done <<EOF
 $authenticated_release_refs
@@ -650,6 +709,7 @@ fi
 
 canonical_candidates=
 canonical_candidate_records=
+canonical_candidate_parent_records=
 
 set -- $canonical_candidate_pairs
 while [ "$#" -gt 0 ]; do
@@ -676,15 +736,27 @@ while [ "$#" -gt 0 ]; do
   if ! candidate_tuple=$(generated_entries_tuple "$candidate_entries"); then
     exit 1
   fi
+  if ! candidate_parent_entries=$(generated_entries "$parent"); then
+    fail "could not inspect canonical release parent entries"
+  fi
+  candidate_parent_tuple=-
+  if generated_entries_are_regular "$candidate_parent_entries"; then
+    if ! candidate_parent_tuple=$(generated_entries_tuple "$candidate_parent_entries"); then
+      exit 1
+    fi
+  fi
   if [ -z "$canonical_candidate_records" ]; then
     canonical_candidate_records="${commit} ${candidate_tuple}"
+    canonical_candidate_parent_records="${commit} ${candidate_parent_tuple}"
   else
     canonical_candidate_records="${canonical_candidate_records}
 ${commit} ${candidate_tuple}"
+    canonical_candidate_parent_records="${canonical_candidate_parent_records}
+${commit} ${candidate_parent_tuple}"
   fi
 done
 
-while IFS=' ' read -r authenticated_sha authenticated_tuple; do
+while IFS=' ' read -r authenticated_sha authenticated_tuple authenticated_parent_tuple; do
   if [ -z "$authenticated_sha" ]; then
     continue
   fi
@@ -697,9 +769,12 @@ while IFS=' ' read -r authenticated_sha authenticated_tuple; do
   canonical_candidates="${canonical_candidates} ${authenticated_sha}"
   if [ -z "$canonical_candidate_records" ]; then
     canonical_candidate_records="${authenticated_sha} ${authenticated_tuple}"
+    canonical_candidate_parent_records="${authenticated_sha} ${authenticated_parent_tuple}"
   else
     canonical_candidate_records="${canonical_candidate_records}
 ${authenticated_sha} ${authenticated_tuple}"
+    canonical_candidate_parent_records="${canonical_candidate_parent_records}
+${authenticated_sha} ${authenticated_parent_tuple}"
   fi
 done <<EOF
 $authenticated_candidate_records
@@ -720,6 +795,53 @@ if ! duplicate_candidate_tuple=$(printf '%s\n' "$canonical_candidate_records" | 
 fi
 if [ -n "$duplicate_candidate_tuple" ]; then
   fail "canonical upstream reuses a generated-file tuple"
+fi
+
+if ! invalid_candidate_lineage=$(
+  {
+    printf '%s\n' "$canonical_candidate_records"
+    printf '%s\n' __CANDIDATE_PARENTS__
+    printf '%s\n' "$canonical_candidate_parent_records"
+  } | awk '
+    function visit(candidate, predecessor) {
+      state[candidate] = 1
+      predecessor = candidate_by_tuple[parent_tuple[candidate]]
+      if (predecessor != "") {
+        if (state[predecessor] == 1) {
+          print predecessor
+          exit
+        }
+        if (state[predecessor] == 0) visit(predecessor)
+      }
+      state[candidate] = 2
+    }
+    $0 == "__CANDIDATE_PARENTS__" { in_parents = 1; next }
+    !in_parents && NF == 2 {
+      candidates[$1] = 1
+      candidate_by_tuple[$2] = $1
+      next
+    }
+    in_parents && NF == 2 {
+      parent_tuple[$1] = $2
+      parent_count[$1]++
+    }
+    END {
+      for (candidate in candidates) {
+        if (parent_count[candidate] != 1) {
+          print candidate
+          exit
+        }
+      }
+      for (candidate in candidates) {
+        if (state[candidate] == 0) visit(candidate)
+      }
+    }
+  '
+); then
+  fail "could not validate canonical generated-file provenance lineage"
+fi
+if [ -n "$invalid_candidate_lineage" ]; then
+  fail "canonical generated-file provenance lineage is cyclic or incomplete"
 fi
 
 if [ -n "$PENDING_RELEASE_SHA" ]; then
@@ -844,7 +966,7 @@ fi
 derive_provenance "$HEAD_SHA" "PR head" true
 matching_head_commit=$provenance_floor
 
-if ! is_ancestor "$base_floor" "$matching_head_commit"; then
+if ! provenance_precedes "$base_floor" "$matching_head_commit"; then
   fail "generated files roll back the canonical release carried by the PR base"
 fi
 

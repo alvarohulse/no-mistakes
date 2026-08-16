@@ -50,6 +50,9 @@ func TestResolveReleaseState(t *testing.T) {
 		if outputs["release_created"] != "false" {
 			t.Fatalf("release_created = %q, want false", outputs["release_created"])
 		}
+		if outputs["release_state"] != "none" {
+			t.Fatalf("release_state = %q, want none", outputs["release_state"])
+		}
 		if calls := fixture.ghCalls(t); calls != "" {
 			t.Fatalf("stale tag must not query a hosted release, got %q", calls)
 		}
@@ -64,6 +67,9 @@ func TestResolveReleaseState(t *testing.T) {
 		}
 		if outputs["release_created"] != "false" {
 			t.Fatalf("release_created = %q, want false", outputs["release_created"])
+		}
+		if outputs["release_state"] != "none" {
+			t.Fatalf("release_state = %q, want none", outputs["release_state"])
 		}
 		if calls := fixture.ghCalls(t); calls != "" {
 			t.Fatalf("absent tag must not query a hosted release, got %q", calls)
@@ -80,6 +86,9 @@ func TestResolveReleaseState(t *testing.T) {
 		}
 		if outputs["release_created"] != "false" {
 			t.Fatalf("release_created = %q, want false", outputs["release_created"])
+		}
+		if outputs["release_state"] != "published" {
+			t.Fatalf("release_state = %q, want published", outputs["release_state"])
 		}
 	})
 
@@ -314,6 +323,7 @@ func (f *releaseStateFixture) ghCalls(t *testing.T) string {
 func (f *releaseStateFixture) assertRelease(t *testing.T, outputs map[string]string) {
 	t.Helper()
 	want := map[string]string{
+		"release_state":   "draft",
 		"release_created": "true",
 		"tag_name":        "v1.2.3",
 		"version":         "1.2.3",
