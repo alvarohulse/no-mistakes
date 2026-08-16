@@ -300,7 +300,7 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 			source := policySource
 			result.SkipSource = &source
 		}
-	} else if policyResolved && row.Status == types.StepStatusSkipped {
+	} else if policyResolved && result.SkipSource != nil {
 		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s is skipped in stored results but not in resolved policy", row.StepName))
 	}
 	return result, integrityErrors

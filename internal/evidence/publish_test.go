@@ -206,6 +206,29 @@ func TestPublish_AppendsWithoutRewritingEarlierEvidence(t *testing.T) {
 	}
 }
 
+func TestPublish_DoesNotCollideWithAnotherPublicationFetchRef(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	first := writeEvidence(t, t.TempDir(), map[string]string{"round-1.txt": "first\n"})
+	if _, err := Publish(context.Background(), baseRequest(remote, work, first)); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	competingRef := "refs/no-mistakes/evidence-fetch/concurrent"
+	mainTip := runGit(t, work, "rev-parse", "refs/heads/main")
+	runGit(t, work, "update-ref", competingRef, mainTip)
+	second := writeEvidence(t, t.TempDir(), map[string]string{"round-2.txt": "second\n"})
+	if _, err := Publish(context.Background(), baseRequest(remote, work, second)); err != nil {
+		t.Fatalf("second publish: %v", err)
+	}
+
+	if got := runGit(t, work, "rev-parse", competingRef); got != mainTip {
+		t.Fatalf("competing fetch ref moved to %s, want %s", got, mainTip)
+	}
+	if refs := runGit(t, work, "for-each-ref", "--format=%(refname)", "refs/no-mistakes/evidence-fetch"); refs != competingRef {
+		t.Fatalf("publication fetch refs leaked:\n%s", refs)
+	}
+}
+
 func TestPublish_UnchangedEvidenceReusesTheExistingCommit(t *testing.T) {
 	remote, work := newRepoWithRemote(t)
 	source := writeEvidence(t, t.TempDir(), map[string]string{"proof.txt": "ok\n"})

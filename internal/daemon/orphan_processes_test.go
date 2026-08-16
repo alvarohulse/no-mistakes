@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -99,6 +100,32 @@ func TestSweepRunWorktreeProcessesReapsLeakedChildAtRunCleanup(t *testing.T) {
 	}
 }
 
+func TestRecoveredRunCleanupReapsLeakedChildBeforeWorktreeRemoval(t *testing.T) {
+	f := newEvidenceFixture(t)
+	m := NewRunManager(f.db, f.p, nil)
+	runID := f.seed("recovered", types.RunRunning, time.Minute, nil)
+	run, err := f.db.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := f.p.WorktreeDir(f.repo.ID, runID)
+	leakedPID := startOrphanInWorktree(t, workDir)
+
+	m.resumeRecoveredRun(recoveredRunPlan{
+		run:     run,
+		repo:    f.repo,
+		workDir: workDir,
+		gateDir: t.TempDir(),
+		cfg:     config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}),
+		agent:   recoveredRunTestAgent{},
+	})
+	m.wg.Wait()
+
+	if processIsRunning(leakedPID) {
+		t.Fatalf("orphan %d in a recovered run's worktree survived cleanup", leakedPID)
+	}
+}
+
 // startOrphanInWorktree leaves a real long-lived process standing in dir whose
 // parent has already exited, which is exactly the shape a leaked pipeline
 // child has by the time anyone notices it.
@@ -126,6 +153,15 @@ func startOrphanInWorktree(t *testing.T, dir string) int {
 
 func processIsAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
+}
+
+func processIsRunning(pid int) bool {
+	if !processIsAlive(pid) {
+		return false
+	}
+	cmd := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid))
+	out, err := cmd.Output()
+	return err == nil && !strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 func pidGoneWithin(pid int, window time.Duration) bool {
