@@ -193,6 +193,9 @@ func TestReleaseWorkflowKeepsReleaseCreationIsolatedForRetries(t *testing.T) {
 	if len(provenanceNeeds) != 1 || provenanceNeeds[0] != "release-please" {
 		t.Fatalf("release provenance needs = %v, want [release-please]", provenanceNeeds)
 	}
+	if !strings.Contains(provenanceJob.If, "needs.release-please.outputs.release_created != 'true'") {
+		t.Fatalf("release provenance must skip exact draft creation and recovery, got if %q", provenanceJob.If)
+	}
 
 	for _, name := range []string{"build-darwin", "build-and-upload"} {
 		job := wf.Jobs[name]
