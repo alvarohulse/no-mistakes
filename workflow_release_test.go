@@ -91,6 +91,7 @@ func TestReleaseWorkflowAttestsExactReleasePleaseHead(t *testing.T) {
 		`sh "$trusted_output_verifier" "$head_sha" "$expected_output_dir"`,
 		`"$GITHUB_SHA"`,
 		`"$head_sha"`,
+		`"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"`,
 		`repos/${GITHUB_REPOSITORY}/statuses/${head_sha}`,
 		`refs/tags/no-mistakes/generated-file-provenance/${head_sha}`,
 		`repos/${GITHUB_REPOSITORY}/git/refs`,
