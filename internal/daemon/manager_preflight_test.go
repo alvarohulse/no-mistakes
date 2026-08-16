@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -67,10 +66,12 @@ func TestPreflightNonzeroRedactsBoundsAndCreatesNoRun(t *testing.T) {
 func TestPreflightTimeoutCreatesNoRun(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database, repo, marker := newPolicyResolutionFixture(t, "preflight-timeout")
-	head := writePreflightPolicyCommit(t, repo, marker, []string{"sleep 5"})
+	head := writePreflightPolicyCommit(t, repo, marker, []string{"echo ready"})
 	step := &mockPassStep{name: types.StepReview}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
-	manager.preflightTimeout = 25 * time.Millisecond
+	manager.executePreflight = func(context.Context, runner.Prepared, runner.ExecuteOptions) (runner.Result, error) {
+		return runner.Result{}, runner.ErrTimeout
+	}
 	t.Cleanup(manager.Shutdown)
 	setSafeBareRepositoryExplicitForDaemonTest(t)
 
