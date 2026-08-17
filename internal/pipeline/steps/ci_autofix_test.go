@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCIStep_CIFailureAutoFix(t *testing.T) {
@@ -283,6 +284,75 @@ func TestCIStep_CIAutoFixLimitExhausted(t *testing.T) {
 	}
 	if !foundRepeated {
 		t.Errorf("expected repeated-failure stop in logs, got: %v", logs)
+	}
+}
+
+func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	failed := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail"}]`
+	pending := `[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`
+
+	fixCount := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixCount++
+			if err := os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("restart-fix-%d.txt", fixCount)), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{}, nil
+		},
+	}
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.PRURL = &prURL
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = 30 * time.Second
+	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.Env = fakeCIGHSequence(t, "OPEN", []string{failed, pending, failed})
+
+	first := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+	firstOutcome, err := first.Execute(sctx)
+	if err != nil {
+		t.Fatalf("initial CI execution: %v", err)
+	}
+	if !firstOutcome.NeedsApproval || fixCount != 1 {
+		t.Fatalf("initial CI outcome = %+v, fixes = %d; want parked after one automatic fix", firstOutcome, fixCount)
+	}
+
+	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := *sctx
+	recovered.Run = recoveredRun
+	recovered.Fixing = true
+	recovered.Env = fakeCIGHSequence(t, "OPEN", []string{failed, pending, failed, pending, failed})
+
+	resumed := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+	resumedOutcome, err := resumed.Execute(&recovered)
+	if err != nil {
+		t.Fatalf("recovered CI execution: %v", err)
+	}
+	if !resumedOutcome.NeedsApproval {
+		t.Fatalf("recovered CI outcome = %+v, want parked", resumedOutcome)
+	}
+	if fixCount != 2 {
+		t.Fatalf("CI fixes across restart = %d, want one automatic plus the explicit user fix", fixCount)
+	}
+	if resumedOutcome.RepairAudit.Result != pipeline.RepairResultAttemptLimit {
+		t.Fatalf("recovered repair audit = %+v, want exhausted persisted budget", resumedOutcome.RepairAudit)
 	}
 }
 

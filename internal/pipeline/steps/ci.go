@@ -54,6 +54,31 @@ type CIStep struct {
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
 
+func (s *CIStep) loadCIFixAttempts(sctx *pipeline.StepContext) error {
+	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
+		return nil
+	}
+	attempts, err := sctx.DB.GetRunCIFixAttempts(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	if attempts < 0 || attempts > pipeline.MaxRepairAttempts {
+		return fmt.Errorf("persisted CI fix attempts %d are outside the supported range", attempts)
+	}
+	if attempts > s.ciFixAttempts {
+		s.ciFixAttempts = attempts
+		s.repairProgress = nil
+	}
+	return nil
+}
+
+func (s *CIStep) persistCIFixAttempts(sctx *pipeline.StepContext, attempts int) error {
+	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
+		return nil
+	}
+	return sctx.DB.SetRunCIFixAttempts(sctx.Run.ID, attempts)
+}
+
 // ReconcileApprovalGate re-checks the PR after the CI step has parked at an
 // approval gate. A PR can be merged or closed after a timeout/failure gate was
 // recorded; either terminal state supersedes the stale gate just as it does in
@@ -122,6 +147,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
+	if err := s.loadCIFixAttempts(sctx); err != nil {
+		return nil, fmt.Errorf("restore CI repair budget: %w", err)
+	}
 	if s.repairProgress == nil {
 		s.repairProgress = pipeline.NewRepairProgress(s.ciFixAttempts)
 	}
@@ -488,6 +516,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if !decision.Attempt {
 						sctx.Log(fmt.Sprintf("issues detected: %s - %s, waiting for manual intervention...", issueDesc, decision.Message))
 						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
+					}
+					if err := s.persistCIFixAttempts(sctx, decision.AttemptNumber); err != nil {
+						return nil, fmt.Errorf("reserve CI repair attempt: %w", err)
 					}
 					s.ciFixAttempts = decision.AttemptNumber
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))

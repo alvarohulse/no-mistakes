@@ -923,3 +923,42 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 	}
 	return nil
 }
+
+// GetRunCIFixAttempts returns the number of automatic CI repair attempts this
+// run already reserved. Historical runs start at zero after migration.
+func (d *DB) GetRunCIFixAttempts(id string) (int, error) {
+	var attempts int
+	err := d.sql.QueryRow(`SELECT COALESCE(ci_fix_attempts, 0) FROM runs WHERE id = ?`, id).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get run CI fix attempts: %w", err)
+	}
+	return attempts, nil
+}
+
+// SetRunCIFixAttempts advances the durable CI repair budget monotonically.
+// The CI step writes this before invoking the fix agent, so a crash after the
+// reservation spends the attempt instead of granting recovery a free retry.
+func (d *DB) SetRunCIFixAttempts(id string, attempts int) error {
+	if attempts < 0 {
+		return fmt.Errorf("set run CI fix attempts: attempts must not be negative")
+	}
+	result, err := d.sql.Exec(`
+		UPDATE runs
+		SET ci_fix_attempts = CASE WHEN ci_fix_attempts < ? THEN ? ELSE ci_fix_attempts END,
+			updated_at = ?
+		WHERE id = ?`, attempts, attempts, now(), id)
+	if err != nil {
+		return fmt.Errorf("set run CI fix attempts: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set run CI fix attempts rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("set run CI fix attempts: updated %d rows", changed)
+	}
+	return nil
+}

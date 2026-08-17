@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_state_observed_at    INTEGER,
     ci_ready_at             INTEGER,
     ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    ci_fix_attempts         INTEGER NOT NULL DEFAULT 0,
     last_pushed_sha         TEXT,
     push_target_kind        TEXT,
     push_target_fingerprint TEXT,
@@ -256,6 +257,11 @@ var migrationStatements = []string{
 	// written before the provider call, so a crash mid-request spends the
 	// budget rather than silently granting a free retry.
 	`ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT`,
+	// CI performs its automatic fixes inside one executor round, so round
+	// selections cannot reconstruct the spent budget after a daemon restart.
+	// Reserve the count before invoking the fix agent so a crash cannot grant a
+	// recovered run a fresh allowance.
+	`ALTER TABLE runs ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
 	// Branch synchronization provenance is intentionally nullable. Historical
 	// rows stay unbound because mutable head_sha cannot prove a successful push.
 	`ALTER TABLE runs ADD COLUMN submitted_head_sha TEXT`,
