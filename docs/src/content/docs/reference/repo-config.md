@@ -256,7 +256,7 @@ External pull request body formatter. Receives the PR body contract as JSON on s
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v3 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, structured per-round command evidence, the Intent step's provenance/absence result, risk fields, test evidence, and one telemetry row per agent invocation. Layout and API-cost estimation are entirely the formatter's decision. Formatters should accept both v2 and v3 while a producer rollout is in progress.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v3 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, structured per-round command evidence, the Intent step's provenance/absence result, risk fields, test evidence, and one telemetry row per agent invocation. Contract v4 adds harness-reported, public API-list, and harness-adjusted cost receipts with completeness and provenance. no-mistakes owns those calculations; the formatter only presents supplied facts. Formatters should accept v2, v3, and v4 during rollout.
 
 ```yaml
 hooks:

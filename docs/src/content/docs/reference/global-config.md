@@ -50,6 +50,10 @@ agent_args_override:
     - -c
     - model_reasoning_effort="low"
 
+pricing:
+  profiles:
+    cursor: cursor-token-rate
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -311,6 +315,18 @@ agent_args_override:
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
+### pricing.profiles
+
+Explicit harness billing profiles used for the harness-adjusted cost class. Keys are normalized harness names and values must identify an embedded profile valid for that harness. Profiles are global-only and are persisted in the resolved run policy; no harness identity activates an adjustment implicitly.
+
+```yaml
+pricing:
+  profiles:
+    cursor: cursor-token-rate
+```
+
+`cursor-token-rate` applies Cursor's documented third-party-model token surcharge during its effective window and records its source, catalog/profile versions, hashes, exclusions, and adjustment kind in each estimate. Embedded Claude Code and Codex/Azure profiles remain inactive because no authoritative exact private adjustment is configured. Reported harness cost, public API-list estimate, and harness-adjusted estimate remain independent nullable facts.
+
 ### ci_timeout
 
 How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
@@ -524,7 +540,7 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and 
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
 | `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
 | `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
-| `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
+| `test.evidence.max_runs`      | `int`    | `200`                    | How many terminal run directories survive regardless of age; values below 50 retain the required floor |
 
 The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
 When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
@@ -543,11 +559,12 @@ Evidence lives under the app root rather than the system temp directory. On Linu
 no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
 
 - A finished run that produced no artifacts leaves nothing behind.
-- Recorded run directories older than `retention` are removed.
-- Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
-- A run that is still pending or running is never touched.
+- Pending, running, and explicitly pinned runs are never touched.
+- Every run inside `retention` is retained.
+- At least the newest 50 terminal unpinned runs, or the configured larger `max_runs` set, are retained regardless of age.
+- Older unpinned evidence and run logs are removed before their rich database rows are pruned.
 
-Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
+Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt. The receipt keeps binary build provenance, content-free statuses, timings, routes, nullable usage/activity metrics, finding counts, and cost provenance for `stats`; it excludes run branch/head/base identity, paths, config refs, session keys, findings prose, prompts, outputs, diffs, commands, and tool arguments. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
 `local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
