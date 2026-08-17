@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	// Config with auto-fix enabled for review (max 3 attempts)
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
@@ -83,8 +85,10 @@ func TestExecutor_CommandSequenceRestartsForEachRound(t *testing.T) {
 		},
 	}
 
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 	executor := NewExecutor(database, paths, &config.Config{AutoFix: config.AutoFix{Lint: 1}}, nil, []Step{step}, nil)
-	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+	if err := executor.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	steps, err := database.GetStepsByRun(run.ID)
@@ -215,6 +219,7 @@ func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	// Config with auto-fix limited to 2 attempts for lint
 	cfg := &config.Config{AutoFix: config.AutoFix{Lint: 2}}
@@ -224,11 +229,14 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		name: types.StepLint,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
+			if callCount > 1 {
+				writeTestFile(t, workDir, "lint-fix.txt", fmt.Sprintf("progress %d\n", callCount))
+			}
 			// Always return NeedsApproval to exhaust auto-fix attempts
 			return &StepOutcome{
 				NeedsApproval: true,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
+				Findings:      failureJSON(fmt.Sprintf("style issue %d", callCount)),
 			}, nil
 		},
 	}
@@ -317,6 +325,7 @@ func TestExecutor_AutoFixNilConfigUsesDefaults(t *testing.T) {
 func TestExecutor_AutoFixEmitsEvents(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Lint: 1}}
 
@@ -387,6 +396,7 @@ func TestExecutor_DoesNotAutoFixManualApprovalOutcome(t *testing.T) {
 func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
 
@@ -484,6 +494,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
 

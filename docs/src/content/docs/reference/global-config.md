@@ -451,6 +451,8 @@ Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit`
 
 These are global defaults. Per-repo config can override individual steps.
 
+Review, Build, Test, Document, Lint, and CI use a hard ceiling of three automatic repair attempts; larger configured values are evaluated as `3`. They stop sooner when the normalized failure repeats or Git HEAD/worktree content makes no progress. File modification times, including timestamp-only log touches, do not count as progress. Refresh conflict handling retains its separate configured budget.
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single check the provider reported as cancelled before that check reaches an approval gate.

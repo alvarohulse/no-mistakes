@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     selected_finding_ids TEXT,
     selection_source     TEXT,
     fix_summary          TEXT,
+    repair_failure_fingerprint TEXT,
+    repair_result        TEXT,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
@@ -237,6 +239,10 @@ var migrationStatements = []string{
 	`ALTER TABLE step_rounds ADD COLUMN replay_config_json BLOB`,
 	`ALTER TABLE step_rounds ADD COLUMN global_config_yaml BLOB`,
 	`ALTER TABLE step_rounds ADD COLUMN repo_config_yaml BLOB`,
+	// Repair audit retains only a normalized hash and low-cardinality result;
+	// prompts, output, diffs, paths, and tool arguments stay out of this table.
+	`ALTER TABLE step_rounds ADD COLUMN repair_failure_fingerprint TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN repair_result TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,

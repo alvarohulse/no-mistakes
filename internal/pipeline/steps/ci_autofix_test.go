@@ -13,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
 func TestCIStep_CIFailureAutoFix(t *testing.T) {
@@ -271,20 +272,21 @@ func TestCIStep_CIAutoFixLimitExhausted(t *testing.T) {
 		t.Errorf("expected 1 poll wait before limit-exhausted outcome, got %d", pollCount)
 	}
 
-	// Should log that max attempts reached on subsequent poll
-	foundExhausted := false
+	// The same normalized failure is the earlier stop condition on the
+	// subsequent poll; no second attempt is spent.
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Errorf("expected 'max auto-fix attempts' in logs, got: %v", logs)
+	if !foundRepeated {
+		t.Errorf("expected repeated-failure stop in logs, got: %v", logs)
 	}
 }
 
-func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
+func TestCIStep_CIAutoFixStopsOnRepeatedFailureAfterChecksRerun(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -356,26 +358,26 @@ func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
 	if outcome.AutoFixable {
 		t.Fatal("expected exhausted CI outcome to be non-auto-fixable")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts after reruns, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated failure to stop after 1 auto-fix attempt, got %d", fixCount)
 	}
-	if pollCount != 4 {
-		t.Fatalf("expected 4 poll waits across reruns and retries, got %d", pollCount)
+	if pollCount != 2 {
+		t.Fatalf("expected 2 poll waits before the repeated post-rerun failure, got %d", pollCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure stop after CI reran, got: %v", logs)
 	}
 }
 
-func TestCIStep_CIAutoFixRetriesWhenGitHubClockLagsLocalClock(t *testing.T) {
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenGitHubClockLagsLocalClock(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -444,18 +446,18 @@ func TestCIStep_CIAutoFixRetriesWhenGitHubClockLagsLocalClock(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when GitHub timestamps advance but local clock is ahead, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated failure to stop after 1 attempt when GitHub timestamps advance, got %d", fixCount)
 	}
 }
 
-// TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation reproduces
+// TestCIStep_CIAutoFixStopsRepeatedFailureWhenFastChecksSkipPendingObservation reproduces
 // the real-world scenario where a failing CI check completes so fast between
 // polls that the pipeline never observes it in a pending state, but the check's
 // completedAt timestamp moves past the last-fix time - proving CI re-ran. The
-// pipeline should treat the second failure as a new iteration and attempt
-// another fix rather than logging "fix already attempted" indefinitely.
-func TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation(t *testing.T) {
+// pipeline should recognize it as a fresh observation, then stop because the
+// normalized failure itself repeated rather than looping indefinitely.
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenFastChecksSkipPendingObservation(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -534,29 +536,29 @@ func TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation(t *testing.
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when post-push rerun has newer completedAt, got %d (stuck in 'fix already attempted' loop?)", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated post-push failure to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after completedAt-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure log after completedAt proved the rerun, got: %v", logs)
 	}
 }
 
-// TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing reproduces the real-world
+// TestCIStep_CIAutoFixStopsRepeatedFailureWhenSomeChecksStayFailing reproduces the real-world
 // scenario where multiple checks fail, the fix push causes only some of them to
 // re-run (and thus transit through pending) while at least one check keeps
-// reporting as failing throughout. The pipeline should still recognize the
-// post-rerun same-name failure as a new attempt and progress to attempt 2,
-// rather than logging "fix already attempted" indefinitely until CI timeout.
-func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
+// reporting as failing throughout. The pipeline recognizes the post-rerun
+// observation and stops on the repeated normalized check set rather than
+// logging "fix already attempted" indefinitely until CI timeout.
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenSomeChecksStayFailing(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -627,19 +629,19 @@ func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when post-push rerun still fails with same check names, got %d (stuck in 'fix already attempted' loop?)", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated check set to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure stop after rerun-backed observation, got: %v", logs)
 	}
 }
 
@@ -732,7 +734,7 @@ func TestCIStep_DoesNotRetryOnUnrelatedPendingCheck(t *testing.T) {
 	}
 }
 
-func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
+func TestCIStep_StopsRepeatedMergeConflictAfterRerun(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -799,19 +801,19 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting conflict rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts for persistent merge conflicts after reruns, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated merge conflict to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after conflict rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure log after conflict rerun, got: %v", logs)
 	}
 }
 
@@ -901,10 +903,9 @@ func TestCIStep_FixMode_ManualInterventionRunsCIFix(t *testing.T) {
 	}
 }
 
-// TestCIStep_AutoFixNoChanges_CountsAsAttempt verifies that when the agent
-// produces no changes (nothing to commit), it still counts as a consumed fix
-// attempt rather than spinning forever with "fix already attempted".
-func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
+// TestCIStep_AutoFixNoChangesStopsImmediately verifies that an unchanged Git
+// content state consumes one attempt and then stops instead of retrying.
+func TestCIStep_AutoFixNoChangesStopsImmediately(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -967,22 +968,23 @@ func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval needed after exhausting fix attempts with no changes")
 	}
-
-	// Agent should be called for each attempt even though no changes were produced
-	if fixCount != 2 {
-		t.Fatalf("expected 2 fix attempts (limit=2), got %d", fixCount)
+	if outcome.RepairAudit.Result != pipeline.RepairResultNoProgress || outcome.RepairAudit.FailureFingerprint == "" {
+		t.Fatalf("repair audit = %+v, want content-free no-progress receipt", outcome.RepairAudit)
 	}
 
-	// Should eventually hit max attempts, not spin forever
-	foundExhausted := false
+	if fixCount != 1 {
+		t.Fatalf("expected no-progress repair to stop after 1 attempt, got %d", fixCount)
+	}
+
+	foundNoProgress := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts") {
-			foundExhausted = true
+		if strings.Contains(l, "worktree and HEAD made no content progress") {
+			foundNoProgress = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Errorf("expected 'max auto-fix attempts' in logs, got: %v", logs)
+	if !foundNoProgress {
+		t.Errorf("expected no-progress stop in logs, got: %v", logs)
 	}
 
 	// Should never log "fix already attempted" indefinitely

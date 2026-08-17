@@ -187,6 +187,10 @@ type StepOutcome struct {
 	// mode so the executor can persist it on the round record and later
 	// rounds can reference what was previously attempted.
 	FixSummary string
+	// RepairAudit carries only a normalized failure hash and low-cardinality
+	// progress result. The executor persists it with the round after the step
+	// returns; raw prompts, findings, diffs, and paths are never duplicated.
+	RepairAudit RepairAudit
 	// ReviewApprovedHeadSHA is set only by a successfully executed full review
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.

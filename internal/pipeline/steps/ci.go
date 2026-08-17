@@ -40,8 +40,9 @@ type CIStep struct {
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt map[string]time.Time // terminally failed check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
-	transientReruns      checkRerunBudget     // per-check rerun budget spent on provider-reported transient failures
-	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
+	repairProgress       *pipeline.RepairProgress
+	transientReruns      checkRerunBudget // per-check rerun budget spent on provider-reported transient failures
+	pollIntervalOverride time.Duration    // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
 	now                  func() time.Time
 	// baseBranchTip resolves the current tip SHA of the effective base branch.
@@ -120,7 +121,20 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 }
 
-func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
+	if s.repairProgress == nil {
+		s.repairProgress = pipeline.NewRepairProgress(s.ciFixAttempts)
+	}
+	defer func() {
+		if outcome == nil {
+			return
+		}
+		audit := s.repairProgress.Audit()
+		if audit.Result == pipeline.RepairResultAttempted && !outcome.NeedsApproval {
+			audit = s.repairProgress.Resolved()
+		}
+		outcome.RepairAudit = audit
+	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -299,7 +313,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 
 		// Check CI status - wait for all checks to complete before fixing
-		ciFixLimit := sctx.Config.AutoFix.CI
+		ciFixLimit := pipeline.RepairAttemptLimit(sctx.Config.AutoFix.CI)
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
 			clearCIMonitorReady(sctx)
@@ -464,13 +478,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				} else if ciFixLimit <= 0 {
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
 					return ciFailureOutcome(reportedIssues, mergeConflict, "CI failures require manual intervention"), nil
-				} else if s.ciFixAttempts >= ciFixLimit {
-					sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
-					return ciFailureOutcome(reportedIssues, mergeConflict, "CI failures still present after auto-fix attempts"), nil
-				} else if fixKey == s.lastFixedChecks {
+				} else if fixKey == s.lastFixedChecks && s.ciFixAttempts < ciFixLimit {
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {
-					s.ciFixAttempts++
+					decision, progressErr := s.repairProgress.Next(ctx, sctx.WorkDir, fixKey, ciFixLimit)
+					if progressErr != nil {
+						return nil, fmt.Errorf("evaluate CI repair progress: %w", progressErr)
+					}
+					if !decision.Attempt {
+						sctx.Log(fmt.Sprintf("issues detected: %s - %s, waiting for manual intervention...", issueDesc, decision.Message))
+						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
+					}
+					s.ciFixAttempts = decision.AttemptNumber
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
 					previousHeadSHA := sctx.Run.HeadSHA
 					pushed, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
@@ -480,9 +499,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
 					} else {
-						// No changes produced - don't set lastFixedChecks so next
-						// poll treats this as a new failure and retries if attempts remain.
-						sctx.Log("CI fix produced no changes, will retry if attempts remain...")
+						decision, progressErr := s.repairProgress.Next(ctx, sctx.WorkDir, fixKey, ciFixLimit)
+						if progressErr != nil {
+							return nil, fmt.Errorf("evaluate CI repair progress after unchanged fix: %w", progressErr)
+						}
+						sctx.Log(fmt.Sprintf("CI fix produced no changes - %s", decision.Message))
+						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
 					}
 				}
 			} else {

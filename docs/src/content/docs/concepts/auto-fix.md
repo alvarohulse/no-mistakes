@@ -110,9 +110,11 @@ Step and CI repair commits add a co-author trailer only for the harness that act
 
 Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
 A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution.
+Automatic repair also stores only a normalized failure hash and a low-cardinality progress result (`attempted`, `resolved`, repeated failure, no content progress, or attempt limit). It never duplicates prompts, outputs, diffs, paths, or tool arguments into that receipt.
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.
+Review, Build, Test, Document, Lint, and CI automatic repair is capped at three attempts even when configuration asks for more. It stops earlier when the normalized failure repeats or Git HEAD/worktree content does not change; timestamp-only log changes do not count as progress.
 The generated PR surfaces this recorded evidence in deterministic Risk Assessment, Testing, and Pipeline sections. The [pipeline steps reference](/no-mistakes/reference/pipeline-steps/#pr) owns the PR body composition and size-limit contract.
 The full round history remains available in the run log.
 

@@ -81,7 +81,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"reviewed_head_sha", "replay_config_json"} {
+	for _, column := range []string{"reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
 		if !hasColumn(t, d, "step_rounds", column) {
 			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
 		}
@@ -273,7 +273,7 @@ func TestOpenMigratesExistingStepRoundsColumns(t *testing.T) {
 		t.Fatalf("iterate table_info: %v", err)
 	}
 
-	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha", "replay_config_json"} {
+	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
 		if !columns[name] {
 			t.Fatalf("expected migrated column %q to exist", name)
 		}

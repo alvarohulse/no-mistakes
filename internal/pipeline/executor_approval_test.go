@@ -507,6 +507,7 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	recorder := &telemetryRecorder{}
 	restore := telemetry.SetDefaultForTesting(recorder)

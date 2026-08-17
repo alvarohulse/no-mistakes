@@ -538,6 +538,8 @@ Unconfigured Build, Test, and Lint still use their own repair loops after the pi
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
+Review, Build, Test, Document, Lint, and CI use a hard ceiling of three automatic repair attempts; larger values are evaluated as `3`. They stop earlier on a repeated normalized failure or when Git HEAD/worktree content does not change. Timestamp-only log changes are ignored. Refresh retains its separate configured conflict budget.
+
 Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
 
 ### ci.rerun_transient
