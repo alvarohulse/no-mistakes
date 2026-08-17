@@ -1,10 +1,8 @@
 package steps
 
 import (
-	"encoding/json"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -330,11 +328,6 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 	}
 
 	byStep := make(map[string][]prbody.AgentRun, len(invocations))
-	estimator, pricingErr := pricing.DefaultEstimator()
-	if pricingErr != nil {
-		slog.Warn("failed to load PR contract pricing estimator", "error", pricingErr)
-	}
-	profiles := contractPricingProfiles(run)
 	for _, invocation := range invocations {
 		totalInput, uncachedInput := agent.CanonicalInputMeters(invocation.Agent, invocation.DeltaInputTokens, invocation.DeltaCacheReadTokens, invocation.DeltaCacheCreationTokens)
 		agentRun := prbody.AgentRun{
@@ -358,20 +351,13 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			agentRun.Provider = *invocation.ModelProvider
 			agentRun.Vendor = *invocation.ModelProvider
 		}
-		if estimator != nil {
-			provider := ""
-			if invocation.ModelProvider != nil {
-				provider = *invocation.ModelProvider
+		if invocation.PricingReceiptJSON != nil {
+			costs, err := pricing.DecodeReceipt(*invocation.PricingReceiptJSON)
+			if err != nil {
+				slog.Warn("failed to decode PR contract pricing receipt", "invocation", invocation.ID, "error", err)
+			} else {
+				agentRun.Costs = &costs
 			}
-			costs := estimator.Estimate(pricing.Observation{
-				Harness: invocation.Agent, ProfileID: profiles[invocation.Agent], Provider: provider, Model: invocation.Model,
-				StartedAt: time.Unix(invocation.StartedAt, 0).UTC(), ReportedCostUSD: invocation.ReportedCostUSD,
-				Meters: pricing.TokenMeters{
-					UncachedInputTokens: contractInt64(uncachedInput), CacheReadTokens: contractInt64(invocation.DeltaCacheReadTokens),
-					CacheWriteTokens: contractInt64(invocation.DeltaCacheCreationTokens), OutputTokens: contractInt64(invocation.DeltaOutputTokens),
-				},
-			})
-			agentRun.Costs = &costs
 		}
 		for _, observation := range invocation.AgentObservations {
 			agentRun.Nested = append(agentRun.Nested, prbody.NestedAgent{
@@ -447,34 +433,6 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 		return nil
 	}
 	return section
-}
-
-func contractPricingProfiles(run *db.Run) map[string]string {
-	result := map[string]string{}
-	if run == nil || run.ResolvedPolicy == nil || strings.TrimSpace(*run.ResolvedPolicy) == "" {
-		return result
-	}
-	var policy struct {
-		Pricing struct {
-			Profiles map[string]string `json:"profiles"`
-		} `json:"pricing"`
-	}
-	if err := json.Unmarshal([]byte(*run.ResolvedPolicy), &policy); err != nil {
-		slog.Warn("failed to decode PR contract pricing profiles", "error", err)
-		return result
-	}
-	for harness, profileID := range policy.Pricing.Profiles {
-		result[harness] = profileID
-	}
-	return result
-}
-
-func contractInt64(value *int) *int64 {
-	if value == nil {
-		return nil
-	}
-	converted := int64(*value)
-	return &converted
 }
 
 func contractStoredIntent(stored *db.IntentEvidence) *prbody.IntentResult {

@@ -845,6 +845,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	repairProgress := NewRepairProgress(autoFixAttempts)
 	roundNum := state.roundNum
+	var pricingProfiles map[string]string
+	if e.config != nil && len(e.config.PricingProfiles) > 0 {
+		pricingProfiles = make(map[string]string, len(e.config.PricingProfiles))
+		for harness, profileID := range e.config.PricingProfiles {
+			pricingProfiles[harness] = profileID
+		}
+	}
 
 	instrumentAgent := func(inner agent.Agent, reviewCandidatePool []db.ReviewCandidateReceipt) agent.Agent {
 		if inner == nil {
@@ -860,6 +867,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			stepName:            stepName,
 			round:               func() int { return roundNum + 1 },
 			reviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), reviewCandidatePool...),
+			pricingProfiles:     pricingProfiles,
 		}
 	}
 	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName), nil)

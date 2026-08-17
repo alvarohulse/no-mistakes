@@ -171,6 +171,31 @@ func NewEstimator(catalog Catalog, profiles ProfileCatalog) (*Estimator, error) 
 	}, nil
 }
 
+// NewReceipt resolves one immutable pricing observation against the embedded
+// catalog and serializes the resulting three cost classes for durable storage.
+// Reports and PR contracts consume this receipt instead of recalculating old
+// invocations with a newer binary's catalog.
+func NewReceipt(observation Observation) (string, error) {
+	estimator, err := DefaultEstimator()
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(estimator.Estimate(observation))
+	if err != nil {
+		return "", fmt.Errorf("encode pricing receipt: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// DecodeReceipt decodes cost facts captured when an invocation completed.
+func DecodeReceipt(encoded string) (CostClasses, error) {
+	var receipt CostClasses
+	if err := json.Unmarshal([]byte(encoded), &receipt); err != nil {
+		return CostClasses{}, fmt.Errorf("decode pricing receipt: %w", err)
+	}
+	return receipt, nil
+}
+
 func (e *Estimator) Estimate(observation Observation) CostClasses {
 	reported := reportedEstimate(observation.ReportedCostUSD)
 	list, modelPrice := e.listEstimate(observation)
@@ -293,13 +318,13 @@ func (e *Estimator) findProfile(harness, profileID string, at time.Time) *Harnes
 }
 
 func validateCatalog(catalog Catalog) error {
-	if catalog.Version != 1 {
-		return fmt.Errorf("pricing catalog: unsupported version %d", catalog.Version)
+	if catalog.Version <= 0 {
+		return fmt.Errorf("pricing catalog: version must be positive")
 	}
 	if len(catalog.Models) == 0 {
 		return fmt.Errorf("pricing catalog: models must not be empty")
 	}
-	seen := make(map[string]bool, len(catalog.Models))
+	windows := make(map[string][]effectiveWindow, len(catalog.Models))
 	for _, model := range catalog.Models {
 		if strings.TrimSpace(model.Provider) == "" || strings.TrimSpace(model.Model) == "" || strings.TrimSpace(model.SourceURL) == "" {
 			return fmt.Errorf("pricing catalog: each model needs provider, model, and source_url")
@@ -308,10 +333,10 @@ func validateCatalog(catalog Catalog) error {
 			return fmt.Errorf("pricing catalog %s/%s: %w", model.Provider, model.Model, err)
 		}
 		key := model.Provider + "\x00" + model.Model
-		if seen[key] {
-			return fmt.Errorf("pricing catalog: duplicate model %s/%s", model.Provider, model.Model)
+		if overlapsAnyWindow(windows[key], model.EffectiveFrom, model.EffectiveUntil) {
+			return fmt.Errorf("pricing catalog: overlapping effective windows for model %s/%s", model.Provider, model.Model)
 		}
-		seen[key] = true
+		windows[key] = append(windows[key], effectiveWindow{from: model.EffectiveFrom, until: model.EffectiveUntil})
 		for name, value := range map[string]float64{
 			"uncached_input_tokens": model.USDPerMillion.UncachedInputTokens,
 			"cache_read_tokens":     model.USDPerMillion.CacheReadTokens,
@@ -327,10 +352,11 @@ func validateCatalog(catalog Catalog) error {
 }
 
 func validateProfiles(catalog ProfileCatalog) error {
-	if catalog.Version != 1 {
-		return fmt.Errorf("harness profiles: unsupported version %d", catalog.Version)
+	if catalog.Version <= 0 {
+		return fmt.Errorf("harness profiles: version must be positive")
 	}
-	seen := make(map[string]bool, len(catalog.Profiles))
+	windows := make(map[string][]effectiveWindow, len(catalog.Profiles))
+	versions := make(map[string]bool, len(catalog.Profiles))
 	for _, profile := range catalog.Profiles {
 		if profile.ID == "" || profile.Version <= 0 || profile.Harness == "" {
 			return fmt.Errorf("harness profiles: each profile needs id, version, and harness")
@@ -350,12 +376,35 @@ func validateProfiles(catalog ProfileCatalog) error {
 			return fmt.Errorf("harness profile %s: %w", profile.ID, err)
 		}
 		key := profile.Harness + "\x00" + profile.ID
-		if seen[key] {
-			return fmt.Errorf("harness profiles: duplicate %s", profile.ID)
+		versionKey := fmt.Sprintf("%s\x00%d", key, profile.Version)
+		if versions[versionKey] {
+			return fmt.Errorf("harness profiles: duplicate version %d for %s", profile.Version, profile.ID)
 		}
-		seen[key] = true
+		if overlapsAnyWindow(windows[key], profile.EffectiveFrom, profile.EffectiveUntil) {
+			return fmt.Errorf("harness profiles: overlapping effective windows for %s", profile.ID)
+		}
+		versions[versionKey] = true
+		windows[key] = append(windows[key], effectiveWindow{from: profile.EffectiveFrom, until: profile.EffectiveUntil})
 	}
 	return nil
+}
+
+type effectiveWindow struct {
+	from  string
+	until string
+}
+
+func overlapsAnyWindow(existing []effectiveWindow, from, until string) bool {
+	for _, candidate := range existing {
+		// Empty-from windows are timeless (used by deliberately inactive
+		// profiles), while an empty until is open-ended. End dates are
+		// inclusive, matching withinWindow.
+		if candidate.from == "" || from == "" ||
+			(candidate.until == "" || from <= candidate.until) && (until == "" || candidate.from <= until) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWindow(from, until string) error {

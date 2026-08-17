@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     delta_cache_read_tokens INTEGER,
 	delta_cache_creation_tokens INTEGER,
 	reported_cost_usd       REAL,
+	pricing_receipt_json    TEXT,
     model_roundtrips      INTEGER,
     tool_calls            INTEGER,
     tool_wait_calls       INTEGER,
@@ -299,6 +300,10 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_read_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_creation_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN reported_cost_usd REAL`,
+	// Pricing receipts are content-free immutable calculations captured when
+	// an invocation completes. Historical rows remain NULL rather than being
+	// repriced by a newer binary.
+	`ALTER TABLE agent_invocations ADD COLUMN pricing_receipt_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN model_roundtrips INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_calls INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_wait_calls INTEGER`,

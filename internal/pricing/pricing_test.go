@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +123,69 @@ func TestCursorFirstPartyExclusionUsesListEstimateWithoutSurcharge(t *testing.T)
 	assertCost(t, result.HarnessAdjustedEstimate, 2, true, 4, 4)
 	if result.HarnessAdjustedEstimate.Provenance.ProfileStatus != "excluded" {
 		t.Fatalf("profile status = %q, want excluded", result.HarnessAdjustedEstimate.Provenance.ProfileStatus)
+	}
+}
+
+func TestEstimatorSupportsNonOverlappingCatalogAndProfileWindows(t *testing.T) {
+	estimator, err := NewEstimator(Catalog{
+		Version: 2,
+		Models: []ModelPrice{
+			{
+				Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/old", EffectiveFrom: "2026-08-01", EffectiveUntil: "2026-08-31",
+				USDPerMillion: Rates{OutputTokens: 10},
+			},
+			{
+				Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/new", EffectiveFrom: "2026-09-01",
+				USDPerMillion: Rates{OutputTokens: 20},
+			},
+		},
+	}, ProfileCatalog{
+		Version: 2,
+		Profiles: []HarnessProfile{
+			{
+				ID: "cursor-token-rate", Version: 1, Harness: "cursor", Status: "active", SourceURL: "https://example.com/profile-old", EffectiveFrom: "2026-08-01", EffectiveUntil: "2026-08-31",
+				Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million", USDPerMillion: 1},
+			},
+			{
+				ID: "cursor-token-rate", Version: 2, Harness: "cursor", Status: "active", SourceURL: "https://example.com/profile-new", EffectiveFrom: "2026-09-01",
+				Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million", USDPerMillion: 2},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := Observation{
+		Harness: "cursor", ProfileID: "cursor-token-rate", Provider: "anthropic", Model: "claude-opus-5",
+		Meters: TokenMeters{UncachedInputTokens: int64Ptr(0), CacheReadTokens: int64Ptr(0), CacheWriteTokens: int64Ptr(0), OutputTokens: int64Ptr(1_000_000)},
+	}
+	observation.StartedAt = time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	old := estimator.Estimate(observation)
+	assertCost(t, old.APIListEstimate, 10, true, 4, 4)
+	assertCost(t, old.HarnessAdjustedEstimate, 11, true, 4, 4)
+	if old.HarnessAdjustedEstimate.Provenance.ProfileVersion != 1 {
+		t.Fatalf("old profile version = %d", old.HarnessAdjustedEstimate.Provenance.ProfileVersion)
+	}
+
+	observation.StartedAt = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	current := estimator.Estimate(observation)
+	assertCost(t, current.APIListEstimate, 20, true, 4, 4)
+	assertCost(t, current.HarnessAdjustedEstimate, 22, true, 4, 4)
+	if current.HarnessAdjustedEstimate.Provenance.ProfileVersion != 2 {
+		t.Fatalf("current profile version = %d", current.HarnessAdjustedEstimate.Provenance.ProfileVersion)
+	}
+}
+
+func TestEstimatorRejectsOverlappingEffectiveWindows(t *testing.T) {
+	_, err := NewEstimator(Catalog{
+		Version: 2,
+		Models: []ModelPrice{
+			{Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/old", EffectiveFrom: "2026-08-01", EffectiveUntil: "2026-09-01"},
+			{Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/new", EffectiveFrom: "2026-09-01"},
+		},
+	}, ProfileCatalog{Version: 1})
+	if err == nil || !strings.Contains(err.Error(), "overlapping effective windows") {
+		t.Fatalf("NewEstimator() error = %v, want overlap refusal", err)
 	}
 }
 

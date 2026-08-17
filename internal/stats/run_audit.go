@@ -5,8 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -235,11 +235,6 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 	if err != nil {
 		return nil, err
 	}
-	estimator, err := pricing.DefaultEstimator()
-	if err != nil {
-		return nil, fmt.Errorf("load pricing estimator: %w", err)
-	}
-
 	configSources, configErrors := configDigests(run.ConfigSources)
 	audit := &RunAudit{
 		SchemaVersion: SchemaVersion,
@@ -279,7 +274,7 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 
 	for _, row := range invocationRows {
 		requireManagedReviewReceipt := policyResolved && policy.ManagedReviewReceipts
-		invocation, errors := buildInvocation(row, estimator, policy.PricingProfiles[row.Agent], requireManagedReviewReceipt, policy.ReviewCandidates)
+		invocation, errors := buildInvocation(row, policy.PricingProfiles[row.Agent], requireManagedReviewReceipt, policy.ReviewCandidates)
 		audit.Invocations = append(audit.Invocations, invocation)
 		audit.IntegrityErrors = append(audit.IntegrityErrors, errors...)
 	}
@@ -381,7 +376,7 @@ func cloneRunnerProvenance(value *runner.Provenance) *runner.Provenance {
 	return &cloned
 }
 
-func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
+func buildInvocation(row db.AgentInvocation, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
 		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported, NestedAgentCount: cloneInt(row.NestedAgentCount),
@@ -415,21 +410,8 @@ func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, prici
 	result.RawUsage.CacheWriteTokens = cloneInt(row.CacheCreationTokens)
 	result.RawUsage.FreshInputTokens = cloneInt(row.FreshInputTokens)
 	result.RawUsage.ReasoningTokens = cloneInt(row.ReasoningTokens)
-	_, uncachedInput := agent.CanonicalInputMeters(row.Agent, row.DeltaInputTokens, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens)
-	provider := ""
-	if row.ModelProvider != nil {
-		provider = *row.ModelProvider
-	}
-	result.Costs = estimator.Estimate(pricing.Observation{
-		Harness: row.Agent, ProfileID: pricingProfileID, Provider: provider, Model: row.Model,
-		StartedAt: time.Unix(row.StartedAt, 0).UTC(), ReportedCostUSD: row.ReportedCostUSD,
-		Meters: pricing.TokenMeters{
-			UncachedInputTokens: int64FromInt(uncachedInput),
-			CacheReadTokens:     int64FromInt(row.DeltaCacheReadTokens),
-			CacheWriteTokens:    int64FromInt(row.DeltaCacheCreationTokens),
-			OutputTokens:        int64FromInt(row.DeltaOutputTokens),
-		},
-	})
+	var integrityErrors []string
+	result.Costs, integrityErrors = invocationPricingCosts(row, pricingProfileID)
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
@@ -440,15 +422,53 @@ func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, prici
 			Selected:      Route{Agent: row.Agent, Model: nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider)},
 		}
 	}
-	return result, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)
+	integrityErrors = append(integrityErrors, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)...)
+	return result, integrityErrors
 }
 
-func int64FromInt(value *int) *int64 {
-	if value == nil {
-		return nil
+func invocationPricingCosts(row db.AgentInvocation, pricingProfileID string) (pricing.CostClasses, []string) {
+	if row.PricingReceiptJSON == nil {
+		reason := "missing_pricing_receipt"
+		if row.ExitStatus == "started" {
+			reason = "pricing_receipt_pending"
+			return unavailablePricingCosts(row, reason), nil
+		}
+		return unavailablePricingCosts(row, reason), []string{fmt.Sprintf("agent invocation %s has no immutable pricing receipt", row.ID)}
 	}
-	converted := int64(*value)
-	return &converted
+	receipt, err := pricing.DecodeReceipt(*row.PricingReceiptJSON)
+	if err != nil {
+		return unavailablePricingCosts(row, "invalid_pricing_receipt"), []string{fmt.Sprintf("agent invocation %s pricing receipt could not be read: %v", row.ID, err)}
+	}
+	profileID := receipt.HarnessAdjustedEstimate.Provenance.ProfileID
+	if profileID != "" && pricingProfileID != "" && profileID != pricingProfileID {
+		return receipt, []string{fmt.Sprintf("agent invocation %s pricing receipt profile differs from resolved policy", row.ID)}
+	}
+	return receipt, nil
+}
+
+func unavailablePricingCosts(row db.AgentInvocation, reason string) pricing.CostClasses {
+	reported := pricing.CostEstimate{
+		Coverage: pricing.Coverage{Eligible: 1}, Basis: "agent_invocations.reported_cost_usd", Reason: "not_reported",
+	}
+	if row.ReportedCostUSD != nil && !math.IsNaN(*row.ReportedCostUSD) && !math.IsInf(*row.ReportedCostUSD, 0) && *row.ReportedCostUSD >= 0 {
+		value := *row.ReportedCostUSD
+		reported.ValueUSD = &value
+		reported.Coverage.Reported = 1
+		reported.Complete = true
+		reported.Reason = ""
+	} else if row.ReportedCostUSD != nil {
+		reported.Reason = "invalid_reported_cost"
+	}
+	coverage := pricing.Coverage{Eligible: 4}
+	_, uncachedInput := agent.CanonicalInputMeters(row.Agent, row.DeltaInputTokens, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens)
+	for _, meter := range []*int{uncachedInput, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens, row.DeltaOutputTokens} {
+		if meter != nil && *meter >= 0 {
+			coverage.Reported++
+		}
+	}
+	list := pricing.CostEstimate{Coverage: coverage, Basis: "canonical_delta_token_meters_x_public_list_rate", Reason: reason}
+	effective := pricing.CostEstimate{Coverage: coverage, Basis: "public_list_estimate_plus_harness_profile", Reason: reason}
+	return pricing.CostClasses{HarnessReported: reported, APIListEstimate: list, HarnessAdjustedEstimate: effective}
 }
 
 func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) []string {

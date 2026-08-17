@@ -3,11 +3,13 @@ package stats
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -168,7 +170,7 @@ func TestBuildRunAuditAggregatesResumedSessionDeltasNotRawCounters(t *testing.T)
 	}
 }
 
-func TestBuildRunAuditAddsIndependentPricingClasses(t *testing.T) {
+func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing.T) {
 	database, run := newAuditRun(t)
 	policy := `{"version":6,"managed":false,"steps":[{"name":"review","status":"enabled"}],"routing":{},"pricing":{"profiles":{"cursor":"cursor-token-rate"}}}`
 	digest := sha256.Sum256([]byte(policy))
@@ -177,14 +179,30 @@ func TestBuildRunAuditAddsIndependentPricingClasses(t *testing.T) {
 	}
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
 	reported := 9.25
+	listValue, effectiveValue := 12.5, 13.5
 	provider := "anthropic"
+	receiptBytes, err := json.Marshal(pricing.CostClasses{
+		HarnessReported: pricing.CostEstimate{ValueUSD: &reported, Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
+		APIListEstimate: pricing.CostEstimate{
+			ValueUSD: &listValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
+			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
+		},
+		HarnessAdjustedEstimate: pricing.CostEstimate{
+			ValueUSD: &effectiveValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
+			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := string(receiptBytes)
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
 		Model: "claude-opus-5", ModelProvider: &provider,
 		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(),
 		CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
 		DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cacheRead,
-		DeltaCacheCreationTokens: &cacheWrite, ReportedCostUSD: &reported,
+		DeltaCacheCreationTokens: &cacheWrite, ReportedCostUSD: &reported, PricingReceiptJSON: &receipt,
 	})
 
 	audit, err := BuildRunAudit(database, run.ID)
@@ -198,20 +216,42 @@ func TestBuildRunAuditAddsIndependentPricingClasses(t *testing.T) {
 	if costs.HarnessReported.ValueUSD == nil || *costs.HarnessReported.ValueUSD != 9.25 {
 		t.Fatalf("harness-reported = %+v", costs.HarnessReported)
 	}
-	if costs.APIListEstimate.ValueUSD == nil || *costs.APIListEstimate.ValueUSD != 36.75 {
+	if costs.APIListEstimate.ValueUSD == nil || *costs.APIListEstimate.ValueUSD != listValue || costs.APIListEstimate.Provenance.CatalogVersion != 77 {
 		t.Fatalf("API-list estimate = %+v", costs.APIListEstimate)
 	}
-	if costs.HarnessAdjustedEstimate.ValueUSD == nil || *costs.HarnessAdjustedEstimate.ValueUSD != 37.75 {
+	if costs.HarnessAdjustedEstimate.ValueUSD == nil || *costs.HarnessAdjustedEstimate.ValueUSD != effectiveValue || costs.HarnessAdjustedEstimate.Provenance.ProfileVersion != 9 {
 		t.Fatalf("harness-adjusted estimate = %+v", costs.HarnessAdjustedEstimate)
 	}
 	if audit.Costs.HarnessReported.ValueUSD == nil || *audit.Costs.HarnessReported.ValueUSD != 9.25 || !audit.Costs.HarnessReported.Complete {
 		t.Fatalf("run harness-reported total = %+v", audit.Costs.HarnessReported)
 	}
-	if audit.Costs.APIListEstimate.ValueUSD == nil || *audit.Costs.APIListEstimate.ValueUSD != 36.75 || !audit.Costs.APIListEstimate.Complete {
+	if audit.Costs.APIListEstimate.ValueUSD == nil || *audit.Costs.APIListEstimate.ValueUSD != listValue || !audit.Costs.APIListEstimate.Complete {
 		t.Fatalf("run API-list total = %+v", audit.Costs.APIListEstimate)
 	}
-	if audit.Costs.HarnessAdjustedEstimate.ValueUSD == nil || *audit.Costs.HarnessAdjustedEstimate.ValueUSD != 37.75 || !audit.Costs.HarnessAdjustedEstimate.Complete {
+	if audit.Costs.HarnessAdjustedEstimate.ValueUSD == nil || *audit.Costs.HarnessAdjustedEstimate.ValueUSD != effectiveValue || !audit.Costs.HarnessAdjustedEstimate.Complete {
 		t.Fatalf("run harness-adjusted total = %+v", audit.Costs.HarnessAdjustedEstimate)
+	}
+}
+
+func TestBuildRunAuditLeavesLegacyCatalogEstimatesUnknown(t *testing.T) {
+	database, run := newAuditRun(t)
+	input, output := 100, 20
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor", Model: "claude-opus-5",
+		SessionMode: db.InvocationModeCold, StartedAt: run.CreatedAt, CompletedAt: run.CreatedAt + 1, ExitStatus: "ok",
+		DeltaInputTokens: &input, DeltaOutputTokens: &output,
+	})
+
+	audit, err := BuildRunAudit(database, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	costs := audit.Invocations[0].Costs
+	if costs.APIListEstimate.ValueUSD != nil || costs.APIListEstimate.Reason != "missing_pricing_receipt" {
+		t.Fatalf("legacy API-list estimate = %+v, want immutable unknown", costs.APIListEstimate)
+	}
+	if !strings.Contains(strings.Join(audit.IntegrityErrors, "\n"), "no immutable pricing receipt") {
+		t.Fatalf("integrity errors = %v", audit.IntegrityErrors)
 	}
 }
 
