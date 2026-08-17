@@ -78,6 +78,15 @@ func yamlScalar(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
+func patchHook(content string) string {
+	payload, err := json.Marshal(prbody.PatchSet{Version: prbody.PatchVersion, Sections: []prbody.SectionPatch{{ID: "summary", Content: content}}})
+	if err != nil {
+		panic(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	return "cat > /dev/null; printf '%s\\n' " + quoted
+}
+
 func runPRBody(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	cmd := newRootCmd()
@@ -120,7 +129,7 @@ func TestPRBodyPrintsTheSampleContract(t *testing.T) {
 func TestPRBodyRunsTheHookOverride(t *testing.T) {
 	setupPRBodyRepo(t)
 
-	out, errOut, err := runPRBody(t, "", "--sample", "--hook", "cat > /dev/null; echo overridden-body")
+	out, errOut, err := runPRBody(t, "", "--sample", "--hook", patchHook("overridden-body"))
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
@@ -139,9 +148,9 @@ func TestPRBodyRunsTheHookOverride(t *testing.T) {
 func TestPRBodyRepoFormatterComesFromDefaultBranchNotTheCheckout(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo trusted-body", "add trusted formatter")
+	commitRepoConfig(t, local.root, patchHook("trusted-body"), "add trusted formatter")
 	run(t, local.root, "git", "checkout", "-b", "contributor")
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo hostile-body", "swap the formatter")
+	commitRepoConfig(t, local.root, patchHook("hostile-body"), "swap the formatter")
 
 	out, errOut, err := runPRBody(t, "", "--sample")
 	if err != nil {
@@ -160,7 +169,7 @@ func TestPRBodyRepoFormatterComesFromDefaultBranchNotTheCheckout(t *testing.T) {
 func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; pwd", "add formatter")
+	commitRepoConfig(t, local.root, `cat > /dev/null; printf '%s' '{"version":1,"sections":[{"id":"summary","content":"'; pwd | tr -d '\n'; printf '%s\n' '"}]}'`, "add formatter")
 	sub := filepath.Join(local.root, "internal", "cli")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -171,12 +180,8 @@ func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
-	printed, resolveErr := filepath.EvalSymlinks(strings.TrimSpace(out))
-	if resolveErr != nil {
-		t.Fatalf("formatter printed %q: %v", out, resolveErr)
-	}
-	if printed != local.root {
-		t.Fatalf("formatter ran in %q, want the repository root %q", printed, local.root)
+	if !strings.Contains(out, "\n"+local.root+"\n") {
+		t.Fatalf("formatter output %q does not contain repository root %q", out, local.root)
 	}
 }
 
@@ -185,7 +190,7 @@ func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 func TestPRBodyFindsTheRepoFormatterFromASubdirectory(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo subdir-body", "add formatter")
+	commitRepoConfig(t, local.root, patchHook("subdir-body"), "add formatter")
 	sub := filepath.Join(local.root, "internal")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -218,7 +223,7 @@ func TestPRBodyReadsAContractFromStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, errOut, err := runPRBody(t, string(raw),
-		"--contract-file", "-", "--hook", `grep -o '"run_id":"01SAMPLE0000000000000000000"' && echo piped-body`)
+		"--contract-file", "-", "--hook", `grep -q '"run_id":"01SAMPLE0000000000000000000"' && `+patchHook("piped-body"))
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
@@ -306,8 +311,8 @@ func TestPRBodyReportsThatARunWouldFallBack(t *testing.T) {
 func TestPRBodyHookComesFromMatchingGlobalOverride(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
-	globalConfig := "overrides:\n  Example/Example:\n    hooks:\n      pr_body: 'cat > /dev/null; echo override-body'\n"
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
+	globalConfig := "overrides:\n  Example/Example:\n    hooks:\n      pr_body: " + yamlScalar(patchHook("override-body")) + "\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +334,7 @@ func TestPRBodyHookComesFromMatchingGlobalOverride(t *testing.T) {
 func TestPRBodyGlobalOverrideExplicitEmptyClearsRepoFormatter(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
 	globalConfig := "overrides:\n  example/example:\n    hooks:\n      pr_body: \"\"\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -346,8 +351,8 @@ func TestPRBodyGlobalOverrideExplicitEmptyClearsRepoFormatter(t *testing.T) {
 func TestPRBodyIgnoresNonMatchingGlobalOverride(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
-	globalConfig := "overrides:\n  other/project:\n    hooks:\n      pr_body: 'cat > /dev/null; echo other-body'\n"
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
+	globalConfig := "overrides:\n  other/project:\n    hooks:\n      pr_body: " + yamlScalar(patchHook("other-body")) + "\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}

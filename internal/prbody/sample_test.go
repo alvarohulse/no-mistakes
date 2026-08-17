@@ -33,8 +33,14 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	if !s.Risk.Reported || s.Risk.Level == "" || s.Risk.Rationale == "" || s.Risk.Scope == "" {
 		t.Errorf("sample risk is incomplete: %+v", s.Risk)
 	}
-	if s.Testing == nil || s.Testing.Summary == "" || len(s.Testing.Tested) == 0 || len(s.Testing.Artifacts) == 0 {
-		t.Error("sample testing is incomplete")
+	if s.StaticTests == nil || s.StaticTests.Summary == "" || len(s.StaticTests.Commands) == 0 || len(s.StaticTests.Reported) == 0 || len(s.StaticTests.Artifacts) == 0 {
+		t.Error("sample static testing is incomplete")
+	}
+	if s.ReviewEvidence == nil || s.ReviewEvidence.Status == "" || s.ReviewEvidence.Rounds == 0 || len(s.ReviewEvidence.Evidence) == 0 {
+		t.Error("sample review evidence is incomplete")
+	}
+	if len(s.UserTesting.Instructions) == 0 || s.UserTesting.Attested {
+		t.Error("sample user testing must be an unattested instruction")
 	}
 	if s.Pipeline == nil || len(s.Pipeline.Steps) == 0 || len(s.Pipeline.ConfigSources) == 0 {
 		t.Fatal("sample pipeline is incomplete")
@@ -188,7 +194,7 @@ func TestSampleRoundTripsThroughJSON(t *testing.T) {
 	}
 }
 
-// A formatter under a v2-to-v3 rollout is told to accept both shapes, so the
+// A formatter under a multi-version rollout is told to accept older shapes, so the
 // v2 sample has to stay reachable and has to be a real v2 contract: intent in
 // its own section, and none of the v3-only additions present.
 func TestSampleV2IsAVersion2Contract(t *testing.T) {
@@ -237,7 +243,7 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 	}
 	// Sample must stay unaffected by the downgrade.
 	if Sample().Sections.Summary == nil {
-		t.Error("SampleV2 mutated the shared v3 sample")
+		t.Error("SampleV2 mutated the shared current sample")
 	}
 }
 

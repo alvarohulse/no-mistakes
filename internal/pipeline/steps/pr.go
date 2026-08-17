@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/prbody"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -27,6 +28,9 @@ type prContent struct {
 	// older test/fallback producers while the structured agent schema uses the
 	// three fields above.
 	Body string `json:"body,omitempty"`
+	// OwnedPatches is publication material produced by hooks.pr_body. It is
+	// never part of the drafting agent's JSON schema.
+	OwnedPatches prbody.PatchSet `json:"-"`
 }
 
 var prContentSchema = json.RawMessage(`{

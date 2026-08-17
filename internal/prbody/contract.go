@@ -72,13 +72,18 @@ type Commit struct {
 type Sections struct {
 	// Intent is retained only so callers can decode a version 2 contract. Version
 	// 3 producers leave it empty and report intent on the Intent pipeline step.
-	Intent      *IntentSection   `json:"intent,omitempty"`
-	Summary     *TextSection     `json:"summary,omitempty"`
-	Notes       NotesSection     `json:"notes"`
-	WhatChanged *TextSection     `json:"what_changed,omitempty"`
-	Risk        RiskSection      `json:"risk"`
-	Testing     *TestingSection  `json:"testing,omitempty"`
-	Pipeline    *PipelineSection `json:"pipeline,omitempty"`
+	Intent      *IntentSection `json:"intent,omitempty"`
+	Summary     *TextSection   `json:"summary,omitempty"`
+	Notes       NotesSection   `json:"notes"`
+	WhatChanged *TextSection   `json:"what_changed,omitempty"`
+	Risk        RiskSection    `json:"risk"`
+	// Testing is retained only so callers can decode version 2 and 3
+	// contracts. Version 4 producers use the three distinct fields below.
+	Testing        *TestingSection        `json:"testing,omitempty"`
+	StaticTests    *StaticTestsSection    `json:"static_tests,omitempty"`
+	ReviewEvidence *ReviewEvidenceSection `json:"review_evidence,omitempty"`
+	UserTesting    UserTestingSection     `json:"user_testing"`
+	Pipeline       *PipelineSection       `json:"pipeline,omitempty"`
 }
 
 // IntentSection is the change author's goal for the branch.
@@ -132,6 +137,32 @@ type TestingSection struct {
 	Summary   string     `json:"summary,omitempty"`
 	Tested    []string   `json:"tested,omitempty"`
 	Artifacts []Artifact `json:"artifacts,omitempty"`
+}
+
+// StaticTestsSection contains objective command outcomes and artifacts. It
+// never contains instructions for a human to perform later.
+type StaticTestsSection struct {
+	Summary   string            `json:"summary,omitempty"`
+	Commands  []PipelineCommand `json:"commands,omitempty"`
+	Reported  []string          `json:"reported,omitempty"`
+	Artifacts []Artifact        `json:"artifacts,omitempty"`
+}
+
+// ReviewEvidenceSection is the Review step's recorded evidence, kept apart
+// from static command results and from future human testing instructions.
+type ReviewEvidenceSection struct {
+	Status   string       `json:"status"`
+	Rounds   int          `json:"rounds"`
+	Findings StepFindings `json:"findings"`
+	Evidence []string     `json:"evidence,omitempty"`
+}
+
+// UserTestingSection contains instructions for a human. Attested is false
+// unless an explicit human completion signal was supplied; instructions alone
+// must never be rendered as test evidence.
+type UserTestingSection struct {
+	Instructions []string `json:"instructions,omitempty"`
+	Attested     bool     `json:"attested"`
 }
 
 // Artifact is one piece of test evidence produced for human review.

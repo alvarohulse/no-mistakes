@@ -11,19 +11,51 @@ import (
 	"time"
 )
 
-func TestRunHookReturnsFormatterStdout(t *testing.T) {
+func TestRunHookDecodesFormatterStdout(t *testing.T) {
 	t.Parallel()
 	requireShell(t)
 
 	result, err := RunHook(context.Background(), HookOptions{
-		Command:  "cat > /dev/null; printf '## Custom\\n\\nbody\\n'",
+		Command:  `cat > /dev/null; printf '%s\n' '{"version":1,"sections":[{"id":"custom","content":"## Custom\n\nbody"}]}'`,
 		Contract: Sample(),
 	})
 	if err != nil {
 		t.Fatalf("RunHook: %v", err)
 	}
-	if result.Body != "## Custom\n\nbody" {
-		t.Fatalf("body = %q", result.Body)
+	if got := result.Patches.Sections[0].Content; got != "## Custom\n\nbody" {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestRunHookReturnsOwnedSectionPatches(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	result, err := RunHook(context.Background(), HookOptions{
+		Command:  `cat > /dev/null; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"## Summary\n\nformatted"}]}'`,
+		Contract: Sample(),
+	})
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if result.Patches.Version != PatchVersion || len(result.Patches.Sections) != 1 {
+		t.Fatalf("patches = %+v", result.Patches)
+	}
+	if got := result.Patches.Sections[0]; got.ID != "summary" || got.Content != "## Summary\n\nformatted" {
+		t.Fatalf("section = %+v", got)
+	}
+}
+
+func TestRunHookRejectsAFullBodyReplacement(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	_, err := RunHook(context.Background(), HookOptions{
+		Command:  `cat > /dev/null; printf '%s\n' '{"version":1,"body":"replacement","sections":[{"id":"summary","content":"x"}]}'`,
+		Contract: Sample(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("error = %v, want full-body field rejection", err)
 	}
 }
 
@@ -34,14 +66,14 @@ func TestRunHookReceivesContractOnStdin(t *testing.T) {
 	// The formatter's only input is stdin; if the contract is not piped, the
 	// grep finds nothing and the command exits non-zero.
 	result, err := RunHook(context.Background(), HookOptions{
-		Command:  `grep -o '"version":4' && echo ok`,
+		Command:  `payload=$(cat); printf '%s' "$payload" | grep -q '"version":4' && printf '%s' "$payload" | grep -q '"costs"' && printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"ok"}]}'`,
 		Contract: Sample(),
 	})
 	if err != nil {
 		t.Fatalf("RunHook: %v", err)
 	}
-	if !strings.Contains(result.Body, "ok") {
-		t.Fatalf("body = %q, want the formatter to have seen the contract", result.Body)
+	if got := result.Patches.Sections[0].Content; got != "ok" {
+		t.Fatalf("content = %q, want the formatter to have seen the contract", got)
 	}
 }
 
@@ -56,8 +88,8 @@ func TestRunHookRejectsFailureModes(t *testing.T) {
 		want    string
 	}{
 		{"non-zero exit", "cat > /dev/null; echo boom >&2; exit 3", 0, "exited 3"},
-		{"empty output", "cat > /dev/null; exit 0", 0, "wrote no body"},
-		{"whitespace-only output", "cat > /dev/null; printf '   \\n\\n'", 0, "wrote no body"},
+		{"empty output", "cat > /dev/null; exit 0", 0, "wrote no patches"},
+		{"whitespace-only output", "cat > /dev/null; printf '   \\n\\n'", 0, "wrote no patches"},
 		{"timeout", "cat > /dev/null; sleep 30", 200 * time.Millisecond, "timed out"},
 	}
 	for _, tt := range tests {
@@ -101,7 +133,7 @@ func TestRunHookSurfacesDiagnosticsOnSuccess(t *testing.T) {
 	requireShell(t)
 
 	result, err := RunHook(context.Background(), HookOptions{
-		Command:  "cat > /dev/null; echo 'linked ENG-4471' >&2; echo body",
+		Command:  `cat > /dev/null; echo 'linked ENG-4471' >&2; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"body"}]}'`,
 		Contract: Sample(),
 	})
 	if err != nil {

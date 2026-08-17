@@ -45,3 +45,64 @@ func TestContractV4ProjectsThreeIndependentCostClassesAndProvenance(t *testing.T
 		t.Fatalf("cost provenance = %+v", run.Costs.HarnessAdjustedEstimate.Provenance)
 	}
 }
+func TestContractV4SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T) {
+	t.Parallel()
+
+	testFindings := `{"findings":[],"summary":"","testing_summary":"go tests passed","tested":["go test ./..."]}`
+	reviewFindings := `{"findings":[{"severity":"P2","description":"fixed","action":"auto-fix"}],"summary":"reviewed","risk_level":"low","risk_rationale":"bounded"}`
+	exitCode := 0
+	testEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Commands: []db.CommandEvidence{{
+		Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &exitCode,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Evidence: []string{"Reviewed the complete branch diff."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := BuildContract(ContractInput{
+		Steps: []*db.StepResult{
+			{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &reviewFindings, EvidenceJSON: &reviewEvidence},
+			{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &testFindings, EvidenceJSON: &testEvidence},
+		},
+		Rounds: map[string][]*db.StepRound{
+			"review": {{ID: "review-round"}},
+			"test":   {{ID: "test-round"}},
+		},
+		UserTestingInstructions: []string{"Open Settings and confirm the saved value."},
+	})
+
+	if contract.Version != 4 {
+		t.Fatalf("version = %d, want 4", contract.Version)
+	}
+	if contract.Sections.Testing != nil {
+		t.Fatalf("legacy testing field is populated: %+v", contract.Sections.Testing)
+	}
+	if contract.Sections.StaticTests == nil || len(contract.Sections.StaticTests.Commands) != 1 {
+		t.Fatalf("static_tests = %+v", contract.Sections.StaticTests)
+	}
+	if contract.Sections.ReviewEvidence == nil || contract.Sections.ReviewEvidence.Findings.Total != 1 || len(contract.Sections.ReviewEvidence.Evidence) != 1 {
+		t.Fatalf("review_evidence = %+v", contract.Sections.ReviewEvidence)
+	}
+	if len(contract.Sections.UserTesting.Instructions) != 1 || contract.Sections.UserTesting.Attested {
+		t.Fatalf("user_testing = %+v", contract.Sections.UserTesting)
+	}
+}
+
+func TestContractV4UserTestingCompletionRequiresExplicitAttestation(t *testing.T) {
+	t.Parallel()
+
+	contract := BuildContract(ContractInput{
+		UserTestingInstructions: []string{"Exercise the checkout flow."},
+		UserTestingAttested:     true,
+	})
+	if !contract.Sections.UserTesting.Attested {
+		t.Fatal("explicit user-testing attestation was not retained")
+	}
+
+	withoutAttestation := BuildContract(ContractInput{UserTestingInstructions: []string{"Exercise the checkout flow."}})
+	if withoutAttestation.Sections.UserTesting.Attested {
+		t.Fatal("instructions alone were presented as completed user testing")
+	}
+}

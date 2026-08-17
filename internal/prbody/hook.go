@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -53,7 +55,7 @@ type HookOptions struct {
 
 // HookResult is a successful formatter invocation.
 type HookResult struct {
-	Body string
+	Patches PatchSet
 	// Diagnostics is the formatter's stderr. A formatter is expected to report
 	// what it linked, dropped, or left for the author here, so this is echoed
 	// into the pipeline log even on success.
@@ -64,8 +66,9 @@ type HookResult struct {
 // ErrNoHook reports that no formatter is configured.
 var ErrNoHook = errors.New("no pr_body hook configured")
 
-// RunHook serializes the contract to the formatter's stdin and returns its
-// stdout as the PR body.
+// RunHook serializes the contract to the formatter's stdin and decodes its
+// stdout as owned-section patches. A formatter can never return a replacement
+// full body; unknown output fields are rejected.
 //
 // Every failure mode - missing command, non-zero exit, timeout, empty output,
 // oversized output - returns an error. The caller's contract with the author
@@ -143,12 +146,38 @@ func RunHook(ctx context.Context, opts HookOptions) (*HookResult, error) {
 		return nil, fmt.Errorf("pr_body hook failed: %s%s", safeurl.RedactText(runErr.Error()), suffix(diagnostics))
 	}
 
-	body := strings.TrimSpace(stdout.String())
-	if body == "" {
-		return nil, fmt.Errorf("pr_body hook exited 0 but wrote no body%s", suffix(diagnostics))
+	output := stdout.Bytes()
+	if len(bytes.TrimSpace(output)) == 0 {
+		return nil, fmt.Errorf("pr_body hook exited 0 but wrote no patches%s", suffix(diagnostics))
+	}
+	if !utf8.Valid(output) {
+		return nil, fmt.Errorf("pr_body hook output: %w%s", ErrInvalidUTF8, suffix(diagnostics))
+	}
+	var patches PatchSet
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&patches); err != nil {
+		return nil, fmt.Errorf("pr_body hook decode patches: %w%s", err, suffix(diagnostics))
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, fmt.Errorf("pr_body hook decode patches: %w%s", err, suffix(diagnostics))
+	}
+	if err := ValidatePatchSet(patches); err != nil {
+		return nil, fmt.Errorf("pr_body hook validate patches: %w%s", err, suffix(diagnostics))
 	}
 
-	return &HookResult{Body: body, Diagnostics: diagnostics, Duration: elapsed}, nil
+	return &HookResult{Patches: patches, Diagnostics: diagnostics, Duration: elapsed}, nil
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 // errHookOutputTooLarge stops the output copy the moment a formatter goes over
@@ -179,6 +208,8 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (c *cappedBuffer) String() string { return c.buf.String() }
+
+func (c *cappedBuffer) Bytes() []byte { return c.buf.Bytes() }
 
 // overflowed reports whether the formatter wrote past the cap.
 func (c *cappedBuffer) overflowed() bool { return c.over }

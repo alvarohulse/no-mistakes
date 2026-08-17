@@ -47,6 +47,9 @@ type ContractInput struct {
 	BaseSHA     string
 	Provider    string
 	BodyLimit   int
+
+	UserTestingInstructions []string
+	UserTestingAttested     bool
 }
 
 // BuildContract assembles the hooks.pr_body payload.
@@ -100,7 +103,12 @@ func BuildContract(in ContractInput) *prbody.Contract {
 	}
 
 	contract.Sections.Risk = contractRisk(in.Steps, in.Rounds)
-	contract.Sections.Testing = contractTesting(in.Steps, in.Rounds)
+	contract.Sections.StaticTests = contractStaticTests(in.Steps, in.Rounds)
+	contract.Sections.ReviewEvidence = contractReviewEvidence(in.Steps, in.Rounds)
+	contract.Sections.UserTesting = prbody.UserTestingSection{
+		Instructions: append([]string(nil), in.UserTestingInstructions...),
+		Attested:     in.UserTestingAttested,
+	}
 	contract.Sections.Pipeline = contractPipeline(in.Steps, in.Rounds, in.Invocations, in.Run, strings.TrimSpace(in.Intent), in.IntentSource, in.IntentAuthoritative)
 	return contract
 }
@@ -231,6 +239,58 @@ func contractTesting(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		}
 		if section.Summary == "" && len(section.Tested) == 0 && len(section.Artifacts) == 0 {
 			return nil
+		}
+		return section
+	}
+	return nil
+}
+
+func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRound) *prbody.StaticTestsSection {
+	for _, sr := range steps {
+		if sr.StepName != types.StepTest {
+			continue
+		}
+		section := &prbody.StaticTestsSection{}
+		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
+			section.Summary = strings.TrimSpace(findings.TestingSummary)
+			section.Reported = append(section.Reported, findings.Tested...)
+			for _, artifact := range findings.Artifacts {
+				section.Artifacts = append(section.Artifacts, prbody.Artifact{
+					Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL,
+				})
+			}
+		}
+		if evidence, err := sr.Evidence(); err == nil {
+			for _, command := range evidence.Commands {
+				section.Commands = append(section.Commands, prbody.PipelineCommand{
+					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
+					Outcome: command.Outcome, ExitCode: command.ExitCode,
+				})
+			}
+		}
+		if section.Summary == "" && len(section.Commands) == 0 && len(section.Reported) == 0 && len(section.Artifacts) == 0 {
+			return nil
+		}
+		return section
+	}
+	return nil
+}
+
+func contractReviewEvidence(steps []*db.StepResult, rounds map[string][]*db.StepRound) *prbody.ReviewEvidenceSection {
+	for _, sr := range steps {
+		if sr.StepName != types.StepReview {
+			continue
+		}
+		section := &prbody.ReviewEvidenceSection{
+			Status:   string(sr.Status),
+			Rounds:   len(rounds[sr.ID]),
+			Findings: contractStepFindings(sr, rounds[sr.ID]),
+		}
+		if section.Rounds == 0 {
+			section.Rounds = 1
+		}
+		if evidence, err := sr.Evidence(); err == nil {
+			section.Evidence = append(section.Evidence, evidence.Evidence...)
 		}
 		return section
 	}

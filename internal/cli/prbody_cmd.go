@@ -118,7 +118,17 @@ With no source, the latest run for the current repository is used.
 			if result.Diagnostics != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", result.Diagnostics)
 			}
-			fmt.Fprintln(out, result.Body)
+			body, err := prbody.NewOwnedDocument(result.Patches)
+			if err != nil {
+				return err
+			}
+			if err := prbody.ValidateOwnedDocument(body, prbody.ValidationLimits{
+				MaxUnits:     contract.BodyLimit,
+				MeasureUnits: scm.PRBodyLen,
+			}); err != nil {
+				return err
+			}
+			fmt.Fprintln(out, body)
 			return nil
 		},
 	}

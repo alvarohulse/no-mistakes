@@ -56,24 +56,21 @@ func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prC
 		sctx.Log("pr_body hook: " + result.Diagnostics)
 	}
 
-	content.Body = clampHookPRBody(sctx, result.Body, scope.bodyLimit)
+	body, err := prbody.NewOwnedDocument(result.Patches)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("warning: pr_body hook returned invalid patches: %v; using the built-in PR body", err))
+		return content
+	}
+	if err := prbody.ValidateOwnedDocument(body, prbody.ValidationLimits{
+		MaxBytes:     maxPullRequestBodyBytes,
+		MaxUnits:     scope.bodyLimit,
+		MeasureUnits: scm.PRBodyLen,
+	}); err != nil {
+		sctx.Log(fmt.Sprintf("warning: pr_body hook returned an unsafe candidate: %v; using the built-in PR body", err))
+		return content
+	}
+	content.Body = body
+	content.OwnedPatches = result.Patches
 	sctx.Log(fmt.Sprintf("pr_body hook formatted the body in %s", result.Duration.Round(1e6)))
 	return content
-}
-
-// clampHookPRBody enforces the host caps on a formatter's output. The contract
-// tells the formatter what the caps are so it can degrade its own layout
-// deliberately; this is the backstop for one that did not.
-func clampHookPRBody(sctx *pipeline.StepContext, body string, bodyLimit int) string {
-	if bodyLimit > 0 && scm.PRBodyLen(body) > bodyLimit {
-		sctx.Log(fmt.Sprintf("pr_body hook returned %d characters against the host's %d limit; clamping",
-			scm.PRBodyLen(body), bodyLimit))
-		body = scm.ClampPRBody(body, bodyLimit)
-	}
-	if len(body) > maxPullRequestBodyBytes {
-		sctx.Log(fmt.Sprintf("pr_body hook returned %d bytes against the %d byte cap; truncating",
-			len(body), maxPullRequestBodyBytes))
-		body = truncateTextAtLineBoundary(body, maxPullRequestBodyBytes, essentialPRBodyTruncationMarker())
-	}
-	return body
 }

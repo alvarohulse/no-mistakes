@@ -76,11 +76,22 @@ func SampleV2() *Contract {
 	return contract
 }
 
-// SampleV3 returns the version 3 shape without the cost receipts introduced in
-// version 4. It remains available while formatter consumers migrate.
+// SampleV3 returns the pre-v4 contract shape. Static test evidence is projected
+// back into the legacy testing field, and v4-only review, user-testing, and cost
+// receipt fields are absent.
 func SampleV3() *Contract {
 	contract := Sample()
 	contract.Version = 3
+	if static := contract.Sections.StaticTests; static != nil {
+		contract.Sections.Testing = &TestingSection{
+			Summary:   static.Summary,
+			Tested:    append([]string(nil), static.Reported...),
+			Artifacts: append([]Artifact(nil), static.Artifacts...),
+		}
+	}
+	contract.Sections.StaticTests = nil
+	contract.Sections.ReviewEvidence = nil
+	contract.Sections.UserTesting = UserTestingSection{}
 	if pipeline := contract.Sections.Pipeline; pipeline != nil {
 		for i := range pipeline.Steps {
 			for j := range pipeline.Steps[i].Agents {
@@ -166,10 +177,23 @@ func Sample() *Contract {
 				Scope:     "source-or-external",
 				Reported:  true,
 			},
-			Testing: &TestingSection{
-				Summary:   "Added coverage for the exhausted-budget path and the invalid-window rejection; ran the scheduler package plus the queue integration suite.",
-				Tested:    []string{"go test ./internal/scheduler/...", "go test -tags=integration ./internal/queue/..."},
+			StaticTests: &StaticTestsSection{
+				Summary:  "Added coverage for the exhausted-budget path and the invalid-window rejection; ran the scheduler package plus the queue integration suite.",
+				Reported: []string{"go test ./internal/scheduler/...", "go test -tags=integration ./internal/queue/..."},
+				Commands: []PipelineCommand{
+					command(1, 1, "go test ./internal/scheduler/...", "passed", &exit),
+					command(1, 2, "go test -tags=integration ./internal/queue/...", "passed", &exit),
+				},
 				Artifacts: []Artifact{{Kind: "log", Label: "scheduler suite output", Path: ".no-mistakes/artifacts/scheduler-test.log"}},
+			},
+			ReviewEvidence: &ReviewEvidenceSection{
+				Status: "completed", Rounds: 2,
+				Findings: StepFindings{Total: 3, BySeverity: map[string]int{"P1": 1, "P2": 2}},
+				Evidence: []string{"Reviewed the complete branch diff against the explicit intent."},
+			},
+			UserTesting: UserTestingSection{
+				Instructions: []string{"Trigger a retry-exhausted job and confirm the operator-facing failure state."},
+				Attested:     false,
 			},
 			Pipeline: &PipelineSection{
 				Attribution: Attribution{Name: "no-mistakes", URL: "https://github.com/kunchenguid/no-mistakes"},

@@ -9,7 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestContractV3CarriesDistinctSummaryAndWhatChanged(t *testing.T) {
+func TestContractV4CarriesDistinctSummaryAndWhatChanged(t *testing.T) {
 	t.Parallel()
 
 	contract := BuildContract(ContractInput{
