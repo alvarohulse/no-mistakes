@@ -1,5 +1,7 @@
 package prbody
 
+import "github.com/kunchenguid/no-mistakes/internal/pricing"
+
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
 // both v2 and v3 during a producer rollout, so both shapes have to be
@@ -8,6 +10,8 @@ func SampleForVersion(version int) *Contract {
 	switch version {
 	case 2:
 		return SampleV2()
+	case 3:
+		return SampleV3()
 	case Version:
 		return Sample()
 	default:
@@ -17,7 +21,7 @@ func SampleForVersion(version int) *Contract {
 
 // SupportedVersions lists the contract versions this build can emit and read,
 // newest first.
-func SupportedVersions() []int { return []int{Version, 2} }
+func SupportedVersions() []int { return []int{Version, 3, 2} }
 
 // IsSupportedVersion reports whether a decoded contract's version is one this
 // build understands.
@@ -31,10 +35,10 @@ func IsSupportedVersion(version int) bool {
 }
 
 // SampleV2 returns the version 2 shape of the same sample run: intent lives in
-// its own top-level section, and none of the version 3 additions are present.
+// its own top-level section, and none of the later contract additions are present.
 // It is derived from Sample so the two cannot drift apart.
 func SampleV2() *Contract {
-	contract := Sample()
+	contract := SampleV3()
 	contract.Version = 2
 	contract.Metadata = ""
 
@@ -72,6 +76,21 @@ func SampleV2() *Contract {
 	return contract
 }
 
+// SampleV3 returns the version 3 shape without the cost receipts introduced in
+// version 4. It remains available while formatter consumers migrate.
+func SampleV3() *Contract {
+	contract := Sample()
+	contract.Version = 3
+	if pipeline := contract.Sections.Pipeline; pipeline != nil {
+		for i := range pipeline.Steps {
+			for j := range pipeline.Steps[i].Agents {
+				pipeline.Steps[i].Agents[j].Costs = nil
+			}
+		}
+	}
+	return contract
+}
+
 // Sample returns a contract that exercises every section.
 //
 // This is deliberately not a transcript of a real run. A sample built to be
@@ -86,6 +105,24 @@ func Sample() *Contract {
 	ms := func(v int64) *int64 { return &v }
 	integer := func(v int) *int { return &v }
 	usd := func(v float64) *float64 { return &v }
+	costs := func(reported, list, adjusted float64) *pricing.CostClasses {
+		return &pricing.CostClasses{
+			HarnessReported: pricing.CostEstimate{
+				ValueUSD: usd(reported), Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true,
+				Basis: "agent_invocations.reported_cost_usd",
+			},
+			APIListEstimate: pricing.CostEstimate{
+				ValueUSD: usd(list), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+				Basis:      "canonical_delta_token_meters_x_public_list_rate",
+				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
+			},
+			HarnessAdjustedEstimate: pricing.CostEstimate{
+				ValueUSD: usd(adjusted), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+				Basis:      "public_list_estimate_plus_harness_profile",
+				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
+			},
+		}
+	}
 	command := func(round, sequence int, text, outcome string, exitCode *int) PipelineCommand {
 		return PipelineCommand{Round: round, Sequence: sequence, Command: text, Outcome: outcome, ExitCode: exitCode}
 	}
@@ -155,6 +192,7 @@ func Sample() *Contract {
 							StartedAt: 1786500000, DurationMS: 2140,
 							InputTokens: integer(1400), OutputTokens: integer(180), UncachedInputTokens: integer(700),
 							CacheReadTokens: integer(500), CacheWriteTokens: integer(200), ReportedCostUSD: usd(0.08),
+							Costs:          costs(0.08, 0.09, 0.09),
 							NestedReported: true, NestedCount: integer(0),
 						}},
 					},

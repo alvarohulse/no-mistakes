@@ -44,7 +44,7 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 
 	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
-	var completeTelemetry, supportedNested, unsupportedNested bool
+	var completeTelemetry, completeCosts, supportedNested, unsupportedNested bool
 	for _, step := range s.Pipeline.Steps {
 		if _, ok := commandSteps[step.Name]; ok {
 			commandSteps[step.Name] = len(step.Commands) > 0
@@ -76,6 +76,9 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
 				completeTelemetry = true
 			}
+			if run.Costs != nil && run.Costs.HarnessReported.ValueUSD != nil && run.Costs.APIListEstimate.ValueUSD != nil && run.Costs.HarnessAdjustedEstimate.ValueUSD != nil {
+				completeCosts = true
+			}
 			if !run.NestedReported {
 				unsupportedNested = true
 			}
@@ -88,6 +91,9 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if !completeTelemetry {
 		t.Error("sample has no fully populated telemetry row")
+	}
+	if !completeCosts {
+		t.Error("sample has no fully populated cost receipt")
 	}
 	if !supportedNested {
 		t.Error("sample does not exercise supported nested-agent telemetry")
@@ -214,23 +220,34 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 		for _, run := range step.Agents {
 			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 || run.NestedCount != nil ||
 				run.InputTokens != nil || run.OutputTokens != nil || run.UncachedInputTokens != nil ||
-				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil {
+				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil || run.Costs != nil {
 				t.Errorf("v2 sample agent row carries v3-only telemetry: %+v", run)
 			}
 		}
 	}
 
-	if SampleForVersion(2) == nil || SampleForVersion(Version) == nil {
+	if SampleForVersion(2) == nil || SampleForVersion(3) == nil || SampleForVersion(Version) == nil {
 		t.Error("SampleForVersion does not cover every supported version")
 	}
 	if SampleForVersion(1) != nil {
 		t.Error("SampleForVersion returned a contract for an unsupported version")
 	}
-	if !IsSupportedVersion(2) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
+	if !IsSupportedVersion(2) || !IsSupportedVersion(3) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
 		t.Error("IsSupportedVersion disagrees with SupportedVersions")
 	}
 	// Sample must stay unaffected by the downgrade.
 	if Sample().Sections.Summary == nil {
 		t.Error("SampleV2 mutated the shared v3 sample")
+	}
+}
+
+func TestSampleV3OmitsVersion4CostReceipts(t *testing.T) {
+	t.Parallel()
+	for _, step := range SampleV3().Sections.Pipeline.Steps {
+		for _, run := range step.Agents {
+			if run.Costs != nil {
+				t.Errorf("v3 sample agent row carries v4 costs: %+v", run.Costs)
+			}
+		}
 	}
 }

@@ -17,8 +17,8 @@ func TestContractV3CarriesDistinctSummaryAndWhatChanged(t *testing.T) {
 		WhatChanged: "- Close the alert after a successful recheck",
 	})
 
-	if contract.Version != 3 {
-		t.Fatalf("version = %d, want 3", contract.Version)
+	if contract.Version != 4 {
+		t.Fatalf("version = %d, want 4", contract.Version)
 	}
 	if contract.Sections.Summary == nil || contract.Sections.Summary.Text != "Fixes stale alerts by calling `AlertMessage.close` after recheck." {
 		t.Fatalf("summary = %+v", contract.Sections.Summary)

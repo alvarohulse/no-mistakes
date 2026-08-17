@@ -8,10 +8,12 @@
 // the test step's own summary, tested list, and artifacts.
 package prbody
 
+import "github.com/kunchenguid/no-mistakes/internal/pricing"
+
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
 // pipeline treats a non-zero exit as "use the built-in body" and says so.
-const Version = 3
+const Version = 4
 
 // Contract is the complete payload written to the formatter's stdin.
 //
@@ -217,19 +219,20 @@ type StepFindings struct {
 
 // AgentRun is one agent invocation within a step.
 type AgentRun struct {
-	Round               int      `json:"round"`
-	Purpose             string   `json:"purpose,omitempty"`
-	Agent               string   `json:"agent,omitempty"`
-	Model               string   `json:"model,omitempty"`
-	Provider            string   `json:"provider,omitempty"`
-	StartedAt           int64    `json:"started_at,omitempty"`
-	DurationMS          int64    `json:"duration_ms,omitempty"`
-	InputTokens         *int     `json:"input_tokens,omitempty"`
-	OutputTokens        *int     `json:"output_tokens,omitempty"`
-	UncachedInputTokens *int     `json:"uncached_input_tokens,omitempty"`
-	CacheReadTokens     *int     `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens    *int     `json:"cache_write_tokens,omitempty"`
-	ReportedCostUSD     *float64 `json:"reported_cost_usd,omitempty"`
+	Round               int                  `json:"round"`
+	Purpose             string               `json:"purpose,omitempty"`
+	Agent               string               `json:"agent,omitempty"`
+	Model               string               `json:"model,omitempty"`
+	Provider            string               `json:"provider,omitempty"`
+	StartedAt           int64                `json:"started_at,omitempty"`
+	DurationMS          int64                `json:"duration_ms,omitempty"`
+	InputTokens         *int                 `json:"input_tokens,omitempty"`
+	OutputTokens        *int                 `json:"output_tokens,omitempty"`
+	UncachedInputTokens *int                 `json:"uncached_input_tokens,omitempty"`
+	CacheReadTokens     *int                 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    *int                 `json:"cache_write_tokens,omitempty"`
+	ReportedCostUSD     *float64             `json:"reported_cost_usd,omitempty"`
+	Costs               *pricing.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
 	Vendor         string `json:"vendor,omitempty"`

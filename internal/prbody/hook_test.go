@@ -34,7 +34,7 @@ func TestRunHookReceivesContractOnStdin(t *testing.T) {
 	// The formatter's only input is stdin; if the contract is not piped, the
 	// grep finds nothing and the command exits non-zero.
 	result, err := RunHook(context.Background(), HookOptions{
-		Command:  `grep -o '"version":3' && echo ok`,
+		Command:  `grep -o '"version":4' && echo ok`,
 		Contract: Sample(),
 	})
 	if err != nil {
