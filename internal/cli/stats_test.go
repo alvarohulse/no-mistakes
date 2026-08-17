@@ -78,6 +78,43 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 	}
 }
 
+func TestResolveStatsRepoIDsAcceptsArchivedRepositoryID(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/archived-repo.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo("/work/archived", "https://github.com/owner/archived", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := database.ArchiveRunWithMetricReceipt(db.RunMetricReceipt{
+		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+		SchemaVersion: 1, PayloadJSON: `{"schema_version":1}`, ArchivedAt: run.UpdatedAt,
+	}, true, nil)
+	if err != nil || !archived {
+		t.Fatalf("archive run = %v, %v", archived, err)
+	}
+	if err := database.DeleteRepo(repo.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := resolveStatsRepoIDs(database, []string{repo.ID}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != repo.ID {
+		t.Fatalf("resolved archived repository IDs = %v", ids)
+	}
+}
+
 func TestStatsDashboardCapsTopReposAndUsesPipelineStepOrder(t *testing.T) {
 	stats := &db.Stats{
 		TotalRuns:        4,

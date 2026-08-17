@@ -89,12 +89,23 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	f := newEvidenceFixture(t)
 	artifact := map[string]string{"screenshot.png": "not really a png"}
 
-	fresh := f.seed("fresh", types.RunCompleted, time.Hour, artifact)
 	stale := f.seed("stale", types.RunCompleted, 30*24*time.Hour, artifact)
 	activePending := f.seed("active-pending", types.RunPending, 30*24*time.Hour, artifact)
 	activeRunning := f.seed("active-running", types.RunRunning, 30*24*time.Hour, artifact)
+	for index := 0; index < 50; index++ {
+		run, err := f.db.InsertRun(f.repo.ID, "newer", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := f.seed("fresh", types.RunCompleted, time.Hour, artifact)
 
-	reapEvidence(f.db, f.root, evidenceReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
+	policy := evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 50}
+	pruneRichRuns(f.db, f.p, f.root, policy, time.Now().Add(30*24*time.Hour))
+	reapEvidence(f.db, f.root)
 
 	if !f.exists(fresh) {
 		t.Error("evidence inside the retention window was removed")
@@ -122,7 +133,7 @@ func TestReapEvidenceRemovesEmptyRunDirectoriesRegardlessOfAge(t *testing.T) {
 	emptyActive := f.seed("empty-active", types.RunRunning, time.Minute, nil)
 	withArtifact := f.seed("kept", types.RunCompleted, time.Minute, map[string]string{"log.txt": "output"})
 
-	reapEvidence(f.db, f.root, evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 100}, time.Now())
+	reapEvidence(f.db, f.root)
 
 	if f.exists(empty) {
 		t.Error("an empty evidence directory survived")
@@ -135,10 +146,9 @@ func TestReapEvidenceRemovesEmptyRunDirectoriesRegardlessOfAge(t *testing.T) {
 	}
 }
 
-// TestReapEvidenceTrimsToTheRunCeilingOldestFirst covers the second bound: a
-// burst of runs that all land inside the retention window still cannot grow the
-// directory without limit.
-func TestReapEvidenceTrimsToTheRunCeilingOldestFirst(t *testing.T) {
+// TestReapEvidenceRetainsEveryRecentRun proves the count floor cannot erase
+// evidence that is still inside the age window.
+func TestReapEvidenceRetainsEveryRecentRun(t *testing.T) {
 	f := newEvidenceFixture(t)
 	artifact := map[string]string{"log.txt": "output"}
 
@@ -146,13 +156,41 @@ func TestReapEvidenceTrimsToTheRunCeilingOldestFirst(t *testing.T) {
 	middle := f.seed("middle", types.RunCompleted, 3*time.Hour, artifact)
 	newest := f.seed("newest", types.RunCompleted, time.Hour, artifact)
 
-	reapEvidence(f.db, f.root, evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 2}, time.Now())
+	policy := evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 2}
+	pruneRichRuns(f.db, f.p, f.root, policy, time.Now())
+	reapEvidence(f.db, f.root)
 
-	if f.exists(oldest) {
-		t.Error("the oldest run's evidence survived the run ceiling")
+	if !f.exists(oldest) || !f.exists(middle) || !f.exists(newest) {
+		t.Error("recent evidence was removed to satisfy a count target")
 	}
-	if !f.exists(middle) || !f.exists(newest) {
-		t.Error("the two newest runs' evidence should have been kept")
+}
+
+func TestReapEvidenceRetainsPinnedAndNewestFiftyOldRuns(t *testing.T) {
+	f := newEvidenceFixture(t)
+	artifact := map[string]string{"log.txt": "output"}
+	old := make([]string, 0, 52)
+	for index := 0; index < 52; index++ {
+		old = append(old, f.seed("old", types.RunCompleted, 30*24*time.Hour, artifact))
+	}
+	pinned := f.seed("pinned", types.RunCompleted, 30*24*time.Hour, artifact)
+	if _, err := f.db.SetRunPinned(pinned, true); err != nil {
+		t.Fatal(err)
+	}
+
+	policy := evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 2}
+	pruneRichRuns(f.db, f.p, f.root, policy, time.Now().Add(30*24*time.Hour))
+	reapEvidence(f.db, f.root)
+
+	if f.exists(old[0]) || f.exists(old[1]) {
+		t.Error("old terminal evidence outside the newest-fifty floor survived")
+	}
+	for _, runID := range old[2:] {
+		if !f.exists(runID) {
+			t.Fatalf("newest-fifty evidence %s was removed", runID)
+		}
+	}
+	if !f.exists(pinned) {
+		t.Error("pinned evidence was removed")
 	}
 }
 
@@ -166,7 +204,9 @@ func TestReapEvidenceKeepsEverythingWhenBothBoundsAreDisabled(t *testing.T) {
 	ancient := f.seed("ancient", types.RunCompleted, 365*24*time.Hour, artifact)
 	recent := f.seed("recent", types.RunCompleted, time.Hour, artifact)
 
-	reapEvidence(f.db, f.root, evidenceReapPolicy{Retention: 0, MaxRuns: 0}, time.Now())
+	policy := evidenceReapPolicy{Retention: 0, MaxRuns: 0}
+	pruneRichRuns(f.db, f.p, f.root, policy, time.Now().Add(365*24*time.Hour))
+	reapEvidence(f.db, f.root)
 
 	if !f.exists(ancient) || !f.exists(recent) {
 		t.Error("evidence was reaped even though both bounds are disabled")
@@ -184,7 +224,7 @@ func TestReapEvidenceLeavesUnownedDirectoriesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reapEvidence(f.db, f.root, evidenceReapPolicy{Retention: time.Hour, MaxRuns: 1}, time.Now())
+	reapEvidence(f.db, f.root)
 
 	if _, err := os.Stat(unowned); err != nil {
 		t.Errorf("reaper removed a directory not owned by a recorded run: %v", err)
@@ -235,10 +275,21 @@ func TestReapLegacyEvidenceDrainsTheSharedTempRootUnderTheSamePolicy(t *testing.
 	}
 
 	stale := seedLegacy("legacy-stale", types.RunCompleted, 30*24*time.Hour)
-	fresh := seedLegacy("legacy-fresh", types.RunCompleted, time.Hour)
 	inFlight := seedLegacy("legacy-active", types.RunRunning, 30*24*time.Hour)
+	for index := 0; index < 50; index++ {
+		run, err := f.db.InsertRun(f.repo.ID, "legacy-newer", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := seedLegacy("legacy-fresh", types.RunCompleted, time.Hour)
 
-	reapLegacyEvidence(f.db, f.root, evidenceReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
+	policy := evidenceReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 50}
+	pruneRichRuns(f.db, f.p, f.root, policy, time.Now().Add(30*24*time.Hour))
+	reapLegacyEvidence(f.db, f.root)
 
 	if _, err := os.Stat(filepath.Join(legacy, stale)); err == nil {
 		t.Error("stale legacy evidence survived the drain")
@@ -266,7 +317,7 @@ func TestReapLegacyEvidenceLeavesTheCurrentRootAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reapLegacyEvidence(f.db, legacy, evidenceReapPolicy{Retention: time.Nanosecond}, time.Now())
+	reapLegacyEvidence(f.db, legacy)
 
 	if _, err := os.Stat(filepath.Join(legacy, "run-x")); err != nil {
 		t.Errorf("the drain reaped the configured current root: %v", err)

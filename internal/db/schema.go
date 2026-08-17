@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS repos (
     created_at     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS repo_eject_claims (
+    repo_id     TEXT PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+    claimed_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
@@ -48,6 +53,13 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
+
+CREATE TRIGGER IF NOT EXISTS prevent_run_during_repo_eject
+BEFORE INSERT ON runs
+WHEN EXISTS (SELECT 1 FROM repo_eject_claims WHERE repo_id = NEW.repo_id)
+BEGIN
+    SELECT RAISE(ABORT, 'repository eject in progress');
+END;
 
 CREATE TABLE IF NOT EXISTS step_results (
     id               TEXT PRIMARY KEY,
@@ -149,6 +161,31 @@ CREATE TABLE IF NOT EXISTS run_agent_sessions (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (run_id, role)
 );
+
+-- Long-lived content-free metric receipts intentionally have no foreign key.
+-- Rich run rows and repository registrations may be deleted without cascading
+-- away the historical facts that power stats.
+CREATE TABLE IF NOT EXISTS run_metric_receipts (
+    run_id                 TEXT PRIMARY KEY,
+    repo_id                TEXT NOT NULL,
+    run_created_at         INTEGER NOT NULL,
+    run_status             TEXT NOT NULL,
+    schema_version         INTEGER NOT NULL,
+    payload_json           TEXT NOT NULL,
+    receipt_sha256         TEXT NOT NULL,
+    archived_at            INTEGER NOT NULL,
+    pull_request           INTEGER NOT NULL DEFAULT 0,
+    reported_findings      INTEGER NOT NULL DEFAULT 0,
+    fixed_findings         INTEGER NOT NULL DEFAULT 0,
+    step_stats_json        TEXT NOT NULL DEFAULT '[]',
+    agent_aggregates_json  TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
+    ON run_metric_receipts (repo_id, run_created_at DESC, run_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_status_created
+    ON run_metric_receipts (run_status, run_created_at DESC, run_id DESC);
 
 CREATE TABLE IF NOT EXISTS intent_cache (
     cache_key   TEXT PRIMARY KEY,

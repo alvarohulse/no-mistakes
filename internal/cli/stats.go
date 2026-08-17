@@ -181,7 +181,18 @@ func resolveStatsRepoIDs(database *db.DB, selectors []string, current bool) ([]s
 			}
 		}
 		if repo == nil {
-			return nil, fmt.Errorf("repository %q is not registered", selector)
+			archived, err := database.HasRunMetricReceiptsForRepo(selector)
+			if err != nil {
+				return nil, err
+			}
+			if !archived {
+				return nil, fmt.Errorf("repository %q is not registered and has no archived metrics", selector)
+			}
+			if !seen[selector] {
+				seen[selector] = true
+				result = append(result, selector)
+			}
+			continue
 		}
 		if !seen[repo.ID] {
 			seen[repo.ID] = true
@@ -462,6 +473,9 @@ func formatAgentObservations(inv runstats.Invocation) string {
 		return "-"
 	}
 	if len(inv.NestedAgents) == 0 {
+		if inv.NestedAgentCount != nil && *inv.NestedAgentCount > 0 {
+			return strconv.Itoa(*inv.NestedAgentCount)
+		}
 		return "none"
 	}
 	observations := make([]string, 0, len(inv.NestedAgents))

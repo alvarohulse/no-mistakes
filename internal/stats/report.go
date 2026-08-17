@@ -3,6 +3,7 @@ package stats
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 1
+const ReportSchemaVersion = 2
 
 type Query struct {
 	RunID    string
@@ -128,10 +129,8 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 	modelFilter := normalizedSet(query.Models)
 	purposeFilter := normalizedSet(query.Purposes)
 	statusFilter := statusSet(query.Statuses)
-	childInvocationFilter := len(agentFilter) > 0 || len(modelFilter) > 0 || len(purposeFilter) > 0
-	childFilter := len(stepFilter) > 0 || childInvocationFilter
-	var selectedInvocations []Invocation
-
+	var audits []*RunAudit
+	rawRunIDs := map[string]bool{}
 	for _, repo := range repos {
 		if len(repoFilter) > 0 && !repoFilter[repo.ID] {
 			continue
@@ -141,50 +140,79 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 			return nil, fmt.Errorf("list runs for repository %s: %w", repo.ID, err)
 		}
 		for _, run := range runs {
-			if query.RunID != "" && run.ID != query.RunID {
-				continue
-			}
-			if query.Since != nil && run.CreatedAt < query.Since.Unix() {
-				continue
-			}
-			if query.Until != nil && run.CreatedAt >= query.Until.Unix() {
-				continue
-			}
-			if len(statusFilter) > 0 && !statusFilter[run.Status] {
-				continue
-			}
 			audit, err := BuildRunAudit(database, run.ID)
 			if err != nil {
 				return nil, err
 			}
-			invocations := filterInvocations(audit.Invocations, stepFilter, agentFilter, modelFilter, purposeFilter)
-			steps := filterSteps(audit.Steps, stepFilter, invocations, childInvocationFilter)
-			if childFilter && ((childInvocationFilter && len(invocations) == 0) || (!childInvocationFilter && len(steps) == 0)) {
-				continue
-			}
-
-			report.Runs.Items = append(report.Runs.Items, audit.Run)
-			report.Runs.ByStatus[audit.Run.Status]++
-			for _, step := range steps {
-				report.Steps = append(report.Steps, ReportStep{RunID: run.ID, Step: step})
-				for _, round := range step.Rounds {
-					if round.Trigger != "auto_fix" && round.Trigger != "user_fix" {
-						continue
-					}
-					report.Repairs = append(report.Repairs, Repair{
-						RunID: run.ID, StepID: step.ID, Step: step.Name, Round: round.Number, Trigger: round.Trigger,
-						SelectionSource: round.SelectionSource, DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
-					})
+			audits = append(audits, audit)
+			rawRunIDs[run.ID] = true
+		}
+	}
+	receiptRecords, err := database.GetRunMetricReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for i := range receiptRecords {
+		if rawRunIDs[receiptRecords[i].RunID] {
+			continue
+		}
+		receipt, err := decodeMetricReceipt(&receiptRecords[i])
+		if err != nil {
+			return nil, err
+		}
+		audits = append(audits, receipt.RunAudit())
+	}
+	sort.Slice(audits, func(i, j int) bool {
+		if audits[i].Run.CreatedAt != audits[j].Run.CreatedAt {
+			return audits[i].Run.CreatedAt > audits[j].Run.CreatedAt
+		}
+		return audits[i].Run.ID > audits[j].Run.ID
+	})
+	childInvocationFilter := len(agentFilter) > 0 || len(modelFilter) > 0 || len(purposeFilter) > 0
+	childFilter := len(stepFilter) > 0 || childInvocationFilter
+	var selectedInvocations []Invocation
+	for _, audit := range audits {
+		if query.RunID != "" && audit.Run.ID != query.RunID {
+			continue
+		}
+		if len(repoFilter) > 0 && !repoFilter[audit.Run.RepoID] {
+			continue
+		}
+		if query.Since != nil && audit.Run.CreatedAt < query.Since.Unix() {
+			continue
+		}
+		if query.Until != nil && audit.Run.CreatedAt >= query.Until.Unix() {
+			continue
+		}
+		if len(statusFilter) > 0 && !statusFilter[audit.Run.Status] {
+			continue
+		}
+		invocations := filterInvocations(audit.Invocations, stepFilter, agentFilter, modelFilter, purposeFilter)
+		steps := filterSteps(audit.Steps, stepFilter, invocations, childInvocationFilter)
+		if childFilter && ((childInvocationFilter && len(invocations) == 0) || (!childInvocationFilter && len(steps) == 0)) {
+			continue
+		}
+		report.Runs.Items = append(report.Runs.Items, audit.Run)
+		report.Runs.ByStatus[audit.Run.Status]++
+		for _, step := range steps {
+			report.Steps = append(report.Steps, ReportStep{RunID: audit.Run.ID, Step: step})
+			for _, round := range step.Rounds {
+				if round.Trigger != "auto_fix" && round.Trigger != "user_fix" {
+					continue
 				}
+				report.Repairs = append(report.Repairs, Repair{
+					RunID: audit.Run.ID, StepID: step.ID, Step: step.Name, Round: round.Number, Trigger: round.Trigger,
+					SelectionSource: round.SelectionSource, DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
+				})
 			}
-			for _, invocation := range invocations {
-				report.Agents = append(report.Agents, ReportAgent{RunID: run.ID, Invocation: invocation})
-				report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: run.ID, InvocationID: invocation.ID, Classes: invocation.Costs})
-				selectedInvocations = append(selectedInvocations, invocation)
-			}
-			for _, integrityError := range audit.IntegrityErrors {
-				report.DataErrors = append(report.DataErrors, DataError{RunID: run.ID, Code: "run_integrity_error", Detail: integrityError})
-			}
+		}
+		for _, invocation := range invocations {
+			report.Agents = append(report.Agents, ReportAgent{RunID: audit.Run.ID, Invocation: invocation})
+			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Classes: invocation.Costs})
+			selectedInvocations = append(selectedInvocations, invocation)
+		}
+		for _, integrityError := range audit.IntegrityErrors {
+			report.DataErrors = append(report.DataErrors, DataError{RunID: audit.Run.ID, Code: "run_integrity_error", Detail: integrityError})
 		}
 	}
 	if query.RunID != "" && len(report.Runs.Items) == 0 {

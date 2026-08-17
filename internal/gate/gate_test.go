@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestMain(m *testing.M) {
@@ -999,6 +1000,66 @@ func TestEjectCleansUpWorktrees(t *testing.T) {
 	repoWtDir := filepath.Join(p.WorktreesDir(), repo.ID)
 	if fileExists(repoWtDir) {
 		t.Error("expected worktree directory to be cleaned up")
+	}
+}
+
+func TestEjectArchivesTerminalRunMetricsBeforeRepoCascade(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d := openTestDB(t, p)
+	repo, _, err := Init(context.Background(), d, p, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature/archive", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Eject(context.Background(), d, p, workDir); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := d.GetRunMetricReceipt(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt == nil {
+		t.Fatal("repository cascade removed terminal run metrics")
+	}
+	if rich, err := d.GetRun(run.ID); err != nil || rich != nil {
+		t.Fatalf("rich run after eject = %+v, %v", rich, err)
+	}
+}
+
+func TestEjectRefusesActiveRunBeforeMutatingGate(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d := openTestDB(t, p)
+	repo, _, err := Init(context.Background(), d, p, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRun(repo.ID, "feature/active", "head", "base"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Eject(context.Background(), d, p, workDir); err == nil || !strings.Contains(err.Error(), "active run") {
+		t.Fatalf("eject with active run error = %v", err)
+	}
+	if registered, err := d.GetRepo(repo.ID); err != nil || registered == nil {
+		t.Fatalf("active-run refusal removed repo: %+v, %v", registered, err)
+	}
+	if _, err := gitpkg.GetRemoteURL(context.Background(), workDir, RemoteName); err != nil {
+		t.Fatalf("active-run refusal removed gate remote: %v", err)
 	}
 }
 

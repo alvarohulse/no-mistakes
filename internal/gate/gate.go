@@ -3,12 +3,15 @@ package gate
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -16,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
 )
 
 var ensureGateHooksPathIsolation = git.EnsureHooksPathIsolation
@@ -306,6 +310,31 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 	if repo == nil {
 		return nil, fmt.Errorf("not initialized for %s", absRoot)
 	}
+	global, err := config.LoadGlobal(p.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config for eject retention: %w", err)
+	}
+	resolved := config.Merge(global, &config.RepoConfig{})
+	evidenceRoot := p.EvidenceRoot(resolved.Test.Evidence.LocalRoot)
+	if err := d.ClaimRepoEject(repo.ID); err != nil {
+		return nil, err
+	}
+	ejectClaimed := true
+	defer func() {
+		if ejectClaimed {
+			if err := d.ReleaseRepoEject(repo.ID); err != nil {
+				slog.Warn("failed to release repository eject claim", "repo_id", repo.ID, "error", err)
+			}
+		}
+	}()
+	if _, err := runstats.ArchiveRepoRuns(d, repo.ID, time.Now(), func(runID string) error {
+		return errors.Join(
+			os.RemoveAll(p.RunLogDir(runID)),
+			os.RemoveAll(filepath.Join(evidenceRoot, runID)),
+		)
+	}); err != nil {
+		return nil, fmt.Errorf("archive run metrics before eject: %w", err)
+	}
 
 	// Remove remote from working repo (non-fatal).
 	_ = git.RemoveRemote(ctx, absRoot, RemoteName)
@@ -322,6 +351,7 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 	if err := d.DeleteRepo(repo.ID); err != nil {
 		return nil, fmt.Errorf("delete repo record: %w", err)
 	}
+	ejectClaimed = false
 
 	slog.Info("gate ejected", "repo_id", repo.ID, "path", absRoot)
 	return repo, nil

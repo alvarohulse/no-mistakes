@@ -3,6 +3,7 @@ package db
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -570,7 +571,76 @@ func (d *DB) AgentInvocationAggregates() ([]AgentInvocationAggregate, error) {
 		}
 		aggregates = append(aggregates, a)
 	}
-	return aggregates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	receipts, err := d.GetRunMetricReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for _, receipt := range receipts {
+		aggregates = append(aggregates, receipt.AgentAggregates...)
+	}
+	return mergeAgentInvocationAggregates(aggregates), nil
+}
+
+func mergeAgentInvocationAggregates(values []AgentInvocationAggregate) []AgentInvocationAggregate {
+	byPurpose := make(map[string][]AgentInvocationAggregate)
+	for _, value := range values {
+		byPurpose[value.Purpose] = append(byPurpose[value.Purpose], value)
+	}
+	result := make([]AgentInvocationAggregate, 0, len(byPurpose))
+	for purpose, groups := range byPurpose {
+		combined := AgentInvocationAggregate{Purpose: purpose}
+		for _, group := range groups {
+			combined.Count += group.Count
+			combined.TotalDurationMS += group.TotalDurationMS
+			combined.Cold += group.Cold
+			combined.Started += group.Started
+			combined.Resumed += group.Resumed
+			combined.Fallback += group.Fallback
+			combined.Errors += group.Errors
+			combined.InputTokens += group.InputTokens
+			combined.OutputTokens += group.OutputTokens
+			combined.CacheReadTokens += group.CacheReadTokens
+			combined.MetricsRows += group.MetricsRows
+		}
+		combined.SubprocessWaitMS = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.SubprocessWaitMS })
+		combined.CacheCreationTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.CacheCreationTokens })
+		combined.FreshInputTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.FreshInputTokens })
+		combined.ReasoningTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ReasoningTokens })
+		combined.ModelRoundtrips = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ModelRoundtrips })
+		combined.ToolCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolCalls })
+		combined.ToolWaitCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolWaitCalls })
+		combined.ToolTestLintCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolTestLintCalls })
+		combined.ToolEditCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolEditCalls })
+		combined.ToolReadCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolReadCalls })
+		combined.ToolGitCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolGitCalls })
+		combined.ToolOtherCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolOtherCalls })
+		if combined.Count > 0 {
+			combined.AvgDurationMS = combined.TotalDurationMS / int64(combined.Count)
+		}
+		result = append(result, combined)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].TotalDurationMS != result[j].TotalDurationMS {
+			return result[i].TotalDurationMS > result[j].TotalDurationMS
+		}
+		return result[i].Purpose < result[j].Purpose
+	})
+	return result
+}
+
+func sumOptionalAggregate(values []AgentInvocationAggregate, field func(AgentInvocationAggregate) *int64) *int64 {
+	total := int64(0)
+	for _, value := range values {
+		item := field(value)
+		if item == nil {
+			return nil
+		}
+		total += *item
+	}
+	return &total
 }
 
 // RunInvocationSummary is the low-cardinality per-run rollup used for the

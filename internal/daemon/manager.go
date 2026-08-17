@@ -835,7 +835,8 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
 		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
 	}
-	reapEvidence(m.db, root, policy, time.Now())
+	reapEvidence(m.db, root)
+	pruneRichRuns(m.db, m.paths, root, policy, time.Now())
 }
 
 // closeSubscribers soft-closes every subscriber for a run and marks the run

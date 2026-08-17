@@ -222,6 +222,56 @@ func (d *DB) UpdateRepoWorkingPath(id, workingPath string) (*Repo, error) {
 	return d.GetRepo(id)
 }
 
+// ClaimRepoEject atomically refuses active runs and blocks new run inserts for
+// one repository until the claim is released or the repository is deleted.
+func (d *DB) ClaimRepoEject(id string) error {
+	result, err := d.sql.Exec(`
+		INSERT INTO repo_eject_claims (repo_id, claimed_at)
+		SELECT ?, ?
+		WHERE EXISTS (SELECT 1 FROM repos WHERE id = ?)
+		  AND NOT EXISTS (SELECT 1 FROM repo_eject_claims WHERE repo_id = ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM runs
+			WHERE repo_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+		  )`, id, now(), id, id, id)
+	if err != nil {
+		return fmt.Errorf("claim repository eject: %w", err)
+	}
+	claimed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read repository eject claim result: %w", err)
+	}
+	if claimed == 1 {
+		return nil
+	}
+	var exists, active, alreadyClaimed int
+	if err := d.sql.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM repos WHERE id = ?),
+		       EXISTS(SELECT 1 FROM runs WHERE repo_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')),
+		       EXISTS(SELECT 1 FROM repo_eject_claims WHERE repo_id = ?)`, id, id, id).Scan(&exists, &active, &alreadyClaimed); err != nil {
+		return fmt.Errorf("inspect repository eject refusal: %w", err)
+	}
+	switch {
+	case exists == 0:
+		return fmt.Errorf("claim repository eject: repository %q not found", id)
+	case active != 0:
+		return fmt.Errorf("claim repository eject: repository %q has an active run", id)
+	case alreadyClaimed != 0:
+		return fmt.Errorf("claim repository eject: repository %q eject already in progress", id)
+	default:
+		return fmt.Errorf("claim repository eject: repository %q could not be claimed", id)
+	}
+}
+
+// ReleaseRepoEject releases a failed or abandoned in-process eject attempt.
+// Successful deletion cascades the claim automatically.
+func (d *DB) ReleaseRepoEject(id string) error {
+	if _, err := d.sql.Exec(`DELETE FROM repo_eject_claims WHERE repo_id = ?`, id); err != nil {
+		return fmt.Errorf("release repository eject: %w", err)
+	}
+	return nil
+}
+
 // DeleteRepo deletes a repo by ID (cascade deletes runs and steps).
 func (d *DB) DeleteRepo(id string) error {
 	_, err := d.sql.Exec(`DELETE FROM repos WHERE id = ?`, id)

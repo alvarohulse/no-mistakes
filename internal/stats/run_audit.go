@@ -14,7 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -38,6 +38,8 @@ type RunIdentity struct {
 	CreatedAt          int64                 `json:"created_at"`
 	UpdatedAt          int64                 `json:"updated_at"`
 	ParkedMS           *int64                `json:"parked_ms"`
+	PinnedAt           *int64                `json:"pinned_at"`
+	RichDataRetained   bool                  `json:"rich_data_retained"`
 	NoMistakesVersion  *string               `json:"no_mistakes_version"`
 	NoMistakesBuildSHA *string               `json:"no_mistakes_build_sha"`
 	PolicyDigest       *string               `json:"policy_digest"`
@@ -83,6 +85,7 @@ type Invocation struct {
 	Agent                string                    `json:"agent"`
 	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
 	NestedAgentsReported bool                      `json:"nested_agents_reported"`
+	NestedAgentCount     *int                      `json:"nested_agent_count"`
 	NestedAgents         []types.AgentObservation  `json:"nested_agents"`
 	Model                *string                   `json:"model"`
 	Provider             *string                   `json:"provider"`
@@ -187,7 +190,18 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 		return nil, fmt.Errorf("get run: %w", err)
 	}
 	if run == nil {
-		return nil, fmt.Errorf("run %q not found", runID)
+		record, err := database.GetRunMetricReceipt(runID)
+		if err != nil {
+			return nil, err
+		}
+		if record == nil {
+			return nil, fmt.Errorf("run %q not found", runID)
+		}
+		receipt, err := decodeMetricReceipt(record)
+		if err != nil {
+			return nil, err
+		}
+		return receipt.RunAudit(), nil
 	}
 	parkedMS, err := database.GetRunParkedMS(runID)
 	if err != nil {
@@ -217,6 +231,7 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 			ID: run.ID, RepoID: run.RepoID, Branch: run.Branch, HeadSHA: run.HeadSHA, BaseSHA: run.BaseSHA,
 			RefreshStrategy: run.RefreshStrategy.OrDefault(), Status: run.Status,
 			CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, ParkedMS: cloneInt64(parkedMS),
+			PinnedAt: cloneInt64(run.PinnedAt), RichDataRetained: true,
 			NoMistakesVersion: cloneString(run.NoMistakesVersion), NoMistakesBuildSHA: cloneString(run.NoMistakesBuildSHA),
 			PolicyDigest: nonEmptyString(run.ResolvedPolicyDigest), ConfigSources: configSources,
 		},
@@ -320,7 +335,7 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
-		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported,
+		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported, NestedAgentCount: cloneInt(row.NestedAgentCount),
 		NestedAgents: append([]types.AgentObservation(nil), row.AgentObservations...),
 		Model:        nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),
 		SessionMode: row.SessionMode, SessionKey: row.SessionKey, FallbackReason: cloneString(row.FallbackReason),

@@ -438,8 +438,9 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	policy := evidenceReapPolicyFor(global)
 	root := evidenceRootFor(p, global)
 	now := time.Now()
-	reapEvidence(d, root, policy, now)
-	reapLegacyEvidence(d, root, policy, now)
+	reapEvidence(d, root)
+	reapLegacyEvidence(d, root)
+	pruneRichRuns(d, p, root, policy, now)
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
