@@ -35,8 +35,8 @@ func TestStatsAgentsReportsLocalPerformanceTelemetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := []db.AgentInvocation{
-		{RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", Model: "gpt-5.2", InvocationMode: types.AgentInvocationModeHarnessCLI, AgentObservationsReported: true, SessionMode: db.InvocationModeStarted, SessionKey: "deadbeef00000000", StartedAt: 1, CompletedAt: 2, DurationMS: 60_000, ExitStatus: "ok", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 40, CacheCreationTokens: statsIntPtr(20)},
-		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeResumed, SessionKey: "deadbeef00000000", StartedAt: 3, CompletedAt: 4, DurationMS: 30_000, ExitStatus: "ok", InputTokens: 50, OutputTokens: 5, CacheReadTokens: 45, CacheCreationTokens: statsIntPtr(25)},
+		{RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", Model: "gpt-5.2", InvocationMode: types.AgentInvocationModeHarnessCLI, AgentObservationsReported: true, SessionMode: db.InvocationModeStarted, SessionKey: "deadbeef00000000", StartedAt: 1, CompletedAt: 2, DurationMS: 60_000, ExitStatus: "ok", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 40, CacheCreationTokens: statsIntPtr(20), DeltaInputTokens: statsIntPtr(100), DeltaOutputTokens: statsIntPtr(10), DeltaCacheReadTokens: statsIntPtr(40), DeltaCacheCreationTokens: statsIntPtr(20)},
+		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeResumed, SessionKey: "deadbeef00000000", StartedAt: 3, CompletedAt: 4, DurationMS: 30_000, ExitStatus: "ok", InputTokens: 50, OutputTokens: 5, CacheReadTokens: 45, CacheCreationTokens: statsIntPtr(25), DeltaInputTokens: statsIntPtr(50), DeltaOutputTokens: statsIntPtr(5), DeltaCacheReadTokens: statsIntPtr(45), DeltaCacheCreationTokens: statsIntPtr(25)},
 		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review-fix", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeStarted, SessionKey: "feedface00000000", StartedAt: 5, CompletedAt: 6, DurationMS: 45_000, ExitStatus: "ok"},
 	}
 	for _, inv := range seed {
@@ -53,7 +53,7 @@ func TestStatsAgentsReportsLocalPerformanceTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stats --agents: %v\n%s", err, out)
 	}
-	for _, want := range []string{"stats report:", "purpose=review", "purpose=review-fix", "session=resumed", "cache_write_tokens=25"} {
+	for _, want := range []string{"PURPOSE", "review", "review-fix", "RESUMED", "CACHE WRITE TOK", "45", "session=resumed", "cache_write_tokens=25"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats --agents missing %q in:\n%s", want, out)
 		}
@@ -126,7 +126,7 @@ func TestStatsRendersPopulatedFidelityMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stats --agents: %v\n%s", err, out)
 	}
-	for _, want := range []string{"roundtrips=24", "test_lint_calls=2", "subprocess_wait_ms=2000"} {
+	for _, want := range []string{"ROUNDTRIPS", "TEST/LINT", "SUBPROC", "24", "METRICS", "1/1", "roundtrips=24", "test_lint_calls=2", "subprocess_wait_ms=2000"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats --agents missing %q in:\n%s", want, out)
 		}
@@ -256,8 +256,8 @@ func TestStatsEveryOutputFormatUsesReportEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(textOutput, "stats report:") || strings.Contains(textOutput, "Total changes") {
-		t.Fatalf("text did not use report summary:\n%s", textOutput)
+	if !strings.Contains(textOutput, "Total changes") || !strings.Contains(textOutput, "git push no-mistakes") {
+		t.Fatalf("text did not render the report dashboard:\n%s", textOutput)
 	}
 
 	jsonOutput, err := executeCmd("stats", "--format", "json")

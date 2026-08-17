@@ -275,6 +275,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 			ID: stored.ID, Name: stored.Name, Order: stored.Order, Status: stored.Status, SkipSource: cloneSkipSource(stored.SkipSource),
 			ExitCode: cloneInt(stored.ExitCode), DurationMS: cloneInt64(stored.DurationMS), StartedAt: cloneInt64(stored.StartedAt), CompletedAt: cloneInt64(stored.CompletedAt),
 			Commands: cloneCommandReceipts(stored.Commands), Rounds: cloneRounds(stored.Rounds),
+			ReportedFindings: stored.ReportedFindings, FixedFindings: stored.FixedFindings,
 		}
 		audit.Steps = append(audit.Steps, step)
 		if step.SkipSource != nil {

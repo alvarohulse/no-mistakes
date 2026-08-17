@@ -11,7 +11,7 @@ import (
 	"github.com/muesli/termenv"
 )
 
-func TestStatsCommandRendersSharedReportSummary(t *testing.T) {
+func TestStatsCommandRendersAllRepoDashboardFromSharedReport(t *testing.T) {
 	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	p := paths.WithRoot(nmHome)
@@ -26,6 +26,7 @@ func TestStatsCommandRendersSharedReportSummary(t *testing.T) {
 
 	repoA, _ := database.InsertRepo("/work/alpha", "git@example.com:alpha.git", "main")
 	repoB, _ := database.InsertRepo("/work/beta", "git@example.com:beta.git", "main")
+	_, _ = database.InsertRepo("/work/gamma", "git@example.com:gamma.git", "main")
 
 	runA, _ := database.InsertRun(repoA.ID, "feature-a", "head-a", "base-a")
 	reviewA, _ := database.InsertStepResult(runA.ID, types.StepReview)
@@ -50,19 +51,34 @@ func TestStatsCommandRendersSharedReportSummary(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"stats report: 2 run(s), 3 step(s), 2 repair(s), 0 agent invocation(s)",
-		"runs by status: pending=2",
-		"cost total/harness_reported",
+		"╭─ git push no-mistakes",
+		"Total changes",
+		"across 3 repos",
+		"Rescued changes",
+		"Rescue rate",
+		"50%",
+		"Mistakes",
+		"Reported",
+		"Fixed",
+		"Fixes by step",
+		"review",
+		"lint",
+		"Top repos",
+		"alpha",
+		"3 fixes",
 		"data errors: 2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats output missing %q:\n%s", want, out)
 		}
 	}
-	for _, notWant := range []string{"Total changes", "Rescue rate", "Fixes by step", "Top repos", "╭─ git push no-mistakes"} {
+	for _, notWant := range []string{"stats report:", "Saved", "Rescue runs", "Mistakes fixed", "auto-fix", "caught in review"} {
 		if strings.Contains(out, notWant) {
 			t.Fatalf("stats output should not contain %q:\n%s", notWant, out)
 		}
+	}
+	if strings.Contains(out, "gamma") {
+		t.Fatalf("zero-run repository should count toward total without appearing in top repos:\n%s", out)
 	}
 }
 

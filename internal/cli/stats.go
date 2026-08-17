@@ -104,17 +104,23 @@ func newStatsCmd() *cobra.Command {
 					}
 					fmt.Fprint(cmd.OutOrStdout(), encoded)
 				default:
-					if agents {
+					if agents || report.Scope.RunID != "" {
 						fmt.Fprint(cmd.OutOrStdout(), runstats.RenderDetailedText(report))
 					} else {
-						fmt.Fprint(cmd.OutOrStdout(), runstats.RenderText(report))
+						fmt.Fprintln(cmd.OutOrStdout(), renderStatsDashboard(reportDashboardStats(report.Dashboard)))
+						if reportScopeIsUnfiltered(report.Scope) && len(report.DataErrors) > 0 {
+							fmt.Fprintf(cmd.OutOrStdout(), "data errors: %d (use --format json or csv for complete details)\n", len(report.DataErrors))
+						} else if !reportScopeIsUnfiltered(report.Scope) {
+							fmt.Fprintln(cmd.OutOrStdout())
+							fmt.Fprint(cmd.OutOrStdout(), runstats.RenderText(report))
+						}
 					}
 				}
 				return nil
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&agents, "agents", false, "compatibility alias; stats reports always include agent invocation facts")
+	cmd.Flags().BoolVar(&agents, "agents", false, "show per-purpose agent aggregates followed by invocation details")
 	cmd.Flags().StringVar(&runID, "run", "", "show one run's steps, agent receipts, and parked time (implies --agents)")
 	cmd.Flags().StringArrayVar(&repoSelectors, "repo", nil, "select an exact repository ID or registered path (repeatable)")
 	cmd.Flags().BoolVar(&currentRepo, "current-repo", false, "select the registered repository containing the current directory")
@@ -127,6 +133,29 @@ func newStatsCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&statusValues, "status", nil, "select a run status (repeatable)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json, or csv")
 	return cmd
+}
+
+func reportScopeIsUnfiltered(scope runstats.ReportScope) bool {
+	return scope.RunID == "" && len(scope.RepoIDs) == 0 && scope.Since == nil && scope.Until == nil && len(scope.Steps) == 0 &&
+		len(scope.Agents) == 0 && len(scope.Models) == 0 && len(scope.Purposes) == 0 && len(scope.Statuses) == 0
+}
+
+func reportDashboardStats(dashboard runstats.Dashboard) *db.Stats {
+	result := &db.Stats{
+		TotalRepos: dashboard.TotalRepos, TotalRuns: dashboard.TotalRuns, RescueRuns: dashboard.RescueRuns,
+		ReportedFindings: dashboard.ReportedFindings, FixedFindings: dashboard.FixedFindings,
+		StepStats: []db.StepStats{}, RepoStats: []db.RepoStats{},
+	}
+	for _, step := range dashboard.Steps {
+		result.StepStats = append(result.StepStats, db.StepStats{StepName: step.Step, ReportedFindings: step.ReportedFindings, FixedFindings: step.FixedFindings})
+	}
+	for _, repo := range dashboard.Repositories {
+		result.RepoStats = append(result.RepoStats, db.RepoStats{
+			RepoID: repo.RepoID, WorkingPath: repo.DisplayName, Runs: repo.Runs, RescueRuns: repo.RescueRuns,
+			ReportedFindings: repo.ReportedFindings, FixedFindings: repo.FixedFindings,
+		})
+	}
+	return result
 }
 
 func resolveStatsRepoIDs(database *db.DB, selectors []string, current bool) ([]string, error) {

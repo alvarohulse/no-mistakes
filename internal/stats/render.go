@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pricing"
 )
@@ -47,7 +49,63 @@ func RenderText(report *Report) string {
 // RenderDetailedText keeps the legacy --agents intent while using the same
 // Report envelope as every other format.
 func RenderDetailedText(report *Report) string {
-	return renderText(report, true)
+	if report == nil {
+		return ""
+	}
+	var out strings.Builder
+	renderAgentAggregateText(&out, report.AgentAggregates)
+	if len(report.AgentAggregates) == 0 {
+		out.WriteString("no agent invocations recorded yet\n")
+	}
+	out.WriteByte('\n')
+	out.WriteString(renderText(report, true))
+	return out.String()
+}
+
+func renderAgentAggregateText(out *strings.Builder, aggregates []AgentAggregate) {
+	if len(aggregates) == 0 {
+		return
+	}
+	table := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PURPOSE\tCOUNT\tAVG\tTOTAL\tCOLD\tSTARTED\tRESUMED\tFALLBACK\tERRORS\tIN TOK\tOUT TOK\tCACHE READ TOK\tCACHE WRITE TOK\tFRESH IN TOK\tREASON TOK")
+	for _, aggregate := range aggregates {
+		fmt.Fprintf(table, "%s\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			aggregate.Purpose, aggregate.Count, aggregateDuration(aggregate.AvgDurationMS), aggregateDuration(aggregate.TotalDurationMS),
+			aggregate.Cold, aggregate.Started, aggregate.Resumed, aggregate.Fallback, aggregate.Errors,
+			aggregateInt64(aggregate.InputTokens), aggregateInt64(aggregate.OutputTokens), aggregateInt64(aggregate.CacheReadTokens),
+			aggregateInt64(aggregate.CacheWriteTokens), aggregateInt64(aggregate.FreshInputTokens), aggregateInt64(aggregate.ReasoningTokens))
+	}
+	_ = table.Flush()
+
+	out.WriteByte('\n')
+	table = tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "PURPOSE\tMETRICS\tSUBPROC\tROUNDTRIPS\tTOOLS\tWAIT\tTEST/LINT\tEDIT\tREAD\tGIT\tOTHER")
+	for _, aggregate := range aggregates {
+		fmt.Fprintf(table, "%s\t%d/%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			aggregate.Purpose, aggregate.MetricsRows, aggregate.Count, aggregateDurationPointer(aggregate.SubprocessWaitMS),
+			aggregateInt64(aggregate.ModelRoundtrips), aggregateInt64(aggregate.ToolCalls), aggregateInt64(aggregate.ToolWaitCalls),
+			aggregateInt64(aggregate.ToolTestLintCalls), aggregateInt64(aggregate.ToolEditCalls), aggregateInt64(aggregate.ToolReadCalls),
+			aggregateInt64(aggregate.ToolGitCalls), aggregateInt64(aggregate.ToolOtherCalls))
+	}
+	_ = table.Flush()
+}
+
+func aggregateDuration(milliseconds int64) string {
+	return time.Duration(milliseconds * int64(time.Millisecond)).Round(100 * time.Millisecond).String()
+}
+
+func aggregateDurationPointer(milliseconds *int64) string {
+	if milliseconds == nil {
+		return "-"
+	}
+	return aggregateDuration(*milliseconds)
+}
+
+func aggregateInt64(value *int64) string {
+	if value == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*value, 10)
 }
 
 func renderText(report *Report, forceDetails bool) string {
@@ -343,7 +401,71 @@ func appendReportFact(report *Report, repoByRun map[string]string, path []string
 	fact.Unit = factUnit(path)
 	applyCostMetadata(report, path, &fact)
 	applyMetricMetadata(report, path, &fact)
+	applyAgentAggregateMetadata(report, path, &fact)
 	*facts = append(*facts, fact)
+}
+
+func applyAgentAggregateMetadata(report *Report, path []string, fact *reportFact) {
+	if len(path) != 3 || path[0] != "agent_aggregates" {
+		return
+	}
+	index, ok := pathIndex(path, 1, len(report.AgentAggregates))
+	if !ok {
+		return
+	}
+	coverage, basis, ok := agentAggregateMetricCoverage(report.AgentAggregates[index].Coverage, path[2])
+	if !ok {
+		return
+	}
+	fact.Reported = coverage.Reported
+	fact.Eligible = coverage.Total
+	fact.Complete = fact.Present && coverage.Reported == coverage.Total
+	fact.Basis = basis
+	switch {
+	case fact.Complete:
+		fact.Reason = ""
+	case coverage.Reported == 0:
+		fact.Reason = "not_reported"
+	default:
+		fact.Reason = "partial_coverage"
+	}
+}
+
+func agentAggregateMetricCoverage(coverage AgentAggregateCoverage, name string) (Coverage, string, bool) {
+	switch name {
+	case "input_tokens":
+		return coverage.InputTokens, "selected_invocation_delta_meters", true
+	case "output_tokens":
+		return coverage.OutputTokens, "selected_invocation_delta_meters", true
+	case "cache_read_tokens":
+		return coverage.CacheReadTokens, "selected_invocation_delta_meters", true
+	case "cache_write_tokens":
+		return coverage.CacheWriteTokens, "selected_invocation_delta_meters", true
+	case "fresh_input_tokens":
+		return coverage.FreshInputTokens, "selected_invocation_canonical_delta_meters", true
+	case "reasoning_tokens":
+		return coverage.ReasoningTokens, "selected_invocation_raw_meters", true
+	case "subprocess_wait_ms":
+		return coverage.SubprocessWaitMS, "selected_invocation_activity_meters", true
+	case "model_roundtrips":
+		return coverage.ModelRoundtrips, "selected_invocation_activity_meters", true
+	case "tool_calls":
+		return coverage.ToolCalls, "selected_invocation_activity_meters", true
+	case "tool_wait_calls":
+		return coverage.ToolWaitCalls, "selected_invocation_activity_meters", true
+	case "tool_test_lint_calls":
+		return coverage.ToolTestLintCalls, "selected_invocation_activity_meters", true
+	case "tool_edit_calls":
+		return coverage.ToolEditCalls, "selected_invocation_activity_meters", true
+	case "tool_read_calls":
+		return coverage.ToolReadCalls, "selected_invocation_activity_meters", true
+	case "tool_git_calls":
+		return coverage.ToolGitCalls, "selected_invocation_activity_meters", true
+	case "tool_other_calls":
+		return coverage.ToolOtherCalls, "selected_invocation_activity_meters", true
+	default:
+		return Coverage{}, "", false
+	}
 }
 
 func factContext(report *Report, repoByRun map[string]string, path []string) reportFact {
@@ -425,6 +547,29 @@ func factContext(report *Report, repoByRun map[string]string, path []string) rep
 				root = 3
 			}
 			fact.Metric = relativeMetric(path, root)
+		}
+	case "agent_aggregates":
+		if index, ok := pathIndex(path, 1, len(report.AgentAggregates)); ok {
+			record := report.AgentAggregates[index]
+			fact.RecordType, fact.EntityID, fact.Group = "agent_aggregate", record.Purpose, record.Purpose
+			fact.Metric = relativeMetric(path, 2)
+		}
+	case "dashboard":
+		fact.RecordType, fact.EntityID, fact.Group = "dashboard", "total", "aggregate"
+		fact.Metric = relativeMetric(path, 1)
+		if len(path) >= 3 && path[1] == "steps" {
+			if index, ok := pathIndex(path, 2, len(report.Dashboard.Steps)); ok {
+				record := report.Dashboard.Steps[index]
+				fact.RecordType, fact.EntityID, fact.Group = "dashboard_step", string(record.Step), string(record.Step)
+				fact.Metric = relativeMetric(path, 3)
+			}
+		} else if len(path) >= 3 && path[1] == "repositories" {
+			if index, ok := pathIndex(path, 2, len(report.Dashboard.Repositories)); ok {
+				record := report.Dashboard.Repositories[index]
+				fact.RepoID = record.RepoID
+				fact.RecordType, fact.EntityID, fact.Group = "dashboard_repository", record.RepoID, "repository"
+				fact.Metric = relativeMetric(path, 3)
+			}
 		}
 	case "costs":
 		fact.RecordType, fact.Group = "cost", "aggregate"

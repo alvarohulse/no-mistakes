@@ -46,6 +46,90 @@ func TestTextJSONAndCSVProjectTheSameSelectedFacts(t *testing.T) {
 	assertCSVLeafParity(t, jsonOutput, rows)
 }
 
+func TestDetailedTextRendersPerPurposeAggregateTablesBeforeInvocationDetail(t *testing.T) {
+	input, cacheWrite, roundtrips := int64(150), int64(45), int64(2)
+	report := &Report{
+		Runs: ReportRuns{ByStatus: map[types.RunStatus]int{}, Items: []RunIdentity{}},
+		AgentAggregates: []AgentAggregate{{
+			Purpose: "review", Count: 2, TotalDurationMS: 90_000, AvgDurationMS: 45_000,
+			Started: 1, Resumed: 1, InputTokens: &input, CacheWriteTokens: &cacheWrite,
+			ModelRoundtrips: &roundtrips, MetricsRows: 2,
+		}},
+		Agents: []ReportAgent{{RunID: "run-1", Invocation: Invocation{ID: "inv-1", Step: types.StepReview, Purpose: "review", Agent: "codex", ExitStatus: "ok"}}},
+	}
+
+	output := RenderDetailedText(report)
+	for _, want := range []string{"PURPOSE", "COUNT", "CACHE WRITE TOK", "review", "45", "METRICS", "2/2", "ROUNDTRIPS", "agent run-1/inv-1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("detailed text omitted %q:\n%s", want, output)
+		}
+	}
+	if strings.Index(output, "PURPOSE") > strings.Index(output, "agent run-1/inv-1") {
+		t.Fatalf("aggregate tables should precede invocation detail:\n%s", output)
+	}
+}
+
+func TestDetailedTextKeepsLegacyEmptyAgentMessage(t *testing.T) {
+	output := RenderDetailedText(&Report{Runs: ReportRuns{ByStatus: map[types.RunStatus]int{}, Items: []RunIdentity{}}, AgentAggregates: []AgentAggregate{}})
+	if !strings.Contains(output, "no agent invocations recorded yet") {
+		t.Fatalf("detailed empty state omitted compatibility message:\n%s", output)
+	}
+}
+
+func TestCSVDescribesPartialAgentAggregateCoverage(t *testing.T) {
+	database, run := newAuditRun(t)
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	knownInput := 10
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex",
+		SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok",
+		InputTokens: knownInput, DeltaInputTokens: &knownInput,
+	})
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: string(types.StepReview), Round: 2, Purpose: "review", Agent: "codex",
+		SessionMode: db.InvocationModeResumed, StartedAt: 3, CompletedAt: 4, DurationMS: 100, ExitStatus: "ok",
+	})
+	report, err := BuildReport(database, Query{}, time.Unix(run.CreatedAt+1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	csvOutput, err := RenderCSV(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(csvOutput)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCoverage, foundFreshBasis, foundAggregate, foundStep, foundRepo := false, false, false, false, false
+	for _, row := range rows[1:] {
+		switch row[15] {
+		case "/agent_aggregates/0/input_tokens":
+			if row[8] != "" || row[10] != "1" || row[11] != "2" || row[12] != "false" || row[13] != "selected_invocation_delta_meters" || row[14] != "partial_coverage" {
+				t.Fatalf("partial aggregate CSV fact = %v", row)
+			}
+			foundCoverage = true
+		case "/agent_aggregates/0/fresh_input_tokens":
+			foundFreshBasis = row[13] == "selected_invocation_canonical_delta_meters"
+		case "/agent_aggregates/0/purpose":
+			foundAggregate = row[3] == "agent_aggregate" && row[4] == "review" && row[6] == "review"
+		case "/dashboard/steps/0/step":
+			foundStep = row[3] == "dashboard_step" && row[4] == string(types.StepReview)
+		case "/dashboard/repositories/0/repo_id":
+			foundRepo = row[1] == run.RepoID && row[3] == "dashboard_repository" && row[4] == run.RepoID
+		}
+	}
+	if !foundCoverage || !foundFreshBasis || !foundAggregate || !foundStep || !foundRepo {
+		t.Fatalf("CSV contexts = coverage:%t fresh_basis:%t aggregate:%t step:%t repo:%t\n%s", foundCoverage, foundFreshBasis, foundAggregate, foundStep, foundRepo, csvOutput)
+	}
+}
+
 func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
 	database, run := newAuditRun(t)
 	step, err := database.InsertStepResult(run.ID, types.StepBuild)

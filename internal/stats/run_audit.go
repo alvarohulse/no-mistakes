@@ -53,17 +53,19 @@ type ConfigDigest struct {
 }
 
 type Step struct {
-	ID          string            `json:"id"`
-	Name        types.StepName    `json:"name"`
-	Order       int               `json:"order"`
-	Status      types.StepStatus  `json:"status"`
-	SkipSource  *types.SkipSource `json:"skip_source"`
-	ExitCode    *int              `json:"exit_code"`
-	DurationMS  *int64            `json:"duration_ms"`
-	StartedAt   *int64            `json:"started_at"`
-	CompletedAt *int64            `json:"completed_at"`
-	Commands    []CommandReceipt  `json:"commands"`
-	Rounds      []Round           `json:"rounds"`
+	ID               string            `json:"id"`
+	Name             types.StepName    `json:"name"`
+	Order            int               `json:"order"`
+	Status           types.StepStatus  `json:"status"`
+	SkipSource       *types.SkipSource `json:"skip_source"`
+	ExitCode         *int              `json:"exit_code"`
+	DurationMS       *int64            `json:"duration_ms"`
+	StartedAt        *int64            `json:"started_at"`
+	CompletedAt      *int64            `json:"completed_at"`
+	Commands         []CommandReceipt  `json:"commands"`
+	Rounds           []Round           `json:"rounds"`
+	ReportedFindings int               `json:"reported_findings"`
+	FixedFindings    int               `json:"fixed_findings"`
 }
 
 // CommandReceipt is the content-free audit record for one pipeline-owned
@@ -328,6 +330,13 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 			RepairFailureFingerprint: cloneString(round.RepairFailureFingerprint), RepairResult: cloneString(round.RepairResult),
 			DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
 		})
+	}
+	findingStats, err := database.StepFindingStats(row)
+	if err != nil {
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s finding stats could not be read: %v", row.StepName, err))
+	} else {
+		result.ReportedFindings = findingStats.ReportedFindings
+		result.FixedFindings = findingStats.FixedFindings
 	}
 	if row.SkipSource != nil {
 		source := types.SkipSource(*row.SkipSource)
