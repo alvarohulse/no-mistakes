@@ -50,7 +50,7 @@ func TestCIStep_CommitAndPush(t *testing.T) {
 	}
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestCIStep_CommitAndPushTargetsForkWhenConfigured(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestCIStep_CommitAndPushRedactsForkURLInGitErrors(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err == nil {
 		t.Fatal("expected push error")
 	}
@@ -179,7 +179,7 @@ func TestCIStep_CommitAndPush_NoChanges(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestCIStep_CommitAndPush_StatusError(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err == nil {
 		t.Fatal("expected status error")
 	}
@@ -285,7 +285,7 @@ func TestCIStep_CommitAndPush_UsesStepEnvForAllGitCommands(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func TestCIStep_CommitAndPush_GitCommandsUseStandardCredentialEnv(t *testing.T) 
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestCIStep_CommitAndPush_NoChanges_ReconcilesStaleDatabaseHeadSHA(t *testin
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestCIStep_CommitAndPush_NoChanges_ReconcilesStaleDatabaseHeadSHA_UsesStepE
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +520,7 @@ func TestCIStep_CommitAndPush_NoDirtyChangesButHeadAdvanced_PushesNewHead(t *tes
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +576,7 @@ func TestCIStep_CommitAndPush_UpdatesLocalBranchRefAfterDetachedPush(t *testing.
 	sctx.Run.Branch = "refs/heads/feature"
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "repair failing checks")
 	if err != nil {
 		t.Fatal(err)
 	}

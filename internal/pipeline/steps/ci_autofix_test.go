@@ -24,6 +24,10 @@ type recoveredCIEnvStep struct {
 	env   []string
 }
 
+func ciRepairResult() *agent.Result {
+	return &agent.Result{Output: json.RawMessage(`{"summary":"repair failing checks"}`)}
+}
+
 func (s *recoveredCIEnvStep) Name() types.StepName { return types.StepCI }
 
 func (s *recoveredCIEnvStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -64,9 +68,16 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			agentCalled = true
+			if len(opts.JSONSchema) == 0 {
+				t.Fatal("CI repair agent did not receive the commit summary schema")
+			}
 			// Agent "fixes" CI by creating a file
 			os.WriteFile(filepath.Join(opts.CWD, "ci-fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Provider: "cursor", Model: "gpt-5.6-terra-medium"}, nil
+			return &agent.Result{
+				Output:   json.RawMessage(`{"summary":"fix Windows path handling"}`),
+				Provider: "cursor",
+				Model:    "gpt-5.6-terra-medium",
+			}, nil
 		},
 	}
 
@@ -121,7 +132,7 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 		t.Errorf("expected issue detection in logs, got: %v", logs)
 	}
 	body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
-	if !strings.HasPrefix(body, "fix(ci): apply CI fixes\n") {
+	if !strings.HasPrefix(body, "fix(ci): fix Windows path handling\n") {
 		t.Fatalf("CI fix commit body starts with %q", body)
 	}
 	if !strings.Contains(body, "Co-authored-by: cursoragent <cursoragent@cursor.com>") {
@@ -245,7 +256,7 @@ func TestCIStep_CIAutoFixLimitExhausted(t *testing.T) {
 			fixCount++
 			// Agent "fixes" but the check will keep failing (same checksJSON)
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -315,7 +326,7 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("restart-fix-%d.txt", fixCount)), []byte("fixed"), 0o644); err != nil {
 				return nil, err
 			}
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -384,7 +395,7 @@ func TestCIStep_RecoveredLegacyBudgetAllowsOnlyExplicitUserFix(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.CWD, "legacy-user-fix.txt"), []byte("fixed"), 0o644); err != nil {
 				return nil, err
 			}
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -518,7 +529,7 @@ func TestCIStep_CIAutoFixStopsOnRepeatedFailureAfterChecksRerun(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -610,7 +621,7 @@ func TestCIStep_CIAutoFixStopsRepeatedFailureWhenGitHubClockLagsLocalClock(t *te
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -694,7 +705,7 @@ func TestCIStep_CIAutoFixStopsRepeatedFailureWhenFastChecksSkipPendingObservatio
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -792,7 +803,7 @@ func TestCIStep_CIAutoFixStopsRepeatedFailureWhenSomeChecksStayFailing(t *testin
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -876,7 +887,7 @@ func TestCIStep_DoesNotRetryOnUnrelatedPendingCheck(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -966,7 +977,7 @@ func TestCIStep_StopsRepeatedMergeConflictAfterRerun(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("conflict-fix-%d.txt", fixCount)), []byte("resolved"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -1131,7 +1142,7 @@ func TestCIStep_AutoFixNoChangesStopsImmediately(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			// Agent "investigates" but produces NO changes
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -1227,7 +1238,7 @@ func TestCIStep_FixMode_NoChanges_CountsAsAttempt(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			// Agent produces NO changes
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -1323,7 +1334,7 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
 			os.WriteFile(filepath.Join(opts.CWD, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 

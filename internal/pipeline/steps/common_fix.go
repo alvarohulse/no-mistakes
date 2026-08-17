@@ -141,11 +141,10 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if summary == "" {
 		summary = "apply fixes"
 	}
-	commitMessage, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	commitMessage, err := attributedAgentFixCommitMessage(sctx, stepName, summary, result)
 	if err != nil {
-		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
+		return err
 	}
-	commitMessage = attributedFixCommitMessage(commitMessage, fixCommitAttribution(sctx.Agent, result))
 	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 		return fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
@@ -200,6 +199,14 @@ func fixCommitAttribution(author agent.Agent, result *agent.Result) fixAttributi
 		model = unknownFixModel
 	}
 	return fixAttribution{Harness: strings.ToLower(harness), Model: model}
+}
+
+func attributedAgentFixCommitMessage(sctx *pipeline.StepContext, stepName types.StepName, summary string, result *agent.Result) (string, error) {
+	subject, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	if err != nil {
+		return "", fmt.Errorf("render %s fix commit message: %w", stepName, err)
+	}
+	return attributedFixCommitMessage(subject, fixCommitAttribution(sctx.Agent, result)), nil
 }
 
 func attributedFixCommitMessage(subject string, attribution fixAttribution) string {

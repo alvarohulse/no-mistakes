@@ -475,7 +475,7 @@ The per-repo [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_
 
 ### commit.fix_message
 
-Template for the subject of commits created by the shared Review, Build, Test, Document, and Lint fix path.
+Template for the subject of commits created by the shared Review, Build, Test, Document, Lint, and CI fix path.
 
 | | |
 | --- | --- |
@@ -486,7 +486,7 @@ The template supports literal text and two Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `build`, `test`, `document`, or `lint` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `build`, `test`, `document`, `lint`, or `ci` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
@@ -499,7 +499,7 @@ Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text sh
 
 The commit body records the actual authoring harness when it has a defined identity (`claude`, `codex`, or `cursor`) and always records `No-Mistakes-Model`. The adapter-observed model wins; the configured model is the fallback, and unavailable or unsafe metadata is recorded as `unknown`.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Refresh, CI, or Push steps.
+The setting does not change commit subjects created by the Refresh or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### intent

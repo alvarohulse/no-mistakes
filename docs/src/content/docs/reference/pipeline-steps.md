@@ -19,7 +19,7 @@ The read-only command-planning pass that an unconfigured Build, Test, or Lint st
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When configured Build, Test, or Lint command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
 That complete-output guarantee applies to pipeline steps. Trusted preflight runs before a run row and step log exist, so a refusal exposes only the bounded, redacted diagnostic documented in the repo-config reference.
-Commits created by the shared Review, Build, Test, Document, and Lint fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
+Commits created by the shared Review, Build, Test, Document, Lint, and CI fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
 Agent roles that can write, repair, or review tests reject tests whose only evidence is matching implementation source text, tokens, syntax, or incidental snapshots.
 They instead require an executable interface or a typed or normalized semantic model that proves observable behavior.
 Reading a file remains valid when that file is itself an owned output or data contract, and deterministic tests may inspect the final emitted agent prompt as a generated interface; model interpretation is reserved for development-only evaluation.
@@ -184,8 +184,9 @@ Runs linters and static analysis.
 Pushes the validated branch to the configured push target.
 
 **Behavior:**
-- If `commands.format` is set, resolves its platform command and runner, then runs it first
-- Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
+- Refuses uncommitted changes that reached Push without agent authorship metadata
+- If `commands.format` is set, resolves its platform command and runner, then runs it
+- Commits formatter-owned changes as `chore(format): apply configured formatting` without agent attribution
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable

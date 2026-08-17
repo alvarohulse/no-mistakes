@@ -94,7 +94,7 @@ Yolo and AXI `--yes` approve that fix review automatically after their one fix r
 
 ## Fix commits
 
-When the Review, Build, Test, Document, or Lint step commits auto-fix changes, its subject comes from `commit.fix_message`.
+When the Review, Build, Test, Document, Lint, or CI step commits auto-fix changes, its subject comes from `commit.fix_message`.
 The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
 The pipeline validates the template, agent summary, predicted output size, and final rendered subject before `git add -A`, so a rejected value does not leave changes staged.
 Document fixes use the Document value for `{{.Step}}`; lint fixes use the Lint value whether their command was configured or planned.
@@ -102,9 +102,9 @@ Document fixes use the Document value for `{{.Step}}`; lint fixes use the Lint v
 Before a step-specific fix commit, the pipeline verifies that the live worktree HEAD still descends from the head recorded after its previous commit.
 It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
-The template does not control commits created by the Refresh, CI, or Push steps.
-CI repair commits use `fix(ci): apply CI fixes`; the Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
-Step and CI repair commits add a co-author trailer only for the harness that actually authored the change and record the observed or configured model in `No-Mistakes-Model` metadata.
+The template does not control commits created by the Refresh or Push steps.
+Every agent repair commit uses the bounded summary returned by its authoring invocation, adds a co-author trailer only for the harness that actually authored the change, and records the observed or configured model in `No-Mistakes-Model` metadata.
+Push refuses unexplained uncommitted changes instead of assigning them to its routed agent. When `commands.format` changes files, Push records those formatter-owned changes separately as `chore(format): apply configured formatting` without agent attribution.
 
 ## Step rounds
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -83,6 +84,13 @@ func TestPushFormatUsesStructuredRunnerCommand(t *testing.T) {
 	assertPlatformRunnerMarker(t, marker)
 	if !fileAtRef(t, upstream, "refs/heads/feature", filepath.Base(marker)) {
 		t.Fatal("formatted file was not committed and pushed")
+	}
+	body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
+	if body != "chore(format): apply configured formatting" {
+		t.Fatalf("formatter commit body = %q", body)
+	}
+	if strings.Contains(body, "Co-authored-by:") || strings.Contains(body, "No-Mistakes-Model:") {
+		t.Fatalf("formatter commit falsely carries agent attribution: %q", body)
 	}
 	assertFirstCommandRunnerReceipt(t, sctx, stepResult.ID, wantSource)
 }
