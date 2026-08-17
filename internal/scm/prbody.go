@@ -6,6 +6,11 @@ import "strings"
 // so a shortened description is visibly marked rather than ending mid-text.
 const prBodyTruncationMarker = "\n\n…(description truncated)"
 
+// MaxPRBodyBytes is the provider-independent publication ceiling. It leaves a
+// safety buffer below GitHub's 65,536-character limit and also bounds providers
+// with larger or unspecified limits.
+const MaxPRBodyBytes = 65536 - 2048
+
 // PRBodyLen reports the length of s the way Azure DevOps (a .NET service)
 // measures a PR description: in UTF-16 code units, so a non-BMP rune (an emoji,
 // some CJK) counts as two. It is the strictest common denominator across

@@ -85,7 +85,7 @@ func TestContractV4SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T
 	if contract.Sections.ReviewEvidence == nil || contract.Sections.ReviewEvidence.Findings.Total != 1 || len(contract.Sections.ReviewEvidence.Evidence) != 1 {
 		t.Fatalf("review_evidence = %+v", contract.Sections.ReviewEvidence)
 	}
-	if len(contract.Sections.UserTesting.Instructions) != 1 || contract.Sections.UserTesting.Attested {
+	if contract.Sections.UserTesting == nil || len(contract.Sections.UserTesting.Instructions) != 1 || contract.Sections.UserTesting.Attested {
 		t.Fatalf("user_testing = %+v", contract.Sections.UserTesting)
 	}
 }
@@ -97,12 +97,12 @@ func TestContractV4UserTestingCompletionRequiresExplicitAttestation(t *testing.T
 		UserTestingInstructions: []string{"Exercise the checkout flow."},
 		UserTestingAttested:     true,
 	})
-	if !contract.Sections.UserTesting.Attested {
+	if contract.Sections.UserTesting == nil || !contract.Sections.UserTesting.Attested {
 		t.Fatal("explicit user-testing attestation was not retained")
 	}
 
 	withoutAttestation := BuildContract(ContractInput{UserTestingInstructions: []string{"Exercise the checkout flow."}})
-	if withoutAttestation.Sections.UserTesting.Attested {
+	if withoutAttestation.Sections.UserTesting == nil || withoutAttestation.Sections.UserTesting.Attested {
 		t.Fatal("instructions alone were presented as completed user testing")
 	}
 }

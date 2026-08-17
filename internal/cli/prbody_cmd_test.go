@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/prbody"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 // prBodyRepo is a git repo whose default branch is main, registered in an
@@ -138,6 +140,15 @@ func TestPRBodyRunsTheHookOverride(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "--hook") {
 		t.Fatalf("stderr = %q, want the formatter source reported", errOut)
+	}
+}
+
+func TestPRBodyEnforcesThePublicationByteLimit(t *testing.T) {
+	setupPRBodyRepo(t)
+
+	_, _, err := runPRBody(t, "", "--sample", "--hook", patchHook(strings.Repeat("x", scm.MaxPRBodyBytes)))
+	if !errors.Is(err, prbody.ErrOversize) {
+		t.Fatalf("err = %v, want ErrOversize", err)
 	}
 }
 

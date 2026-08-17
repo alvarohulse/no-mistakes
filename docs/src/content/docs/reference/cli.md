@@ -111,8 +111,8 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
-`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. The body is written only when the PR step creates the pull request, so a note supplied for a branch that already has an open PR is neither published to it nor given to the PR-summary agent; that run only retargets the existing PR's base.
-`--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in contract v3 and later for PR formatters. Treat it as non-secret input.
+`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. For an existing PR, the note can update only a matching valid owned section; unowned content remains byte-preserved.
+`--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in contract v4 for PR formatters. Treat it as non-secret input.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -336,7 +336,7 @@ records the transcript source. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome, or after you have committed a separate fix outside
 an active run; do not use it to bypass a gate.
-When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Existing PRs are adopted without replacing their title or body.
+When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Retargeting remains base-only; body updates independently replace only verified owned sections.
 
 ## no-mistakes sync
 
@@ -457,9 +457,9 @@ no-mistakes pr-body [--sample [--sample-version <2|3|4>] | --run <id> | --contra
 | `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
 | `--hook`           | `string` | Configured | Formatter command, overriding `hooks.pr_body` for this run       |
 
-This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
+This never creates or updates a pull request. It renders the formatter's section patches as a fresh marked body; publication is the `pr` step's job. Keeping them separate makes formatter output testable without hosted side effects.
 
-Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block. `--contract-file` accepts versions 2, 3, and 4. Version 4 adds the three cost classes calculated by no-mistakes; formatters present those receipts and do not own pricing calculations.
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block. `--contract-file` accepts any contract version this build still supports (`4`, `3`, or `2`). Version 4 adds the three cost classes calculated by no-mistakes; formatters present those receipts and do not own pricing calculations.
 
 The formatter is resolved the same way a run resolves it: `--hook`, then a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry, then the repo's `.no-mistakes.yaml`, then the global `hooks.pr_body` default. The chosen source is reported on stderr.
 

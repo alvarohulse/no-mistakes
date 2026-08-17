@@ -105,7 +105,7 @@ func BuildContract(in ContractInput) *prbody.Contract {
 	contract.Sections.Risk = contractRisk(in.Steps, in.Rounds)
 	contract.Sections.StaticTests = contractStaticTests(in.Steps, in.Rounds)
 	contract.Sections.ReviewEvidence = contractReviewEvidence(in.Steps, in.Rounds)
-	contract.Sections.UserTesting = prbody.UserTestingSection{
+	contract.Sections.UserTesting = &prbody.UserTestingSection{
 		Instructions: append([]string(nil), in.UserTestingInstructions...),
 		Attested:     in.UserTestingAttested,
 	}

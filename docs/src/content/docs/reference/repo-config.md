@@ -249,21 +249,37 @@ Because the hook executes arbitrary shell with the daemon's credentials, it foll
 
 ### hooks.pr_body
 
-External pull request body formatter. Receives the PR body contract as JSON on stdin and returns the finished body on stdout. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+External pull request section formatter. Receives the PR body contract as JSON on stdin and returns typed owned-section patches on stdout. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
 
 | | |
 | --- | --- |
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v3 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, structured per-round command evidence, the Intent step's provenance/absence result, risk fields, test evidence, and one telemetry row per agent invocation. Contract v4 adds harness-reported, public API-list, and harness-adjusted cost receipts with completeness and provenance. no-mistakes owns those calculations; the formatter only presents supplied facts. Formatters should accept v2, v3, and v4 during rollout.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v4 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, pipeline telemetry, and distinct `static_tests`, `review_evidence`, and `user_testing` records. User Testing is an instruction unless `attested` is explicitly true. It also supplies harness-reported, public API-list, and harness-adjusted cost receipts with completeness and provenance. no-mistakes owns those calculations; the formatter only presents supplied facts. Formatters should accept v2, v3, and v4 while a producer rollout is in progress.
+
+Successful stdout is strict JSON. It has no full-body field:
+
+```json
+{
+  "version": 1,
+  "sections": [
+    {"id": "summary", "content": "## Summary\n\nGenerated summary"},
+    {"id": "static-tests", "content": "## Static Tests\n\n- `go test ./...` passed"},
+    {"id": "review-evidence", "content": "## Review Evidence\n\nNo blocking findings."},
+    {"id": "user-testing", "content": "## User Testing\n\n1. Exercise the saved flow."}
+  ]
+}
+```
+
+no-mistakes wraps each section in versioned begin/end/hash markers. On later runs it reads the hosted body and replaces only those owned ranges; every byte outside them, including human edits, third-party content, and template checklists, remains unchanged. Missing, duplicate, conflicting, or hash-invalid markers stop publication rather than guessing an insertion point.
 
 ```yaml
 hooks:
   pr_body: "~/scripts/format-pr --auto-linear"
 ```
 
-Any failure - a non-zero exit, a timeout past 60 seconds, empty output, or output over 1 MiB - falls back to the built-in body and reports the reason (including the formatter's own stderr) in the run log. A formatter is a convenience, so a broken one never blocks shipping; the failure is stated rather than swallowed, because a body that silently lost its template is worse than one that never had it. Output is still clamped to the host's body limit, which the contract also supplies as `body_limit` so a formatter can degrade its own layout deliberately.
+An execution failure - a non-zero exit, a timeout past 60 seconds, empty output, malformed patch JSON, or output over 1 MiB - falls back to built-in generated content and reports the reason (including the formatter's own stderr) in the run log. The resulting candidate is never truncated into validity: invalid UTF-8, possible secrets, marker conflicts, or host/byte-limit overflow fail closed. Existing bodies can use a fallback only when they already contain the matching owned marker set.
 
 Iterate on a formatter without running a gate:
 

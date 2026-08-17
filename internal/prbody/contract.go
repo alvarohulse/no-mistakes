@@ -12,20 +12,22 @@ import "github.com/kunchenguid/no-mistakes/internal/pricing"
 
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
-// pipeline treats a non-zero exit as "use the built-in body" and says so.
+// pipeline reports that failure and may fall back to built-in section content,
+// subject to the same marker and publication validation as formatter output.
 const Version = 4
 
 // Contract is the complete payload written to the formatter's stdin.
 //
-// Two presence rules apply to Sections, because absence carries different
+// Presence rules apply to Sections, because absence carries different
 // meanings:
 //
 //   - Risk and Notes are always present, each with a boolean saying whether
 //     anything was actually reported or supplied. Their absence is itself
 //     information a reader needs ("no risk assessment ran", "the author left
 //     no note"), so it is stated rather than implied.
-//   - Every other section is an absent key when there is nothing to say, so a
-//     formatter can tell "nothing to say" from "said nothing".
+//   - Version 4 producers always emit UserTesting so its attestation state is
+//     explicit; version 2 and 3 contracts omit that unsupported field.
+//   - Every other optional section is absent when there is nothing to say.
 type Contract struct {
 	Version int    `json:"version"`
 	RunID   string `json:"run_id"`
@@ -82,7 +84,7 @@ type Sections struct {
 	Testing        *TestingSection        `json:"testing,omitempty"`
 	StaticTests    *StaticTestsSection    `json:"static_tests,omitempty"`
 	ReviewEvidence *ReviewEvidenceSection `json:"review_evidence,omitempty"`
-	UserTesting    UserTestingSection     `json:"user_testing"`
+	UserTesting    *UserTestingSection    `json:"user_testing,omitempty"`
 	Pipeline       *PipelineSection       `json:"pipeline,omitempty"`
 }
 

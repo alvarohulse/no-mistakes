@@ -27,10 +27,9 @@ type prBodyScope struct {
 // applyPRBodyHook replaces the built-in body with an external formatter's,
 // when hooks.pr_body is configured.
 //
-// Every failure returns the built-in body and says so in the pipeline log. A
-// formatter is a convenience; a PR that cannot be described is not a reason to
-// stop shipping, and a body that silently lost its template is worse than one
-// that never had it.
+// Every formatter failure selects built-in section content and says so in the
+// pipeline log. Publication still fails closed when an existing body lacks the
+// matching verified marker set; fallback never authorizes a full-body rewrite.
 func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prContent, whatChanged string, scope prBodyScope) prContent {
 	if sctx == nil || sctx.Config == nil {
 		return content

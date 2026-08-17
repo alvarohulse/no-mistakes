@@ -71,10 +71,9 @@ var ErrNoHook = errors.New("no pr_body hook configured")
 // full body; unknown output fields are rejected.
 //
 // Every failure mode - missing command, non-zero exit, timeout, empty output,
-// oversized output - returns an error. The caller's contract with the author
-// is that a broken formatter never blocks shipping: fall back to the built-in
-// body, and say loudly that you did. Silently shipping an untemplated body is
-// the one outcome worse than either.
+// oversized output - returns an error. Callers report the failure and may use
+// built-in section content, but publication still fails closed when an existing
+// body lacks the matching verified marker set.
 func RunHook(ctx context.Context, opts HookOptions) (*HookResult, error) {
 	command := strings.TrimSpace(opts.Command)
 	if command == "" {

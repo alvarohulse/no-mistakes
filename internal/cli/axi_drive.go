@@ -109,9 +109,9 @@ func newAxiRunCmd() *cobra.Command {
 			"--pr-note or --pr-note-file injects trusted author text verbatim into the\n" +
 			"PR body: a ## Notes section in the built-in body, or wherever a configured\n" +
 			"hooks.pr_body formatter places it. The flags are mutually exclusive,\n" +
-			"limited to 16 KiB, and apply only when starting a new run. The body is\n" +
-			"written only when the pr step creates the pull request, so a note for a\n" +
-			"branch that already has an open PR is never published to it.\n\n" +
+			"limited to 16 KiB, and apply only when starting a new run. Existing PRs\n" +
+			"accept the note only through matching verified owned-section markers;\n" +
+			"human and third-party bytes outside those markers stay unchanged.\n\n" +
 			preserveGateFixCommitsGuidance,
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,

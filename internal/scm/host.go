@@ -99,8 +99,8 @@ type PR struct {
 // Create requires Title and Body. Update is a partial write: an empty field
 // leaves the hosted value untouched, so a base-only retarget must not carry
 // content. Without that rule every backend would submit the empty strings
-// verbatim and erase a pull request's title and body, which the pipeline
-// never rewrites after creation.
+// verbatim and erase a pull request's title and body. Verified owned-section
+// updates deliberately carry Body while base-only retargets do not.
 type PRContent struct {
 	Title string
 	Body  string

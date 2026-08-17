@@ -91,7 +91,7 @@ func SampleV3() *Contract {
 	}
 	contract.Sections.StaticTests = nil
 	contract.Sections.ReviewEvidence = nil
-	contract.Sections.UserTesting = UserTestingSection{}
+	contract.Sections.UserTesting = nil
 	if pipeline := contract.Sections.Pipeline; pipeline != nil {
 		for i := range pipeline.Steps {
 			for j := range pipeline.Steps[i].Agents {
@@ -191,7 +191,7 @@ func Sample() *Contract {
 				Findings: StepFindings{Total: 3, BySeverity: map[string]int{"P1": 1, "P2": 2}},
 				Evidence: []string{"Reviewed the complete branch diff against the explicit intent."},
 			},
-			UserTesting: UserTestingSection{
+			UserTesting: &UserTestingSection{
 				Instructions: []string{"Trigger a retry-exhausted job and confirm the operator-facing failure state."},
 				Attested:     false,
 			},

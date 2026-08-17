@@ -123,6 +123,7 @@ With no source, the latest run for the current repository is used.
 				return err
 			}
 			if err := prbody.ValidateOwnedDocument(body, prbody.ValidationLimits{
+				MaxBytes:     scm.MaxPRBodyBytes,
 				MaxUnits:     contract.BodyLimit,
 				MeasureUnits: scm.PRBodyLen,
 			}); err != nil {
@@ -201,8 +202,8 @@ func readContractFile(cmd *cobra.Command, path string) (*prbody.Contract, error)
 	if err := json.Unmarshal(data, &contract); err != nil {
 		return nil, fmt.Errorf("parse contract: %w", err)
 	}
-	// A formatter under a v2-to-v3 rollout has to be testable against both
-	// shapes, so a still-supported older contract is read rather than refused.
+	// A formatter under a contract rollout has to be testable against every
+	// supported shape, so older contracts are read rather than refused.
 	if !prbody.IsSupportedVersion(contract.Version) {
 		return nil, fmt.Errorf("contract version %d, expected one of %s", contract.Version, joinVersions(prbody.SupportedVersions()))
 	}

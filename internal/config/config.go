@@ -1328,9 +1328,9 @@ func commandWithRun(command runner.Command, run string) runner.Command {
 type Hooks struct {
 	PostWorktree string `yaml:"post_worktree"`
 	// PRBody is an external PR body formatter. It receives the prbody
-	// contract on stdin and returns the finished body on stdout. A non-zero
-	// exit falls back to the built-in body and is reported, so a broken
-	// formatter never blocks shipping.
+	// contract on stdin and returns typed owned-section patches on stdout.
+	// The publisher, not the formatter, merges those patches into a hosted
+	// body and verifies the exact published bytes.
 	PRBody string `yaml:"pr_body"`
 }
 

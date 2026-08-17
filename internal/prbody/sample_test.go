@@ -1,6 +1,7 @@
 package prbody
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -39,7 +40,7 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	if s.ReviewEvidence == nil || s.ReviewEvidence.Status == "" || s.ReviewEvidence.Rounds == 0 || len(s.ReviewEvidence.Evidence) == 0 {
 		t.Error("sample review evidence is incomplete")
 	}
-	if len(s.UserTesting.Instructions) == 0 || s.UserTesting.Attested {
+	if s.UserTesting == nil || len(s.UserTesting.Instructions) == 0 || s.UserTesting.Attested {
 		t.Error("sample user testing must be an unattested instruction")
 	}
 	if s.Pipeline == nil || len(s.Pipeline.Steps) == 0 || len(s.Pipeline.ConfigSources) == 0 {
@@ -246,13 +247,28 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 		t.Error("SampleV2 mutated the shared current sample")
 	}
 }
-
 func TestSampleV3OmitsVersion4CostReceipts(t *testing.T) {
 	t.Parallel()
 	for _, step := range SampleV3().Sections.Pipeline.Steps {
 		for _, run := range step.Agents {
 			if run.Costs != nil {
 				t.Errorf("v3 sample agent row carries v4 costs: %+v", run.Costs)
+			}
+		}
+	}
+}
+
+func TestOlderSamplesOmitVersion4SectionsFromJSON(t *testing.T) {
+	t.Parallel()
+
+	for _, sample := range []*Contract{SampleV2(), SampleV3()} {
+		raw, err := json.Marshal(sample)
+		if err != nil {
+			t.Fatalf("marshal v%d sample: %v", sample.Version, err)
+		}
+		for _, key := range []string{`"static_tests"`, `"review_evidence"`, `"user_testing"`} {
+			if bytes.Contains(raw, []byte(key)) {
+				t.Errorf("v%d sample carries v4-only key %s: %s", sample.Version, key, raw)
 			}
 		}
 	}
