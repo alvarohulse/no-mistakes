@@ -64,7 +64,36 @@ func newRunsCmd() *cobra.Command {
 	}
 
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum number of runs to display")
+	cmd.AddCommand(newRunsPinCmd(true), newRunsPinCmd(false))
 	return cmd
+}
+
+func newRunsPinCmd(pin bool) *cobra.Command {
+	action := "pin"
+	resultWord := "pinned"
+	if !pin {
+		action = "unpin"
+		resultWord = "unpinned"
+	}
+	return &cobra.Command{
+		Use:   action + " <run-id>",
+		Short: resultWord + " a run for rich-data retention",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return trackCommand("runs "+action, func() error {
+				_, database, err := openResources()
+				if err != nil {
+					return err
+				}
+				defer database.Close()
+				if _, err := database.SetRunPinned(args[0], pin); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s run %s\n", resultWord, args[0])
+				return nil
+			})
+		},
+	}
 }
 
 func printRunLine(w io.Writer, r *db.Run) {
@@ -77,5 +106,9 @@ func printRunLine(w io.Writer, r *db.Run) {
 	if r.PRURL != nil {
 		pr = fmt.Sprintf("  %s", *r.PRURL)
 	}
-	fmt.Fprintf(w, "  %-12s %-20s %s  %s%s\n", runStatusStyle(r.Status), r.Branch, sDim.Render(sha), sDim.Render(ts), pr)
+	pin := ""
+	if r.PinnedAt != nil {
+		pin = "  pinned"
+	}
+	fmt.Fprintf(w, "  %-26s %-12s %-20s %s  %s%s%s\n", r.ID, runStatusStyle(r.Status), r.Branch, sDim.Render(sha), sDim.Render(ts), pr, pin)
 }

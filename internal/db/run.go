@@ -65,6 +65,7 @@ type Run struct {
 	// review completes; mutable run/worktree heads never infer this authority.
 	ReviewApprovedHeadSHA  *string
 	Status                 types.RunStatus
+	PinnedAt               *int64
 	PRURL                  *string
 	PRState                *string
 	PRStateObservedAt      *int64
@@ -107,14 +108,14 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, metadata, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pinned_at, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, metadata, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	var configSourcesJSON string
 	if err := row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.ResolvedAgentRouting, &r.ResolvedPolicy, &r.ResolvedPolicyDigest, &r.SubmittedHeadSHA, &r.NoMistakesVersion, &r.NoMistakesBuildSHA, &r.ReviewApprovedHeadSHA, &r.Status,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.ResolvedAgentRouting, &r.ResolvedPolicy, &r.ResolvedPolicyDigest, &r.SubmittedHeadSHA, &r.NoMistakesVersion, &r.NoMistakesBuildSHA, &r.ReviewApprovedHeadSHA, &r.Status, &r.PinnedAt,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.CIReadyNoCI,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive, &r.TerminalHeadVerifiedAt,
@@ -318,6 +319,34 @@ func (d *DB) GetRun(id string) (*Run, error) {
 		return nil, fmt.Errorf("get run: %w", err)
 	}
 	return r, nil
+}
+
+// SetRunPinned explicitly includes or excludes a run from rich-data pruning.
+// Pinning is idempotent and preserves the original pin timestamp.
+func (d *DB) SetRunPinned(id string, pinned bool) (*Run, error) {
+	ts := now()
+	result, err := d.sql.Exec(
+		`UPDATE runs SET pinned_at = CASE WHEN ? THEN COALESCE(pinned_at, ?) ELSE NULL END, updated_at = ? WHERE id = ?`,
+		pinned, ts, ts, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("set run pin: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read run pin result: %w", err)
+	}
+	if changed == 0 {
+		return nil, fmt.Errorf("run %q not found", id)
+	}
+	run, err := d.GetRun(id)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, fmt.Errorf("run %q not found", id)
+	}
+	return run, nil
 }
 
 // GetRunsByRepo returns all runs for a repo, newest first.

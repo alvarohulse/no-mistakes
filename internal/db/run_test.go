@@ -8,6 +8,48 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestSetRunPinnedPersistsAndClearsExplicitPin(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/pinned-run", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PinnedAt != nil {
+		t.Fatalf("new run pinned_at = %v, want nil", run.PinnedAt)
+	}
+
+	pinned, err := d.SetRunPinned(run.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.PinnedAt == nil {
+		t.Fatal("pin did not persist pinned_at")
+	}
+	firstPin := *pinned.PinnedAt
+	pinnedAgain, err := d.SetRunPinned(run.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinnedAgain.PinnedAt == nil || *pinnedAgain.PinnedAt != firstPin {
+		t.Fatalf("idempotent pin changed pinned_at: first %d, second %v", firstPin, pinnedAgain.PinnedAt)
+	}
+
+	unpinned, err := d.SetRunPinned(run.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unpinned.PinnedAt != nil {
+		t.Fatalf("unpin left pinned_at = %v", unpinned.PinnedAt)
+	}
+	if _, err := d.SetRunPinned("missing-run", true); err == nil {
+		t.Fatal("pinning an unknown run succeeded")
+	}
+}
+
 func TestUpdateRunConfigSourcesPersistsOrderedEvidence(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/config-sources", "git@github.com:user/project.git", "main")
