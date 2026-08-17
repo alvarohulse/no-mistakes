@@ -3,6 +3,7 @@ package stats
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,10 +24,15 @@ func RenderText(report *Report) string {
 		fmt.Fprintf(&out, "run %s repo=%s status=%s created=%d\n", run.ID, run.RepoID, run.Status, run.CreatedAt)
 	}
 	for _, repair := range report.Repairs {
-		fmt.Fprintf(&out, "repair %s/%s/%d trigger=%s selection=%s duration_ms=%d\n", repair.RunID, repair.Step, repair.Round, repair.Trigger, optionalString(repair.SelectionSource), repair.DurationMS)
+		fmt.Fprintf(&out, "repair %s/%s/%d trigger=%s selection=%s failure_fingerprint=%s result=%s duration_ms=%d\n", repair.RunID, repair.Step, repair.Round, repair.Trigger, optionalString(repair.SelectionSource), optionalString(repair.RepairFailureFingerprint), optionalString(repair.RepairResult), repair.DurationMS)
 	}
 	for _, step := range report.Steps {
 		fmt.Fprintf(&out, "step %s/%s status=%s rounds=%d duration_ms=%s\n", step.RunID, step.Step.Name, step.Step.Status, len(step.Step.Rounds), optionalInt64(step.Step.DurationMS))
+		for _, command := range step.Step.Commands {
+			fmt.Fprintf(&out, "command %s/%s/%d/%d outcome=%s exit_code=%s command_source=%s runner=%s runner_schema=%s runner_source=%s platform=%s args=%s version=%s\n",
+				step.RunID, step.Step.Name, command.Round, command.Sequence, command.Outcome, optionalInt(command.ExitCode), optionalValue(command.CommandSource),
+				runnerExecutable(command), runnerSchemaVersion(command), runnerSource(command), runnerPlatform(command), runnerArgs(command), runnerVersion(command))
+		}
 	}
 	for _, invocation := range report.Agents {
 		fmt.Fprintf(&out, "agent %s/%s step=%s purpose=%s harness=%s model=%s provider=%s status=%s\n",
@@ -60,11 +66,24 @@ func RenderCSV(report *Report) (string, error) {
 	for _, repair := range report.Repairs {
 		entityID := fmt.Sprintf("%s:%d", repair.StepID, repair.Round)
 		writeCSVFact(w, report.SchemaVersion, repoByRun[repair.RunID], repair.RunID, "repair", entityID, "repairs", string(repair.Step), "trigger", repair.Trigger, "", "", "", "", "step_rounds.trigger_type", "")
+		writeNullableStringFact(w, report.SchemaVersion, repoByRun[repair.RunID], repair.RunID, "repair", entityID, "repairs", string(repair.Step), "failure_fingerprint", repair.RepairFailureFingerprint, "step_rounds.repair_failure_fingerprint")
+		writeNullableStringFact(w, report.SchemaVersion, repoByRun[repair.RunID], repair.RunID, "repair", entityID, "repairs", string(repair.Step), "result", repair.RepairResult, "step_rounds.repair_result")
 		writeCSVFact(w, report.SchemaVersion, repoByRun[repair.RunID], repair.RunID, "repair", entityID, "repairs", string(repair.Step), "duration", strconv.FormatInt(repair.DurationMS, 10), "milliseconds", "1", "1", "true", "step_rounds.duration_ms", "")
 	}
 	for _, step := range report.Steps {
 		writeCSVFact(w, report.SchemaVersion, repoByRun[step.RunID], step.RunID, "step", step.Step.ID, "steps", string(step.Step.Name), "status", string(step.Step.Status), "", "", "", "", "step_results.status", "")
 		writeNullableInt64Fact(w, report.SchemaVersion, repoByRun[step.RunID], step.RunID, "step", step.Step.ID, "steps", string(step.Step.Name), "duration", step.Step.DurationMS, "milliseconds", "step_results.duration_ms")
+		for _, command := range step.Step.Commands {
+			entityID := fmt.Sprintf("%s:%d:%d", step.Step.ID, command.Round, command.Sequence)
+			repoID := repoByRun[step.RunID]
+			group := string(step.Step.Name)
+			writeCSVFact(w, report.SchemaVersion, repoID, step.RunID, "command", entityID, "commands", group, "round", strconv.Itoa(command.Round), "", "1", "1", "true", "step_results.evidence_json.commands.round", "")
+			writeCSVFact(w, report.SchemaVersion, repoID, step.RunID, "command", entityID, "commands", group, "sequence", strconv.Itoa(command.Sequence), "", "1", "1", "true", "step_results.evidence_json.commands.sequence", "")
+			writeCSVFact(w, report.SchemaVersion, repoID, step.RunID, "command", entityID, "commands", group, "outcome", command.Outcome, "", "1", "1", "true", "step_results.evidence_json.commands.outcome", "")
+			writeNullableIntFact(w, report.SchemaVersion, repoID, step.RunID, "command", entityID, "commands", group, "exit_code", command.ExitCode, "", "step_results.evidence_json.commands.exit_code")
+			writeOptionalStringFact(w, report.SchemaVersion, repoID, step.RunID, "command", entityID, "commands", group, "command_source", command.CommandSource, command.CommandSource != "", "step_results.evidence_json.commands.command_source")
+			writeRunnerCSVFacts(w, report.SchemaVersion, repoID, step.RunID, entityID, group, command)
+		}
 	}
 	for _, agent := range report.Agents {
 		invocation := agent.Invocation
@@ -117,6 +136,39 @@ func writeNullableInt64Fact(w *csv.Writer, schemaVersion int, repoID, runID, rec
 	writeCSVFact(w, schemaVersion, repoID, runID, recordType, entityID, section, group, metric, strconv.FormatInt(*value, 10), unit, "1", "1", "true", basis, "")
 }
 
+func writeNullableStringFact(w *csv.Writer, schemaVersion int, repoID, runID, recordType, entityID, section, group, metric string, value *string, basis string) {
+	present := value != nil && *value != ""
+	text := ""
+	if present {
+		text = *value
+	}
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, recordType, entityID, section, group, metric, text, present, basis)
+}
+
+func writeOptionalStringFact(w *csv.Writer, schemaVersion int, repoID, runID, recordType, entityID, section, group, metric, value string, present bool, basis string) {
+	if !present {
+		writeCSVFact(w, schemaVersion, repoID, runID, recordType, entityID, section, group, metric, "", "", "0", "1", "false", basis, "not_reported")
+		return
+	}
+	writeCSVFact(w, schemaVersion, repoID, runID, recordType, entityID, section, group, metric, value, "", "1", "1", "true", basis, "")
+}
+
+func writeRunnerCSVFacts(w *csv.Writer, schemaVersion int, repoID, runID, entityID, group string, command CommandReceipt) {
+	const basis = "step_results.evidence_json.commands.runner"
+	if command.Runner == nil {
+		for _, metric := range []string{"runner_schema_version", "runner_platform", "runner_source", "runner_executable", "runner_args", "runner_version"} {
+			writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, metric, "", false, basis)
+		}
+		return
+	}
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_schema_version", strconv.Itoa(command.Runner.SchemaVersion), true, basis)
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_platform", command.Runner.Platform, true, basis)
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_source", command.Runner.Source, true, basis)
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_executable", command.Runner.Executable, true, basis)
+	writeOptionalStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_args", runnerArgs(command), true, basis)
+	writeNullableStringFact(w, schemaVersion, repoID, runID, "command", entityID, "commands", group, "runner_version", command.Runner.Version, basis)
+}
+
 func optionalString(value *string) string {
 	if value == nil || *value == "" {
 		return "—"
@@ -129,6 +181,63 @@ func optionalInt64(value *int64) string {
 		return "—"
 	}
 	return strconv.FormatInt(*value, 10)
+}
+
+func optionalInt(value *int) string {
+	if value == nil {
+		return "—"
+	}
+	return strconv.Itoa(*value)
+}
+
+func optionalValue(value string) string {
+	if value == "" {
+		return "—"
+	}
+	return value
+}
+
+func runnerExecutable(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	return optionalValue(command.Runner.Executable)
+}
+
+func runnerSchemaVersion(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	return strconv.Itoa(command.Runner.SchemaVersion)
+}
+
+func runnerSource(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	return optionalValue(command.Runner.Source)
+}
+
+func runnerPlatform(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	return optionalValue(command.Runner.Platform)
+}
+
+func runnerArgs(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	encoded, _ := json.Marshal(command.Runner.Args)
+	return string(encoded)
+}
+
+func runnerVersion(command CommandReceipt) string {
+	if command.Runner == nil {
+		return "—"
+	}
+	return optionalString(command.Runner.Version)
 }
 
 func optionalFloat(value *float64) string {

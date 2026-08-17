@@ -12,7 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 2
+const ReportSchemaVersion = 3
 
 type Query struct {
 	RunID    string
@@ -63,14 +63,16 @@ type ReportStep struct {
 }
 
 type Repair struct {
-	RunID           string         `json:"run_id"`
-	StepID          string         `json:"step_id"`
-	Step            types.StepName `json:"step"`
-	Round           int            `json:"round"`
-	Trigger         string         `json:"trigger"`
-	SelectionSource *string        `json:"selection_source"`
-	DurationMS      int64          `json:"duration_ms"`
-	CreatedAt       int64          `json:"created_at"`
+	RunID                    string         `json:"run_id"`
+	StepID                   string         `json:"step_id"`
+	Step                     types.StepName `json:"step"`
+	Round                    int            `json:"round"`
+	Trigger                  string         `json:"trigger"`
+	SelectionSource          *string        `json:"selection_source"`
+	RepairFailureFingerprint *string        `json:"repair_failure_fingerprint"`
+	RepairResult             *string        `json:"repair_result"`
+	DurationMS               int64          `json:"duration_ms"`
+	CreatedAt                int64          `json:"created_at"`
 }
 
 type ReportAgent struct {
@@ -197,12 +199,15 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		for _, step := range steps {
 			report.Steps = append(report.Steps, ReportStep{RunID: audit.Run.ID, Step: step})
 			for _, round := range step.Rounds {
-				if round.Trigger != "auto_fix" && round.Trigger != "user_fix" {
+				isFixRound := round.Trigger == "auto_fix" || round.Trigger == "user_fix"
+				hasRepairDecision := round.RepairFailureFingerprint != nil || round.RepairResult != nil
+				if !isFixRound && !hasRepairDecision {
 					continue
 				}
 				report.Repairs = append(report.Repairs, Repair{
 					RunID: audit.Run.ID, StepID: step.ID, Step: step.Name, Round: round.Number, Trigger: round.Trigger,
-					SelectionSource: round.SelectionSource, DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
+					SelectionSource: round.SelectionSource, RepairFailureFingerprint: round.RepairFailureFingerprint, RepairResult: round.RepairResult,
+					DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
 				})
 			}
 		}

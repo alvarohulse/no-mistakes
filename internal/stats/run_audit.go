@@ -11,10 +11,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -61,15 +62,30 @@ type Step struct {
 	DurationMS  *int64            `json:"duration_ms"`
 	StartedAt   *int64            `json:"started_at"`
 	CompletedAt *int64            `json:"completed_at"`
+	Commands    []CommandReceipt  `json:"commands"`
 	Rounds      []Round           `json:"rounds"`
 }
 
+// CommandReceipt is the content-free audit record for one pipeline-owned
+// command. The command string and resolved executable argv deliberately stay
+// in rich step evidence and never enter stats or metric retention.
+type CommandReceipt struct {
+	Round         int                `json:"round"`
+	Sequence      int                `json:"sequence"`
+	Outcome       string             `json:"outcome"`
+	ExitCode      *int               `json:"exit_code"`
+	CommandSource string             `json:"command_source"`
+	Runner        *runner.Provenance `json:"runner"`
+}
+
 type Round struct {
-	Number          int     `json:"number"`
-	Trigger         string  `json:"trigger"`
-	SelectionSource *string `json:"selection_source"`
-	DurationMS      int64   `json:"duration_ms"`
-	CreatedAt       int64   `json:"created_at"`
+	Number                   int     `json:"number"`
+	Trigger                  string  `json:"trigger"`
+	SelectionSource          *string `json:"selection_source"`
+	RepairFailureFingerprint *string `json:"repair_failure_fingerprint"`
+	RepairResult             *string `json:"repair_result"`
+	DurationMS               int64   `json:"duration_ms"`
+	CreatedAt                int64   `json:"created_at"`
 }
 
 type SkipReceipt struct {
@@ -296,16 +312,27 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 		ID: row.ID, Name: row.StepName.Canonical(), Order: row.StepOrder, Status: row.Status,
 		ExitCode: cloneInt(row.ExitCode), DurationMS: cloneInt64(row.DurationMS),
 		StartedAt: cloneInt64(row.StartedAt), CompletedAt: cloneInt64(row.CompletedAt),
-		Rounds: []Round{},
+		Commands: []CommandReceipt{}, Rounds: []Round{},
+	}
+	var integrityErrors []string
+	evidence, err := row.Evidence()
+	if err != nil {
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s evidence could not be read: %v", row.StepName, err))
+	} else {
+		result.Commands = commandReceipts(evidence.Commands)
 	}
 	rounds, err := database.GetRoundsByStep(row.ID)
 	if err != nil {
-		return result, []string{fmt.Sprintf("step %s rounds could not be read: %v", row.StepName, err)}
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s rounds could not be read: %v", row.StepName, err))
+		return result, integrityErrors
 	}
 	result.Rounds = make([]Round, 0, len(rounds))
-	var integrityErrors []string
 	for _, round := range rounds {
-		result.Rounds = append(result.Rounds, Round{Number: round.Round, Trigger: round.Trigger, SelectionSource: cloneString(round.SelectionSource), DurationMS: round.DurationMS, CreatedAt: round.CreatedAt})
+		result.Rounds = append(result.Rounds, Round{
+			Number: round.Round, Trigger: round.Trigger, SelectionSource: cloneString(round.SelectionSource),
+			RepairFailureFingerprint: cloneString(round.RepairFailureFingerprint), RepairResult: cloneString(round.RepairResult),
+			DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
+		})
 	}
 	if row.SkipSource != nil {
 		source := types.SkipSource(*row.SkipSource)
@@ -330,6 +357,28 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s is skipped in stored results but not in resolved policy", row.StepName))
 	}
 	return result, integrityErrors
+}
+
+func commandReceipts(commands []db.CommandEvidence) []CommandReceipt {
+	result := make([]CommandReceipt, 0, len(commands))
+	for _, command := range commands {
+		result = append(result, CommandReceipt{
+			Round: command.Round, Sequence: command.Sequence, Outcome: command.Outcome,
+			ExitCode: cloneInt(command.ExitCode), CommandSource: command.CommandSource,
+			Runner: cloneRunnerProvenance(command.Runner),
+		})
+	}
+	return result
+}
+
+func cloneRunnerProvenance(value *runner.Provenance) *runner.Provenance {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Args = append([]string(nil), value.Args...)
+	cloned.Version = cloneString(value.Version)
+	return &cloned
 }
 
 func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {

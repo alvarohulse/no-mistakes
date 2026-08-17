@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -22,6 +23,8 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	}
 
 	const privateMarker = "PRIVATE-CONTENT-MUST-NOT-SURVIVE"
+	const privateCommandMarker = "PRIVATE-COMMAND-MUST-NOT-SURVIVE"
+	const privateProseMarker = "PRIVATE-PROSE-MUST-NOT-SURVIVE"
 	terminal := make([]*db.Run, 0, 54)
 	for index := 0; index < 53; index++ {
 		branch := "feature/retention"
@@ -67,7 +70,29 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	if _, err := database.InsertStepRound(review.ID, 1, "initial", &initialFindings, nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.InsertStepRound(review.ID, 2, "auto_fix", nil, nil, 20); err != nil {
+	repairRound, err := database.InsertStepRound(review.ID, 2, "auto_fix", nil, nil, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepRoundRepairAudit(repairRound.ID, "sha256:retained-repair-fingerprint", "resolved"); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	runnerVersion := "5.2.26"
+	if err := database.SetStepEvidence(review.ID, db.StepEvidence{
+		Commands: []db.CommandEvidence{
+			{
+				Round: 2, Sequence: 1, Command: "/private/resolved/path/" + privateCommandMarker, Outcome: db.CommandOutcomePassed, ExitCode: &zero,
+				CommandSource: runner.SourceLinux,
+				Runner: &runner.Provenance{
+					SchemaVersion: runner.SchemaVersion, Platform: "linux", Source: runner.SourceLinux,
+					Executable: "zsh", Args: []string{"-lc"}, Version: &runnerVersion,
+				},
+			},
+			{Round: 2, Sequence: 2, Command: privateCommandMarker, Outcome: db.CommandOutcomeError},
+		},
+		Evidence: []string{privateProseMarker}, Explanation: privateProseMarker,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 30, ""); err != nil {
@@ -90,6 +115,18 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 		DurationMS: 500, ExitStatus: "ok", InputTokens: 20, OutputTokens: 5, CacheReadTokens: 3,
 	})
 	beforeAggregates, err := database.AgentInvocationAggregates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeAudit, err := BuildRunAudit(database, oldest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := Query{
+		RunID: oldest.ID, Steps: []types.StepName{types.StepReview}, Agents: []string{"codex"},
+		Models: []string{"gpt-5.6-sol"}, Purposes: []string{"review-fix"},
+	}
+	beforeReport, err := BuildReport(database, query, time.Unix(oldest.CreatedAt+1, 0).UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +166,7 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	if receipt == nil {
 		t.Fatal("pruned run has no long-lived metric receipt")
 	}
-	if strings.Contains(receipt.PayloadJSON, privateMarker) || strings.Contains(receipt.PayloadJSON, "/private/") {
+	if strings.Contains(receipt.PayloadJSON, privateMarker) || strings.Contains(receipt.PayloadJSON, privateCommandMarker) || strings.Contains(receipt.PayloadJSON, privateProseMarker) || strings.Contains(receipt.PayloadJSON, "/private/") {
 		t.Fatalf("metric receipt retained private content: %s", receipt.PayloadJSON)
 	}
 
@@ -140,15 +177,24 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	if audit.Run.RichDataRetained || audit.Run.Branch != "" || audit.Run.HeadSHA != "" || audit.Invocations[0].SessionKey != "" || len(audit.Invocations[0].NestedAgents) != 0 {
 		t.Fatalf("archived audit retained rich identity: %+v", audit)
 	}
-	report, err := BuildReport(database, Query{
-		RunID: oldest.ID, Steps: []types.StepName{types.StepReview}, Agents: []string{"codex"},
-		Models: []string{"gpt-5.6-sol"}, Purposes: []string{"review-fix"},
-	}, oldNow)
+	if !reflect.DeepEqual(audit.Steps, beforeAudit.Steps) {
+		t.Fatalf("content-free step audit changed after pruning:\n before: %+v\n  after: %+v", beforeAudit.Steps, audit.Steps)
+	}
+	if got := audit.Steps[0].Commands; len(got) != 2 || got[0].Runner == nil || got[0].Runner.Executable != "zsh" || got[1].Runner != nil {
+		t.Fatalf("archived command receipts = %+v", got)
+	}
+	if got := audit.Steps[0].Rounds[1]; got.RepairFailureFingerprint == nil || *got.RepairFailureFingerprint != "sha256:retained-repair-fingerprint" || got.RepairResult == nil || *got.RepairResult != "resolved" {
+		t.Fatalf("archived repair receipt = %+v", got)
+	}
+	report, err := BuildReport(database, query, oldNow)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Runs.Count != 1 || len(report.Agents) != 1 || report.Runs.Items[0].RichDataRetained {
 		t.Fatalf("archived filtered report = %+v", report)
+	}
+	if !reflect.DeepEqual(report.Steps, beforeReport.Steps) || !reflect.DeepEqual(report.Repairs, beforeReport.Repairs) {
+		t.Fatalf("content-free report changed after pruning:\n before steps=%+v repairs=%+v\n  after steps=%+v repairs=%+v", beforeReport.Steps, beforeReport.Repairs, report.Steps, report.Repairs)
 	}
 
 	stats, err := database.GetStats()

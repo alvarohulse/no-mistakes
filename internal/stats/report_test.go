@@ -85,4 +85,30 @@ func TestBuildReportRejectsAnEmptyOrReversedWindow(t *testing.T) {
 	}
 }
 
+func TestBuildReportIncludesRepairDecisionOnInitialRound(t *testing.T) {
+	database, run := newAuditRun(t)
+	step, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.InsertStepRound(step.ID, 1, "initial", nil, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepRoundRepairAudit(round.ID, "sha256:attempted", "attempted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 10, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := BuildReport(database, Query{RunID: run.ID}, time.Unix(run.CreatedAt+1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Repairs) != 1 || report.Repairs[0].Trigger != "initial" || report.Repairs[0].RepairResult == nil || *report.Repairs[0].RepairResult != "attempted" {
+		t.Fatalf("initial repair decision = %+v", report.Repairs)
+	}
+}
+
 func timePointer(value time.Time) *time.Time { return &value }

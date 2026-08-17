@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
@@ -337,7 +337,7 @@ Platform fields override `run` and `runner` independently. Resolution precedence
 
 Runner identities use the same secret-free contract as the global default: `sh`, `bash`, or `zsh` with `[-c]` or `[-lc]`, and `pwsh` or `powershell` with `[-NoLogo, -NoProfile, -NonInteractive, -Command]`. Executable paths and extra arguments are rejected, including in inactive platform overrides, because the full structured definition is persisted in the resolved policy.
 
-This schema is active for trusted preflight commands. Build, Test, Lint, and Format retain their existing `sh -c` / `cmd.exe /c` execution path until their dedicated migration; for those four fields, structured runner/platform metadata is preserved and explained but the compatibility `run` value remains the executed command.
+This schema is active for trusted preflight commands and for Build, Test, Lint, and Format. Each call site executes the resolved platform command through its resolved runner and records content-free command-source and runner provenance with the pipeline evidence.
 
 Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
 
@@ -353,7 +353,7 @@ preflight:
     windows: Get-Command git | Out-Null
 ```
 
-no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Failure diagnostics are secret-redacted, control-sanitized, and bounded, and identify the command index plus resolved command/runner source.
+no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Because no run or step log exists yet, preflight exposes only a secret-redacted, control-sanitized, bounded failure diagnostic identifying the command index plus resolved command/runner source. This is distinct from the complete command output retained by an executed pipeline step's authoritative log.
 
 A top-level global `preflight` is rejected. Use a trusted default-branch repo config or a matching machine-owned `overrides.<owner>/<repo>.preflight` list. A machine override replaces the full committed list; an explicit empty list clears it.
 
@@ -364,7 +364,7 @@ A top-level global `preflight` is rejected. Use a trusted default-branch repo co
 
 ### commands.build
 
-Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit build or compile command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -395,7 +395,7 @@ A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot 
 
 ### commands.test
 
-Explicit **targeted** local test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit **targeted** local test command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -411,7 +411,7 @@ When empty, the agent selects one exact focused test command in a read-only plan
 
 ### commands.lint
 
-Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit lint command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -430,7 +430,7 @@ Formatter command run before the push step commits agent fixes.
 | Type | `string` or structured command |
 | Default | Empty (no separate push-step formatter) |
 
-This remains separate from the Lint step's planned or configured command.
+The Push step resolves its platform command and runner before execution. This remains separate from the Lint step's planned or configured command.
 
 ### document.instructions
 

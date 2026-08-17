@@ -10,7 +10,7 @@ intent → refresh → review → build → test → document → lint → push 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
-Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, and nullable exit code; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence.
+Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, nullable exit code, and resolved command-source/runner provenance when available; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence. Stats deliberately drops the display text while retaining the content-free command and runner facts.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
@@ -18,6 +18,7 @@ The steering still allows requested test evidence under the run's managed eviden
 The read-only command-planning pass that an unconfigured Build, Test, or Lint step runs is checked rather than only steered: it runs in a private throwaway checkout of the run's current commit, with no remotes, no inherited Git hooks, and no ambient Git configuration, and no-mistakes compares both that checkout and the run worktree before and after the pass. When a planner wrote to either one, the run worktree is restored from its snapshot, the planning checkout is discarded, and the step parks with a bounded, redacted explanation instead of a planned command.
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When configured Build, Test, or Lint command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
+That complete-output guarantee applies to pipeline steps. Trusted preflight runs before a run row and step log exist, so a refusal exposes only the bounded, redacted diagnostic documented in the repo-config reference.
 Commits created by the shared Review, Build, Test, Document, and Lint fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
 Agent roles that can write, repair, or review tests reject tests whose only evidence is matching implementation source text, tokens, syntax, or incidental snapshots.
 They instead require an executable interface or a typed or normalized semantic model that proves observable behavior.
@@ -111,7 +112,7 @@ At entry to every remaining step in the fixed pipeline order - Build, Test, Docu
 Compiles the changed production code before behavioral testing begins. [`commands.build`](/no-mistakes/reference/repo-config/#commandsbuild) owns the deterministic command contract.
 
 **Behavior:**
-- If `commands.build` is set, runs it visibly through the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) in the managed process group. A non-zero exit produces an actionable `error` finding with bounded compiler output; the complete output stays in the Build step log.
+- If `commands.build` is set, resolves its platform command and runner, then runs it visibly in the managed process group. A non-zero exit produces an actionable `error` finding with bounded compiler output; the complete output stays in the Build step log.
 - If `commands.build` is empty, asks the routed Build agent for one exact command in a read-only planning pass, executes and records that command itself, and parks when the planner returns no usable command. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 - Build agents are explicitly told not to run tests, linters, formatters, static analysis, or documentation work, except when static analysis or formatting is inseparable from the repository's canonical build command.
 
@@ -128,7 +129,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) owns the configuration contract for any explicit baseline command.
 
 **Behavior:**
-- If `commands.test` is set in repo config: runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
+- If `commands.test` is set in repo config: resolves its platform command and runner, runs it first as a baseline, and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
 - If `commands.test` is empty, first asks the routed Test agent for one exact targeted command in a read-only planning pass, then executes and records it. After it passes, an evidence agent gathers evidence and artifacts for the intent; it may run further focused checks or write a focused test itself, but never the complete repository suite. A failure enters repair and the pipeline reruns the same planned command.
 - When user intent is available after a configured baseline command passes, the same evidence-oriented agent follow-up runs. Evidence agents return structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). Both evidence and repair agents are instructed not to run the complete repository test suite; a generic driver instruction asking for broad or full-suite confirmation does not override that product boundary. For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
 - "Do not run everything" is not "run nothing": when no targeted check can establish the intent, the agent must write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
@@ -167,7 +168,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 Runs linters and static analysis.
 
 **Behavior:**
-- If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
+- If `commands.lint` is set: resolves its platform command and runner before execution. Non-zero exit produces `warning` findings.
 - If `commands.lint` is empty: asks the routed Lint agent for one exact formatter, linter, or static-analysis command in a read-only planning pass, executes and records it, and parks when no meaningful command can be established. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 
 **Approval:** lint findings with `action: ask-user` pause for approval, including a command plan that could not be established.
@@ -183,7 +184,7 @@ Runs linters and static analysis.
 Pushes the validated branch to the configured push target.
 
 **Behavior:**
-- If `commands.format` is set, runs it first
+- If `commands.format` is set, resolves its platform command and runner, then runs it first
 - Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`

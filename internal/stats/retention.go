@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MetricReceiptSchemaVersion = 1
+	MetricReceiptSchemaVersion = 2
 	RichRunRetentionAge        = 14 * 24 * time.Hour
 	RichRunRetentionFloor      = 50
 )
@@ -54,6 +54,7 @@ type MetricStep struct {
 	DurationMS       *int64            `json:"duration_ms"`
 	StartedAt        *int64            `json:"started_at"`
 	CompletedAt      *int64            `json:"completed_at"`
+	Commands         []CommandReceipt  `json:"commands"`
 	Rounds           []Round           `json:"rounds"`
 	ReportedFindings int               `json:"reported_findings"`
 	FixedFindings    int               `json:"fixed_findings"`
@@ -211,7 +212,8 @@ func BuildMetricReceipt(database *db.DB, runID string, archivedAt time.Time) (*M
 		receipt.Steps = append(receipt.Steps, MetricStep{
 			ID: step.ID, Name: step.Name, Order: step.Order, Status: step.Status, SkipSource: cloneSkipSource(step.SkipSource),
 			ExitCode: cloneInt(step.ExitCode), DurationMS: cloneInt64(step.DurationMS), StartedAt: cloneInt64(step.StartedAt), CompletedAt: cloneInt64(step.CompletedAt),
-			Rounds: append([]Round(nil), step.Rounds...), ReportedFindings: findingStats.ReportedFindings, FixedFindings: findingStats.FixedFindings,
+			Commands: cloneCommandReceipts(step.Commands), Rounds: cloneRounds(step.Rounds),
+			ReportedFindings: findingStats.ReportedFindings, FixedFindings: findingStats.FixedFindings,
 		})
 	}
 	for _, invocation := range audit.Invocations {
@@ -272,7 +274,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 		step := Step{
 			ID: stored.ID, Name: stored.Name, Order: stored.Order, Status: stored.Status, SkipSource: cloneSkipSource(stored.SkipSource),
 			ExitCode: cloneInt(stored.ExitCode), DurationMS: cloneInt64(stored.DurationMS), StartedAt: cloneInt64(stored.StartedAt), CompletedAt: cloneInt64(stored.CompletedAt),
-			Rounds: append([]Round(nil), stored.Rounds...),
+			Commands: cloneCommandReceipts(stored.Commands), Rounds: cloneRounds(stored.Rounds),
 		}
 		audit.Steps = append(audit.Steps, step)
 		if step.SkipSource != nil {
@@ -408,6 +410,30 @@ func cloneTokenMeters(value TokenMeters) TokenMeters {
 	}
 }
 
+func cloneCommandReceipts(values []CommandReceipt) []CommandReceipt {
+	result := make([]CommandReceipt, 0, len(values))
+	for _, value := range values {
+		result = append(result, CommandReceipt{
+			Round: value.Round, Sequence: value.Sequence, Outcome: value.Outcome,
+			ExitCode: cloneInt(value.ExitCode), CommandSource: value.CommandSource,
+			Runner: cloneRunnerProvenance(value.Runner),
+		})
+	}
+	return result
+}
+
+func cloneRounds(values []Round) []Round {
+	result := make([]Round, 0, len(values))
+	for _, value := range values {
+		result = append(result, Round{
+			Number: value.Number, Trigger: value.Trigger, SelectionSource: cloneString(value.SelectionSource),
+			RepairFailureFingerprint: cloneString(value.RepairFailureFingerprint), RepairResult: cloneString(value.RepairResult),
+			DurationMS: value.DurationMS, CreatedAt: value.CreatedAt,
+		})
+	}
+	return result
+}
+
 func cloneSkipSource(value *types.SkipSource) *types.SkipSource {
 	if value == nil {
 		return nil
@@ -419,6 +445,10 @@ func cloneSkipSource(value *types.SkipSource) *types.SkipSource {
 func nonNilMetricSteps(values []MetricStep) []MetricStep {
 	if values == nil {
 		return []MetricStep{}
+	}
+	for index := range values {
+		values[index].Commands = cloneCommandReceipts(values[index].Commands)
+		values[index].Rounds = cloneRounds(values[index].Rounds)
 	}
 	return values
 }

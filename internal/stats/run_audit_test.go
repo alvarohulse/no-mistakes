@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -32,7 +33,7 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":3,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
+	want := `{"schema_version":4,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -73,6 +74,70 @@ func TestBuildRunAuditPreservesZeroAndRejectsPartialTotals(t *testing.T) {
 	}
 	if audit.Invocations[1].DeltaUsage.OutputTokens != nil {
 		t.Fatalf("missing output became zero: %+v", audit.Invocations[1].DeltaUsage)
+	}
+}
+
+func TestBuildRunAuditKeepsContentFreeCommandAndRepairReceipts(t *testing.T) {
+	database, run := newAuditRun(t)
+	step, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.InsertStepRound(step.ID, 1, "auto_fix", nil, nil, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepRoundRepairAudit(round.ID, "sha256:repair-fingerprint", "resolved"); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0
+	version := "5.2.26"
+	const privateCommand = "/private/worktree/DO-NOT-RETAIN --token secret"
+	if err := database.SetStepEvidence(step.ID, db.StepEvidence{
+		Commands: []db.CommandEvidence{
+			{
+				Round: 1, Sequence: 1, Command: privateCommand, Outcome: db.CommandOutcomePassed, ExitCode: &zero,
+				CommandSource: runner.SourceLinux,
+				Runner: &runner.Provenance{
+					SchemaVersion: runner.SchemaVersion, Platform: "linux", Source: runner.SourceLinux,
+					Executable: "zsh", Args: []string{"-lc"}, Version: &version,
+				},
+			},
+			{Round: 1, Sequence: 2, Command: privateCommand, Outcome: db.CommandOutcomeError, CommandSource: runner.SourceBase},
+		},
+		Evidence: []string{"private prose must not enter stats"}, Explanation: "private explanation must not enter stats",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 25, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	audit, err := BuildRunAudit(database, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.Steps) != 1 || len(audit.Steps[0].Commands) != 2 {
+		t.Fatalf("command receipts = %+v", audit.Steps)
+	}
+	first, second := audit.Steps[0].Commands[0], audit.Steps[0].Commands[1]
+	if first.Round != 1 || first.Sequence != 1 || first.Outcome != db.CommandOutcomePassed || first.ExitCode == nil || *first.ExitCode != 0 || first.CommandSource != runner.SourceLinux {
+		t.Fatalf("first command receipt = %+v", first)
+	}
+	if first.Runner == nil || first.Runner.Executable != "zsh" || first.Runner.Version == nil || *first.Runner.Version != version || len(first.Runner.Args) != 1 || first.Runner.Args[0] != "-lc" {
+		t.Fatalf("runner provenance = %+v", first.Runner)
+	}
+	if second.Runner != nil || second.Outcome != db.CommandOutcomeError {
+		t.Fatalf("runner-less command receipt = %+v", second)
+	}
+	if len(audit.Steps[0].Rounds) != 1 || audit.Steps[0].Rounds[0].RepairFailureFingerprint == nil || *audit.Steps[0].Rounds[0].RepairFailureFingerprint != "sha256:repair-fingerprint" || audit.Steps[0].Rounds[0].RepairResult == nil || *audit.Steps[0].Rounds[0].RepairResult != "resolved" {
+		t.Fatalf("repair receipt = %+v", audit.Steps[0].Rounds)
+	}
+	encoded := mustJSON(t, audit)
+	for _, private := range []string{privateCommand, "private prose", "private explanation"} {
+		if strings.Contains(encoded, private) {
+			t.Fatalf("run audit retained private content %q: %s", private, encoded)
+		}
 	}
 }
 
