@@ -25,6 +25,10 @@ func TestNewOwnedDocumentIsDeterministicAndVerifiable(t *testing.T) {
 	if first != second {
 		t.Fatalf("render is not deterministic\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
+	if !strings.HasPrefix(first, "<!-- no-mistakes:owned-sections:v1 -->\n\n<!-- no-mistakes:section:v1:summary:begin -->") ||
+		!strings.Contains(first, " -->\n\n<!-- no-mistakes:section:v1:static-tests:begin -->") {
+		t.Fatalf("patch-only output no longer uses the legacy sections-only layout:\n%s", first)
+	}
 	for _, marker := range []string{
 		"<!-- no-mistakes:owned-sections:v1 -->",
 		"<!-- no-mistakes:section:v1:summary:begin -->",
@@ -39,6 +43,84 @@ func TestNewOwnedDocumentIsDeterministicAndVerifiable(t *testing.T) {
 		t.Fatalf("ValidateOwnedDocument: %v", err)
 	}
 }
+
+func TestNewOwnedDocumentBootstrapsOwnedSectionsIntoLiteralLayout(t *testing.T) {
+	t.Parallel()
+
+	preamble := "Repository template preamble.\n\n# Summary\n\n"
+	checklist := "\n\n# Test Plan\n\n- [ ] Keep this checklist byte-for-byte.\r\n"
+	footer := "\nRepository-owned footer.\n"
+	patches := PatchSet{
+		Version: PatchVersion,
+		Sections: []SectionPatch{
+			{ID: "summary", Content: "Generated summary."},
+			{ID: "static-tests", Content: "- `go test ./...` passed"},
+		},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer(preamble)},
+			{Section: stringPointer("summary")},
+			{Literal: stringPointer(checklist)},
+			{Section: stringPointer("static-tests")},
+			{Literal: stringPointer(footer)},
+		}},
+	}
+
+	body, err := NewOwnedDocument(patches)
+	if err != nil {
+		t.Fatalf("NewOwnedDocument: %v", err)
+	}
+	if err := ValidateOwnedDocument(body, ValidationLimits{}); err != nil {
+		t.Fatalf("ValidateOwnedDocument: %v", err)
+	}
+	for _, exact := range []string{preamble, checklist, footer} {
+		if !strings.Contains(body, exact) {
+			t.Fatalf("literal bytes %q missing from bootstrapped document:\n%s", exact, body)
+		}
+	}
+	if summary, tests := strings.Index(body, "Generated summary."), strings.Index(body, "- `go test ./...` passed"); summary < 0 || tests < summary {
+		t.Fatalf("owned sections were not rendered at their references:\n%s", body)
+	}
+}
+
+func TestApplyOwnedPatchesIgnoresBootstrapAndPreservesInitialLayout(t *testing.T) {
+	t.Parallel()
+
+	initial, err := NewOwnedDocument(PatchSet{
+		Version:  PatchVersion,
+		Sections: []SectionPatch{{ID: "summary", Content: "old summary"}},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer("# Summary\n\n")},
+			{Section: stringPointer("summary")},
+			{Literal: stringPointer("\n\n- [ ] Human checklist\n")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := ApplyOwnedPatches(initial, PatchSet{
+		Version:  PatchVersion,
+		Sections: []SectionPatch{{ID: "summary", Content: "new summary"}},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer("THIS REPLACEMENT LAYOUT MUST BE IGNORED\n")},
+			{Section: stringPointer("summary")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyOwnedPatches: %v", err)
+	}
+	if !strings.Contains(updated, "# Summary\n\n") || !strings.Contains(updated, "\n\n- [ ] Human checklist\n") {
+		t.Fatalf("initial unowned layout drifted:\n%s", updated)
+	}
+	if strings.Contains(updated, "THIS REPLACEMENT LAYOUT") || strings.Contains(updated, "old summary") {
+		t.Fatalf("bootstrap layout or old owned content survived:\n%s", updated)
+	}
+	if !strings.Contains(updated, "new summary") {
+		t.Fatalf("updated owned content missing:\n%s", updated)
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 func TestApplyOwnedPatchesPreservesEveryUnownedByte(t *testing.T) {
 	t.Parallel()
@@ -133,6 +215,28 @@ func TestOwnedDocumentValidationRejectsUnsafeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bootstrapSecret, err := NewOwnedDocument(PatchSet{
+		Version:  PatchVersion,
+		Sections: []SectionPatch{{ID: "summary", Content: "safe"}},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer("ghp_abcdefghijklmnopqrstuvwx12\n\n")},
+			{Section: stringPointer("summary")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapLarge, err := NewOwnedDocument(PatchSet{
+		Version:  PatchVersion,
+		Sections: []SectionPatch{{ID: "summary", Content: "safe"}},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer(strings.Repeat("template ", 100) + "\n\n")},
+			{Section: stringPointer("summary")},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name   string
@@ -144,6 +248,8 @@ func TestOwnedDocumentValidationRejectsUnsafeCandidates(t *testing.T) {
 		{name: "byte limit", body: safe, limits: ValidationLimits{MaxBytes: len(safe) - 1}, want: ErrOversize},
 		{name: "host unit limit", body: safe, limits: ValidationLimits{MaxUnits: utf8.RuneCountInString(safe) - 1, MeasureUnits: utf8.RuneCountInString}, want: ErrOversize},
 		{name: "secret", body: secret, want: ErrSecretDetected},
+		{name: "bootstrap literal byte limit", body: bootstrapLarge, limits: ValidationLimits{MaxBytes: len(bootstrapLarge) - 1}, want: ErrOversize},
+		{name: "bootstrap literal secret", body: bootstrapSecret, want: ErrSecretDetected},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -168,5 +274,55 @@ func TestPatchSetRejectsReplacementBodyAndInvalidSections(t *testing.T) {
 		if err := ValidatePatchSet(patches); err == nil {
 			t.Fatalf("case %d: expected rejection for %+v", i, patches)
 		}
+	}
+}
+
+func TestPatchSetRejectsInvalidBootstrapLayouts(t *testing.T) {
+	t.Parallel()
+
+	literal := "template\n"
+	summary := "summary"
+	testsID := "static-tests"
+	unknown := "unknown"
+	invalidUTF8 := string([]byte{0xff})
+	reserved := "<!-- no-mistakes:owned-sections:v1 -->\n"
+	base := []SectionPatch{{ID: summary, Content: "summary"}, {ID: testsID, Content: "tests"}}
+
+	tests := []struct {
+		name  string
+		parts []BootstrapPart
+	}{
+		{name: "part has neither field", parts: []BootstrapPart{{}, {Section: &summary}, {Section: &testsID}}},
+		{name: "part has both fields", parts: []BootstrapPart{{Literal: &literal, Section: &summary}, {Section: &testsID}}},
+		{name: "duplicate section reference", parts: []BootstrapPart{{Section: &summary}, {Section: &summary}, {Section: &testsID}}},
+		{name: "missing section reference", parts: []BootstrapPart{{Section: &summary}}},
+		{name: "unknown section reference", parts: []BootstrapPart{{Section: &summary}, {Section: &testsID}, {Section: &unknown}}},
+		{name: "invalid utf8 literal", parts: []BootstrapPart{{Literal: &invalidUTF8}, {Section: &summary}, {Section: &testsID}}},
+		{name: "reserved marker literal", parts: []BootstrapPart{{Literal: &reserved}, {Section: &summary}, {Section: &testsID}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			patches := PatchSet{Version: PatchVersion, Sections: base, Bootstrap: &BootstrapLayout{Parts: tt.parts}}
+			if err := ValidatePatchSet(patches); err == nil {
+				t.Fatalf("ValidatePatchSet accepted invalid bootstrap: %+v", tt.parts)
+			}
+		})
+	}
+}
+
+func TestNewOwnedDocumentRejectsBootstrapWithoutSectionMarkerBoundaries(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewOwnedDocument(PatchSet{
+		Version:  PatchVersion,
+		Sections: []SectionPatch{{ID: "summary", Content: "generated"}},
+		Bootstrap: &BootstrapLayout{Parts: []BootstrapPart{
+			{Literal: stringPointer("# Summary")},
+			{Section: stringPointer("summary")},
+		}},
+	})
+	if !errors.Is(err, ErrMissingMarkers) && !errors.Is(err, ErrCorruptMarkers) {
+		t.Fatalf("error = %v, want an invalid marker-layout error", err)
 	}
 }

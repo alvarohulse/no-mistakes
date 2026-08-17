@@ -53,6 +53,80 @@ func TestApplyPRBodyHookUsesFormatterOutput(t *testing.T) {
 	}
 }
 
+func TestApplyPRBodyHookBootstrapsAndPreservesTemplateChecklist(t *testing.T) {
+	t.Parallel()
+	heading := "# Repository Summary\n\n"
+	checklist := "\n\n# Test Plan\n\n- [ ] Human-only verification\n"
+	sectionID := "summary"
+	patches := prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: "formatted body"}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &heading},
+			{Section: &sectionID},
+			{Literal: &checklist},
+		}},
+	}
+	payload, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	sctx, _ := newHookTestContext(t, "cat > /dev/null; printf '%s\\n' "+quoted)
+
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in"}, "wc", prBodyScope{})
+	if got.OwnedPatches.Bootstrap == nil {
+		t.Fatal("the hook bootstrap layout was not retained for initial publication")
+	}
+	for _, exact := range []string{heading, checklist} {
+		if !strings.Contains(got.Body, exact) {
+			t.Fatalf("bootstrap literal %q missing:\n%s", exact, got.Body)
+		}
+	}
+
+	replacementHeading := "# Replacement layout must not be used\n\n"
+	replacement := patches
+	replacement.Sections = []prbody.SectionPatch{{ID: sectionID, Content: "updated body"}}
+	replacement.Bootstrap = &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+		{Literal: &replacementHeading},
+		{Section: &sectionID},
+	}}
+	updated, err := prbody.ApplyOwnedPatches(got.Body, replacement)
+	if err != nil {
+		t.Fatalf("ApplyOwnedPatches: %v", err)
+	}
+	if !strings.Contains(updated, checklist) || strings.Contains(updated, replacementHeading) {
+		t.Fatalf("existing-body update changed the initial template layout:\n%s", updated)
+	}
+}
+
+func TestApplyPRBodyHookRejectsSecretInBootstrapLiteral(t *testing.T) {
+	t.Parallel()
+	literal := "# Summary\n\nghp_abcdefghijklmnopqrstuvwx12\n\n"
+	sectionID := "summary"
+	patches := prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: "formatted body"}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &literal},
+			{Section: &sectionID},
+		}},
+	}
+	payload, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx, logs := newHookTestContext(t, "cat > /dev/null; printf '%s\\n' '"+string(payload)+"'")
+
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in"}, "wc", prBodyScope{})
+	if got.Body != "built-in" {
+		t.Fatalf("body = %q, want safe built-in fallback", got.Body)
+	}
+	if !logsContain(*logs, "unsafe candidate") || !logsContain(*logs, "possible secret") {
+		t.Fatalf("expected bootstrap secret rejection in logs, got %v", *logs)
+	}
+}
+
 func TestApplyPRBodyHookFallsBackLoudlyOnFailure(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "cat > /dev/null; echo 'no template' >&2; exit 2")

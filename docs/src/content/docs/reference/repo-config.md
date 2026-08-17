@@ -264,15 +264,30 @@ Successful stdout is strict JSON. It has no full-body field:
 {
   "version": 1,
   "sections": [
-    {"id": "summary", "content": "## Summary\n\nGenerated summary"},
-    {"id": "static-tests", "content": "## Static Tests\n\n- `go test ./...` passed"},
-    {"id": "review-evidence", "content": "## Review Evidence\n\nNo blocking findings."},
-    {"id": "user-testing", "content": "## User Testing\n\n1. Exercise the saved flow."}
-  ]
+    {"id": "summary", "content": "Generated summary"},
+    {"id": "static-tests", "content": "### Static Tests\n\n- `go test ./...` passed"},
+    {"id": "review-evidence", "content": "### Review Evidence\n\nNo blocking findings."},
+    {"id": "user-testing", "content": "### User Testing\n\n1. Exercise the saved flow."}
+  ],
+  "bootstrap": {
+    "parts": [
+      {"literal": "# Summary\n\n"},
+      {"section": "summary"},
+      {"literal": "\n\n# Test Plan\n\n"},
+      {"section": "static-tests"},
+      {"literal": "\n\n"},
+      {"section": "review-evidence"},
+      {"literal": "\n\n"},
+      {"section": "user-testing"},
+      {"literal": "\n\n- [ ] Complete the repository checklist.\n"}
+    ]
+  }
 }
 ```
 
-no-mistakes wraps each section in versioned begin/end/hash markers. On later runs it reads the hosted body and replaces only those owned ranges; every byte outside them, including human edits, third-party content, and template checklists, remains unchanged. Missing, duplicate, conflicting, or hash-invalid markers stop publication rather than guessing an insertion point.
+`bootstrap` is optional and is consumed only when creating the initial body. Each part has exactly one string field: `literal` is exact unowned UTF-8 text, while `section` references one patch ID. Every patch ID must be referenced exactly once; missing, duplicate, or unknown references, reserved no-mistakes markers, and layouts that do not leave section markers on their own lines are rejected. Omitting `bootstrap` keeps the sections-only layout.
+
+no-mistakes wraps each section in versioned begin/end/hash markers. On later runs it ignores `bootstrap`, reads the hosted body, and replaces only those owned ranges; every byte outside them, including human edits, third-party content, and template checklists, remains unchanged. Missing, duplicate, conflicting, or hash-invalid markers stop publication rather than guessing an insertion point.
 
 ```yaml
 hooks:

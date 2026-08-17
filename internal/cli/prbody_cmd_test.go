@@ -89,6 +89,26 @@ func patchHook(content string) string {
 	return "cat > /dev/null; printf '%s\\n' " + quoted
 }
 
+func bootstrapHook(content string) string {
+	heading := "# Repository Summary\n\n"
+	checklist := "\n\n# Test Plan\n\n- [ ] Human verification\n"
+	sectionID := "summary"
+	payload, err := json.Marshal(prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: content}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &heading},
+			{Section: &sectionID},
+			{Literal: &checklist},
+		}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	return "cat > /dev/null; printf '%s\\n' " + quoted
+}
+
 func runPRBody(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	cmd := newRootCmd()
@@ -140,6 +160,23 @@ func TestPRBodyRunsTheHookOverride(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "--hook") {
 		t.Fatalf("stderr = %q, want the formatter source reported", errOut)
+	}
+}
+
+func TestPRBodyRendersFormatterBootstrapLayout(t *testing.T) {
+	setupPRBodyRepo(t)
+
+	out, errOut, err := runPRBody(t, "", "--sample", "--hook", bootstrapHook("generated summary"))
+	if err != nil {
+		t.Fatalf("pr-body: %v\n%s", err, errOut)
+	}
+	for _, exact := range []string{"# Repository Summary\n\n", "\n\n# Test Plan\n\n- [ ] Human verification\n"} {
+		if !strings.Contains(out, exact) {
+			t.Fatalf("bootstrap literal %q missing from stdout:\n%s", exact, out)
+		}
+	}
+	if !strings.Contains(out, "no-mistakes:section:v1:summary:begin") || !strings.Contains(out, "generated summary") {
+		t.Fatalf("owned summary missing from bootstrap layout:\n%s", out)
 	}
 }
 

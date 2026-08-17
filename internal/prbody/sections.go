@@ -46,16 +46,31 @@ var (
 
 // PatchSet is the only successful stdout shape accepted from hooks.pr_body.
 // It deliberately has no full-body field: formatters choose owned section
-// content while no-mistakes alone merges that content into the hosted body.
+// content and may describe a one-time initial layout, while no-mistakes alone
+// renders and merges the hosted body.
 type PatchSet struct {
-	Version  int            `json:"version"`
-	Sections []SectionPatch `json:"sections"`
+	Version   int              `json:"version"`
+	Sections  []SectionPatch   `json:"sections"`
+	Bootstrap *BootstrapLayout `json:"bootstrap,omitempty"`
 }
 
 // SectionPatch replaces one named no-mistakes-owned section.
 type SectionPatch struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
+}
+
+// BootstrapLayout is a one-time layout for a newly-created pull request. Each
+// part is either exact unowned text or a reference to one owned section.
+type BootstrapLayout struct {
+	Parts []BootstrapPart `json:"parts"`
+}
+
+// BootstrapPart is a pointer-valued sum type so an omitted field remains
+// distinct from an intentionally empty literal.
+type BootstrapPart struct {
+	Literal *string `json:"literal,omitempty"`
+	Section *string `json:"section,omitempty"`
 }
 
 // ValidationLimits applies the provider-independent byte limit plus an
@@ -110,30 +125,98 @@ func ValidatePatchSet(patches PatchSet) error {
 			return fmt.Errorf("owned PR section %q contains a reserved marker", section.ID)
 		}
 	}
+	if patches.Bootstrap != nil {
+		if err := validateBootstrapLayout(*patches.Bootstrap, seen); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// NewOwnedDocument renders a fresh body containing only versioned owned
-// sections. Unowned repository-template or human content can subsequently be
-// placed around or between those blocks and is preserved by ApplyOwnedPatches.
+func validateBootstrapLayout(layout BootstrapLayout, sections map[string]struct{}) error {
+	referenced := make(map[string]struct{}, len(sections))
+	for i, part := range layout.Parts {
+		switch {
+		case part.Literal != nil && part.Section == nil:
+			if !utf8.ValidString(*part.Literal) {
+				return fmt.Errorf("owned PR bootstrap part %d literal: %w", i, ErrInvalidUTF8)
+			}
+			if strings.Contains(*part.Literal, reservedPrefix) {
+				return fmt.Errorf("owned PR bootstrap part %d literal contains a reserved marker", i)
+			}
+		case part.Literal == nil && part.Section != nil:
+			id := *part.Section
+			if _, exists := sections[id]; !exists {
+				return fmt.Errorf("owned PR bootstrap part %d references unknown section %q", i, id)
+			}
+			if _, exists := referenced[id]; exists {
+				return fmt.Errorf("owned PR bootstrap references section %q more than once", id)
+			}
+			referenced[id] = struct{}{}
+		default:
+			return fmt.Errorf("owned PR bootstrap part %d must contain exactly one of literal or section", i)
+		}
+	}
+	for _, section := range sortedSectionIDs(sections) {
+		if _, exists := referenced[section]; !exists {
+			return fmt.Errorf("owned PR bootstrap does not reference section %q", section)
+		}
+	}
+	return nil
+}
+
+func sortedSectionIDs(sections map[string]struct{}) []string {
+	ids := make([]string, 0, len(sections))
+	for id := range sections {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// NewOwnedDocument renders a fresh body. A bootstrap layout interleaves exact
+// unowned literals with the versioned owned sections; without one, the legacy
+// sections-only layout is retained. ApplyOwnedPatches preserves every unowned
+// byte after this one-time render.
 func NewOwnedDocument(patches PatchSet) (string, error) {
 	if err := ValidatePatchSet(patches); err != nil {
 		return "", err
 	}
-	blocks := make([]string, 0, len(patches.Sections))
-	for _, section := range patches.Sections {
-		blocks = append(blocks, renderOwnedSection(section.ID, section.Content))
+	body := ""
+	if patches.Bootstrap == nil {
+		blocks := make([]string, 0, len(patches.Sections))
+		for _, section := range patches.Sections {
+			blocks = append(blocks, renderOwnedSection(section.ID, section.Content))
+		}
+		body = watermark + "\n\n" + strings.Join(blocks, "\n\n")
+	} else {
+		sections := make(map[string]SectionPatch, len(patches.Sections))
+		for _, section := range patches.Sections {
+			sections[section.ID] = section
+		}
+		var rendered strings.Builder
+		rendered.WriteString(watermark)
+		rendered.WriteString("\n\n")
+		for _, part := range patches.Bootstrap.Parts {
+			if part.Literal != nil {
+				rendered.WriteString(*part.Literal)
+				continue
+			}
+			section := sections[*part.Section]
+			rendered.WriteString(renderOwnedSection(section.ID, section.Content))
+		}
+		body = rendered.String()
 	}
-	body := watermark + "\n\n" + strings.Join(blocks, "\n\n")
 	if _, err := parseOwnedDocument(body); err != nil {
 		return "", fmt.Errorf("render owned PR body: %w", err)
 	}
 	return body, nil
 }
 
-// ApplyOwnedPatches updates only already-owned sections. It never bootstraps a
-// missing section into an existing body: missing/corrupt/conflicting markers
-// require an operator decision instead of guessing an insertion point.
+// ApplyOwnedPatches updates only already-owned sections and never applies the
+// optional bootstrap layout. It never bootstraps a missing section into an
+// existing body: missing/corrupt/conflicting markers require an operator
+// decision instead of guessing an insertion point.
 func ApplyOwnedPatches(body string, patches PatchSet) (string, error) {
 	if err := ValidatePatchSet(patches); err != nil {
 		return "", err

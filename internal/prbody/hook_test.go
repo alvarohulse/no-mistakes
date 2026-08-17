@@ -46,6 +46,70 @@ func TestRunHookReturnsOwnedSectionPatches(t *testing.T) {
 	}
 }
 
+func TestRunHookDecodesTypedBootstrapLayout(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	result, err := RunHook(context.Background(), HookOptions{
+		Command:  `cat > /dev/null; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"generated"}],"bootstrap":{"parts":[{"literal":"# Summary\n\n"},{"section":"summary"},{"literal":"\n\n- [ ] Human checklist\n"}]}}'`,
+		Contract: Sample(),
+	})
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	if result.Patches.Bootstrap == nil || len(result.Patches.Bootstrap.Parts) != 3 {
+		t.Fatalf("bootstrap = %+v", result.Patches.Bootstrap)
+	}
+	body, err := NewOwnedDocument(result.Patches)
+	if err != nil {
+		t.Fatalf("NewOwnedDocument: %v", err)
+	}
+	if !strings.Contains(body, "# Summary\n\n") || !strings.Contains(body, "\n\n- [ ] Human checklist\n") {
+		t.Fatalf("bootstrap literals missing:\n%s", body)
+	}
+}
+
+func TestRunHookStrictlyDecodesBootstrapObjects(t *testing.T) {
+	t.Parallel()
+	requireShell(t)
+
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "unknown bootstrap field",
+			output: `{"version":1,"sections":[{"id":"summary","content":"x"}],"bootstrap":{"parts":[{"section":"summary"}],"layout":"replacement"}}`,
+		},
+		{
+			name:   "unknown part field",
+			output: `{"version":1,"sections":[{"id":"summary","content":"x"}],"bootstrap":{"parts":[{"section":"summary","text":"replacement"}]}}`,
+		},
+		{
+			name:   "null is not a supplied variant",
+			output: `{"version":1,"sections":[{"id":"summary","content":"x"}],"bootstrap":{"parts":[{"literal":null},{"section":"summary"}]}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := RunHook(context.Background(), HookOptions{
+				Command:  `cat > /dev/null; printf '%s\n' '` + tt.output + `'`,
+				Contract: Sample(),
+			})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if tt.name != "null is not a supplied variant" && !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("error = %v, want strict unknown-field rejection", err)
+			}
+			if tt.name == "null is not a supplied variant" && !strings.Contains(err.Error(), "exactly one") {
+				t.Fatalf("error = %v, want typed-variant rejection", err)
+			}
+		})
+	}
+}
+
 func TestRunHookRejectsAFullBodyReplacement(t *testing.T) {
 	t.Parallel()
 	requireShell(t)

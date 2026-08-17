@@ -67,8 +67,9 @@ type HookResult struct {
 var ErrNoHook = errors.New("no pr_body hook configured")
 
 // RunHook serializes the contract to the formatter's stdin and decodes its
-// stdout as owned-section patches. A formatter can never return a replacement
-// full body; unknown output fields are rejected.
+// stdout as owned-section patches plus an optional one-time bootstrap layout.
+// A formatter can never return a replacement full body; unknown output fields
+// are rejected.
 //
 // Every failure mode - missing command, non-zero exit, timeout, empty output,
 // oversized output - returns an error. Callers report the failure and may use
