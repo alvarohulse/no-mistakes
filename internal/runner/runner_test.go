@@ -157,6 +157,57 @@ func TestResolveRejectsMissingRunnerBinary(t *testing.T) {
 	}
 }
 
+func TestResolveRetainsConfiguredProvenanceOnOperationalErrors(t *testing.T) {
+	linuxRun := "linux command"
+	probeErr := errors.New("version probe unavailable")
+	tests := []struct {
+		name         string
+		lookPath     func(string) (string, error)
+		probeVersion func(context.Context, shellKind, string) (*string, error)
+		wantErr      error
+	}{
+		{
+			name: "missing executable",
+			lookPath: func(name string) (string, error) {
+				return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+			},
+			probeVersion: func(context.Context, shellKind, string) (*string, error) { return nil, nil },
+			wantErr:      exec.ErrNotFound,
+		},
+		{
+			name:         "version probe failure",
+			lookPath:     func(name string) (string, error) { return "/resolved/" + name, nil },
+			probeVersion: func(context.Context, shellKind, string) (*string, error) { return nil, probeErr },
+			wantErr:      probeErr,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := resolve(context.Background(), Command{
+				Run:   "base command",
+				Linux: &Override{Run: &linuxRun},
+			}, Spec{Executable: "zsh", Args: []string{"-lc"}}, resolverDeps{
+				platform:     "linux",
+				lookPath:     tt.lookPath,
+				probeVersion: tt.probeVersion,
+			})
+			if err == nil || !errors.Is(err, tt.wantErr) {
+				t.Fatalf("resolve() error = %v, want %v", err, tt.wantErr)
+			}
+			if resolved.Script != linuxRun || resolved.CommandSource != SourceLinux {
+				t.Fatalf("partial command resolution = %+v", resolved)
+			}
+			provenance := resolved.Provenance
+			if provenance.SchemaVersion != SchemaVersion || provenance.Platform != "linux" || provenance.Source != SourceDefault || provenance.Executable != "zsh" || !reflect.DeepEqual(provenance.Args, []string{"-lc"}) || provenance.Version != nil {
+				t.Fatalf("partial runner provenance = %+v", provenance)
+			}
+			if len(resolved.Argv) != 0 {
+				t.Fatalf("failed resolution exposed executable argv = %#v", resolved.Argv)
+			}
+		})
+	}
+}
+
 func stringPointer(value string) *string { return &value }
 
 func TestResolvedRunDistinguishesTimeoutLaunchAndExit(t *testing.T) {

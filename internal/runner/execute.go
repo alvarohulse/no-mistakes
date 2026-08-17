@@ -57,10 +57,10 @@ type Prepared struct {
 // Prepare resolves and syntax-checks one command. No command body is executed.
 func Prepare(ctx context.Context, command Command, defaultRunner Spec, options ExecuteOptions) (Prepared, error) {
 	resolved, err := Resolve(ctx, command, defaultRunner)
-	if err != nil {
-		return Prepared{}, err
-	}
 	prepared := Prepared{resolved: resolved}
+	if err != nil {
+		return prepared, err
+	}
 	if err := resolved.ValidateSyntax(ctx, options); err != nil {
 		return prepared, err
 	}

@@ -80,21 +80,19 @@ func resolve(ctx context.Context, command Command, defaultRunner Spec, deps reso
 	if strings.TrimSpace(script) == "" {
 		return Resolved{}, fmt.Errorf("runner command is empty for platform %s", platform)
 	}
+	resolved := Resolved{Script: script, CommandSource: commandSource}
 	provenance, provenancePath, err := resolveSpec(ctx, selectedRunner, runnerSource, platform, deps)
+	resolved.Provenance = provenance
 	if err != nil {
-		return Resolved{}, err
+		return resolved, err
 	}
 	argv := make([]string, 0, len(provenance.Args)+2)
 	argv = append(argv, provenancePath)
 	argv = append(argv, provenance.Args...)
 	argv = append(argv, script)
-	return Resolved{
-		Script:        script,
-		Argv:          argv,
-		CommandSource: commandSource,
-		Provenance:    provenance,
-		executable:    provenancePath,
-	}, nil
+	resolved.Argv = argv
+	resolved.executable = provenancePath
+	return resolved, nil
 }
 
 func resolveDefault(ctx context.Context, configured Spec, deps resolverDeps) (Provenance, error) {
@@ -159,25 +157,26 @@ func resolveSpec(ctx context.Context, spec Spec, source, platform string, deps r
 	if err != nil {
 		return Provenance{}, "", err
 	}
-	path, err := deps.lookPath(spec.Executable)
-	if err != nil {
-		return Provenance{}, "", fmt.Errorf("resolve runner executable %q: %w", spec.Executable, err)
-	}
-	version, err := deps.probeVersion(ctx, kind, path)
-	if err != nil {
-		return Provenance{}, "", fmt.Errorf("probe runner version for %q: %w", spec.Executable, err)
-	}
-	if err := ValidateVersion(version); err != nil {
-		return Provenance{}, "", err
-	}
-	return Provenance{
+	provenance := Provenance{
 		SchemaVersion: SchemaVersion,
 		Platform:      platform,
 		Source:        source,
 		Executable:    spec.Executable,
 		Args:          append([]string(nil), spec.Args...),
-		Version:       version,
-	}, path, nil
+	}
+	path, err := deps.lookPath(spec.Executable)
+	if err != nil {
+		return provenance, "", fmt.Errorf("resolve runner executable %q: %w", spec.Executable, err)
+	}
+	version, err := deps.probeVersion(ctx, kind, path)
+	if err != nil {
+		return provenance, path, fmt.Errorf("probe runner version for %q: %w", spec.Executable, err)
+	}
+	if err := ValidateVersion(version); err != nil {
+		return provenance, path, err
+	}
+	provenance.Version = version
+	return provenance, path, nil
 }
 
 func validateSpec(spec Spec) (shellKind, error) {

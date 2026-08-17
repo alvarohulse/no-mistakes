@@ -104,6 +104,63 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestRunStepRunnerCommandPersistsPartialProvenanceOnPrepareErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	tests := []struct {
+		name       string
+		writeShell bool
+	}{
+		{name: "missing executable"},
+		{name: "version probe launch failure", writeShell: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			binDir := t.TempDir()
+			if tt.writeShell {
+				if err := os.WriteFile(filepath.Join(binDir, "zsh"), []byte("not an executable image"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.Runner = runner.Spec{Executable: "zsh", Args: []string{"-lc"}}
+			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepBuild)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = step.ID
+			sctx.Round = 1
+
+			_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf ready"})
+			if err == nil || exitCode != -1 {
+				t.Fatalf("prepare result = exit %d error %v, want -1/error", exitCode, err)
+			}
+			stored, err := sctx.DB.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := stored.Evidence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(evidence.Commands) != 1 {
+				t.Fatalf("commands = %+v", evidence.Commands)
+			}
+			receipt := evidence.Commands[0]
+			if receipt.Command != "printf ready" || receipt.Outcome != "error" || receipt.ExitCode != nil || receipt.CommandSource != runner.SourceBase || receipt.Runner == nil {
+				t.Fatalf("prepare-error receipt = %+v", receipt)
+			}
+			if receipt.Runner.SchemaVersion != runner.SchemaVersion || receipt.Runner.Platform != runtime.GOOS || receipt.Runner.Source != runner.SourceDefault || receipt.Runner.Executable != "zsh" || len(receipt.Runner.Args) != 1 || receipt.Runner.Args[0] != "-lc" || receipt.Runner.Version != nil {
+				t.Fatalf("prepare-error runner provenance = %+v", receipt.Runner)
+			}
+		})
+	}
+}
+
 func TestRunStepRunnerCommandRetainsCompleteOutputForStepLogging(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX runner fixture")
