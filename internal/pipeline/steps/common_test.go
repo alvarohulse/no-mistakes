@@ -589,7 +589,7 @@ func TestCommitAgentFixes_PersistsUncertifiedRangeForReview(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
@@ -615,7 +615,7 @@ func TestCommitAgentFixes_LintDoesNotPersistUncertifiedRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "lint-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepLint, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepLint, "apply fix", "fallback", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
@@ -638,7 +638,7 @@ func TestCommitAgentFixes_DocumentDoesNotPersistUncertifiedRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "docs-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepDocument, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepDocument, "apply fix", "fallback", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
@@ -659,7 +659,7 @@ func TestCommitAgentFixes_NoChanges(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	originalHeadSHA := sctx.Run.HeadSHA
 
-	err := commitAgentFixes(sctx, types.StepReview, "should not commit", "fallback")
+	err := commitAgentFixes(sctx, types.StepReview, "should not commit", "fallback", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestCommitAgentFixes_InvalidTemplateDoesNotStageChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "agent-change.txt"), []byte("change"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err == nil {
+	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback", nil); err == nil {
 		t.Fatal("commitAgentFixes() accepted an invalid commit.fix_message")
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
@@ -701,7 +701,7 @@ func TestCommitAgentFixes_OversizedRenderedMessageDoesNotStageChanges(t *testing
 		t.Fatal(err)
 	}
 	summary := strings.Repeat("x", 2049)
-	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback"); err == nil {
+	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback", nil); err == nil {
 		t.Fatal("commitAgentFixes() accepted an oversized rendered message")
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
@@ -793,12 +793,81 @@ func TestCommitAgentFixes_UsesFallbackSummary(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	os.WriteFile(filepath.Join(dir, "agent-change.txt"), []byte("change"), 0o644)
-	err := commitAgentFixes(sctx, types.StepLint, "", "fallback lint fix")
+	err := commitAgentFixes(sctx, types.StepLint, "", "fallback lint fix", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): fallback lint fix" {
+	if got := lastCommitMessage(t, dir); got != "fix(lint): fallback lint fix" {
 		t.Errorf("commit message = %q, want fallback-based message", got)
+	}
+}
+
+func TestExecuteFixMode_AttributesCommitToActualHarnessAndModel(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "codex",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "agent-change.txt"), []byte("change"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{
+				Output:   json.RawMessage(`{"summary":"fix parser ownership"}`),
+				Provider: "cursor",
+				Model:    "gpt-5.6-luna-low",
+			}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+
+	if _, err := executeFixMode(sctx, types.StepLint, fixExecutionOptions{
+		ErrorPrefix:     "agent fix lint",
+		FallbackSummary: "fix lint issues",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
+	if !strings.HasPrefix(body, "fix(lint): fix parser ownership\n") {
+		t.Fatalf("commit body starts with %q", body)
+	}
+	if !strings.Contains(body, "Co-authored-by: cursoragent <cursoragent@cursor.com>") {
+		t.Fatalf("commit body lacks Cursor attribution:\n%s", body)
+	}
+	if strings.Contains(body, "Codex <noreply@openai.com>") {
+		t.Fatalf("commit body attributed the configured wrapper instead of the actual harness:\n%s", body)
+	}
+	if !strings.Contains(body, "No-Mistakes-Model: gpt-5.6-luna-low") {
+		t.Fatalf("commit body lacks model attribution:\n%s", body)
+	}
+}
+
+type configuredAttributionAgent struct {
+	agent.Agent
+	model agent.ModelIdentity
+}
+
+func (a configuredAttributionAgent) ConfiguredModel() agent.ModelIdentity { return a.model }
+
+func TestFixCommitAttribution_RejectsUnsafeObservedMetadata(t *testing.T) {
+	t.Parallel()
+	author := configuredAttributionAgent{
+		Agent: &mockAgent{name: "codex"},
+		model: agent.ModelIdentity{Name: "gpt-5.6-sol-high", Vendor: "openai"},
+	}
+
+	got := fixCommitAttribution(author, &agent.Result{
+		Provider: "cursor\n",
+		Model:    "served-model\nCo-authored-by: attacker <attacker@example.com>",
+	})
+	if got.Harness != "codex" {
+		t.Fatalf("harness = %q, want configured authoring harness", got.Harness)
+	}
+	if got.Model != "gpt-5.6-sol-high" {
+		t.Fatalf("model = %q, want safe configured fallback", got.Model)
 	}
 }
 

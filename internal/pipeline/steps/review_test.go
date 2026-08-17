@@ -127,7 +127,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after fix commit, got %q", status)
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(review): address review findings" {
+	if got := lastCommitMessage(t, dir); got != "fix(review): address review findings" {
 		t.Fatalf("last commit message = %q", got)
 	}
 	if branchSHA := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchSHA != sctx.Run.HeadSHA {
@@ -528,7 +528,7 @@ func TestUncertifiedRange_PersistsThenFeedsNextInitialReview(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(fixCtx, types.StepReview, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(fixCtx, types.StepReview, "apply fix", "fallback", nil); err != nil {
 		t.Fatal(err)
 	}
 	persisted, err := fixCtx.DB.GetUncertifiedPipelineRange(fixCtx.Repo.ID, fixCtx.Run.Branch)

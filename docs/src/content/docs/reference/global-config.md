@@ -478,7 +478,7 @@ Template for the subject of commits created by the shared Review, Build, Test, D
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | `no-mistakes({{.Step}}): {{.Summary}}` |
+| Default | `fix({{.Step}}): {{.Summary}}` |
 
 The template supports literal text and two Go-style placeholders:
 
@@ -494,6 +494,8 @@ Before rendering, no-mistakes predicts the subject size from the validated liter
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
+
+The commit body records the actual authoring harness when it has a defined identity (`claude`, `codex`, or `cursor`) and always records `No-Mistakes-Model`. The adapter-observed model wins; the configured model is the fallback, and unavailable or unsafe metadata is recorded as `unknown`.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
 The setting does not change commit subjects created by the Refresh, CI, or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.

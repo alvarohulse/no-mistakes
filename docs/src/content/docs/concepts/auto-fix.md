@@ -103,7 +103,8 @@ Before a step-specific fix commit, the pipeline verifies that the live worktree 
 It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
 The template does not control commits created by the Refresh, CI, or Push steps.
-The CI step uses `no-mistakes: apply CI fixes`, and the Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
+CI repair commits use `fix(ci): apply CI fixes`; the Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
+Step and CI repair commits add a co-author trailer only for the harness that actually authored the change and record the observed or configured model in `No-Mistakes-Model` metadata.
 
 ## Step rounds
 

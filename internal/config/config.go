@@ -2251,7 +2251,7 @@ ci:
 # Auto-fix commit subject template. Available variables: {{.Step}} and {{.Summary}}.
 # Repo config may override this value.
 # commit:
-#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
+#   fix_message: "fix({{.Step}}): {{.Summary}}"
 
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,

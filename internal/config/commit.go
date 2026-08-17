@@ -12,8 +12,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// DefaultFixMessageTemplate preserves the built-in auto-fix commit subject.
-const DefaultFixMessageTemplate = "no-mistakes({{.Step}}): {{.Summary}}"
+// DefaultFixMessageTemplate is the built-in Conventional Commit subject for
+// agent-authored repair commits. Operators may still override it with the
+// existing safe commit.fix_message renderer.
+const DefaultFixMessageTemplate = "fix({{.Step}}): {{.Summary}}"
 
 // Limits are byte-based because they bound allocations and the git commit argument.
 // The source and placeholder caps keep repository-controlled parsing cheap, while

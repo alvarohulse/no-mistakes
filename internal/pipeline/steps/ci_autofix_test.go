@@ -50,7 +50,7 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 			agentCalled = true
 			// Agent "fixes" CI by creating a file
 			os.WriteFile(filepath.Join(opts.CWD, "ci-fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return &agent.Result{Provider: "cursor", Model: "gpt-5.6-terra-medium"}, nil
 		},
 	}
 
@@ -103,6 +103,16 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	}
 	if !foundAutoFix {
 		t.Errorf("expected issue detection in logs, got: %v", logs)
+	}
+	body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
+	if !strings.HasPrefix(body, "fix(ci): apply CI fixes\n") {
+		t.Fatalf("CI fix commit body starts with %q", body)
+	}
+	if !strings.Contains(body, "Co-authored-by: cursoragent <cursoragent@cursor.com>") {
+		t.Fatalf("CI fix commit lacks Cursor attribution:\n%s", body)
+	}
+	if !strings.Contains(body, "No-Mistakes-Model: gpt-5.6-terra-medium") {
+		t.Fatalf("CI fix commit lacks model attribution:\n%s", body)
 	}
 }
 

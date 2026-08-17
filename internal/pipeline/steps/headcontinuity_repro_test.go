@@ -42,7 +42,7 @@ func TestCommitAgentFixes_RefusesToCommitOnOutOfBandResetHead(t *testing.T) {
 	if err := os.WriteFile(guard, []byte("FORCE_INCLUDE marker-inversion\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "guard linked secondmate homes correctly", "address review findings"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepReview, "guard linked secondmate homes correctly", "address review findings", nil); err != nil {
 		t.Fatalf("review-fix commit: %v", err)
 	}
 	reviewedHead := sctx.Run.HeadSHA
@@ -74,7 +74,7 @@ func TestCommitAgentFixes_RefusesToCommitOnOutOfBandResetHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "docs.md"), []byte("corrected docs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := commitAgentFixes(sctx, types.StepDocument, "correct secondmate guard documentation", "update docs")
+	err := commitAgentFixes(sctx, types.StepDocument, "correct secondmate guard documentation", "update docs", nil)
 	if err == nil {
 		t.Fatal("expected commitAgentFixes to refuse committing on an out-of-band-reset HEAD, got nil")
 	}
@@ -107,7 +107,7 @@ func TestCommitAgentFixes_RefusesOnBackwardReset(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "guard.sh"), []byte("FORCE_INCLUDE\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback", nil); err != nil {
 		t.Fatalf("review-fix commit: %v", err)
 	}
 	reviewedHead := sctx.Run.HeadSHA
@@ -118,7 +118,7 @@ func TestCommitAgentFixes_RefusesOnBackwardReset(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "docs.md"), []byte("docs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := commitAgentFixes(sctx, types.StepDocument, "docs", "fallback")
+	err := commitAgentFixes(sctx, types.StepDocument, "docs", "fallback", nil)
 	if err == nil {
 		t.Fatal("expected refusal on a backward-reset HEAD, got nil")
 	}
@@ -150,7 +150,7 @@ func TestCommitAgentFixes_RefusesResetDuringCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("reviewed fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := commitAgentFixes(sctx, types.StepDocument, "update docs", "fallback")
+	err := commitAgentFixes(sctx, types.StepDocument, "update docs", "fallback", nil)
 	if err == nil {
 		t.Fatal("expected refusal when HEAD is reset during commit")
 	}
@@ -189,7 +189,7 @@ func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("pipeline fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback", nil); err != nil {
 		t.Fatalf("forward agent commit should be allowed, got: %v", err)
 	}
 	if _, err := git.Run(sctx.Ctx, dir, "merge-base", "--is-ancestor", forward, sctx.Run.HeadSHA); err != nil {

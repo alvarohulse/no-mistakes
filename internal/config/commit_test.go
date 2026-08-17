@@ -16,7 +16,7 @@ func TestCommitRenderFixMessage_Default(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "no-mistakes(review): address review findings"
+	want := "fix(review): address review findings"
 	if got != want {
 		t.Fatalf("RenderFixMessage() = %q, want %q", got, want)
 	}
@@ -105,7 +105,7 @@ func TestCommitRenderFixMessage_NormalizesMultilineSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "no-mistakes(document): update configuration docs"
+	want := "fix(document): update configuration docs"
 	if got != want {
 		t.Fatalf("RenderFixMessage() = %q, want %q", got, want)
 	}

@@ -106,7 +106,7 @@ CI logs:
 	prompt = testguidance.LateRepairPrompt(string(s.Name()), prompt)
 
 	sctx.Log("running agent to fix CI issues...")
-	_, err := sctx.Agent.Run(ctx, agent.RunOpts{
+	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:  prompt,
 		CWD:     sctx.WorkDir,
 		OnChunk: sctx.LogChunk,
@@ -115,7 +115,7 @@ CI logs:
 		return false, fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	return s.commitAndPush(sctx)
+	return s.commitAndPushAttributed(sctx, result)
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the
@@ -123,6 +123,10 @@ CI logs:
 // Returns (true, nil) when changes were pushed, (false, nil) when there was
 // nothing to commit, or (false, err) on failure.
 func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
+	return s.commitAndPushAttributed(sctx, nil)
+}
+
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result) (bool, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("check CI changes: %w", err)
@@ -139,7 +143,8 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
 	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
 		return false, fmt.Errorf("stage CI changes: %w", err)
 	}
-	if _, err := stepGitRun(sctx, "commit", "-m", "no-mistakes: apply CI fixes"); err != nil {
+	message := attributedFixCommitMessage("fix(ci): apply CI fixes", fixCommitAttribution(sctx.Agent, result))
+	if _, err := stepGitRun(sctx, "commit", "-m", message); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
 	headSHA, err := stepGitHeadSHA(sctx)
