@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -24,13 +25,14 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 		SkipReceipts:    []SkipReceipt{},
 		Invocations:     []Invocation{},
 		Metrics:         emptyMetrics(),
+		Costs:           buildCostTotals(nil),
 		IntegrityErrors: []string{},
 	}
 	got, err := audit.CanonicalJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":1,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"integrity_errors":[]}`
+	want := `{"schema_version":2,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -98,6 +100,53 @@ func TestBuildRunAuditAggregatesResumedSessionDeltasNotRawCounters(t *testing.T)
 	}
 	if audit.Invocations[1].RawUsage.InputTokens == nil || *audit.Invocations[1].RawUsage.InputTokens != 2500 {
 		t.Fatalf("raw cumulative receipt = %+v", audit.Invocations[1].RawUsage)
+	}
+}
+
+func TestBuildRunAuditAddsIndependentPricingClasses(t *testing.T) {
+	database, run := newAuditRun(t)
+	policy := `{"version":6,"managed":false,"steps":[{"name":"review","status":"enabled"}],"routing":{},"pricing":{"profiles":{"cursor":"cursor-token-rate"}}}`
+	digest := sha256.Sum256([]byte(policy))
+	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
+	reported := 9.25
+	provider := "anthropic"
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
+		Model: "claude-opus-5", ModelProvider: &provider,
+		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(),
+		CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
+		DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cacheRead,
+		DeltaCacheCreationTokens: &cacheWrite, ReportedCostUSD: &reported,
+	})
+
+	audit, err := BuildRunAudit(database, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audit.Invocations) != 1 {
+		t.Fatalf("invocations = %d, want 1", len(audit.Invocations))
+	}
+	costs := audit.Invocations[0].Costs
+	if costs.HarnessReported.ValueUSD == nil || *costs.HarnessReported.ValueUSD != 9.25 {
+		t.Fatalf("harness-reported = %+v", costs.HarnessReported)
+	}
+	if costs.APIListEstimate.ValueUSD == nil || *costs.APIListEstimate.ValueUSD != 36.75 {
+		t.Fatalf("API-list estimate = %+v", costs.APIListEstimate)
+	}
+	if costs.HarnessAdjustedEstimate.ValueUSD == nil || *costs.HarnessAdjustedEstimate.ValueUSD != 37.75 {
+		t.Fatalf("harness-adjusted estimate = %+v", costs.HarnessAdjustedEstimate)
+	}
+	if audit.Costs.HarnessReported.ValueUSD == nil || *audit.Costs.HarnessReported.ValueUSD != 9.25 || !audit.Costs.HarnessReported.Complete {
+		t.Fatalf("run harness-reported total = %+v", audit.Costs.HarnessReported)
+	}
+	if audit.Costs.APIListEstimate.ValueUSD == nil || *audit.Costs.APIListEstimate.ValueUSD != 36.75 || !audit.Costs.APIListEstimate.Complete {
+		t.Fatalf("run API-list total = %+v", audit.Costs.APIListEstimate)
+	}
+	if audit.Costs.HarnessAdjustedEstimate.ValueUSD == nil || *audit.Costs.HarnessAdjustedEstimate.ValueUSD != 37.75 || !audit.Costs.HarnessAdjustedEstimate.Complete {
+		t.Fatalf("run harness-adjusted total = %+v", audit.Costs.HarnessAdjustedEstimate)
 	}
 }
 

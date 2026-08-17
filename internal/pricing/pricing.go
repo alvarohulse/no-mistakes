@@ -71,6 +71,7 @@ type TokenMeters struct {
 
 type Observation struct {
 	Harness         string
+	ProfileID       string
 	Provider        string
 	Model           string
 	StartedAt       time.Time
@@ -132,6 +133,21 @@ func DefaultEstimator() (*Estimator, error) {
 		return nil, fmt.Errorf("decode embedded harness profiles: %w", err)
 	}
 	return NewEstimator(catalog, profiles)
+}
+
+func ValidateProfileSelection(harness, profileID string) error {
+	estimator, err := DefaultEstimator()
+	if err != nil {
+		return err
+	}
+	harness = strings.TrimSpace(harness)
+	profileID = strings.TrimSpace(profileID)
+	for _, profile := range estimator.profiles.Profiles {
+		if profile.Harness == harness && profile.ID == profileID {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown pricing profile %q for harness %q", profileID, harness)
 }
 
 func NewEstimator(catalog Catalog, profiles ProfileCatalog) (*Estimator, error) {
@@ -215,7 +231,7 @@ func (e *Estimator) effectiveEstimate(observation Observation, list CostEstimate
 		result.Reason = list.Reason
 		return result
 	}
-	profile := e.findProfile(observation.Harness, observation.StartedAt)
+	profile := e.findProfile(observation.Harness, observation.ProfileID, observation.StartedAt)
 	if profile == nil {
 		result.Reason = "no_applicable_billing_profile"
 		return result
@@ -261,11 +277,15 @@ func (e *Estimator) findModelPrice(provider, model string, at time.Time) *ModelP
 	return nil
 }
 
-func (e *Estimator) findProfile(harness string, at time.Time) *HarnessProfile {
+func (e *Estimator) findProfile(harness, profileID string, at time.Time) *HarnessProfile {
 	harness = strings.TrimSpace(harness)
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return nil
+	}
 	for i := range e.profiles.Profiles {
 		profile := &e.profiles.Profiles[i]
-		if profile.Harness == harness && withinWindow(at, profile.EffectiveFrom, profile.EffectiveUntil) {
+		if profile.Harness == harness && profile.ID == profileID && withinWindow(at, profile.EffectiveFrom, profile.EffectiveUntil) {
 			return profile
 		}
 	}

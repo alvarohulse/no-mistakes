@@ -11,6 +11,7 @@ func TestEstimatorKeepsThreeCostClassesIndependent(t *testing.T) {
 	reported := 9.25
 	result := estimator.Estimate(Observation{
 		Harness:         "cursor",
+		ProfileID:       "cursor-token-rate",
 		Provider:        "anthropic",
 		Model:           "claude-opus-5",
 		StartedAt:       time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
@@ -35,6 +36,7 @@ func TestEstimatorReportsKnownMeterFloorWithoutInventingMissingUsage(t *testing.
 	estimator := testEstimator(t)
 	result := estimator.Estimate(Observation{
 		Harness:   "cursor",
+		ProfileID: "cursor-token-rate",
 		Provider:  "anthropic",
 		Model:     "claude-opus-5",
 		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
@@ -62,6 +64,7 @@ func TestEstimatorLeavesUnknownCatalogAndInactivePrivateProfilesNull(t *testing.
 
 	private := estimator.Estimate(Observation{
 		Harness:   "claude",
+		ProfileID: "claude-code-private",
 		Provider:  "anthropic",
 		Model:     "claude-opus-5",
 		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
@@ -78,10 +81,32 @@ func TestEstimatorLeavesUnknownCatalogAndInactivePrivateProfilesNull(t *testing.
 	assertUnknownCost(t, private.HarnessAdjustedEstimate, "inactive_profile", 4, 4)
 }
 
+func TestCursorAdjustmentRequiresAnExplicitProfileSelection(t *testing.T) {
+	estimator := testEstimator(t)
+	result := estimator.Estimate(Observation{
+		Harness:   "cursor",
+		Provider:  "anthropic",
+		Model:     "claude-opus-5",
+		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),
+		Meters: TokenMeters{
+			UncachedInputTokens: int64Ptr(100),
+			CacheReadTokens:     int64Ptr(0),
+			CacheWriteTokens:    int64Ptr(0),
+			OutputTokens:        int64Ptr(100),
+		},
+	})
+
+	if result.APIListEstimate.ValueUSD == nil {
+		t.Fatal("public list estimate = nil, want independent estimate")
+	}
+	assertUnknownCost(t, result.HarnessAdjustedEstimate, "no_applicable_billing_profile", 4, 4)
+}
+
 func TestCursorFirstPartyExclusionUsesListEstimateWithoutSurcharge(t *testing.T) {
 	estimator := testEstimator(t)
 	result := estimator.Estimate(Observation{
 		Harness:   "cursor",
+		ProfileID: "cursor-token-rate",
 		Provider:  "xai",
 		Model:     "grok-4.6",
 		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC),

@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -20,6 +23,7 @@ type RunAudit struct {
 	SkipReceipts    []SkipReceipt `json:"skip_receipts"`
 	Invocations     []Invocation  `json:"invocations"`
 	Metrics         Metrics       `json:"metrics"`
+	Costs           CostTotals    `json:"costs"`
 	IntegrityErrors []string      `json:"integrity_errors"`
 }
 
@@ -93,6 +97,7 @@ type Invocation struct {
 	RawUsage             TokenMeters               `json:"raw_usage"`
 	DeltaUsage           TokenMeters               `json:"delta_usage"`
 	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
+	Costs                pricing.CostClasses       `json:"costs"`
 	Activity             Activity                  `json:"activity"`
 }
 
@@ -199,6 +204,10 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 	if err != nil {
 		return nil, err
 	}
+	estimator, err := pricing.DefaultEstimator()
+	if err != nil {
+		return nil, fmt.Errorf("load pricing estimator: %w", err)
+	}
 
 	configSources, configErrors := configDigests(run.ConfigSources)
 	audit := &RunAudit{
@@ -238,11 +247,12 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 
 	for _, row := range invocationRows {
 		requireManagedReviewReceipt := policyResolved && policy.ManagedReviewReceipts
-		invocation, errors := buildInvocation(row, requireManagedReviewReceipt, policy.ReviewCandidates)
+		invocation, errors := buildInvocation(row, estimator, policy.PricingProfiles[row.Agent], requireManagedReviewReceipt, policy.ReviewCandidates)
 		audit.Invocations = append(audit.Invocations, invocation)
 		audit.IntegrityErrors = append(audit.IntegrityErrors, errors...)
 	}
 	audit.Metrics, policyErrors = buildMetrics(audit.Invocations, databaseTotals)
+	audit.Costs = buildCostTotals(audit.Invocations)
 	audit.IntegrityErrors = append(audit.IntegrityErrors, policyErrors...)
 	return audit, nil
 }
@@ -306,7 +316,7 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 	return result, integrityErrors
 }
 
-func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
+func buildInvocation(row db.AgentInvocation, estimator *pricing.Estimator, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
 		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported,
@@ -340,6 +350,21 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	result.RawUsage.CacheWriteTokens = cloneInt(row.CacheCreationTokens)
 	result.RawUsage.FreshInputTokens = cloneInt(row.FreshInputTokens)
 	result.RawUsage.ReasoningTokens = cloneInt(row.ReasoningTokens)
+	_, uncachedInput := agent.CanonicalInputMeters(row.Agent, row.DeltaInputTokens, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens)
+	provider := ""
+	if row.ModelProvider != nil {
+		provider = *row.ModelProvider
+	}
+	result.Costs = estimator.Estimate(pricing.Observation{
+		Harness: row.Agent, ProfileID: pricingProfileID, Provider: provider, Model: row.Model,
+		StartedAt: time.Unix(row.StartedAt, 0).UTC(), ReportedCostUSD: row.ReportedCostUSD,
+		Meters: pricing.TokenMeters{
+			UncachedInputTokens: int64FromInt(uncachedInput),
+			CacheReadTokens:     int64FromInt(row.DeltaCacheReadTokens),
+			CacheWriteTokens:    int64FromInt(row.DeltaCacheCreationTokens),
+			OutputTokens:        int64FromInt(row.DeltaOutputTokens),
+		},
+	})
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
@@ -351,6 +376,14 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 		}
 	}
 	return result, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)
+}
+
+func int64FromInt(value *int) *int64 {
+	if value == nil {
+		return nil
+	}
+	converted := int64(*value)
+	return &converted
 }
 
 func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) []string {
