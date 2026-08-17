@@ -238,6 +238,31 @@ func autoFixableFindingsJSON(raw string) string {
 	return fixableRaw
 }
 
+func repairFailureFindingsJSON(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	substantive := findings
+	substantive.Items = nil
+	for _, item := range findings.Items {
+		if item.ActionOrDefault() != types.ActionNoOp {
+			substantive.Items = append(substantive.Items, item)
+		}
+	}
+	if len(substantive.Items) == 0 {
+		return ""
+	}
+	substantiveRaw, err := types.MarshalFindingsJSON(substantive)
+	if err != nil {
+		return raw
+	}
+	return substantiveRaw
+}
+
 func hasAskUserFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false

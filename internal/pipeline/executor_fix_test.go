@@ -847,6 +847,52 @@ func TestExecutor_AutoFixStopsOnRepeatedFailureFingerprint(t *testing.T) {
 	<-done
 }
 
+func TestExecutor_AutoFixDoesNotResolveReroutedSurvivingFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					AutoFixable:   true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","line":10,"description":"same surviving failure","action":"auto-fix"}]}`,
+				}, nil
+			}
+			writeTestFile(t, workDir, "repair.go", "package repair\n")
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-99","severity":"warning","file":"main.go","line":91,"description":"same surviving failure","action":"ask-user"}]}`,
+			}, nil
+		},
+	}
+	executor := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != 2 {
+		t.Fatalf("step executions = %d, want initial plus one repair", calls)
+	}
+	rounds, err := database.GetRoundsByStep(firstStepID(t, database, run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[1].RepairResult == nil || *rounds[1].RepairResult != RepairResultRepeatedFailure {
+		t.Fatalf("rerouted surviving failure audit = %#v, want %q", rounds, RepairResultRepeatedFailure)
+	}
+	if err := executor.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
 func TestExecutor_AutoFixHardCapsConfiguredLimitAtThree(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

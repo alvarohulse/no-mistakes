@@ -1021,13 +1021,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
+		repairFailureFindings := repairFailureFindingsJSON(outcome.Findings)
+		fixableFindings := autoFixableFindingsJSON(outcome.Findings)
+		repairProgressChecked := false
 		if outcome.AutoFixable && autoFixLimit > 0 {
-			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
 			if fixableFindings != "" {
-				decision, progressErr := repairProgress.Next(ctx, workDir, fixableFindings, autoFixLimit)
+				decision, progressErr := repairProgress.Next(ctx, workDir, repairFailureFindings, autoFixLimit)
 				if progressErr != nil {
 					return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
 				}
+				repairProgressChecked = true
 				persistRepairAudit(decision.Audit)
 				if !decision.Attempt {
 					writeLog(decision.Message)
@@ -1057,8 +1060,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				}
 			}
 		}
-		if autoFixAttempts > 0 && autoFixableFindingsJSON(outcome.Findings) == "" && outcome.RepairAudit.Result == "" {
-			persistRepairAudit(repairProgress.Resolved())
+		if autoFixAttempts > 0 && outcome.RepairAudit.Result == "" {
+			if repairFailureFindings == "" {
+				persistRepairAudit(repairProgress.Resolved())
+			} else if !repairProgressChecked {
+				decision, progressErr := repairProgress.Observe(ctx, workDir, repairFailureFindings)
+				if progressErr != nil {
+					return false, fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr)
+				}
+				if decision.Audit.Result != "" {
+					persistRepairAudit(decision.Audit)
+					writeLog(decision.Message)
+				}
+			}
 		}
 
 		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(outcome.Findings) {

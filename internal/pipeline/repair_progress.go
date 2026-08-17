@@ -74,24 +74,29 @@ func progressAwareRepairStep(step types.StepName) bool {
 	}
 }
 
-// Next decides whether another repair may start. After the first attempt it
-// requires both a changed Git content state and a new normalized failure.
-func (p *RepairProgress) Next(ctx context.Context, workDir, rawFailure string, configuredLimit int) (RepairDecision, error) {
+// Observe compares one substantive failure with the previous repair attempt
+// without authorizing another attempt. This lets callers audit a surviving
+// failure even when its action was rerouted away from automatic repair.
+func (p *RepairProgress) Observe(ctx context.Context, workDir, rawFailure string) (RepairDecision, error) {
+	decision, _, err := p.observe(ctx, workDir, rawFailure)
+	return decision, err
+}
+
+func (p *RepairProgress) observe(ctx context.Context, workDir, rawFailure string) (RepairDecision, string, error) {
 	if p == nil {
-		return RepairDecision{}, fmt.Errorf("repair progress is unavailable")
+		return RepairDecision{}, "", fmt.Errorf("repair progress is unavailable")
 	}
-	limit := RepairAttemptLimit(configuredLimit)
 	failureFingerprint := repairFailureFingerprint(rawFailure)
 	worktreeFingerprint, err := repairWorktreeFingerprint(ctx, workDir)
 	if err != nil {
-		return RepairDecision{}, err
+		return RepairDecision{}, "", err
 	}
-	decision := RepairDecision{Limit: limit, Audit: RepairAudit{FailureFingerprint: failureFingerprint}}
-	stop := func(result, message string) (RepairDecision, error) {
+	decision := RepairDecision{Audit: RepairAudit{FailureFingerprint: failureFingerprint}}
+	stop := func(result, message string) (RepairDecision, string, error) {
 		decision.Audit.Result = result
 		decision.Message = message
 		p.audit = decision.Audit
-		return decision, nil
+		return decision, worktreeFingerprint, nil
 	}
 	if p.attempts > 0 && p.previousWorktreeFingerprint != "" && worktreeFingerprint == p.previousWorktreeFingerprint {
 		return stop(RepairResultNoProgress, "repair stopped: worktree and HEAD made no content progress")
@@ -99,14 +104,35 @@ func (p *RepairProgress) Next(ctx context.Context, workDir, rawFailure string, c
 	if p.attempts > 0 && p.previousFailureFingerprint != "" && failureFingerprint == p.previousFailureFingerprint {
 		return stop(RepairResultRepeatedFailure, "repair stopped: normalized failure fingerprint repeated")
 	}
+	return decision, worktreeFingerprint, nil
+}
+
+// Next decides whether another repair may start. After the first attempt it
+// requires both a changed Git content state and a new normalized failure.
+func (p *RepairProgress) Next(ctx context.Context, workDir, rawFailure string, configuredLimit int) (RepairDecision, error) {
+	limit := RepairAttemptLimit(configuredLimit)
+	decision, worktreeFingerprint, err := p.observe(ctx, workDir, rawFailure)
+	if err != nil {
+		return RepairDecision{}, err
+	}
+	decision.Limit = limit
+	if decision.Audit.Result != "" {
+		return decision, nil
+	}
+	stop := func(result, message string) (RepairDecision, error) {
+		decision.Audit.Result = result
+		decision.Message = message
+		p.audit = decision.Audit
+		return decision, nil
+	}
 	if p.attempts >= limit {
 		return stop(RepairResultAttemptLimit, fmt.Sprintf("repair stopped: maximum %d attempts reached", limit))
 	}
 
 	p.attempts++
-	p.previousFailureFingerprint = failureFingerprint
+	p.previousFailureFingerprint = decision.Audit.FailureFingerprint
 	p.previousWorktreeFingerprint = worktreeFingerprint
-	p.audit = RepairAudit{FailureFingerprint: failureFingerprint, Result: RepairResultAttempted}
+	p.audit = RepairAudit{FailureFingerprint: decision.Audit.FailureFingerprint, Result: RepairResultAttempted}
 	decision.Attempt = true
 	decision.AttemptNumber = p.attempts
 	decision.Audit = p.audit
