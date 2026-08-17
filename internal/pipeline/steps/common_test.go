@@ -845,6 +845,55 @@ func TestExecuteFixMode_AttributesCommitToActualHarnessAndModel(t *testing.T) {
 	}
 }
 
+func TestExecuteFixMode_AttributesOnlyCursorACPRepairCommit(t *testing.T) {
+	tests := []struct {
+		name       string
+		provider   string
+		wantCursor bool
+	}{
+		{name: "Cursor ACP", provider: "acp:cursor", wantCursor: true},
+		{name: "unrelated ACP target", provider: "acp:other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+			ag := &mockAgent{
+				name: tt.provider,
+				runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "agent-change.txt"), []byte("change"), 0o644); err != nil {
+						return nil, err
+					}
+					return &agent.Result{
+						Output:   json.RawMessage(`{"summary":"fix ACP repair"}`),
+						Provider: tt.provider,
+						Model:    "served-model",
+					}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Fixing = true
+
+			if _, err := executeFixMode(sctx, types.StepLint, fixExecutionOptions{
+				ErrorPrefix:     "agent fix lint",
+				FallbackSummary: "fix lint issues",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
+			hasCursor := strings.Contains(body, "Co-authored-by: cursoragent <cursoragent@cursor.com>")
+			if hasCursor != tt.wantCursor {
+				t.Fatalf("Cursor attribution present = %t, want %t:\n%s", hasCursor, tt.wantCursor, body)
+			}
+			if !tt.wantCursor && strings.Contains(body, "Co-authored-by:") {
+				t.Fatalf("unrelated ACP target received a co-author trailer:\n%s", body)
+			}
+		})
+	}
+}
+
 type configuredAttributionAgent struct {
 	agent.Agent
 	model agent.ModelIdentity

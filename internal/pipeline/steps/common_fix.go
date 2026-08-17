@@ -43,9 +43,10 @@ var errRejectedCommitSummary = errors.New("rejected commit summary")
 const unknownFixModel = "unknown"
 
 var fixCoAuthorByHarness = map[string]string{
-	"claude": "Claude <noreply@anthropic.com>",
-	"codex":  "Codex <noreply@openai.com>",
-	"cursor": "cursoragent <cursoragent@cursor.com>",
+	"claude":     "Claude <noreply@anthropic.com>",
+	"codex":      "Codex <noreply@openai.com>",
+	"cursor":     "cursoragent <cursoragent@cursor.com>",
+	"acp:cursor": "cursoragent <cursoragent@cursor.com>",
 }
 
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
