@@ -58,9 +58,9 @@ func (s *CIStep) loadCIFixAttempts(sctx *pipeline.StepContext) error {
 	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
 		return nil
 	}
-	attempts, err := sctx.DB.GetRunCIFixAttempts(sctx.Run.ID)
-	if err != nil {
-		return err
+	attempts := pipeline.MaxRepairAttempts
+	if sctx.Run.CIFixAttempts != nil {
+		attempts = *sctx.Run.CIFixAttempts
 	}
 	if attempts < 0 || attempts > pipeline.MaxRepairAttempts {
 		return fmt.Errorf("persisted CI fix attempts %d are outside the supported range", attempts)
@@ -76,7 +76,12 @@ func (s *CIStep) persistCIFixAttempts(sctx *pipeline.StepContext, attempts int) 
 	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
 		return nil
 	}
-	return sctx.DB.SetRunCIFixAttempts(sctx.Run.ID, attempts)
+	if err := sctx.DB.SetRunCIFixAttempts(sctx.Run.ID, attempts); err != nil {
+		return err
+	}
+	persisted := attempts
+	sctx.Run.CIFixAttempts = &persisted
+	return nil
 }
 
 // ReconcileApprovalGate re-checks the PR after the CI step has parked at an

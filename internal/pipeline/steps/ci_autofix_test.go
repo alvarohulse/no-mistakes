@@ -8,14 +8,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type recoveredCIEnvStep struct {
+	inner *CIStep
+	env   []string
+}
+
+func (s *recoveredCIEnvStep) Name() types.StepName { return types.StepCI }
+
+func (s *recoveredCIEnvStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	sctx.Env = append([]string(nil), s.env...)
+	return s.inner.Execute(sctx)
+}
 
 func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	t.Parallel()
@@ -353,6 +367,115 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 	}
 	if resumedOutcome.RepairAudit.Result != pipeline.RepairResultAttemptLimit {
 		t.Fatalf("recovered repair audit = %+v, want exhausted persisted budget", resumedOutcome.RepairAudit)
+	}
+}
+
+func TestCIStep_RecoveredLegacyBudgetAllowsOnlyExplicitUserFix(t *testing.T) {
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	failedBeforeFix := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail","completedAt":"2026-08-17T01:00:00Z"}]`
+	failedAfterFix := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail","completedAt":"2026-08-17T01:01:00Z"}]`
+	pending := `[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`
+
+	var fixCount atomic.Int32
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixCount.Add(1)
+			if err := os.WriteFile(filepath.Join(opts.CWD, "legacy-user-fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{}, nil
+		},
+	}
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo.UpstreamURL = upstream
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStepWithAutoFixLimit(stepResult.ID, pipeline.MaxRepairAttempts); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-1","severity":"error","description":"CI check failing: test","action":"ask-user"}],"summary":"CI failures require manual intervention"}`
+	if err := sctx.DB.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetRunAwaitingAgent(sctx.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A run created before ci_fix_attempts existed migrates with NULL. This is
+	// the StepContext state Resume passes back into CI after the user chooses Fix.
+	recoveredRun.CIFixAttempts = nil
+	recoveredRun.PRURL = &prURL
+	recoveredRun.Branch = "refs/heads/feature"
+	cfg := &config.Config{CITimeout: 30 * time.Second, AutoFix: config.AutoFix{CI: 3}}
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	step := &recoveredCIEnvStep{
+		inner: &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }},
+		env:   fakeCIGHSequence(t, "OPEN", []string{failedBeforeFix, pending, failedAfterFix}),
+	}
+	executor := pipeline.NewExecutor(sctx.DB, p, cfg, ag, []pipeline.Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(context.Background(), recoveredRun, sctx.Repo, dir) }()
+
+	responseDeadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := executor.Respond(types.StepCI, types.ActionFix, []string{"ci-1"}); err == nil {
+			break
+		}
+		if time.Now().After(responseDeadline) {
+			t.Fatal("recovered legacy CI gate never accepted the explicit user fix")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var repairResult string
+	repairDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(repairDeadline) {
+		rounds, roundsErr := sctx.DB.GetRoundsByStep(stepResult.ID)
+		if roundsErr != nil {
+			t.Fatal(roundsErr)
+		}
+		if len(rounds) >= 2 && rounds[len(rounds)-1].RepairResult != nil {
+			repairResult = *rounds[len(rounds)-1].RepairResult
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fixCount.Load() != 1 || repairResult != pipeline.RepairResultAttemptLimit {
+		t.Fatalf("recovered legacy CI fixes = %d repair result = %q, want explicit fix only and exhausted automatic budget", fixCount.Load(), repairResult)
+	}
+	if err := executor.Respond(types.StepCI, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+			t.Fatalf("recovered legacy CI completion error = %v, want user abort", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("recovered legacy CI executor did not stop")
 	}
 }
 

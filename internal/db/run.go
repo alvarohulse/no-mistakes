@@ -63,14 +63,20 @@ type Run struct {
 	// ReviewApprovedHeadSHA is the exact commit approved by the last
 	// successfully completed full review. It is nil for legacy runs and until
 	// review completes; mutable run/worktree heads never infer this authority.
-	ReviewApprovedHeadSHA  *string
-	Status                 types.RunStatus
-	PinnedAt               *int64
-	PRURL                  *string
-	PRState                *string
-	PRStateObservedAt      *int64
-	CIReadyAt              *int64
-	CIReadyNoCI            bool
+	ReviewApprovedHeadSHA *string
+	Status                types.RunStatus
+	PinnedAt              *int64
+	PRURL                 *string
+	PRState               *string
+	PRStateObservedAt     *int64
+	CIReadyAt             *int64
+	CIReadyNoCI           bool
+
+	// CIFixAttempts is nil only for a run created before durable CI repair
+	// budgets existed. Recovery treats unknown as exhausted; new runs initialize
+	// an explicit zero.
+	CIFixAttempts *int
+
 	LastPushedSHA          *string
 	PushTargetKind         *string
 	PushTargetFingerprint  *string
@@ -108,7 +114,7 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pinned_at, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, metadata, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, COALESCE(refresh_strategy, 'rebase'), COALESCE(stacked_on, ''), COALESCE(config_sources_json, '[]'), resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pinned_at, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), ci_fix_attempts, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, pr_note, metadata, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -116,7 +122,7 @@ func scanRun(row interface {
 	var configSourcesJSON string
 	if err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.RefreshStrategy, &r.StackedOn, &configSourcesJSON, &r.ResolvedAgentRouting, &r.ResolvedPolicy, &r.ResolvedPolicyDigest, &r.SubmittedHeadSHA, &r.NoMistakesVersion, &r.NoMistakesBuildSHA, &r.ReviewApprovedHeadSHA, &r.Status, &r.PinnedAt,
-		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.CIReadyNoCI,
+		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.CIReadyNoCI, &r.CIFixAttempts,
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive, &r.TerminalHeadVerifiedAt,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
@@ -227,8 +233,10 @@ func (d *DB) insertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 		notePtr = &note
 	}
 	r.Metadata = opts.Metadata
+	zeroCIFixAttempts := 0
+	r.CIFixAttempts = &zeroCIFixAttempts
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, parked_ms, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata, error, terminal_head_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, refresh_strategy, stacked_on, resolved_agent_routing_json, resolved_policy_json, resolved_policy_digest, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, parked_ms, ci_fix_attempts, intent, intent_source, intent_session_id, intent_score, created_at, updated_at, pr_note, metadata, error, terminal_head_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, 'none', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, r.RefreshStrategy, nullableString(stackedOn), policyMarker, policyDigestMarker, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.CreatedAt, r.UpdatedAt, notePtr, opts.Metadata, runError, terminalHeadVerifiedAt,
 	)
 	if err != nil {
@@ -924,20 +932,6 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 	return nil
 }
 
-// GetRunCIFixAttempts returns the number of automatic CI repair attempts this
-// run already reserved. Historical runs start at zero after migration.
-func (d *DB) GetRunCIFixAttempts(id string) (int, error) {
-	var attempts int
-	err := d.sql.QueryRow(`SELECT COALESCE(ci_fix_attempts, 0) FROM runs WHERE id = ?`, id).Scan(&attempts)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("get run CI fix attempts: %w", err)
-	}
-	return attempts, nil
-}
-
 // SetRunCIFixAttempts advances the durable CI repair budget monotonically.
 // The CI step writes this before invoking the fix agent, so a crash after the
 // reservation spends the attempt instead of granting recovery a free retry.
@@ -947,7 +941,7 @@ func (d *DB) SetRunCIFixAttempts(id string, attempts int) error {
 	}
 	result, err := d.sql.Exec(`
 		UPDATE runs
-		SET ci_fix_attempts = CASE WHEN ci_fix_attempts < ? THEN ? ELSE ci_fix_attempts END,
+		SET ci_fix_attempts = CASE WHEN ci_fix_attempts IS NULL OR ci_fix_attempts < ? THEN ? ELSE ci_fix_attempts END,
 			updated_at = ?
 		WHERE id = ?`, attempts, attempts, now(), id)
 	if err != nil {

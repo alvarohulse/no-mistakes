@@ -98,6 +98,62 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesCIFixAttemptsWithoutGrantingLegacyRunsAFreshBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-ci-fix.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/home/user/legacy-ci-fix", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRun, err := before.InsertRun(repo.ID, "legacy", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN ci_fix_attempts`); err != nil {
+		raw.Close()
+		t.Fatalf("remove post-legacy column: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { after.Close() })
+	var migrated sql.NullInt64
+	if err := after.sql.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, legacyRun.ID).Scan(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Valid {
+		t.Fatalf("migrated legacy CI fix attempts = %d, want unknown", migrated.Int64)
+	}
+
+	newRun, err := after.InsertRun(repo.ID, "new", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialized sql.NullInt64
+	if err := after.sql.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, newRun.ID).Scan(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	if !initialized.Valid || initialized.Int64 != 0 {
+		t.Fatalf("new run CI fix attempts = %+v, want known zero", initialized)
+	}
+}
+
 func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
 	legacy, err := sql.Open("sqlite", dbPath)
