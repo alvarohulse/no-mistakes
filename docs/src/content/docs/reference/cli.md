@@ -111,8 +111,8 @@ Err on the side of completeness: include the goal, important decisions and trade
 When starting a new run, `axi run` refuses the default branch and uncommitted working trees with actionable errors instead of auto-branching or auto-committing.
 Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
-`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. The body is written only when the PR step creates the pull request, so a note supplied for a branch that already has an open PR is neither published to it nor given to the PR-summary agent; that run only retargets the existing PR's base.
-`--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in contract v3 for PR formatters. Treat it as non-secret input.
+`--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. For an existing PR, the note can update only a matching valid owned section; unowned content remains byte-preserved.
+`--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in contract v4 for PR formatters. Treat it as non-secret input.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -336,7 +336,7 @@ records the transcript source. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome, or after you have committed a separate fix outside
 an active run; do not use it to bypass a gate.
-When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Existing PRs are adopted without replacing their title or body.
+When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Retargeting remains base-only; body updates independently replace only verified owned sections.
 
 ## no-mistakes sync
 
@@ -382,13 +382,15 @@ List recorded pipeline runs for the current repo.
 
 ```sh
 no-mistakes runs [--limit <n>]
+no-mistakes runs pin <run-id>
+no-mistakes runs unpin <run-id>
 ```
 
 | Flag      | Type  | Default | Description                       |
 | --------- | ----- | ------- | --------------------------------- |
 | `--limit` | `int` | `10`    | Maximum number of runs to display |
 
-Shows runs newest-first with branch, status (styled), short SHA, timestamp, and PR URL if set.
+Shows runs newest-first with the copyable run ID, branch, status (styled), short SHA, timestamp, PR URL if set, and `pinned` when rich run data is protected from retention. `pin` and `unpin` are idempotent explicit retention changes; recursive gate-execution containment refuses them from an active validation step.
 
 ## no-mistakes config explain
 
@@ -413,46 +415,51 @@ See [Evaluation toolkit](/no-mistakes/reference/eval/) for the local-only bounda
 Show historical usage stats across all repos.
 
 ```sh
-no-mistakes stats
+no-mistakes stats [--agents] [--run <id>] [--repo <id-or-path> | --current-repo] [--since <duration-or-time>] [--until <time>] [--step <step>] [--agent <agent>] [--model <model>] [--purpose <purpose>] [--status <status>] [--format text|json|csv]
 ```
 
-Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+The default text view retains the bounded visual dashboard of total and rescued changes, reported and fixed findings, fixes by step, and top repositories, followed by a bounded data-error count when any selected fact is incomplete. The dashboard is projected from the same versioned `Report` envelope as every other format; direct selectors scope its runs, steps, and repositories, and filtered text appends the selected report detail.
 
-Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
-Use `--run <id>` to inspect one run's binary/build identity, ordered steps and rounds, configured skip receipts, policy and config digests, Review candidate pool and selected route, and individual agent invocations. Invocation detail includes the step, purpose, harness invocation mode, provider/model, observed nested agent identities, per-round token deltas next to raw counters, reported cost, tool-category breakdown, workload size, finding count, and fallback reason. It also shows the nullable total time parked at approval gates and implies `--agents`.
-Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`. Reported raw input, output, and cache-read counters remain visible and may be cumulative; when the matching per-round meter is absent, the audit does not reinterpret a legacy database zero as reported usage.
+Use `--agents` for the per-purpose aggregate tables followed by the detailed text projection of the same report. The tables summarize session modes, duration, nullable per-round token totals, subprocess time, model round-trips, and tool activity; JSON and CSV carry each nullable aggregate meter's selected-invocation coverage. The detail lists individual local invocation facts, including duration, session mode, nullable per-round and raw token meters, workload, and nested-agent observations.
+Use `--run <id>` to inspect one run's binary/build identity, ordered steps and rounds, content-free command/runner and repair-progress receipts, configured skip receipts, policy and config digests, Review candidate pool and selected route, and individual agent invocations. Invocation detail includes the step, purpose, harness invocation mode, provider/model, observed nested agent identities, per-round token deltas next to raw counters, reported cost, tool-category breakdown, workload size, finding count, and fallback reason. It also shows the nullable total time parked at approval gates and implies `--agents`.
+Nullable fields an adapter did not report remain unknown, which is distinct from a recorded `0`; per-purpose tables render them as `-`, while detailed report rows use `—`. Reported raw input, output, and cache-read counters remain visible and may be cumulative; when the matching per-round meter is absent, the audit does not reinterpret a legacy database zero as reported usage.
 
 ```sh
 no-mistakes stats --agents
 no-mistakes stats --run <id>
 no-mistakes stats --run <id> --format json
+no-mistakes stats --current-repo --since 7d --step review --format csv
 ```
 
-`--format` accepts `text` (the default) or `json` for `--run`. JSON is the normative, versioned machine contract. Its aggregate delta-token and harness-reported-cost metrics include `reported`/`total` coverage and remain `null` when coverage is incomplete or an independent database aggregate does not match the emitted invocation rows. `integrity_errors` explains those conditions and policy drift in stored steps, skip sources, and managed Review receipts. The report never fills missing per-round usage from raw cumulative counters, and legacy `parked_ms: null` remains unknown instead of becoming zero.
+Repository, time, step, agent, model, purpose, and status selectors combine with AND semantics; repeat one selector to match any of its supplied values. The selectors scope run detail, the dashboard, and per-purpose agent aggregates together. The run-created time window is half-open: `since <= created_at < until`. An ejected repository remains selectable by its exact archived repository ID; its former path is deliberately not retained. `--run` cannot be combined with repository, time, or status selectors, but it can be narrowed to matching steps and invocations.
+
+`--format` accepts `text` (the default), canonical `json`, or long-form `csv`; every format is derived from the same `Report` envelope. JSON is the normative, versioned machine contract. CSV emits exactly one row for every JSON leaf, including nulls and empty collections, and its `json_path` column identifies that leaf; record, section, entity, coverage, basis, and reason columns keep common queries direct. Aggregate per-round token and activity meters include coverage and remain `null` when incomplete; run-level aggregate delta-token facts also remain null when an independent database aggregate does not match the emitted invocation rows. Costs remain three independent classes: harness-reported, public API-list estimate, and harness-adjusted effective estimate, each with its own completeness and pricing/profile provenance. Pricing is captured once with the completed invocation; a legacy or malformed missing receipt remains unknown with a data error instead of being recalculated from the current binary's catalog. No composite savings or efficacy estimate is invented.
+
+Rich run rows, logs, findings, and evidence follow the [`test.evidence` retention policy](/no-mistakes/reference/global-config/#local-storage-and-cleanup), which protects active and pinned runs and enforces minimum age and newest-run floors. Older runs continue to appear through immutable content-free metric receipts with `rich_data_retained: false`; the [environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns the archived field and privacy boundary.
 
 The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body publishes only a bounded subset of it.
-The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
+The field definitions and their local/remote split are owned by [the environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes pr-body
 
 Render a pull request body through the [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter and print it.
 
 ```sh
-no-mistakes pr-body [--sample [--sample-version <2|3>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+no-mistakes pr-body [--sample [--sample-version <2|3|4>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
 ```
 
 | Flag               | Type     | Default    | Description                                                     |
 | ------------------ | -------- | ---------- | --------------------------------------------------------------- |
 | `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
-| `--sample-version` | `int`    | `3`        | Contract version `--sample` emits (`2` or `3`)                    |
+| `--sample-version` | `int`    | `4`        | Contract version `--sample` emits (`2`, `3`, or `4`)              |
 | `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
 | `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
 | `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |
 | `--hook`           | `string` | Configured | Formatter command, overriding `hooks.pr_body` for this run       |
 
-This never creates or updates a pull request. Generation returns a string; publication is the `pr` step's job. Keeping them separate is what makes a formatter testable at all - otherwise the only way to see its output is a full gate run.
+This never creates or updates a pull request. It renders the formatter's section patches as a fresh marked body; publication is the `pr` step's job. Keeping them separate makes formatter output testable without hosted side effects.
 
-Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block. `--contract-file` accepts any contract version this build still supports (`3` or `2`), so a formatter can be exercised against both shapes during a rollout.
+Without a source flag it uses the latest run for the current repository. `--run` reconstructs everything the `pr` step would have supplied except `summary` and `what_changed`, which are the drafting agent's own output and are not stored separately. A run id belonging to another repository is rejected rather than mixed with this directory's `repo` block. `--contract-file` accepts any contract version this build still supports (`4`, `3`, or `2`). Version 4 adds the three cost classes calculated by no-mistakes; formatters present those receipts and do not own pricing calculations.
 
 The formatter is resolved the same way a run resolves it: `--hook`, then a matching global-config [`overrides`](/no-mistakes/reference/global-config/#overrides) entry, then the repo's `.no-mistakes.yaml`, then the global `hooks.pr_body` default. The chosen source is reported on stderr.
 

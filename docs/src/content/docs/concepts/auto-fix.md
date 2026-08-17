@@ -94,7 +94,7 @@ Yolo and AXI `--yes` approve that fix review automatically after their one fix r
 
 ## Fix commits
 
-When the Review, Build, Test, Document, or Lint step commits auto-fix changes, its subject comes from `commit.fix_message`.
+When the Review, Build, Test, Document, Lint, or CI step commits auto-fix changes, its subject comes from `commit.fix_message`.
 The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
 The pipeline validates the template, agent summary, predicted output size, and final rendered subject before `git add -A`, so a rejected value does not leave changes staged.
 Document fixes use the Document value for `{{.Step}}`; lint fixes use the Lint value whether their command was configured or planned.
@@ -102,16 +102,19 @@ Document fixes use the Document value for `{{.Step}}`; lint fixes use the Lint v
 Before a step-specific fix commit, the pipeline verifies that the live worktree HEAD still descends from the head recorded after its previous commit.
 It allows a legitimate forward commit made by an agent, but aborts the run if an out-of-band backward or divergent reset would drop the reviewed history.
 
-The template does not control commits created by the Refresh, CI, or Push steps.
-The CI step uses `no-mistakes: apply CI fixes`, and the Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
+The template does not control commits created by the Refresh or Push steps.
+Every agent repair commit uses the bounded summary returned by its authoring invocation, adds a co-author trailer only for the harness that actually authored the change, and records the observed or configured model in `No-Mistakes-Model` metadata.
+Push refuses unexplained uncommitted changes instead of assigning them to its routed agent. When `commands.format` changes files, Push records those formatter-owned changes separately as `chore(format): apply configured formatting` without agent attribution.
 
 ## Step rounds
 
 Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
 A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution.
+Automatic repair also stores only a normalized failure hash and a low-cardinality progress result (`attempted`, `resolved`, repeated failure, no content progress, or attempt limit). It never duplicates prompts, outputs, diffs, paths, or tool arguments into that receipt.
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.
+Review, Build, Test, Document, Lint, and CI automatic repair is capped at three attempts even when configuration asks for more. It stops earlier when the normalized failure repeats or Git HEAD/worktree content does not change; timestamp-only log changes do not count as progress.
 The generated PR surfaces this recorded evidence in deterministic Risk Assessment, Testing, and Pipeline sections. The [pipeline steps reference](/no-mistakes/reference/pipeline-steps/#pr) owns the PR body composition and size-limit contract.
 The full round history remains available in the run log.
 

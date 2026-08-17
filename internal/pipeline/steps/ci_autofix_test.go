@@ -8,12 +8,32 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type recoveredCIEnvStep struct {
+	inner *CIStep
+	env   []string
+}
+
+func ciRepairResult() *agent.Result {
+	return &agent.Result{Output: json.RawMessage(`{"summary":"repair failing checks"}`)}
+}
+
+func (s *recoveredCIEnvStep) Name() types.StepName { return types.StepCI }
+
+func (s *recoveredCIEnvStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	sctx.Env = append([]string(nil), s.env...)
+	return s.inner.Execute(sctx)
+}
 
 func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	t.Parallel()
@@ -48,9 +68,16 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			agentCalled = true
+			if len(opts.JSONSchema) == 0 {
+				t.Fatal("CI repair agent did not receive the commit summary schema")
+			}
 			// Agent "fixes" CI by creating a file
 			os.WriteFile(filepath.Join(opts.CWD, "ci-fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return &agent.Result{
+				Output:   json.RawMessage(`{"summary":"fix Windows path handling"}`),
+				Provider: "cursor",
+				Model:    "gpt-5.6-terra-medium",
+			}, nil
 		},
 	}
 
@@ -103,6 +130,16 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	}
 	if !foundAutoFix {
 		t.Errorf("expected issue detection in logs, got: %v", logs)
+	}
+	body := gitCmd(t, dir, "log", "-1", "--pretty=%B")
+	if !strings.HasPrefix(body, "fix(ci): fix Windows path handling\n") {
+		t.Fatalf("CI fix commit body starts with %q", body)
+	}
+	if !strings.Contains(body, "Co-authored-by: cursoragent <cursoragent@cursor.com>") {
+		t.Fatalf("CI fix commit lacks Cursor attribution:\n%s", body)
+	}
+	if !strings.Contains(body, "No-Mistakes-Model: gpt-5.6-terra-medium") {
+		t.Fatalf("CI fix commit lacks model attribution:\n%s", body)
 	}
 }
 
@@ -219,7 +256,7 @@ func TestCIStep_CIAutoFixLimitExhausted(t *testing.T) {
 			fixCount++
 			// Agent "fixes" but the check will keep failing (same checksJSON)
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -261,20 +298,199 @@ func TestCIStep_CIAutoFixLimitExhausted(t *testing.T) {
 		t.Errorf("expected 1 poll wait before limit-exhausted outcome, got %d", pollCount)
 	}
 
-	// Should log that max attempts reached on subsequent poll
-	foundExhausted := false
+	// The same normalized failure is the earlier stop condition on the
+	// subsequent poll; no second attempt is spent.
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Errorf("expected 'max auto-fix attempts' in logs, got: %v", logs)
+	if !foundRepeated {
+		t.Errorf("expected repeated-failure stop in logs, got: %v", logs)
 	}
 }
 
-func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
+func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
+	t.Parallel()
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	failed := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail"}]`
+	pending := `[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`
+
+	fixCount := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixCount++
+			if err := os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("restart-fix-%d.txt", fixCount)), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return ciRepairResult(), nil
+		},
+	}
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.PRURL = &prURL
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = 30 * time.Second
+	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.Env = fakeCIGHSequence(t, "OPEN", []string{failed, pending, failed})
+
+	first := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+	firstOutcome, err := first.Execute(sctx)
+	if err != nil {
+		t.Fatalf("initial CI execution: %v", err)
+	}
+	if !firstOutcome.NeedsApproval || fixCount != 1 {
+		t.Fatalf("initial CI outcome = %+v, fixes = %d; want parked after one automatic fix", firstOutcome, fixCount)
+	}
+
+	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := *sctx
+	recovered.Run = recoveredRun
+	recovered.Fixing = true
+	recovered.Env = fakeCIGHSequence(t, "OPEN", []string{failed, pending, failed, pending, failed})
+
+	resumed := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+	resumedOutcome, err := resumed.Execute(&recovered)
+	if err != nil {
+		t.Fatalf("recovered CI execution: %v", err)
+	}
+	if !resumedOutcome.NeedsApproval {
+		t.Fatalf("recovered CI outcome = %+v, want parked", resumedOutcome)
+	}
+	if fixCount != 2 {
+		t.Fatalf("CI fixes across restart = %d, want one automatic plus the explicit user fix", fixCount)
+	}
+	if resumedOutcome.RepairAudit.Result != pipeline.RepairResultAttemptLimit {
+		t.Fatalf("recovered repair audit = %+v, want exhausted persisted budget", resumedOutcome.RepairAudit)
+	}
+}
+
+func TestCIStep_RecoveredLegacyBudgetAllowsOnlyExplicitUserFix(t *testing.T) {
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	failedBeforeFix := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail","completedAt":"2026-08-17T01:00:00Z"}]`
+	failedAfterFix := `[{"name":"test","status":"COMPLETED","conclusion":"failure","bucket":"fail","completedAt":"2026-08-17T01:01:00Z"}]`
+	pending := `[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`
+
+	var fixCount atomic.Int32
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			fixCount.Add(1)
+			if err := os.WriteFile(filepath.Join(opts.CWD, "legacy-user-fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return ciRepairResult(), nil
+		},
+	}
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo.UpstreamURL = upstream
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStepWithAutoFixLimit(stepResult.ID, pipeline.MaxRepairAttempts); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-1","severity":"error","description":"CI check failing: test","action":"ask-user"}],"summary":"CI failures require manual intervention"}`
+	if err := sctx.DB.SetStepFindings(stepResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetRunAwaitingAgent(sctx.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A run created before ci_fix_attempts existed migrates with NULL. This is
+	// the StepContext state Resume passes back into CI after the user chooses Fix.
+	recoveredRun.CIFixAttempts = nil
+	recoveredRun.PRURL = &prURL
+	recoveredRun.Branch = "refs/heads/feature"
+	cfg := &config.Config{CITimeout: 30 * time.Second, AutoFix: config.AutoFix{CI: 3}}
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	step := &recoveredCIEnvStep{
+		inner: &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }},
+		env:   fakeCIGHSequence(t, "OPEN", []string{failedBeforeFix, pending, failedAfterFix}),
+	}
+	executor := pipeline.NewExecutor(sctx.DB, p, cfg, ag, []pipeline.Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(context.Background(), recoveredRun, sctx.Repo, dir) }()
+
+	responseDeadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := executor.Respond(types.StepCI, types.ActionFix, []string{"ci-1"}); err == nil {
+			break
+		}
+		if time.Now().After(responseDeadline) {
+			t.Fatal("recovered legacy CI gate never accepted the explicit user fix")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var repairResult string
+	repairDeadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(repairDeadline) {
+		rounds, roundsErr := sctx.DB.GetRoundsByStep(stepResult.ID)
+		if roundsErr != nil {
+			t.Fatal(roundsErr)
+		}
+		if len(rounds) >= 2 && rounds[len(rounds)-1].RepairResult != nil {
+			repairResult = *rounds[len(rounds)-1].RepairResult
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fixCount.Load() != 1 || repairResult != pipeline.RepairResultAttemptLimit {
+		t.Fatalf("recovered legacy CI fixes = %d repair result = %q, want explicit fix only and exhausted automatic budget", fixCount.Load(), repairResult)
+	}
+	if err := executor.Respond(types.StepCI, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+			t.Fatalf("recovered legacy CI completion error = %v, want user abort", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("recovered legacy CI executor did not stop")
+	}
+}
+
+func TestCIStep_CIAutoFixStopsOnRepeatedFailureAfterChecksRerun(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -313,7 +529,7 @@ func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -346,26 +562,26 @@ func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
 	if outcome.AutoFixable {
 		t.Fatal("expected exhausted CI outcome to be non-auto-fixable")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts after reruns, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated failure to stop after 1 auto-fix attempt, got %d", fixCount)
 	}
-	if pollCount != 4 {
-		t.Fatalf("expected 4 poll waits across reruns and retries, got %d", pollCount)
+	if pollCount != 2 {
+		t.Fatalf("expected 2 poll waits before the repeated post-rerun failure, got %d", pollCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure stop after CI reran, got: %v", logs)
 	}
 }
 
-func TestCIStep_CIAutoFixRetriesWhenGitHubClockLagsLocalClock(t *testing.T) {
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenGitHubClockLagsLocalClock(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -405,7 +621,7 @@ func TestCIStep_CIAutoFixRetriesWhenGitHubClockLagsLocalClock(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -434,18 +650,18 @@ func TestCIStep_CIAutoFixRetriesWhenGitHubClockLagsLocalClock(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when GitHub timestamps advance but local clock is ahead, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated failure to stop after 1 attempt when GitHub timestamps advance, got %d", fixCount)
 	}
 }
 
-// TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation reproduces
+// TestCIStep_CIAutoFixStopsRepeatedFailureWhenFastChecksSkipPendingObservation reproduces
 // the real-world scenario where a failing CI check completes so fast between
 // polls that the pipeline never observes it in a pending state, but the check's
 // completedAt timestamp moves past the last-fix time - proving CI re-ran. The
-// pipeline should treat the second failure as a new iteration and attempt
-// another fix rather than logging "fix already attempted" indefinitely.
-func TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation(t *testing.T) {
+// pipeline should recognize it as a fresh observation, then stop because the
+// normalized failure itself repeated rather than looping indefinitely.
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenFastChecksSkipPendingObservation(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -489,7 +705,7 @@ func TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation(t *testing.
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -524,29 +740,29 @@ func TestCIStep_CIAutoFixRetriesWhenFastChecksSkipPendingObservation(t *testing.
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when post-push rerun has newer completedAt, got %d (stuck in 'fix already attempted' loop?)", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated post-push failure to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after completedAt-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure log after completedAt proved the rerun, got: %v", logs)
 	}
 }
 
-// TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing reproduces the real-world
+// TestCIStep_CIAutoFixStopsRepeatedFailureWhenSomeChecksStayFailing reproduces the real-world
 // scenario where multiple checks fail, the fix push causes only some of them to
 // re-run (and thus transit through pending) while at least one check keeps
-// reporting as failing throughout. The pipeline should still recognize the
-// post-rerun same-name failure as a new attempt and progress to attempt 2,
-// rather than logging "fix already attempted" indefinitely until CI timeout.
-func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
+// reporting as failing throughout. The pipeline recognizes the post-rerun
+// observation and stops on the repeated normalized check set rather than
+// logging "fix already attempted" indefinitely until CI timeout.
+func TestCIStep_CIAutoFixStopsRepeatedFailureWhenSomeChecksStayFailing(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -587,7 +803,7 @@ func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -617,19 +833,19 @@ func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts when post-push rerun still fails with same check names, got %d (stuck in 'fix already attempted' loop?)", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated check set to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure stop after rerun-backed observation, got: %v", logs)
 	}
 }
 
@@ -671,7 +887,7 @@ func TestCIStep_DoesNotRetryOnUnrelatedPendingCheck(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", fixCount)), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -722,7 +938,7 @@ func TestCIStep_DoesNotRetryOnUnrelatedPendingCheck(t *testing.T) {
 	}
 }
 
-func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
+func TestCIStep_StopsRepeatedMergeConflictAfterRerun(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -761,7 +977,7 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("conflict-fix-%d.txt", fixCount)), []byte("resolved"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -789,19 +1005,19 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval after exhausting conflict rerun-backed retries")
 	}
-	if fixCount != 2 {
-		t.Fatalf("expected 2 auto-fix attempts for persistent merge conflicts after reruns, got %d", fixCount)
+	if fixCount != 1 {
+		t.Fatalf("expected repeated merge conflict to stop after 1 attempt, got %d", fixCount)
 	}
 
-	foundExhausted := false
+	foundRepeated := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts (2) reached") {
-			foundExhausted = true
+		if strings.Contains(l, "normalized failure fingerprint repeated") {
+			foundRepeated = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Fatalf("expected max-attempts log after conflict rerun-backed retries, got: %v", logs)
+	if !foundRepeated {
+		t.Fatalf("expected repeated-failure log after conflict rerun, got: %v", logs)
 	}
 }
 
@@ -891,10 +1107,9 @@ func TestCIStep_FixMode_ManualInterventionRunsCIFix(t *testing.T) {
 	}
 }
 
-// TestCIStep_AutoFixNoChanges_CountsAsAttempt verifies that when the agent
-// produces no changes (nothing to commit), it still counts as a consumed fix
-// attempt rather than spinning forever with "fix already attempted".
-func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
+// TestCIStep_AutoFixNoChangesStopsImmediately verifies that an unchanged Git
+// content state consumes one attempt and then stops instead of retrying.
+func TestCIStep_AutoFixNoChangesStopsImmediately(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -927,7 +1142,7 @@ func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			// Agent "investigates" but produces NO changes
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -957,22 +1172,23 @@ func TestCIStep_AutoFixNoChanges_CountsAsAttempt(t *testing.T) {
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval needed after exhausting fix attempts with no changes")
 	}
-
-	// Agent should be called for each attempt even though no changes were produced
-	if fixCount != 2 {
-		t.Fatalf("expected 2 fix attempts (limit=2), got %d", fixCount)
+	if outcome.RepairAudit.Result != pipeline.RepairResultNoProgress || outcome.RepairAudit.FailureFingerprint == "" {
+		t.Fatalf("repair audit = %+v, want content-free no-progress receipt", outcome.RepairAudit)
 	}
 
-	// Should eventually hit max attempts, not spin forever
-	foundExhausted := false
+	if fixCount != 1 {
+		t.Fatalf("expected no-progress repair to stop after 1 attempt, got %d", fixCount)
+	}
+
+	foundNoProgress := false
 	for _, l := range logs {
-		if strings.Contains(l, "max auto-fix attempts") {
-			foundExhausted = true
+		if strings.Contains(l, "worktree and HEAD made no content progress") {
+			foundNoProgress = true
 			break
 		}
 	}
-	if !foundExhausted {
-		t.Errorf("expected 'max auto-fix attempts' in logs, got: %v", logs)
+	if !foundNoProgress {
+		t.Errorf("expected no-progress stop in logs, got: %v", logs)
 	}
 
 	// Should never log "fix already attempted" indefinitely
@@ -1022,7 +1238,7 @@ func TestCIStep_FixMode_NoChanges_CountsAsAttempt(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			fixCount++
 			// Agent produces NO changes
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 
@@ -1118,7 +1334,7 @@ func TestCIStep_AutoFixPromptIncludesMustFixInstruction(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
 			os.WriteFile(filepath.Join(opts.CWD, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{}, nil
+			return ciRepairResult(), nil
 		},
 	}
 

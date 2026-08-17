@@ -84,7 +84,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// structured output turns out to be.
 	commitSummary := extractDocumentSummary(result.Output, "")
 	fallbackSummary := "update documentation"
-	if err := commitAgentFixes(sctx, s.Name(), commitSummary, fallbackSummary); err != nil {
+	if err := commitAgentFixes(sctx, s.Name(), commitSummary, fallbackSummary, result); err != nil {
 		return nil, err
 	}
 

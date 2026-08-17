@@ -37,8 +37,13 @@ type StepRound struct {
 	// the fix attempt performed during this round. It is only set when the
 	// round itself was a fix round (trigger=="auto_fix").
 	FixSummary *string
-	DurationMS int64
-	CreatedAt  int64
+	// RepairFailureFingerprint and RepairResult are content-free audit facts
+	// for bounded automatic repair. The fingerprint is a one-way hash of the
+	// normalized failure identity; no finding or output content is duplicated.
+	RepairFailureFingerprint *string
+	RepairResult             *string
+	DurationMS               int64
+	CreatedAt                int64
 }
 
 // StepRoundStats summarizes execution rounds for a step. It lets status
@@ -236,10 +241,29 @@ func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error
 	return nil
 }
 
+// SetStepRoundRepairAudit records privacy-safe progress facts for one round.
+// Empty values clear their columns.
+func (d *DB) SetStepRoundRepairAudit(id, failureFingerprint, result string) error {
+	var fingerprintValue, resultValue *string
+	if failureFingerprint != "" {
+		fingerprintValue = &failureFingerprint
+	}
+	if result != "" {
+		resultValue = &result
+	}
+	if _, err := d.sql.Exec(
+		`UPDATE step_rounds SET repair_failure_fingerprint = ?, repair_result = ? WHERE id = ?`,
+		fingerprintValue, resultValue, id,
+	); err != nil {
+		return fmt.Errorf("set step round repair audit: %w", err)
+	}
+	return nil
+}
+
 // GetRoundsByStep returns all rounds for a step result, ordered by round number.
 func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
+		`SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_failure_fingerprint, repair_result, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
 		stepResultID,
 	)
 	if err != nil {
@@ -249,7 +273,7 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}
-		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.DurationMS, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairFailureFingerprint, &r.RepairResult, &r.DurationMS, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan step round: %w", err)
 		}
 		rounds = append(rounds, r)

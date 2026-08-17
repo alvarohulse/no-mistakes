@@ -337,3 +337,28 @@ func TestSetStepRoundUserDecision(t *testing.T) {
 		t.Errorf("expected nil user_findings_json after clear, got %v", rounds[0].UserFindingsJSON)
 	}
 }
+
+func TestSetStepRoundRepairAudit(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepTest)
+	round, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.SetStepRoundRepairAudit(round.ID, "sha256:abc", "stopped_no_progress"); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].RepairFailureFingerprint == nil || *rounds[0].RepairFailureFingerprint != "sha256:abc" {
+		t.Fatalf("repair fingerprint = %#v", rounds)
+	}
+	if rounds[0].RepairResult == nil || *rounds[0].RepairResult != "stopped_no_progress" {
+		t.Fatalf("repair result = %#v", rounds[0].RepairResult)
+	}
+}

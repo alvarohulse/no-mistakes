@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -52,11 +53,13 @@ type StepEvidence struct {
 }
 
 type CommandEvidence struct {
-	Round    int    `json:"round"`
-	Sequence int    `json:"sequence"`
-	Command  string `json:"command"`
-	Outcome  string `json:"outcome"`
-	ExitCode *int   `json:"exit_code"`
+	Round         int                `json:"round"`
+	Sequence      int                `json:"sequence"`
+	Command       string             `json:"command"`
+	Outcome       string             `json:"outcome"`
+	ExitCode      *int               `json:"exit_code"`
+	CommandSource string             `json:"command_source,omitempty"`
+	Runner        *runner.Provenance `json:"runner,omitempty"`
 }
 
 type IntentEvidence struct {

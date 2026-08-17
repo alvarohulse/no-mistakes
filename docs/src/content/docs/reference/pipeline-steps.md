@@ -10,7 +10,7 @@ intent → refresh → review → build → test → document → lint → push 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
-Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, and nullable exit code; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence.
+Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, nullable exit code, and resolved command-source/runner provenance when available; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence. Stats deliberately drops the display text while retaining the content-free command and runner facts.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
@@ -18,7 +18,8 @@ The steering still allows requested test evidence under the run's managed eviden
 The read-only command-planning pass that an unconfigured Build, Test, or Lint step runs is checked rather than only steered: it runs in a private throwaway checkout of the run's current commit, with no remotes, no inherited Git hooks, and no ambient Git configuration, and no-mistakes compares both that checkout and the run worktree before and after the pass. When a planner wrote to either one, the run worktree is restored from its snapshot, the planning checkout is discarded, and the step parks with a bounded, redacted explanation instead of a planned command.
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When configured Build, Test, or Lint command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
-Commits created by the shared Review, Build, Test, Document, and Lint fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
+That complete-output guarantee applies to pipeline steps. Trusted preflight runs before a run row and step log exist, so a refusal exposes only the bounded, redacted diagnostic documented in the repo-config reference.
+Commits created by the shared Review, Build, Test, Document, Lint, and CI fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
 Agent roles that can write, repair, or review tests reject tests whose only evidence is matching implementation source text, tokens, syntax, or incidental snapshots.
 They instead require an executable interface or a typed or normalized semantic model that proves observable behavior.
 Reading a file remains valid when that file is itself an owned output or data contract, and deterministic tests may inspect the final emitted agent prompt as a generated interface; model interpretation is reserved for development-only evaluation.
@@ -111,7 +112,7 @@ At entry to every remaining step in the fixed pipeline order - Build, Test, Docu
 Compiles the changed production code before behavioral testing begins. [`commands.build`](/no-mistakes/reference/repo-config/#commandsbuild) owns the deterministic command contract.
 
 **Behavior:**
-- If `commands.build` is set, runs it visibly through the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) in the managed process group. A non-zero exit produces an actionable `error` finding with bounded compiler output; the complete output stays in the Build step log.
+- If `commands.build` is set, resolves its platform command and runner, then runs it visibly in the managed process group. A non-zero exit produces an actionable `error` finding with bounded compiler output; the complete output stays in the Build step log.
 - If `commands.build` is empty, asks the routed Build agent for one exact command in a read-only planning pass, executes and records that command itself, and parks when the planner returns no usable command. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 - Build agents are explicitly told not to run tests, linters, formatters, static analysis, or documentation work, except when static analysis or formatting is inseparable from the repository's canonical build command.
 
@@ -128,7 +129,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) owns the configuration contract for any explicit baseline command.
 
 **Behavior:**
-- If `commands.test` is set in repo config: runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
+- If `commands.test` is set in repo config: resolves its platform command and runner, runs it first as a baseline, and captures output. Non-zero exit produces `error` findings. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
 - If `commands.test` is empty, first asks the routed Test agent for one exact targeted command in a read-only planning pass, then executes and records it. After it passes, an evidence agent gathers evidence and artifacts for the intent; it may run further focused checks or write a focused test itself, but never the complete repository suite. A failure enters repair and the pipeline reruns the same planned command.
 - When user intent is available after a configured baseline command passes, the same evidence-oriented agent follow-up runs. Evidence agents return structured findings with severity, description, and `action` (`no-op`, `auto-fix`, `ask-user`). Both evidence and repair agents are instructed not to run the complete repository test suite; a generic driver instruction asking for broad or full-suite confirmation does not override that product boundary. For UI, HTML, CSS, browser, visual layout, or copy-placement changes, the agent attempts reviewer-visible visual evidence and explains in `testing_summary` when screenshots, images, videos, GIFs, or rendered HTML artifacts are not captured.
 - "Do not run everything" is not "run nothing": when no targeted check can establish the intent, the agent must write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
@@ -167,7 +168,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 Runs linters and static analysis.
 
 **Behavior:**
-- If `commands.lint` is set: runs it via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows). Non-zero exit produces `warning` findings.
+- If `commands.lint` is set: resolves its platform command and runner before execution. Non-zero exit produces `warning` findings.
 - If `commands.lint` is empty: asks the routed Lint agent for one exact formatter, linter, or static-analysis command in a read-only planning pass, executes and records it, and parks when no meaningful command can be established. After a failure, the repair agent fixes the cause and the pipeline reruns the same planned command.
 
 **Approval:** lint findings with `action: ask-user` pause for approval, including a command plan that could not be established.
@@ -183,8 +184,9 @@ Runs linters and static analysis.
 Pushes the validated branch to the configured push target.
 
 **Behavior:**
-- If `commands.format` is set, runs it first
-- Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
+- Refuses uncommitted changes that reached Push without agent authorship metadata
+- If `commands.format` is set, resolves its platform command and runner, then runs it
+- Commits formatter-owned changes as `chore(format): apply configured formatting` without agent attribution
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
@@ -219,7 +221,7 @@ Creates a pull request or adopts the existing one for the branch.
 
 **Behavior:**
 - Checks for an existing PR on the branch
-- If one exists, discovers it and may retarget its base, but never replaces its body. If none exists, creates a new one.
+- If one exists, reads and updates only valid no-mistakes-owned body sections. If none exists, creates a new one with versioned owned-section markers.
 - Targets the run's `--stacked-on` branch when set; otherwise targets the repository default branch
 - If an existing PR targets a different base, retargets it with a base-only update that carries no title or body; matching bases are not sent again
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
@@ -227,7 +229,7 @@ Creates a pull request or adopts the existing one for the branch.
 - PR title: agent-generated from the final branch delta with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. If drafting fails, the fallback uses the neutral title `chore: update pull request` rather than inferring scope from earlier commits.
 - One PR agent invocation receives the explicit or inferred intent plus the final diff and returns separate heading-free `summary` and `what_changed` GFM fragments with the title. Code identifiers must use backticks; the renderer inserts the section headings exactly once.
 - The built-in PR body includes `## Summary`, optional operator-supplied `## Notes`, final-diff `## What Changed`, and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections. PR-facing intent provenance lives on the Intent pipeline result instead of a duplicate body section. Only `## What Changed` describes the complete final branch scope; deterministic sections remain evidence for the commit each step inspected. Auto-fix results in `## Pipeline` render as an issue -> fix -> verification narrative using captured fix summaries, re-check success text, and any still-open findings; Test details also list the recorded commands.
-- Pipeline entries label `refresh` as `Rebase` or `Merge`, render stored command/evidence details for successful steps, and omit PR and CI because those steps are incomplete when the body is created. The built-in body opens the section with a compact attribution table listing each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents; unreported nested attribution renders as `-`, while a supported stream that observed none renders as `none`. Contract v3 supplies a richer per-invocation/round telemetry record instead: agent, model, provider, start time, duration, nullable token/cache meters, nested-agent observations, and nullable CLI-reported USD cost. Formatter layout and API-price estimation remain formatter-owned.
+- Pipeline entries label `refresh` as `Rebase` or `Merge`, render stored command/evidence details for successful steps, and omit PR and CI because those steps are incomplete when the body is created. The built-in body opens the section with a compact attribution table listing each recorded invocation's step and round, top-level agent and invocation mode, and wire-observed nested agents; unreported nested attribution renders as `-`, while a supported stream that observed none renders as `none`. Contract v4 supplies a richer per-invocation/round telemetry record and keeps static command results, Review evidence, and human User Testing instructions distinct. Formatter layout remains formatter-owned.
 - `## Pipeline` keeps the existing human-readable signature and includes the stable structured step attestation documented below.
 - Generated PR bodies are capped at 63,488 bytes, leaving a 2 KB safety buffer below GitHub's 65,536-character body limit.
 - Under body caps, the attribution table is removed as a complete unit before older Pipeline update rounds are omitted at clean boundaries. The newest update is kept when possible, and omission or truncation is marked explicitly.
@@ -235,8 +237,9 @@ Creates a pull request or adopts the existing one for the branch.
 - The regenerated `## Testing` section prefers the recorded `testing_summary` as prose, uses a compact recorded-check count when no summary is available, includes produced evidence artifacts from `path`, `url`, or `content` fields when available, and only adds an outcome with run count and total duration when it is failed or needed as a fallback. Only artifacts inside the repository worktree or inside the run's own evidence directory are linked or embedded; a path naming another run's evidence is dropped.
 - Evidence artifacts render compactly in PR bodies: repository-relative `path` artifacts and `url` artifacts become `Evidence` links, `content` artifacts appear in collapsible details blocks, GitHub PRs convert repository-relative paths to blob URLs and published evidence to commit-pinned blob or raw URLs, readable UTF-8 text files from the run's evidence directory are embedded inline with truncation for large files, and binary, visual, or over-budget local artifacts render as non-link local file references.
 - For Azure DevOps, the PR description is capped at 4000 characters (UTF-16 code units, matching .NET's measurement): the agent is told about the cap and asked to keep `## What Changed` compact; if the assembled body still overruns, `## Testing` and then the attribution table are dropped, then older Pipeline update rounds are omitted oldest-first at their `<details>` boundaries so the newest evidence survives. A final connector-level clamp adds a visible marker as a last-resort backstop.
-- The assembled title and body pass through credential redaction immediately before they are sent, after any `hooks.pr_body` formatter, so a recorded finding, test command, or embedded artifact cannot publish a secret to the host.
-- When a PR body formatter is configured, its output replaces the built-in body described above and the section layout becomes its decision; the title stays pipeline-drafted, and the host character cap and byte cap above still clamp what the formatter returns, while the built-in body's section-removal and truncation ordering no longer apply. The formatter's data contract, resolution order, and fallback behavior are owned by [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body), and [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body) renders one without running a gate.
+- Built-in content passes through credential redaction before marker generation. Formatter candidates and hosted updates fail closed when possible-secret detection fires; they are never silently truncated or redacted after hashing.
+- When a PR body formatter is configured, it returns owned section contents rather than a replacement body. no-mistakes reads the hosted body, validates every marker/hash, preserves all unowned bytes, then reads it a second time and rejects edits observed before the full-body write. A post-write reread verifies the exact landed bytes and hashes. Current host backends expose no atomic expected-revision/compare-and-swap write, so a human edit in the final request window can still be overwritten; hosts without supported body read/revision behavior remain fail-closed. Base retargeting remains a separate base-only update. The formatter contract and fallback behavior are owned by [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body), and [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body) renders a marked candidate without publishing it.
+- Ticket metadata comes only from explicit run metadata and commits in the owned branch delta (`base_sha..head_sha`); a stacked base's commits are not formatter ticket input.
 
 Stores the PR URL in the database and streams it to the TUI.
 
@@ -290,8 +293,9 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - On CI failure: fetches failed job logs (GitHub via `gh run view --log-failed`, GitLab via `glab ci trace`, Bitbucket Cloud via failed pipeline step logs; Azure DevOps has no first-class build-log command, so the agent fixes from the failing-check list without logs), sends them to the agent with user intent when available, and, if the agent produces changes, commits them and uses the same force-push safety guard as the push step
 - On GitHub, GitLab, or Azure DevOps merge conflict: asks the agent to rebase onto the latest default-branch tip and make the smallest correct root-cause fix for the conflicts, using user intent when available
 - If both CI failures and a GitHub, GitLab, or Azure DevOps merge conflict are present: fixes both in the same attempt
-- If a fix attempt produces no changes: automatic mode leaves the failure undeduplicated so it can retry until the auto-fix limit, while manual fix mode returns immediately for manual intervention
+- If a fix attempt produces no Git content change, automatic mode spends that attempt and stops immediately for manual intervention; manual fix mode also returns immediately
 - Deduplicates fix attempts only after a fix is actually committed and pushed
+- Persists the spent automatic CI repair count before launching each fix agent, so recreating or recovering the CI step cannot reset its budget. Legacy runs without that counter are treated as having exhausted automatic repair, while an explicit user-requested fix remains available
 - Exits cleanly when the PR is merged, closed, or declined
 - If the idle timeout is reached while the PR is still open: pauses for user approval, even when CI checks are currently healthy
 - If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses for user approval with findings for the remaining issues

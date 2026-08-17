@@ -36,6 +36,28 @@ func TestProviderAndCapabilities(t *testing.T) {
 	if caps.FailedCheckLogs {
 		t.Fatal("Capabilities().FailedCheckLogs = true, want false (not implemented)")
 	}
+	if !caps.PRBodyReadRevision {
+		t.Fatal("Capabilities().PRBodyReadRevision = false, want true")
+	}
+}
+
+func TestReadPRBodyReturnsExactBytesAndRevision(t *testing.T) {
+	t.Parallel()
+
+	const body = "human preamble\r\n<!-- marker -->\n"
+	h := newTestHost(map[string]azdoTestResponse{
+		"az repos pr show --id 42 --organization " + testOrg + " --output json": {
+			stdout: `{"pullRequestId":42,"description":"human preamble\r\n<!-- marker -->\n"}` + "\n",
+		},
+	})
+
+	snapshot, err := h.ReadPRBody(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatalf("ReadPRBody() error = %v", err)
+	}
+	if snapshot.Body != body || snapshot.Revision != scm.NewPRBodySnapshot(body).Revision {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
 }
 
 func TestAvailableChecksExtensionAndAuth(t *testing.T) {

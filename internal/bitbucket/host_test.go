@@ -1,11 +1,42 @@
 package bitbucket
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+func TestHostReadPRBodyReturnsExactBytesAndRevision(t *testing.T) {
+	t.Parallel()
+
+	const body = "human preamble\r\n<!-- marker -->\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/2.0/repositories/workspace/repo/pullrequests/42" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":42,"description":"human preamble\r\n<!-- marker -->\n"}`)
+	}))
+	t.Cleanup(server.Close)
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: server.Client()}
+	host := NewHost(client, RepoRef{Workspace: "workspace", RepoSlug: "repo"})
+
+	snapshot, err := host.ReadPRBody(context.Background(), &scm.PR{Number: "42"})
+	if err != nil {
+		t.Fatalf("ReadPRBody() error = %v", err)
+	}
+	if snapshot.Body != body || snapshot.Revision != scm.NewPRBodySnapshot(body).Revision {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if !host.Capabilities().PRBodyReadRevision {
+		t.Fatal("Bitbucket did not advertise PR body read/revision support")
+	}
+}
 
 func TestNormalizePRState(t *testing.T) {
 	tests := []struct {

@@ -19,6 +19,9 @@ type policyShape struct {
 		Demo             bool                    `json:"demo"`
 		ReviewCandidates []policyReviewCandidate `json:"review_candidates"`
 	} `json:"routing"`
+	Pricing struct {
+		Profiles map[string]string `json:"profiles"`
+	} `json:"pricing"`
 }
 
 type policyStep struct {
@@ -42,6 +45,7 @@ type policyFacts struct {
 	SkipSources           map[types.StepName]types.SkipSource
 	ManagedReviewReceipts bool
 	ReviewCandidates      []ReviewCandidate
+	PricingProfiles       map[string]string
 }
 
 func resolvedPolicyFacts(encoded, digest *string) (policyFacts, bool, []string) {
@@ -60,7 +64,7 @@ func resolvedPolicyFacts(encoded, digest *string) (policyFacts, bool, []string) 
 	if err := json.Unmarshal([]byte(*encoded), &policy); err != nil {
 		return facts, false, []string{fmt.Sprintf("resolved policy could not be decoded: %v", err)}
 	}
-	if policy.Version < 1 || policy.Version > 5 {
+	if policy.Version < 1 || policy.Version > 6 {
 		return facts, false, []string{fmt.Sprintf("resolved policy version %d is unsupported", policy.Version)}
 	}
 	var integrityErrors []string
@@ -106,6 +110,16 @@ func resolvedPolicyFacts(encoded, digest *string) (policyFacts, bool, []string) 
 		facts.ReviewCandidates = append(facts.ReviewCandidates, ReviewCandidate{
 			Agent: candidate.Agent, Model: candidate.Model.Name, Provider: candidate.Model.Vendor, Optional: candidate.Optional,
 		})
+	}
+	for harness, profileID := range policy.Pricing.Profiles {
+		if strings.TrimSpace(harness) == "" || strings.TrimSpace(profileID) == "" {
+			integrityErrors = append(integrityErrors, "resolved policy contains an incomplete pricing profile selection")
+			continue
+		}
+		if facts.PricingProfiles == nil {
+			facts.PricingProfiles = make(map[string]string)
+		}
+		facts.PricingProfiles[harness] = profileID
 	}
 	if len(policy.Steps) == 0 {
 		integrityErrors = append(integrityErrors, "resolved policy has no pipeline steps")

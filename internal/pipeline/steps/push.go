@@ -27,11 +27,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("check for uncommitted changes before push: %w", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return nil, fmt.Errorf("refusing to push uncommitted changes without agent authorship metadata")
+	}
 
 	// Run format command if configured (before committing, so changes are formatted)
-	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
-		sctx.Log(fmt.Sprintf("running formatter: %s", fmtCmd))
-		output, exitCode, err := runStepShellCommand(sctx, fmtCmd)
+	if formatCommand := sctx.Config.Commands.FormatCommand(); !formatCommand.IsZero() {
+		sctx.Log(fmt.Sprintf("running formatter: %s", formatCommand.Run))
+		output, exitCode, err := runStepRunnerCommand(sctx, formatCommand)
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: format command failed: %v", err))
 		} else if exitCode != 0 {
@@ -39,19 +46,22 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
-	// Commit any uncommitted changes from agent fixes. Test evidence is
+	// Commit any changes made by the configured formatter. Test evidence is
 	// deliberately not among them: it is collected outside the worktree and
 	// published to the orphan evidence branch (internal/evidence), so no
 	// artifact ever enters the pushed branch or the default branch's history.
-	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	status, err = git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("check formatter changes: %w", err)
+	}
 	if strings.TrimSpace(status) != "" {
-		sctx.Log("committing agent changes...")
+		sctx.Log("committing formatter changes...")
 		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
-			return nil, fmt.Errorf("stage agent changes: %w", err)
+			return nil, fmt.Errorf("stage formatter changes: %w", err)
 		}
-		_, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", "no-mistakes: apply agent fixes")
+		_, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", "chore(format): apply configured formatting")
 		if err != nil {
-			return nil, fmt.Errorf("commit agent changes: %w", err)
+			return nil, fmt.Errorf("commit formatter changes: %w", err)
 		}
 		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 		if err != nil {

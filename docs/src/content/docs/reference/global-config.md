@@ -50,6 +50,10 @@ agent_args_override:
     - -c
     - model_reasoning_effort="low"
 
+pricing:
+  profiles:
+    cursor: cursor-token-rate
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -78,7 +82,7 @@ ci:
   rerun_transient: 0
 
 commit:
-  fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+  fix_message: "fix({{.Step}}): {{.Summary}}"
 
 intent:
   enabled: true
@@ -311,6 +315,18 @@ agent_args_override:
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
+### pricing.profiles
+
+Explicit harness billing profiles used for the harness-adjusted cost class. Keys are normalized harness names and values must identify an embedded profile valid for that harness. Profiles are global-only and are persisted in the resolved run policy; no harness identity activates an adjustment implicitly.
+
+```yaml
+pricing:
+  profiles:
+    cursor: cursor-token-rate
+```
+
+`cursor-token-rate` applies Cursor's documented third-party-model token surcharge during its effective window and records its source, catalog/profile versions, hashes, exclusions, and adjustment kind in each estimate. Embedded Claude Code and Codex/Azure profiles remain inactive because no authoritative exact private adjustment is configured. Reported harness cost, public API-list estimate, and harness-adjusted estimate remain independent nullable facts.
+
 ### ci_timeout
 
 How long the CI step monitors an open PR, including provider CI status and on GitHub, GitLab, or Azure DevOps PR mergeability, before giving up.
@@ -435,6 +451,8 @@ Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit`
 
 These are global defaults. Per-repo config can override individual steps.
 
+Review, Build, Test, Document, Lint, and CI use a hard ceiling of three automatic repair attempts; larger configured values are evaluated as `3`. They stop sooner when the normalized failure repeats or Git HEAD/worktree content makes no progress. File modification times, including timestamp-only log touches, do not count as progress. Refresh conflict handling retains its separate configured budget.
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single check the provider reported as cancelled before that check reaches an approval gate.
@@ -457,18 +475,18 @@ The per-repo [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_
 
 ### commit.fix_message
 
-Template for the subject of commits created by the shared Review, Build, Test, Document, and Lint fix path.
+Template for the subject of commits created by the shared Review, Build, Test, Document, Lint, and CI fix path.
 
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | `no-mistakes({{.Step}}): {{.Summary}}` |
+| Default | `fix({{.Step}}): {{.Summary}}` |
 
 The template supports literal text and two Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `build`, `test`, `document`, or `lint` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `build`, `test`, `document`, `lint`, or `ci` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
@@ -478,8 +496,10 @@ Before rendering, no-mistakes predicts the subject size from the validated liter
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
+
+The commit body records the actual authoring harness when it has a defined identity (`claude`, `codex`, native `cursor`, or `acp:cursor`) and always records `No-Mistakes-Model`. The adapter-observed model wins; the configured model is the fallback, and unavailable or unsafe metadata is recorded as `unknown`.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Refresh, CI, or Push steps.
+The setting does not change commit subjects created by the Refresh or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### intent
@@ -523,8 +543,8 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and 
 | `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
 | `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
-| `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
-| `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
+| `test.evidence.retention`     | `string` | `336h` (14 days)         | Minimum run age from creation before rich terminal data is eligible for pruning; positive values below 14 days use the 14-day floor, while `unlimited`/`none`/`off`/`never` or a non-positive duration disables rich pruning |
+| `test.evidence.max_runs`      | `int`    | `200`                    | Minimum newest terminal-unpinned set retained regardless of age; values below 50 retain the required floor |
 
 The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
 When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
@@ -543,13 +563,14 @@ Evidence lives under the app root rather than the system temp directory. On Linu
 no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
 
 - A finished run that produced no artifacts leaves nothing behind.
-- Recorded run directories older than `retention` are removed.
-- Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
-- A run that is still pending or running is never touched.
+- Pending, running, and explicitly pinned runs are never touched.
+- Every run created inside the configured `retention` window or the mandatory 14-day floor is retained.
+- At least the newest 50 terminal unpinned runs, or the configured larger `max_runs` set, are retained regardless of age.
+- Older unpinned evidence and run logs are removed before their rich database rows are pruned.
 
-Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
+Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt so historical stats survive. The [local/remote data boundary](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns that receipt's content-free fields and privacy exclusions. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` sets the guaranteed age window for a PR body's local artifact links, raise it rather than lowering it if your reviews run long.
 
 The publication fields are global defaults. Repo config can override `store_in_repo` and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 

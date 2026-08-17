@@ -11,7 +11,7 @@ import (
 	"github.com/muesli/termenv"
 )
 
-func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
+func TestStatsCommandRendersAllRepoDashboardFromSharedReport(t *testing.T) {
 	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	p := paths.WithRoot(nmHome)
@@ -26,6 +26,7 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 
 	repoA, _ := database.InsertRepo("/work/alpha", "git@example.com:alpha.git", "main")
 	repoB, _ := database.InsertRepo("/work/beta", "git@example.com:beta.git", "main")
+	_, _ = database.InsertRepo("/work/gamma", "git@example.com:gamma.git", "main")
 
 	runA, _ := database.InsertRun(repoA.ID, "feature-a", "head-a", "base-a")
 	reviewA, _ := database.InsertStepResult(runA.ID, types.StepReview)
@@ -51,8 +52,8 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 
 	for _, want := range []string{
 		"╭─ git push no-mistakes",
-		"_  _ ____    _  _ _ ____ ___ ____ _  _ ____ ____",
 		"Total changes",
+		"across 3 repos",
 		"Rescued changes",
 		"Rescue rate",
 		"50%",
@@ -65,16 +66,56 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 		"Top repos",
 		"alpha",
 		"3 fixes",
+		"data errors: 2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats output missing %q:\n%s", want, out)
 		}
 	}
-	assertOrder(t, out, "Total changes", "Rescued changes", "Rescue rate", "Mistakes", "Reported", "Fixed")
-	for _, notWant := range []string{"Saved", "Rescue runs", "Mistakes fixed", "auto-fix", "caught in review", "╭─ no-mistakes"} {
+	for _, notWant := range []string{"stats report:", "Saved", "Rescue runs", "Mistakes fixed", "auto-fix", "caught in review"} {
 		if strings.Contains(out, notWant) {
 			t.Fatalf("stats output should not contain %q:\n%s", notWant, out)
 		}
+	}
+	if strings.Contains(out, "gamma") {
+		t.Fatalf("zero-run repository should count toward total without appearing in top repos:\n%s", out)
+	}
+}
+
+func TestResolveStatsRepoIDsAcceptsArchivedRepositoryID(t *testing.T) {
+	database, err := db.Open(t.TempDir() + "/archived-repo.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo("/work/archived", "https://github.com/owner/archived", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := database.ArchiveRunWithMetricReceipt(db.RunMetricReceipt{
+		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+		SchemaVersion: 1, PayloadJSON: `{"schema_version":1}`, ArchivedAt: run.UpdatedAt,
+	}, true, nil)
+	if err != nil || !archived {
+		t.Fatalf("archive run = %v, %v", archived, err)
+	}
+	if err := database.DeleteRepo(repo.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := resolveStatsRepoIDs(database, []string{repo.ID}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != repo.ID {
+		t.Fatalf("resolved archived repository IDs = %v", ids)
 	}
 }
 

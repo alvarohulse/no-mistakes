@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/prbody"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -235,12 +237,23 @@ func fakeGH(t *testing.T, prViewURL string) (env []string, logFile string) {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)
 	logFile = filepath.Join(t.TempDir(), "gh.log")
+	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
+	if prViewURL != "" {
+		body, err := prbody.NewOwnedDocument(prbody.PatchSet{Version: prbody.PatchVersion, Sections: []prbody.SectionPatch{{ID: "generated", Content: "existing generated body"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	linkTestBinary(t, binDir, "gh")
 	env = fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":    "gh",
-		"FAKE_CLI_LOG":     logFile,
-		"FAKE_CLI_PR_URL":  prViewURL,
-		"FAKE_CLI_PR_BASE": "main",
+		"FAKE_CLI_MODE":         "gh",
+		"FAKE_CLI_LOG":          logFile,
+		"FAKE_CLI_PR_URL":       prViewURL,
+		"FAKE_CLI_PR_BASE":      "main",
+		"FAKE_CLI_PR_BODY_FILE": bodyFile,
 	})
 	return env, logFile
 }
@@ -256,6 +269,7 @@ type fakeBitbucketPRAPI struct {
 	existingPRID   int
 	existingPRURL  string
 	createdPRURL   string
+	body           string
 }
 
 func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string) *fakeBitbucketPRAPI {
@@ -265,6 +279,13 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 		existingPRID:  existingPRID,
 		existingPRURL: existingPRURL,
 		createdPRURL:  "https://bitbucket.org/test/repo/pull-requests/99",
+	}
+	if existingPRID != 0 {
+		body, err := prbody.NewOwnedDocument(prbody.PatchSet{Version: prbody.PatchVersion, Sections: []prbody.SectionPatch{{ID: "generated", Content: "existing generated body"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		api.body = body
 	}
 
 	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,6 +310,13 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 				t.Fatalf("read create body: %v", err)
 			}
 			api.lastCreateBody = string(body)
+			var payload struct {
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode create body: %v", err)
+			}
+			api.body = payload.Description
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprintf(w, `{"id":99,"links":{"html":{"href":%q}}}`,
@@ -301,11 +329,27 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 				t.Fatalf("read update body: %v", err)
 			}
 			api.lastUpdateBody = string(body)
+			var payload struct {
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode update body: %v", err)
+			}
+			if payload.Description != "" {
+				api.body = payload.Description
+			}
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"id":%d,"links":{"html":{"href":%q}}}`,
 				api.existingPRID,
 				api.existingPRURL,
 			)
+		case r.Method == http.MethodGet && (r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d", api.existingPRID) || r.URL.Path == "/2.0/repositories/test/repo/pullrequests/99"):
+			id := api.existingPRID
+			if strings.HasSuffix(r.URL.Path, "/99") {
+				id = 99
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%d,"description":%q,"links":{"html":{"href":%q}}}`, id, api.body, api.createdPRURL)
 		default:
 			t.Fatalf("unexpected Bitbucket PR API request: %s %s", r.Method, r.URL.String())
 		}
@@ -396,11 +440,23 @@ func fakeGlab(t *testing.T, mrViewJSON string) (env []string, logFile string) {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)
 	logFile = filepath.Join(t.TempDir(), "glab.log")
+	bodyFile := filepath.Join(t.TempDir(), "mr-body.md")
+	if mrViewJSON != "" {
+		var payload struct {
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal([]byte(mrViewJSON), &payload); err == nil && payload.Description != "" {
+			if err := os.WriteFile(bodyFile, []byte(payload.Description), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	linkTestBinary(t, binDir, "glab")
 	env = fakeCLIEnv(binDir, map[string]string{
 		"FAKE_CLI_MODE":         "glab",
 		"FAKE_CLI_LOG":          logFile,
 		"FAKE_CLI_MR_VIEW_JSON": mrViewJSON,
+		"FAKE_CLI_PR_BODY_FILE": bodyFile,
 	})
 	return env, logFile
 }

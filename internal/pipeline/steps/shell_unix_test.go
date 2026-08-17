@@ -5,6 +5,7 @@ package steps
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // TestRunShellCommandWithEnv_KillsGrandchildOnCancel is a regression test for
@@ -46,7 +46,7 @@ func TestRunShellCommandWithEnv_KillsGrandchildOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _, _ = runShellCommandWithEnv(ctx, dir, nil, script, shellenv.DefaultProcessTerminationGrace)
+		_, _, _ = runShellCommandWithEnv(ctx, dir, nil, script, time.Second)
 	}()
 
 	grandchild := waitForIntFile(t, pidFile, 5*time.Second)
@@ -58,13 +58,13 @@ func TestRunShellCommandWithEnv_KillsGrandchildOnCancel(t *testing.T) {
 	cancel()
 
 	// The grandchild must stop running promptly: the heartbeat holds steady
-	// (process is no longer executing) AND the PID has been reaped (no longer
-	// alive). The generous window absorbs subreaper/reparenting jitter.
+	// and the process is no longer runnable. An ancestor subreaper may retain
+	// it briefly as a zombie, so PID existence alone is not a liveness signal.
 	if !heartbeatHoldsWithin(t, heartbeat, 5*time.Second) {
 		t.Fatalf("grandchild pid %d still running after cancel: heartbeat advanced past %q", grandchild, before)
 	}
-	if err := syscall.Kill(grandchild, 0); err != syscall.ESRCH {
-		t.Fatalf("grandchild pid %d not reaped after cancel (kill -0: %v); want ESRCH", grandchild, err)
+	if processRunningForStepShellTest(grandchild) {
+		t.Fatalf("grandchild pid %d still running after cancel", grandchild)
 	}
 
 	select {
@@ -97,20 +97,20 @@ func TestRunShellCommandWithEnv_ReapsGrandchildOnCleanExit(t *testing.T) {
 		"; sleep 0.1; i=$((i+1)); done ) >/dev/null 2>&1 & echo $! > " + pidFile + "; exit 0"
 
 	ctx := context.Background()
-	if _, _, err := runShellCommandWithEnv(ctx, dir, nil, script, shellenv.DefaultProcessTerminationGrace); err != nil {
+	if _, _, err := runShellCommandWithEnv(ctx, dir, nil, script, time.Second); err != nil {
 		t.Fatalf("runShellCommandWithEnv: %v", err)
 	}
 
 	grandchild := waitForIntFile(t, pidFile, 5*time.Second)
 	// After the command returns cleanly, the deferred reap must have killed the
-	// whole group: the heartbeat stops advancing AND the pid is gone.
+	// whole group: the heartbeat stops advancing and the process is not runnable.
 	if !heartbeatHoldsWithin(t, heartbeat, 5*time.Second) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL)
 		t.Fatalf("grandchild pid %d still running after clean exit: heartbeat kept advancing", grandchild)
 	}
-	if err := syscall.Kill(grandchild, 0); err != syscall.ESRCH {
+	if processRunningForStepShellTest(grandchild) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL)
-		t.Fatalf("grandchild pid %d not reaped after clean exit (kill -0: %v); want ESRCH", grandchild, err)
+		t.Fatalf("grandchild pid %d still running after clean exit", grandchild)
 	}
 }
 
@@ -150,12 +150,21 @@ func TestRunStepShellCommand_UsesConfiguredProcessTerminationGrace(t *testing.T)
 func pidGoneWithinStepShellTest(pid int, window time.Duration) bool {
 	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) == syscall.ESRCH {
+		if !processRunningForStepShellTest(pid) {
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return syscall.Kill(pid, 0) == syscall.ESRCH
+	return !processRunningForStepShellTest(pid)
+}
+
+func processRunningForStepShellTest(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	cmd := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid))
+	out, err := cmd.Output()
+	return err == nil && !strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
 }
 
 func waitForIntFile(t *testing.T, path string, timeout time.Duration) int {

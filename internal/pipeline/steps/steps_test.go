@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -74,11 +75,17 @@ func handleFakeCLI(mode string) {
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {
-	if logFile == "" || !argsUseStdinBodyFile(args) {
+	if !argsUseStdinBodyFile(args) {
 		return
 	}
 	body, err := io.ReadAll(os.Stdin)
 	if err != nil {
+		return
+	}
+	if bodyFile := os.Getenv("FAKE_CLI_PR_BODY_FILE"); bodyFile != "" {
+		_ = os.WriteFile(bodyFile, body, 0o644)
+	}
+	if logFile == "" {
 		return
 	}
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -133,6 +140,15 @@ func fakeGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+		if slices.Contains(args, "body") {
+			body, err := os.ReadFile(os.Getenv("FAKE_CLI_PR_BODY_FILE"))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Printf("{\"body\":%q}\n", string(body))
+			os.Exit(0)
+		}
 		if prURL != "" {
 			fmt.Println(prURL)
 			os.Exit(0)
@@ -270,16 +286,35 @@ func fakeGlabHandler(args []string) {
 			fmt.Println(mrViewJSON)
 			os.Exit(0)
 		}
+		if body, err := os.ReadFile(os.Getenv("FAKE_CLI_PR_BODY_FILE")); err == nil {
+			fmt.Printf("{\"iid\":99,\"description\":%q}\n", string(body))
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "update" {
+		if description, ok := testArgValue(args, "--description"); ok {
+			_ = os.WriteFile(os.Getenv("FAKE_CLI_PR_BODY_FILE"), []byte(description), 0o644)
+		}
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "create" {
+		if description, ok := testArgValue(args, "--description"); ok {
+			_ = os.WriteFile(os.Getenv("FAKE_CLI_PR_BODY_FILE"), []byte(description), 0o644)
+		}
 		fmt.Println("https://gitlab.com/test/repo/-/merge_requests/99")
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+func testArgValue(args []string, flag string) (string, bool) {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1], true
+		}
+	}
+	return "", false
 }
 
 func extractTrailingNumber(rawURL string) int {
@@ -309,6 +344,15 @@ func fakeCIGHReconcileHandler(args []string) {
 	}
 	if strings.Contains(joined, "pr create") {
 		fmt.Println("https://github.com/test/repo/pull/42")
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json body") {
+		body, err := os.ReadFile(os.Getenv("FAKE_CLI_PR_BODY_FILE"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("{\"body\":%q}\n", string(body))
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {

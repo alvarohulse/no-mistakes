@@ -27,6 +27,7 @@ import (
 func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	// Persisted, resolved intent: removal is REQUIRED, retry-only is REJECTED,
 	// and it is authoritative (Source=="agent"), as `axi run --intent` stamps.

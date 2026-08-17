@@ -2,6 +2,8 @@ package scm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -97,13 +99,27 @@ type PR struct {
 // Create requires Title and Body. Update is a partial write: an empty field
 // leaves the hosted value untouched, so a base-only retarget must not carry
 // content. Without that rule every backend would submit the empty strings
-// verbatim and erase a pull request's title and body, which the pipeline
-// never rewrites after creation.
+// verbatim and erase a pull request's title and body. Verified owned-section
+// updates deliberately carry Body while base-only retargets do not.
 type PRContent struct {
 	Title string
 	Body  string
 	// Base is optional on update. Empty preserves the current base.
 	Base string
+}
+
+// PRBodySnapshot is one exact hosted body plus a revision derived from those
+// bytes. Providers expose inconsistent or absent edit versions, so the common
+// contract uses a SHA-256 body revision and compares it immediately before a
+// write. Any byte change, including line-ending drift, changes Revision.
+type PRBodySnapshot struct {
+	Body     string
+	Revision string
+}
+
+func NewPRBodySnapshot(body string) PRBodySnapshot {
+	digest := sha256.Sum256([]byte(body))
+	return PRBodySnapshot{Body: body, Revision: "sha256:" + hex.EncodeToString(digest[:])}
 }
 
 // PRState is the normalized lifecycle state of a PR.
@@ -170,8 +186,9 @@ func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
 // Capabilities declares which optional Host methods return meaningful data.
 // Callers must consult Capabilities before invoking optional methods.
 type Capabilities struct {
-	MergeableState  bool
-	FailedCheckLogs bool
+	MergeableState     bool
+	FailedCheckLogs    bool
+	PRBodyReadRevision bool
 }
 
 // ErrUnsupported is returned by optional Host methods that the provider
@@ -194,6 +211,9 @@ type Host interface {
 	CreatePR(ctx context.Context, branch, base string, content PRContent) (*PR, error)
 	// UpdatePR applies only the non-empty fields of content; see PRContent.
 	UpdatePR(ctx context.Context, pr *PR, content PRContent) (*PR, error)
+	// ReadPRBody returns the exact hosted body and its comparable revision.
+	// Callers must gate it on Capabilities().PRBodyReadRevision.
+	ReadPRBody(ctx context.Context, pr *PR) (PRBodySnapshot, error)
 
 	GetPRState(ctx context.Context, pr *PR) (PRState, error)
 	GetChecks(ctx context.Context, pr *PR) ([]Check, error)

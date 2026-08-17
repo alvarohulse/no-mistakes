@@ -68,7 +68,7 @@ func TestLintStep_FixMode_CommitsChanges(t *testing.T) {
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after fix commit, got %q", status)
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): fix lint issues" {
+	if got := lastCommitMessage(t, dir); got != "fix(lint): fix lint issues" {
 		t.Fatalf("last commit message = %q", got)
 	}
 }
@@ -94,7 +94,7 @@ func TestLintStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 		t.Fatal(err)
 	}
 
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): fix lint issues" {
+	if got := lastCommitMessage(t, dir); got != "fix(lint): fix lint issues" {
 		t.Fatalf("last commit message = %q", got)
 	}
 }

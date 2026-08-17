@@ -157,6 +157,57 @@ func TestResolveRejectsMissingRunnerBinary(t *testing.T) {
 	}
 }
 
+func TestResolveRetainsConfiguredProvenanceOnOperationalErrors(t *testing.T) {
+	linuxRun := "linux command"
+	probeErr := errors.New("version probe unavailable")
+	tests := []struct {
+		name         string
+		lookPath     func(string) (string, error)
+		probeVersion func(context.Context, shellKind, string) (*string, error)
+		wantErr      error
+	}{
+		{
+			name: "missing executable",
+			lookPath: func(name string) (string, error) {
+				return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+			},
+			probeVersion: func(context.Context, shellKind, string) (*string, error) { return nil, nil },
+			wantErr:      exec.ErrNotFound,
+		},
+		{
+			name:         "version probe failure",
+			lookPath:     func(name string) (string, error) { return "/resolved/" + name, nil },
+			probeVersion: func(context.Context, shellKind, string) (*string, error) { return nil, probeErr },
+			wantErr:      probeErr,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := resolve(context.Background(), Command{
+				Run:   "base command",
+				Linux: &Override{Run: &linuxRun},
+			}, Spec{Executable: "zsh", Args: []string{"-lc"}}, resolverDeps{
+				platform:     "linux",
+				lookPath:     tt.lookPath,
+				probeVersion: tt.probeVersion,
+			})
+			if err == nil || !errors.Is(err, tt.wantErr) {
+				t.Fatalf("resolve() error = %v, want %v", err, tt.wantErr)
+			}
+			if resolved.Script != linuxRun || resolved.CommandSource != SourceLinux {
+				t.Fatalf("partial command resolution = %+v", resolved)
+			}
+			provenance := resolved.Provenance
+			if provenance.SchemaVersion != SchemaVersion || provenance.Platform != "linux" || provenance.Source != SourceDefault || provenance.Executable != "zsh" || !reflect.DeepEqual(provenance.Args, []string{"-lc"}) || provenance.Version != nil {
+				t.Fatalf("partial runner provenance = %+v", provenance)
+			}
+			if len(resolved.Argv) != 0 {
+				t.Fatalf("failed resolution exposed executable argv = %#v", resolved.Argv)
+			}
+		})
+	}
+}
+
 func stringPointer(value string) *string { return &value }
 
 func TestResolvedRunDistinguishesTimeoutLaunchAndExit(t *testing.T) {
@@ -214,6 +265,38 @@ func TestPreparedExecuteBoundsCapturedOutputAndReportsTruncation(t *testing.T) {
 				t.Fatalf("captured output = %d bytes, truncated=%t; want %d/true", len(result.Output), result.Truncated, tt.want)
 			}
 		})
+	}
+}
+
+func TestPreparedExecuteRetainsFullOutputWhenPipelineLoggingRequestsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	prepared, err := Prepare(context.Background(), Command{Run: `head -c 131072 /dev/zero`}, Spec{}, ExecuteOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := prepared.Execute(context.Background(), ExecuteOptions{Timeout: time.Second, CaptureFullOutput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Output) != 131072 || result.Truncated {
+		t.Fatalf("captured output = %d bytes, truncated=%t; want 131072/false", len(result.Output), result.Truncated)
+	}
+}
+
+func TestPrepareRetainsResolvedProvenanceWhenSyntaxValidationFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	prepared, err := Prepare(context.Background(), Command{Run: "if true; then"}, Spec{}, ExecuteOptions{Timeout: time.Second})
+	if err == nil || !errors.Is(err, ErrInvalidSyntax) {
+		t.Fatalf("Prepare() error = %v, want invalid syntax", err)
+	}
+	resolved := prepared.Resolution()
+	if resolved.Script != "if true; then" || resolved.CommandSource != SourceBase || resolved.Provenance.Executable != "sh" {
+		t.Fatalf("resolved syntax failure = %+v", resolved)
 	}
 }
 

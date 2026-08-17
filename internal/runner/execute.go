@@ -27,6 +27,10 @@ type ExecuteOptions struct {
 	ExtraEnv                []string
 	Timeout                 time.Duration
 	ProcessTerminationGrace time.Duration
+	// CaptureFullOutput preserves configured-pipeline behavior where the complete
+	// combined output is retained for the authoritative step log.
+	// Leave it false at bounded diagnostic surfaces such as preflight.
+	CaptureFullOutput bool
 	// OutputLimit bounds combined stdout/stderr retained in Result. Values at
 	// or below zero use the safe default; values above the hard cap are clamped.
 	OutputLimit int
@@ -53,13 +57,15 @@ type Prepared struct {
 // Prepare resolves and syntax-checks one command. No command body is executed.
 func Prepare(ctx context.Context, command Command, defaultRunner Spec, options ExecuteOptions) (Prepared, error) {
 	resolved, err := Resolve(ctx, command, defaultRunner)
+	prepared := Prepared{resolved: resolved}
 	if err != nil {
-		return Prepared{}, err
+		return prepared, err
 	}
 	if err := resolved.ValidateSyntax(ctx, options); err != nil {
-		return Prepared{}, err
+		return prepared, err
 	}
-	return Prepared{resolved: resolved, validated: true}, nil
+	prepared.validated = true
+	return prepared, nil
 }
 
 // Resolution returns an independent copy of the prepared command and its
@@ -80,7 +86,7 @@ func (p Prepared) Execute(ctx context.Context, options ExecuteOptions) (Result, 
 	if !p.validated {
 		return Result{}, fmt.Errorf("execute runner: command was not prepared")
 	}
-	return executeArgv(ctx, p.resolved.Argv, options, nil, outputLimit(options.OutputLimit))
+	return executeArgv(ctx, p.resolved.Argv, options, nil, captureOutputLimit(options))
 }
 
 // ValidateSyntax parses the command with the resolved shell without running
@@ -149,6 +155,13 @@ func outputLimit(requested int) int {
 		return maxCapturedOutputBytes
 	}
 	return requested
+}
+
+func captureOutputLimit(options ExecuteOptions) int {
+	if options.CaptureFullOutput {
+		return int(^uint(0) >> 1)
+	}
+	return outputLimit(options.OutputLimit)
 }
 
 func capturedResult(output *boundedBuffer, exitCode int) Result {

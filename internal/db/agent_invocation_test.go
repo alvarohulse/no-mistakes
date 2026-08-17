@@ -38,6 +38,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		CacheCreationTokens:       intPtr(50),
 		DeltaCacheCreationTokens:  intPtr(50),
 		ReportedCostUSD:           float64Ptr(1.25),
+		PricingReceiptJSON:        strPtr(`{"receipt":"captured"}`),
 	}
 	if _, err := d.InsertAgentInvocation(inv); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -61,6 +62,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	if back.DeltaCacheCreationTokens == nil || *back.DeltaCacheCreationTokens != 50 || back.ReportedCostUSD == nil || *back.ReportedCostUSD != 1.25 {
 		t.Fatalf("cache-write/cost readback = %v/%v", back.DeltaCacheCreationTokens, back.ReportedCostUSD)
 	}
+	if back.PricingReceiptJSON == nil || *back.PricingReceiptJSON != `{"receipt":"captured"}` {
+		t.Fatalf("pricing receipt readback = %v", back.PricingReceiptJSON)
+	}
 	if back.InvocationMode != types.AgentInvocationModeHarnessCLI {
 		t.Fatalf("invocation mode = %q, want harness_cli", back.InvocationMode)
 	}
@@ -72,6 +76,34 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.NestedAgentCount == nil || *back.NestedAgentCount != 2 {
 		t.Fatalf("nested agent count = %v, want 2", back.NestedAgentCount)
+	}
+}
+
+func TestAgentInvocations_PricingReceiptIsWriteOnce(t *testing.T) {
+	d, _, run := openSessionTestDB(t)
+	pending, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
+		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 1, ExitStatus: "started",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := `{"catalog":"captured"}`
+	pending.CompletedAt, pending.ExitStatus, pending.PricingReceiptJSON = 2, "ok", &first
+	if _, err := d.UpdateAgentInvocation(*pending); err != nil {
+		t.Fatal(err)
+	}
+	second := `{"catalog":"newer"}`
+	pending.PricingReceiptJSON = &second
+	if _, err := d.UpdateAgentInvocation(*pending); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].PricingReceiptJSON == nil || *got[0].PricingReceiptJSON != first {
+		t.Fatalf("stored pricing receipt = %+v, want first capture", got)
 	}
 }
 
@@ -504,7 +536,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	// Simulate a pre-fidelity table by dropping the new columns, then insert a
 	// legacy row that has no fidelity data.
 	for _, col := range []string{"model_provider", "fallback_reason", "subprocess_wait_ms",
-		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count", "review_candidate_pool_json"} {
+		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count", "review_candidate_pool_json", "pricing_receipt_json"} {
 		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + col); err != nil {
 			t.Fatalf("drop %s: %v", col, err)
 		}
@@ -536,7 +568,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
 	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
-		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
+		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil || legacy.PricingReceiptJSON != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}
 	// The migrated table now accepts the new fields.

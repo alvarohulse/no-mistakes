@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -128,6 +129,7 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 // round-history prompt section instead.
 func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	reviewRound := 0
+	repairWorkDir := ""
 	mock := &sessionMockAgent{}
 	mock.respond = func(opts agent.RunOpts) *agent.Result {
 		switch opts.Purpose {
@@ -141,6 +143,9 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 			}
 			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
 		case "review-fix":
+			if err := os.WriteFile(filepath.Join(repairWorkDir, "feature.txt"), []byte(fmt.Sprintf("fixed round %d\n", reviewRound)), 0o644); err != nil {
+				t.Fatalf("record repair progress: %v", err)
+			}
 			return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
 		default:
 			t.Errorf("unexpected agent purpose %q", opts.Purpose)
@@ -149,6 +154,7 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	}
 
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	repairWorkDir = workDir
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}

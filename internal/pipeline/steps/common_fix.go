@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -38,6 +39,15 @@ type commitSummary struct {
 }
 
 var errRejectedCommitSummary = errors.New("rejected commit summary")
+
+const unknownFixModel = "unknown"
+
+var fixCoAuthorByHarness = map[string]string{
+	"claude":     "Claude <noreply@anthropic.com>",
+	"codex":      "Codex <noreply@openai.com>",
+	"cursor":     "cursoragent <cursoragent@cursor.com>",
+	"acp:cursor": "cursoragent <cursoragent@cursor.com>",
+}
 
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
@@ -115,7 +125,7 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 	return nil
 }
 
-func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
+func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, result *agent.Result) error {
 	ctx := sctx.Ctx
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
@@ -131,9 +141,9 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if summary == "" {
 		summary = "apply fixes"
 	}
-	commitMessage, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	commitMessage, err := attributedAgentFixCommitMessage(sctx, stepName, summary, result)
 	if err != nil {
-		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
+		return err
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 		return fmt.Errorf("stage %s changes: %w", stepName, err)
@@ -165,6 +175,59 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	return nil
+}
+
+type fixAttribution struct {
+	Harness string
+	Model   string
+}
+
+func fixCommitAttribution(author agent.Agent, result *agent.Result) fixAttribution {
+	harness := ""
+	model := ""
+	if result != nil {
+		harness = safeFixTrailerValue(result.Provider)
+		model = safeFixTrailerValue(result.Model)
+	}
+	if harness == "" && author != nil {
+		harness = safeFixTrailerValue(author.Name())
+	}
+	if model == "" && author != nil {
+		model = safeFixTrailerValue(agent.ConfiguredModel(author).Name)
+	}
+	if model == "" {
+		model = unknownFixModel
+	}
+	return fixAttribution{Harness: strings.ToLower(harness), Model: model}
+}
+
+func attributedAgentFixCommitMessage(sctx *pipeline.StepContext, stepName types.StepName, summary string, result *agent.Result) (string, error) {
+	subject, err := sctx.Config.Commit.RenderFixMessage(stepName, summary)
+	if err != nil {
+		return "", fmt.Errorf("render %s fix commit message: %w", stepName, err)
+	}
+	return attributedFixCommitMessage(subject, fixCommitAttribution(sctx.Agent, result)), nil
+}
+
+func attributedFixCommitMessage(subject string, attribution fixAttribution) string {
+	trailers := make([]string, 0, 2)
+	if coAuthor := fixCoAuthorByHarness[attribution.Harness]; coAuthor != "" {
+		trailers = append(trailers, "Co-authored-by: "+coAuthor)
+	}
+	trailers = append(trailers, "No-Mistakes-Model: "+attribution.Model)
+	return subject + "\n\n" + strings.Join(trailers, "\n")
+}
+
+func safeFixTrailerValue(value string) string {
+	if value == "" || len(value) > 256 || !utf8.ValidString(value) {
+		return ""
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || unicode.Is(unicode.Cf, r) {
+			return ""
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {
@@ -234,7 +297,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
-	if err := commitAgentFixes(sctx, stepName, summary, opts.FallbackSummary); err != nil {
+	if err := commitAgentFixes(sctx, stepName, summary, opts.FallbackSummary, result); err != nil {
 		return "", err
 	}
 	return summary, nil

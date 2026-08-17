@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -103,7 +104,21 @@ func runGhForkPRStub(args []string) int {
 		fmt.Printf("https://github.com/%s/pull/99\n", strings.TrimSuffix(repo, ".git"))
 		return 0
 	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
+		return 0
+	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+		if hasArgValue(args, "--json", "body") {
+			body, err := latestGhStubBody()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fakeagent gh fork-pr: read PR body: %v\n", err)
+				return 1
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(struct {
+				Body string `json:"body"`
+			}{Body: body})
+			return 0
+		}
 		if hasArgValue(args, "--json", "state") {
 			fmt.Println("MERGED")
 			return 0
@@ -120,6 +135,37 @@ func runGhForkPRStub(args []string) int {
 
 	fmt.Fprintf(os.Stderr, "fakeagent gh fork-pr: subcommand not implemented: %v\n", args)
 	return 1
+}
+
+func latestGhStubBody() (string, error) {
+	logPath := os.Getenv("FAKEAGENT_GH_LOG")
+	if logPath == "" {
+		return "", errors.New("FAKEAGENT_GH_LOG is not set")
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var latest string
+	decoder := json.NewDecoder(f)
+	for {
+		var inv ghStubInvocation
+		if err := decoder.Decode(&inv); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", err
+		}
+		if inv.Body != "" {
+			latest = inv.Body
+		}
+	}
+	if latest == "" {
+		return "", errors.New("no recorded PR body")
+	}
+	return latest, nil
 }
 
 func recordGhStubInvocation(args []string) {

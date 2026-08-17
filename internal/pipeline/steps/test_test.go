@@ -86,7 +86,7 @@ func TestTestStep_FixMode(t *testing.T) {
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after fix commit, got %q", status)
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(test): fix test failures" {
+	if got := lastCommitMessage(t, dir); got != "fix(test): fix test failures" {
 		t.Fatalf("last commit message = %q", got)
 	}
 }
@@ -144,7 +144,7 @@ func TestTestStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 	if outcome.NeedsApproval {
 		t.Fatal("expected no approval after fallback summary commit and passing tests")
 	}
-	if got := lastCommitMessage(t, dir); got != "no-mistakes(test): fix test failures" {
+	if got := lastCommitMessage(t, dir); got != "fix(test): fix test failures" {
 		t.Fatalf("last commit message = %q", got)
 	}
 }

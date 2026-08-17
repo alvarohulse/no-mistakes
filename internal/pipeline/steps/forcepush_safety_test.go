@@ -75,7 +75,7 @@ func TestCIStep_CommitAndPush_RefusesToClobberUnseenUpstreamCommit(t *testing.T)
 	sctx.Run.HeadSHA = headSHA // gate's last-recorded head == H1
 
 	step := &CIStep{}
-	pushed, err := step.commitAndPush(sctx)
+	pushed, err := step.commitAndPush(sctx, "preserve reviewed remote changes")
 
 	// The push must be refused: origin has a commit the worktree never saw.
 	if err == nil {

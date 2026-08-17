@@ -49,6 +49,26 @@ func TestProjectPath(t *testing.T) {
 	}
 }
 
+func TestReadPRBodyReturnsExactBytesAndRevision(t *testing.T) {
+	t.Parallel()
+
+	const body = "human preamble\r\n<!-- marker -->\n"
+	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
+		"glab mr view 123 --output json": {stdout: `{"iid":123,"description":"human preamble\r\n<!-- marker -->\n"}` + "\n"},
+	}), nil, "", "")
+
+	snapshot, err := host.ReadPRBody(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("ReadPRBody() error = %v", err)
+	}
+	if snapshot.Body != body || snapshot.Revision != scm.NewPRBodySnapshot(body).Revision {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if !host.Capabilities().PRBodyReadRevision {
+		t.Fatal("GitLab did not advertise PR body read/revision support")
+	}
+}
+
 func TestGetMergeableStateTreatsBlockedStatusesAsResolved(t *testing.T) {
 	t.Parallel()
 

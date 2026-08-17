@@ -76,12 +76,12 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"refresh_strategy", "stacked_on", "config_sources_json", "resolved_agent_routing_json", "resolved_policy_json", "resolved_policy_digest", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "custody_returned_at", "metadata"} {
+	for _, column := range []string{"refresh_strategy", "stacked_on", "config_sources_json", "resolved_agent_routing_json", "resolved_policy_json", "resolved_policy_digest", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "ci_fix_attempts", "custody_returned_at", "metadata"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"reviewed_head_sha", "replay_config_json"} {
+	for _, column := range []string{"reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
 		if !hasColumn(t, d, "step_rounds", column) {
 			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
 		}
@@ -91,10 +91,66 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd"} {
+	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd", "pricing_receipt_json"} {
 		if !hasColumn(t, d, "agent_invocations", column) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
 		}
+	}
+}
+
+func TestOpenMigratesCIFixAttemptsWithoutGrantingLegacyRunsAFreshBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-ci-fix.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/home/user/legacy-ci-fix", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRun, err := before.InsertRun(repo.ID, "legacy", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN ci_fix_attempts`); err != nil {
+		raw.Close()
+		t.Fatalf("remove post-legacy column: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { after.Close() })
+	var migrated sql.NullInt64
+	if err := after.sql.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, legacyRun.ID).Scan(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Valid {
+		t.Fatalf("migrated legacy CI fix attempts = %d, want unknown", migrated.Int64)
+	}
+
+	newRun, err := after.InsertRun(repo.ID, "new", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialized sql.NullInt64
+	if err := after.sql.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, newRun.ID).Scan(&initialized); err != nil {
+		t.Fatal(err)
+	}
+	if !initialized.Valid || initialized.Int64 != 0 {
+		t.Fatalf("new run CI fix attempts = %+v, want known zero", initialized)
 	}
 }
 
@@ -147,7 +203,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 	for table, columns := range map[string][]string{
 		"runs":              {"metadata"},
 		"step_results":      {"evidence_json", "planned_command", "skip_source"},
-		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd"},
+		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd", "pricing_receipt_json"},
 	} {
 		for _, column := range columns {
 			if !hasColumn(t, database, table, column) {
@@ -273,7 +329,7 @@ func TestOpenMigratesExistingStepRoundsColumns(t *testing.T) {
 		t.Fatalf("iterate table_info: %v", err)
 	}
 
-	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha", "replay_config_json"} {
+	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
 		if !columns[name] {
 			t.Fatalf("expected migrated column %q to exist", name)
 		}

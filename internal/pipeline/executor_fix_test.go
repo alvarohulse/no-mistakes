@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -741,6 +742,7 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 1}}
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	callCount := 0
 	step := &adaptiveCallStep{
@@ -786,6 +788,159 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != "apply cheap fix" {
 		t.Fatalf("expected fix_summary persisted on round 2, got %v", rounds[1].FixSummary)
 	}
+	if rounds[0].RepairResult == nil || *rounds[0].RepairResult != RepairResultAttempted || rounds[0].RepairFailureFingerprint == nil {
+		t.Fatalf("initial repair audit = %#v", rounds[0])
+	}
+	if rounds[1].RepairResult == nil || *rounds[1].RepairResult != RepairResultResolved {
+		t.Fatalf("resolved repair audit = %#v", rounds[1])
+	}
+	if rounds[1].RepairFailureFingerprint == nil || *rounds[1].RepairFailureFingerprint != *rounds[0].RepairFailureFingerprint {
+		t.Fatalf("resolved repair fingerprint = %v, want %v", rounds[1].RepairFailureFingerprint, rounds[0].RepairFailureFingerprint)
+	}
+}
+
+func TestExecutor_AutoFixStopsOnRepeatedFailureFingerprint(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 8}}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 2 {
+				writeTestFile(t, workDir, "repair.go", "package repair\n")
+			}
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings: fmt.Sprintf(
+					`{"findings":[{"id":"review-%d","severity":"warning","file":"main.go","line":%d,"description":"same failure","action":"auto-fix"}]}`,
+					calls, calls,
+				),
+			}, nil
+		},
+	}
+	executor := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != 2 {
+		t.Fatalf("step executions = %d, want initial plus one repair", calls)
+	}
+	rounds, err := database.GetRoundsByStep(firstStepID(t, database, run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[1].RepairResult == nil || *rounds[1].RepairResult != RepairResultRepeatedFailure {
+		t.Fatalf("round repair audit = %#v", rounds)
+	}
+	if rounds[1].RepairFailureFingerprint == nil || *rounds[1].RepairFailureFingerprint == "" {
+		t.Fatalf("repeated round lacks content-free fingerprint: %#v", rounds[1])
+	}
+	if err := executor.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
+func TestExecutor_AutoFixDoesNotResolveReroutedSurvivingFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					AutoFixable:   true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","line":10,"description":"same surviving failure","action":"auto-fix"}]}`,
+				}, nil
+			}
+			writeTestFile(t, workDir, "repair.go", "package repair\n")
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"review-99","severity":"warning","file":"main.go","line":91,"description":"same surviving failure","action":"ask-user"}]}`,
+			}, nil
+		},
+	}
+	executor := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != 2 {
+		t.Fatalf("step executions = %d, want initial plus one repair", calls)
+	}
+	rounds, err := database.GetRoundsByStep(firstStepID(t, database, run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[1].RepairResult == nil || *rounds[1].RepairResult != RepairResultRepeatedFailure {
+		t.Fatalf("rerouted surviving failure audit = %#v, want %q", rounds, RepairResultRepeatedFailure)
+	}
+	if err := executor.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+}
+
+func TestExecutor_AutoFixHardCapsConfiguredLimitAtThree(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 99}}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			if calls > 1 {
+				writeTestFile(t, workDir, "repair.go", fmt.Sprintf("package repair\n// %d\n", calls))
+			}
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings:      failureJSON(fmt.Sprintf("failure-%d", calls)),
+			}, nil
+		},
+	}
+	executor := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != MaxRepairAttempts+1 {
+		t.Fatalf("step executions = %d, want initial plus %d repairs", calls, MaxRepairAttempts)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].AutoFixLimit == nil || *steps[0].AutoFixLimit != MaxRepairAttempts {
+		t.Fatalf("effective auto-fix limit = %#v, want %d", steps, MaxRepairAttempts)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := rounds[len(rounds)-1]
+	if last.RepairResult == nil || *last.RepairResult != RepairResultAttemptLimit {
+		t.Fatalf("last repair result = %#v, want %q", last.RepairResult, RepairResultAttemptLimit)
+	}
+	if err := executor.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-done
 }
 
 func TestRoundInsertIDClearsOnInsertFailure(t *testing.T) {

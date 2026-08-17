@@ -4,26 +4,30 @@
 // The contract carries the PR body's raw material, never a pre-rendered
 // layout. A formatter that receives markdown has already had its layout
 // decision made for it, which defeats the point of the hook; so the pipeline
-// section is per-step records, risk is its three stored fields, and testing is
-// the test step's own summary, tested list, and artifacts.
+// section is per-step records, risk is its three stored fields, and static
+// tests, review evidence, and user-testing instructions remain distinct.
 package prbody
+
+import "github.com/kunchenguid/no-mistakes/internal/pricing"
 
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
-// pipeline treats a non-zero exit as "use the built-in body" and says so.
-const Version = 3
+// pipeline reports that failure and may fall back to built-in section content,
+// subject to the same marker and publication validation as formatter output.
+const Version = 4
 
 // Contract is the complete payload written to the formatter's stdin.
 //
-// Two presence rules apply to Sections, because absence carries different
+// Presence rules apply to Sections, because absence carries different
 // meanings:
 //
 //   - Risk and Notes are always present, each with a boolean saying whether
 //     anything was actually reported or supplied. Their absence is itself
 //     information a reader needs ("no risk assessment ran", "the author left
 //     no note"), so it is stated rather than implied.
-//   - Every other section is an absent key when there is nothing to say, so a
-//     formatter can tell "nothing to say" from "said nothing".
+//   - Version 4 producers always emit UserTesting so its attestation state is
+//     explicit; version 2 and 3 contracts omit that unsupported field.
+//   - Every other optional section is absent when there is nothing to say.
 type Contract struct {
 	Version int    `json:"version"`
 	RunID   string `json:"run_id"`
@@ -38,12 +42,13 @@ type Contract struct {
 	// Provider is the detected SCM host ("github", "azure", ...).
 	Provider string `json:"provider"`
 	// BodyLimit is the host's PR body character cap, 0 when unlimited. A
-	// formatter should respect it; the pipeline clamps anything over it
-	// afterwards and logs that it did.
+	// formatter should respect it; the pipeline rejects an oversized marked
+	// candidate rather than truncating section content after hashing it.
 	BodyLimit int `json:"body_limit"`
 
 	// Title is the drafted conventional-commit PR title. The formatter owns
-	// the body only - returning a title has no effect.
+	// section content and the optional bootstrap layout only; returning a title
+	// has no effect.
 	Title string `json:"title"`
 	// Metadata is opaque operator-supplied context. no-mistakes does not parse
 	// or assign structure to it; formatters may interpret it for their own use.
@@ -68,15 +73,20 @@ type Commit struct {
 
 // Sections holds the body's raw material.
 type Sections struct {
-	// Intent is retained only so callers can decode a version 2 contract. Version
-	// 3 producers leave it empty and report intent on the Intent pipeline step.
-	Intent      *IntentSection   `json:"intent,omitempty"`
-	Summary     *TextSection     `json:"summary,omitempty"`
-	Notes       NotesSection     `json:"notes"`
-	WhatChanged *TextSection     `json:"what_changed,omitempty"`
-	Risk        RiskSection      `json:"risk"`
-	Testing     *TestingSection  `json:"testing,omitempty"`
-	Pipeline    *PipelineSection `json:"pipeline,omitempty"`
+	// Intent is retained only so callers can decode a version 2 contract.
+	// Versions 3 and 4 report intent on the Intent pipeline step instead.
+	Intent      *IntentSection `json:"intent,omitempty"`
+	Summary     *TextSection   `json:"summary,omitempty"`
+	Notes       NotesSection   `json:"notes"`
+	WhatChanged *TextSection   `json:"what_changed,omitempty"`
+	Risk        RiskSection    `json:"risk"`
+	// Testing is retained only so callers can decode version 2 and 3
+	// contracts. Version 4 producers use the three distinct fields below.
+	Testing        *TestingSection        `json:"testing,omitempty"`
+	StaticTests    *StaticTestsSection    `json:"static_tests,omitempty"`
+	ReviewEvidence *ReviewEvidenceSection `json:"review_evidence,omitempty"`
+	UserTesting    *UserTestingSection    `json:"user_testing,omitempty"`
+	Pipeline       *PipelineSection       `json:"pipeline,omitempty"`
 }
 
 // IntentSection is the change author's goal for the branch.
@@ -130,6 +140,32 @@ type TestingSection struct {
 	Summary   string     `json:"summary,omitempty"`
 	Tested    []string   `json:"tested,omitempty"`
 	Artifacts []Artifact `json:"artifacts,omitempty"`
+}
+
+// StaticTestsSection contains objective command outcomes and artifacts. It
+// never contains instructions for a human to perform later.
+type StaticTestsSection struct {
+	Summary   string            `json:"summary,omitempty"`
+	Commands  []PipelineCommand `json:"commands,omitempty"`
+	Reported  []string          `json:"reported,omitempty"`
+	Artifacts []Artifact        `json:"artifacts,omitempty"`
+}
+
+// ReviewEvidenceSection is the Review step's recorded evidence, kept apart
+// from static command results and from future human testing instructions.
+type ReviewEvidenceSection struct {
+	Status   string       `json:"status"`
+	Rounds   int          `json:"rounds"`
+	Findings StepFindings `json:"findings"`
+	Evidence []string     `json:"evidence,omitempty"`
+}
+
+// UserTestingSection contains instructions for a human. Attested is false
+// unless an explicit human completion signal was supplied; instructions alone
+// must never be rendered as test evidence.
+type UserTestingSection struct {
+	Instructions []string `json:"instructions,omitempty"`
+	Attested     bool     `json:"attested"`
 }
 
 // Artifact is one piece of test evidence produced for human review.
@@ -217,19 +253,20 @@ type StepFindings struct {
 
 // AgentRun is one agent invocation within a step.
 type AgentRun struct {
-	Round               int      `json:"round"`
-	Purpose             string   `json:"purpose,omitempty"`
-	Agent               string   `json:"agent,omitempty"`
-	Model               string   `json:"model,omitempty"`
-	Provider            string   `json:"provider,omitempty"`
-	StartedAt           int64    `json:"started_at,omitempty"`
-	DurationMS          int64    `json:"duration_ms,omitempty"`
-	InputTokens         *int     `json:"input_tokens,omitempty"`
-	OutputTokens        *int     `json:"output_tokens,omitempty"`
-	UncachedInputTokens *int     `json:"uncached_input_tokens,omitempty"`
-	CacheReadTokens     *int     `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens    *int     `json:"cache_write_tokens,omitempty"`
-	ReportedCostUSD     *float64 `json:"reported_cost_usd,omitempty"`
+	Round               int                  `json:"round"`
+	Purpose             string               `json:"purpose,omitempty"`
+	Agent               string               `json:"agent,omitempty"`
+	Model               string               `json:"model,omitempty"`
+	Provider            string               `json:"provider,omitempty"`
+	StartedAt           int64                `json:"started_at,omitempty"`
+	DurationMS          int64                `json:"duration_ms,omitempty"`
+	InputTokens         *int                 `json:"input_tokens,omitempty"`
+	OutputTokens        *int                 `json:"output_tokens,omitempty"`
+	UncachedInputTokens *int                 `json:"uncached_input_tokens,omitempty"`
+	CacheReadTokens     *int                 `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    *int                 `json:"cache_write_tokens,omitempty"`
+	ReportedCostUSD     *float64             `json:"reported_cost_usd,omitempty"`
+	Costs               *pricing.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
 	Vendor         string `json:"vendor,omitempty"`

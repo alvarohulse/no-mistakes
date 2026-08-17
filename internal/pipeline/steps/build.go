@@ -26,8 +26,8 @@ func (s *BuildStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 		}
 	}
 
-	buildCommand := sctx.Config.Commands.Build
-	if buildCommand == "" {
+	buildCommand := sctx.Config.Commands.BuildCommand()
+	if buildCommand.IsZero() {
 		outcome, err := s.executeAgentBuild(sctx)
 		if outcome != nil {
 			outcome.FixSummary = fixSummary
@@ -35,8 +35,8 @@ func (s *BuildStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 		return outcome, err
 	}
 
-	sctx.Log(fmt.Sprintf("running build: %s", buildCommand))
-	output, exitCode, err := runStepShellCommand(sctx, buildCommand)
+	sctx.Log(fmt.Sprintf("running build: %s", buildCommand.Run))
+	output, exitCode, err := runStepRunnerCommand(sctx, buildCommand)
 	if err != nil {
 		return nil, fmt.Errorf("run build command: %w", err)
 	}

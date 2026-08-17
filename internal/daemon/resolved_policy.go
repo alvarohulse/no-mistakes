@@ -16,12 +16,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	resolvedPolicyVersion     = 5
+	resolvedPolicyVersion     = 6
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -48,6 +49,7 @@ type resolvedPolicy struct {
 	Intent                 resolvedPolicyIntent   `json:"intent"`
 	Eval                   resolvedPolicyEval     `json:"eval"`
 	TestEvidence           resolvedPolicyEvidence `json:"test_evidence"`
+	Pricing                resolvedPolicyPricing  `json:"pricing"`
 }
 
 type resolvedPolicyBinary struct {
@@ -117,6 +119,10 @@ type resolvedPolicyEval struct {
 	AutoCapture       bool `json:"auto_capture"`
 	MaxCases          int  `json:"max_cases"`
 	DiversifiedSize   int  `json:"diversified_size"`
+}
+
+type resolvedPolicyPricing struct {
+	Profiles map[string]string `json:"profiles"`
 }
 
 // PolicyExplanation is a presentation wrapper around the exact NM-02 policy
@@ -247,9 +253,10 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 	return nil
 }
 
-// Versions 1 through 4 predate managed routing, resolved runner provenance,
-// trusted preflight, or source-aware skip receipts. Their missing fields decode
-// to legacy zero values and are normalized before semantic comparison.
+// Older versions predate managed routing, resolved runner provenance, trusted
+// preflight, source-aware skip receipts, or explicit pricing profiles. Their
+// missing fields decode to legacy zero values and are normalized before
+// semantic comparison.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	if policy.Version == 1 {
 		if policy.Routing.Version == 1 {
@@ -265,6 +272,9 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 				policy.Steps[i].SkipSource = types.SkipSourceRunRequest
 			}
 		}
+	}
+	if policy.Version >= 1 && policy.Version <= 5 {
+		policy.Pricing.Profiles = map[string]string{}
 		policy.Version = resolvedPolicyVersion
 	}
 }
@@ -352,12 +362,16 @@ func resolvedPolicyFromConfigWithSkips(cfg *config.Config, sources []db.ConfigSo
 			RetentionNS: int64(cfg.Test.Evidence.Retention),
 			MaxRuns:     cfg.Test.Evidence.MaxRuns,
 		},
+		Pricing: resolvedPolicyPricing{Profiles: copyResolvedPolicyStrings(cfg.PricingProfiles)},
 	}
 	if policy.Sources == nil {
 		policy.Sources = []db.ConfigSource{}
 	}
 	if policy.IgnorePatterns == nil {
 		policy.IgnorePatterns = []string{}
+	}
+	if policy.Pricing.Profiles == nil {
+		policy.Pricing.Profiles = map[string]string{}
 	}
 	if err := policy.validate(); err != nil {
 		return nil, err
@@ -447,6 +461,16 @@ func (p *resolvedPolicy) validate() error {
 	}
 	if p.Budgets.CITimeoutNS < 0 || p.Budgets.StepQuietWarningNS < 0 || p.Budgets.ProcessTerminationGraceNS < 0 || p.Budgets.CIRerunTransient < 0 || p.TestEvidence.RetentionNS < 0 || p.TestEvidence.MaxRuns < 0 || p.Intent.SlackDays < 0 || p.Eval.MaxCases < 0 || p.Eval.DiversifiedSize < 0 {
 		return fmt.Errorf("resolved policy contains a negative budget")
+	}
+	if p.Version >= 6 {
+		if p.Pricing.Profiles == nil {
+			return fmt.Errorf("resolved policy pricing profiles are missing")
+		}
+		for harness, profileID := range p.Pricing.Profiles {
+			if err := pricing.ValidateProfileSelection(harness, profileID); err != nil {
+				return fmt.Errorf("resolved policy pricing: %w", err)
+			}
+		}
 	}
 	for _, limit := range []int{p.Budgets.AutoFix.Lint, p.Budgets.AutoFix.Build, p.Budgets.AutoFix.Test, p.Budgets.AutoFix.Review, p.Budgets.AutoFix.Document, p.Budgets.AutoFix.CI, p.Budgets.AutoFix.Refresh} {
 		if limit < 0 {
@@ -570,4 +594,12 @@ func sortedResolvedPolicyKeys(values map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func copyResolvedPolicyStrings(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -126,6 +127,10 @@ type AgentInvocation struct {
 	DeltaCacheCreationTokens *int
 	// ReportedCostUSD is the cost emitted by the agent CLI, when available.
 	ReportedCostUSD *float64
+	// PricingReceiptJSON is the content-free immutable three-class cost receipt
+	// captured when this invocation completed. Nil marks an in-flight or legacy
+	// row; readers must not fill it from the current pricing catalog.
+	PricingReceiptJSON *string
 	// ModelRoundtrips is the count of model-authored items (messages + tool
 	// calls) - a live-stream proxy for productive model round-trips. Nil when
 	// the adapter reported no activity metrics.
@@ -158,7 +163,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, in
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 	fresh_input_tokens, reasoning_tokens,
-	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens, delta_cache_creation_tokens, reported_cost_usd,
+	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens, delta_cache_creation_tokens, reported_cost_usd, pricing_receipt_json,
 	model_roundtrips, tool_calls,
 	tool_wait_calls, tool_test_lint_calls, tool_edit_calls, tool_read_calls, tool_git_calls, tool_other_calls,
 	workload_files, workload_lines, finding_count`
@@ -166,7 +171,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, in
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
 const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
-	?, ?, ?, ?, ?, ?,
+	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
 	?, ?,
 	?, ?, ?,
@@ -199,7 +204,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
 		inv.FreshInputTokens, inv.ReasoningTokens,
-		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD, inv.PricingReceiptJSON,
 		inv.ModelRoundtrips, inv.ToolCalls,
 		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
 		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
@@ -234,6 +239,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
 		fresh_input_tokens = ?, reasoning_tokens = ?,
 		delta_input_tokens = ?, delta_output_tokens = ?, delta_cache_read_tokens = ?, delta_cache_creation_tokens = ?, reported_cost_usd = ?,
+		pricing_receipt_json = COALESCE(pricing_receipt_json, ?),
 		model_roundtrips = ?, tool_calls = ?,
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
@@ -243,7 +249,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
 		inv.FreshInputTokens, inv.ReasoningTokens,
-		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD, inv.PricingReceiptJSON,
 		inv.ModelRoundtrips, inv.ToolCalls,
 		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
 		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
@@ -341,7 +347,7 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
 		&inv.FreshInputTokens, &inv.ReasoningTokens,
-		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens, &inv.DeltaCacheCreationTokens, &inv.ReportedCostUSD,
+		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens, &inv.DeltaCacheCreationTokens, &inv.ReportedCostUSD, &inv.PricingReceiptJSON,
 		&inv.ModelRoundtrips, &inv.ToolCalls,
 		&inv.ToolWaitCalls, &inv.ToolTestLintCalls, &inv.ToolEditCalls, &inv.ToolReadCalls, &inv.ToolGitCalls, &inv.ToolOtherCalls,
 		&inv.WorkloadFiles, &inv.WorkloadLines, &inv.FindingCount,
@@ -570,7 +576,76 @@ func (d *DB) AgentInvocationAggregates() ([]AgentInvocationAggregate, error) {
 		}
 		aggregates = append(aggregates, a)
 	}
-	return aggregates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	receipts, err := d.GetRunMetricReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for _, receipt := range receipts {
+		aggregates = append(aggregates, receipt.AgentAggregates...)
+	}
+	return mergeAgentInvocationAggregates(aggregates), nil
+}
+
+func mergeAgentInvocationAggregates(values []AgentInvocationAggregate) []AgentInvocationAggregate {
+	byPurpose := make(map[string][]AgentInvocationAggregate)
+	for _, value := range values {
+		byPurpose[value.Purpose] = append(byPurpose[value.Purpose], value)
+	}
+	result := make([]AgentInvocationAggregate, 0, len(byPurpose))
+	for purpose, groups := range byPurpose {
+		combined := AgentInvocationAggregate{Purpose: purpose}
+		for _, group := range groups {
+			combined.Count += group.Count
+			combined.TotalDurationMS += group.TotalDurationMS
+			combined.Cold += group.Cold
+			combined.Started += group.Started
+			combined.Resumed += group.Resumed
+			combined.Fallback += group.Fallback
+			combined.Errors += group.Errors
+			combined.InputTokens += group.InputTokens
+			combined.OutputTokens += group.OutputTokens
+			combined.CacheReadTokens += group.CacheReadTokens
+			combined.MetricsRows += group.MetricsRows
+		}
+		combined.SubprocessWaitMS = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.SubprocessWaitMS })
+		combined.CacheCreationTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.CacheCreationTokens })
+		combined.FreshInputTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.FreshInputTokens })
+		combined.ReasoningTokens = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ReasoningTokens })
+		combined.ModelRoundtrips = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ModelRoundtrips })
+		combined.ToolCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolCalls })
+		combined.ToolWaitCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolWaitCalls })
+		combined.ToolTestLintCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolTestLintCalls })
+		combined.ToolEditCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolEditCalls })
+		combined.ToolReadCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolReadCalls })
+		combined.ToolGitCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolGitCalls })
+		combined.ToolOtherCalls = sumOptionalAggregate(groups, func(value AgentInvocationAggregate) *int64 { return value.ToolOtherCalls })
+		if combined.Count > 0 {
+			combined.AvgDurationMS = combined.TotalDurationMS / int64(combined.Count)
+		}
+		result = append(result, combined)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].TotalDurationMS != result[j].TotalDurationMS {
+			return result[i].TotalDurationMS > result[j].TotalDurationMS
+		}
+		return result[i].Purpose < result[j].Purpose
+	})
+	return result
+}
+
+func sumOptionalAggregate(values []AgentInvocationAggregate, field func(AgentInvocationAggregate) *int64) *int64 {
+	total := int64(0)
+	for _, value := range values {
+		item := field(value)
+		if item == nil {
+			return nil
+		}
+		total += *item
+	}
+	return &total
 }
 
 // RunInvocationSummary is the low-cardinality per-run rollup used for the

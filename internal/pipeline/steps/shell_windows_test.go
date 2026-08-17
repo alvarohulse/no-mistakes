@@ -12,7 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-func TestRunShellCommandWithEnv_UsesCmdAndIgnoresUserShell(t *testing.T) {
+func TestRunShellCommandWithEnv_UsesPowerShellAndIgnoresUserShell(t *testing.T) {
 	workDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "user-shell-used")
 	shellPath := filepath.Join(t.TempDir(), "fake-shell.cmd")
@@ -23,7 +23,7 @@ func TestRunShellCommandWithEnv_UsesCmdAndIgnoresUserShell(t *testing.T) {
 	t.Setenv("SHELL", shellPath)
 	t.Setenv("USER_SHELL_MARKER", marker)
 
-	output, exitCode, err := runShellCommandWithEnv(context.Background(), workDir, []string{"STEP_SPECIAL=from-step"}, `echo %STEP_SPECIAL%`, shellenv.DefaultProcessTerminationGrace)
+	output, exitCode, err := runShellCommandWithEnv(context.Background(), workDir, []string{"STEP_SPECIAL=from-step"}, `Write-Output $env:STEP_SPECIAL`, shellenv.DefaultProcessTerminationGrace)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -118,13 +118,24 @@ With no source, the latest run for the current repository is used.
 			if result.Diagnostics != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "%s\n", result.Diagnostics)
 			}
-			fmt.Fprintln(out, result.Body)
+			body, err := prbody.NewOwnedDocument(result.Patches)
+			if err != nil {
+				return err
+			}
+			if err := prbody.ValidateOwnedDocument(body, prbody.ValidationLimits{
+				MaxBytes:     scm.MaxPRBodyBytes,
+				MaxUnits:     contract.BodyLimit,
+				MeasureUnits: scm.PRBodyLen,
+			}); err != nil {
+				return err
+			}
+			fmt.Fprintln(out, body)
 			return nil
 		},
 	}
 
 	cmd.Flags().BoolVar(&sample, "sample", false, "use the built-in sample contract")
-	cmd.Flags().IntVar(&sampleVersion, "sample-version", prbody.Version, "contract version --sample emits (2 or 3)")
+	cmd.Flags().IntVar(&sampleVersion, "sample-version", prbody.Version, "contract version --sample emits (2, 3, or 4)")
 	cmd.Flags().StringVar(&runID, "run", "", "use a stored run's contract")
 	cmd.Flags().StringVar(&contractIn, "contract-file", "", "read the contract from a JSON file ('-' for stdin)")
 	cmd.Flags().BoolVar(&contractOut, "print-contract", false, "print the contract JSON instead of running the formatter")
@@ -191,8 +202,8 @@ func readContractFile(cmd *cobra.Command, path string) (*prbody.Contract, error)
 	if err := json.Unmarshal(data, &contract); err != nil {
 		return nil, fmt.Errorf("parse contract: %w", err)
 	}
-	// A formatter under a v2-to-v3 rollout has to be testable against both
-	// shapes, so a still-supported older contract is read rather than refused.
+	// A formatter under a contract rollout has to be testable against every
+	// supported shape, so older contracts are read rather than refused.
 	if !prbody.IsSupportedVersion(contract.Version) {
 		return nil, fmt.Errorf("contract version %d, expected one of %s", contract.Version, joinVersions(prbody.SupportedVersions()))
 	}

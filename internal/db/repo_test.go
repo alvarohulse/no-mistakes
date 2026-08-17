@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -213,5 +214,39 @@ func TestRepoDelete(t *testing.T) {
 	got, _ := d.GetRepo(repo.ID)
 	if got != nil {
 		t.Fatal("expected nil after delete")
+	}
+}
+
+func TestRepoEjectClaimBlocksNewRunsUntilReleased(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/ejecting", "git@github.com:user/ejecting.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClaimRepoEject(repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRun(repo.ID, "feature", "head", "base"); err == nil || !strings.Contains(err.Error(), "eject") {
+		t.Fatalf("insert during eject error = %v", err)
+	}
+	if err := d.ReleaseRepoEject(repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRun(repo.ID, "feature", "head", "base"); err != nil {
+		t.Fatalf("insert after eject claim release: %v", err)
+	}
+}
+
+func TestRepoEjectClaimRefusesActiveRuns(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/active-eject", "git@github.com:user/active-eject.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRun(repo.ID, "feature", "head", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClaimRepoEject(repo.ID); err == nil || !strings.Contains(err.Error(), "active run") {
+		t.Fatalf("claim with active run error = %v", err)
 	}
 }

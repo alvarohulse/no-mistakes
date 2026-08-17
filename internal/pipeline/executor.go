@@ -731,6 +731,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if e.config != nil {
 		autoFixLimit = e.config.AutoFixLimit(stepName)
 	}
+	if progressAwareRepairStep(stepName) {
+		autoFixLimit = RepairAttemptLimit(autoFixLimit)
+	}
 
 	// Mark step as running
 	if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
@@ -840,7 +843,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// roundNum is shared with the perf wrapper's round closure below: an
 	// invocation during execution of round N+1 sees roundNum still at N.
 	autoFixAttempts := state.autoFixAttempts
+	repairProgress := NewRepairProgress(autoFixAttempts)
 	roundNum := state.roundNum
+	var pricingProfiles map[string]string
+	if e.config != nil && len(e.config.PricingProfiles) > 0 {
+		pricingProfiles = make(map[string]string, len(e.config.PricingProfiles))
+		for harness, profileID := range e.config.PricingProfiles {
+			pricingProfiles[harness] = profileID
+		}
+	}
 
 	instrumentAgent := func(inner agent.Agent, reviewCandidatePool []db.ReviewCandidateReceipt) agent.Agent {
 		if inner == nil {
@@ -856,6 +867,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			stepName:            stepName,
 			round:               func() int { return roundNum + 1 },
 			reviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), reviewCandidatePool...),
+			pricingProfiles:     pricingProfiles,
 		}
 	}
 	stepAgent := instrumentAgent(e.agents.AgentForStep(stepName), nil)
@@ -997,6 +1009,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
 		}
+		persistRepairAudit := func(audit RepairAudit) {
+			if currentRoundID == "" || (audit.FailureFingerprint == "" && audit.Result == "") {
+				return
+			}
+			if dbErr := e.db.SetStepRoundRepairAudit(currentRoundID, audit.FailureFingerprint, audit.Result); dbErr != nil {
+				slog.Warn("failed to record repair progress", "step", stepName, "round", roundNum, "error", dbErr)
+			}
+		}
+		persistRepairAudit(outcome.RepairAudit)
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.
 		if outcome.PRURL != "" {
@@ -1008,31 +1029,57 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
-			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
+		repairFailureFindings := repairFailureFindingsJSON(outcome.Findings)
+		fixableFindings := autoFixableFindingsJSON(outcome.Findings)
+		repairProgressChecked := false
+		if outcome.AutoFixable && autoFixLimit > 0 {
 			if fixableFindings != "" {
-				autoFixAttempts++
-				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
-				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
-				executionMS += time.Since(phaseStart).Milliseconds()
-				fixCount := findingsCount(fixableFindings)
-				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
-				if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
-					slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
+				decision, progressErr := repairProgress.Next(ctx, workDir, repairFailureFindings, autoFixLimit)
+				if progressErr != nil {
+					return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
 				}
-				if currentRoundID != "" {
-					if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
-						if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix); dbErr != nil {
-							slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
+				repairProgressChecked = true
+				persistRepairAudit(decision.Audit)
+				if !decision.Attempt {
+					writeLog(decision.Message)
+				} else {
+					autoFixAttempts = decision.AttemptNumber
+					telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
+					slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
+					executionMS += time.Since(phaseStart).Milliseconds()
+					fixCount := findingsCount(fixableFindings)
+					writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
+					if dbErr := e.db.UpdateStepStatus(sr.ID, types.StepStatusFixing); dbErr != nil {
+						slog.Warn("failed to update step status in db", "step", stepName, "status", "fixing", "error", dbErr)
+					}
+					if currentRoundID != "" {
+						if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
+							if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix); dbErr != nil {
+								slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
+							}
 						}
 					}
+					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
+					phaseStart = time.Now()
+					sctx.Fixing = true
+					sctx.PreviousFindings = fixableFindings
+					nextTrigger = "auto_fix"
+					continue
 				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
-				phaseStart = time.Now()
-				sctx.Fixing = true
-				sctx.PreviousFindings = fixableFindings
-				nextTrigger = "auto_fix"
-				continue
+			}
+		}
+		if autoFixAttempts > 0 && outcome.RepairAudit.Result == "" {
+			if repairFailureFindings == "" {
+				persistRepairAudit(repairProgress.Resolved())
+			} else if !repairProgressChecked {
+				decision, progressErr := repairProgress.Observe(ctx, workDir, repairFailureFindings)
+				if progressErr != nil {
+					return false, fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr)
+				}
+				if decision.Audit.Result != "" {
+					persistRepairAudit(decision.Audit)
+					writeLog(decision.Message)
+				}
 			}
 		}
 

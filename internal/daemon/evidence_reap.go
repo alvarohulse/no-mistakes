@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -24,9 +23,10 @@ import (
 // and reapLegacyEvidence once installs from before the relocation are gone.
 const legacyEvidenceDirName = "no-mistakes-evidence"
 
-// evidenceReapPolicy bounds how much on-disk evidence survives. A zero
-// Retention disables age-based reaping and a zero MaxRuns disables the count
-// ceiling; both zero keeps everything except empty directories.
+// evidenceReapPolicy bounds how much rich run data survives. A non-positive
+// Retention keeps rich data indefinitely. Positive values are widened to the
+// mandatory 14-day minimum, and MaxRuns can widen the mandatory newest-50
+// floor.
 type evidenceReapPolicy struct {
 	Retention time.Duration
 	MaxRuns   int
@@ -34,7 +34,7 @@ type evidenceReapPolicy struct {
 
 // evidenceReapPolicyFor resolves the policy from a loaded global config,
 // falling back to the built-in defaults when configuration is unavailable.
-// Retention and the run ceiling are global-only settings (see
+// Retention and the configured newest-run floor are global-only settings (see
 // config.EvidenceRaw), so no repository is consulted here.
 func evidenceReapPolicyFor(global *config.GlobalConfig) evidenceReapPolicy {
 	policy := evidenceReapPolicy{
@@ -60,38 +60,16 @@ func evidenceRootFor(p *paths.Paths, global *config.GlobalConfig) string {
 	return p.EvidenceRoot(configured)
 }
 
-// reapEvidence bounds the on-disk evidence directory. It is what makes
-// no-mistakes responsible for its own scratch: before the relocation, evidence
-// sat in the shared system temp directory and the only thing that ever removed
-// it was an OS timer this program does not control, does not configure, and
-// cannot rely on across macOS, Linux, and Windows.
-//
-// Three rules, applied oldest-first and all best effort:
-//
-//  1. An empty run directory is removed regardless of age. The test step
-//     creates the directory before the agent decides whether it has anything to
-//     write, so a run that produced no artifact would otherwise leave a
-//     permanent entry behind. Nearly all of the observed accumulation was this.
-//  2. A run directory older than the retention window is removed.
-//  3. Whatever survives is trimmed to the run ceiling, oldest first.
-//
-// A directory whose run row is still pending or running is never touched, at
-// any step - the same active-run guard cleanupOrphanWorktrees uses, for the
-// same reason: only a settled run's leftovers are safe to remove.
-func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Time) {
+// reapEvidence removes empty terminal-run directories and leftovers whose rich
+// run row was already archived. Non-empty retention is owned by pruneRichRuns,
+// which holds the database write lock across artifact cleanup and archival so a
+// concurrent pin cannot succeed during deletion.
+func reapEvidence(d *db.DB, root string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return // directory may not exist yet, which is the normal case
 	}
-
-	type candidate struct {
-		path     string
-		modTime  time.Time
-		isEmpty  bool
-		runID    string
-		reapable bool
-	}
-	candidates := make([]candidate, 0, len(entries))
+	removed := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -103,6 +81,19 @@ func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Tim
 			continue
 		}
 		if run == nil {
+			receipt, receiptErr := d.GetRunMetricReceipt(runID)
+			if receiptErr != nil {
+				slog.Debug("skipping evidence cleanup", "run_id", runID, "reason", receiptErr)
+				continue
+			}
+			if receipt != nil {
+				if removeEvidenceDir(filepath.Join(root, runID), runID) {
+					removed++
+				}
+			}
+			continue
+		}
+		if run.PinnedAt != nil {
 			continue
 		}
 		if skip, reason := skipWorktreeCleanup(d, runID); skip {
@@ -110,43 +101,14 @@ func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Tim
 			continue
 		}
 		path := filepath.Join(root, runID)
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
 		inner, err := os.ReadDir(path)
 		if err != nil {
 			continue
 		}
-		candidates = append(candidates, candidate{
-			path:     path,
-			modTime:  info.ModTime(),
-			isEmpty:  len(inner) == 0,
-			runID:    runID,
-			reapable: true,
-		})
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].modTime.Before(candidates[j].modTime)
-	})
-
-	removed := 0
-	survivors := make([]candidate, 0, len(candidates))
-	for _, c := range candidates {
-		expired := policy.Retention > 0 && now.Sub(c.modTime) > policy.Retention
-		if c.isEmpty || expired {
-			if removeEvidenceDir(c.path, c.runID) {
-				removed++
-			}
-			continue
-		}
-		survivors = append(survivors, c)
-	}
-
-	if policy.MaxRuns > 0 && len(survivors) > policy.MaxRuns {
-		for _, c := range survivors[:len(survivors)-policy.MaxRuns] {
-			if removeEvidenceDir(c.path, c.runID) {
+		if len(inner) == 0 {
+			// Remove only the directory itself. If a writer raced the empty
+			// check and created an artifact, this fails rather than deleting it.
+			if err := os.Remove(path); err == nil {
 				removed++
 			}
 		}
@@ -171,7 +133,7 @@ func removeEvidenceDir(path, runID string) bool {
 // moving files would not repair them, and a wholesale removal could delete
 // artifacts a run started before the upgrade is still writing. Reaping by the
 // same rules, with the same active-run guard, is bounded and surprises nobody.
-func reapLegacyEvidence(d *db.DB, current string, policy evidenceReapPolicy, now time.Time) {
+func reapLegacyEvidence(d *db.DB, current string) {
 	legacy := filepath.Join(os.TempDir(), legacyEvidenceDirName)
 	if legacy == current {
 		return // an operator who pointed local_root back at it owns it now
@@ -179,7 +141,7 @@ func reapLegacyEvidence(d *db.DB, current string, policy evidenceReapPolicy, now
 	if _, err := os.Stat(legacy); err != nil {
 		return
 	}
-	reapEvidence(d, legacy, policy, now)
+	reapEvidence(d, legacy)
 	// Remove the root itself once it is empty; os.Remove fails harmlessly while
 	// anything remains.
 	_ = os.Remove(legacy)

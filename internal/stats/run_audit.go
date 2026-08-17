@@ -5,13 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 4
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -20,6 +24,7 @@ type RunAudit struct {
 	SkipReceipts    []SkipReceipt `json:"skip_receipts"`
 	Invocations     []Invocation  `json:"invocations"`
 	Metrics         Metrics       `json:"metrics"`
+	Costs           CostTotals    `json:"costs"`
 	IntegrityErrors []string      `json:"integrity_errors"`
 }
 
@@ -34,6 +39,8 @@ type RunIdentity struct {
 	CreatedAt          int64                 `json:"created_at"`
 	UpdatedAt          int64                 `json:"updated_at"`
 	ParkedMS           *int64                `json:"parked_ms"`
+	PinnedAt           *int64                `json:"pinned_at"`
+	RichDataRetained   bool                  `json:"rich_data_retained"`
 	NoMistakesVersion  *string               `json:"no_mistakes_version"`
 	NoMistakesBuildSHA *string               `json:"no_mistakes_build_sha"`
 	PolicyDigest       *string               `json:"policy_digest"`
@@ -46,23 +53,41 @@ type ConfigDigest struct {
 }
 
 type Step struct {
-	ID          string            `json:"id"`
-	Name        types.StepName    `json:"name"`
-	Order       int               `json:"order"`
-	Status      types.StepStatus  `json:"status"`
-	SkipSource  *types.SkipSource `json:"skip_source"`
-	ExitCode    *int              `json:"exit_code"`
-	DurationMS  *int64            `json:"duration_ms"`
-	StartedAt   *int64            `json:"started_at"`
-	CompletedAt *int64            `json:"completed_at"`
-	Rounds      []Round           `json:"rounds"`
+	ID               string            `json:"id"`
+	Name             types.StepName    `json:"name"`
+	Order            int               `json:"order"`
+	Status           types.StepStatus  `json:"status"`
+	SkipSource       *types.SkipSource `json:"skip_source"`
+	ExitCode         *int              `json:"exit_code"`
+	DurationMS       *int64            `json:"duration_ms"`
+	StartedAt        *int64            `json:"started_at"`
+	CompletedAt      *int64            `json:"completed_at"`
+	Commands         []CommandReceipt  `json:"commands"`
+	Rounds           []Round           `json:"rounds"`
+	ReportedFindings int               `json:"reported_findings"`
+	FixedFindings    int               `json:"fixed_findings"`
+}
+
+// CommandReceipt is the content-free audit record for one pipeline-owned
+// command. The command string and resolved executable argv deliberately stay
+// in rich step evidence and never enter stats or metric retention.
+type CommandReceipt struct {
+	Round         int                `json:"round"`
+	Sequence      int                `json:"sequence"`
+	Outcome       string             `json:"outcome"`
+	ExitCode      *int               `json:"exit_code"`
+	CommandSource string             `json:"command_source"`
+	Runner        *runner.Provenance `json:"runner"`
 }
 
 type Round struct {
-	Number     int    `json:"number"`
-	Trigger    string `json:"trigger"`
-	DurationMS int64  `json:"duration_ms"`
-	CreatedAt  int64  `json:"created_at"`
+	Number                   int     `json:"number"`
+	Trigger                  string  `json:"trigger"`
+	SelectionSource          *string `json:"selection_source"`
+	RepairFailureFingerprint *string `json:"repair_failure_fingerprint"`
+	RepairResult             *string `json:"repair_result"`
+	DurationMS               int64   `json:"duration_ms"`
+	CreatedAt                int64   `json:"created_at"`
 }
 
 type SkipReceipt struct {
@@ -78,6 +103,7 @@ type Invocation struct {
 	Agent                string                    `json:"agent"`
 	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
 	NestedAgentsReported bool                      `json:"nested_agents_reported"`
+	NestedAgentCount     *int                      `json:"nested_agent_count"`
 	NestedAgents         []types.AgentObservation  `json:"nested_agents"`
 	Model                *string                   `json:"model"`
 	Provider             *string                   `json:"provider"`
@@ -93,6 +119,7 @@ type Invocation struct {
 	RawUsage             TokenMeters               `json:"raw_usage"`
 	DeltaUsage           TokenMeters               `json:"delta_usage"`
 	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
+	Costs                pricing.CostClasses       `json:"costs"`
 	Activity             Activity                  `json:"activity"`
 }
 
@@ -181,7 +208,18 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 		return nil, fmt.Errorf("get run: %w", err)
 	}
 	if run == nil {
-		return nil, fmt.Errorf("run %q not found", runID)
+		record, err := database.GetRunMetricReceipt(runID)
+		if err != nil {
+			return nil, err
+		}
+		if record == nil {
+			return nil, fmt.Errorf("run %q not found", runID)
+		}
+		receipt, err := decodeMetricReceipt(record)
+		if err != nil {
+			return nil, err
+		}
+		return receipt.RunAudit(), nil
 	}
 	parkedMS, err := database.GetRunParkedMS(runID)
 	if err != nil {
@@ -199,7 +237,6 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	configSources, configErrors := configDigests(run.ConfigSources)
 	audit := &RunAudit{
 		SchemaVersion: SchemaVersion,
@@ -207,6 +244,7 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 			ID: run.ID, RepoID: run.RepoID, Branch: run.Branch, HeadSHA: run.HeadSHA, BaseSHA: run.BaseSHA,
 			RefreshStrategy: run.RefreshStrategy.OrDefault(), Status: run.Status,
 			CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, ParkedMS: cloneInt64(parkedMS),
+			PinnedAt: cloneInt64(run.PinnedAt), RichDataRetained: true,
 			NoMistakesVersion: cloneString(run.NoMistakesVersion), NoMistakesBuildSHA: cloneString(run.NoMistakesBuildSHA),
 			PolicyDigest: nonEmptyString(run.ResolvedPolicyDigest), ConfigSources: configSources,
 		},
@@ -238,11 +276,12 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 
 	for _, row := range invocationRows {
 		requireManagedReviewReceipt := policyResolved && policy.ManagedReviewReceipts
-		invocation, errors := buildInvocation(row, requireManagedReviewReceipt, policy.ReviewCandidates)
+		invocation, errors := buildInvocation(row, policy.PricingProfiles[row.Agent], requireManagedReviewReceipt, policy.ReviewCandidates)
 		audit.Invocations = append(audit.Invocations, invocation)
 		audit.IntegrityErrors = append(audit.IntegrityErrors, errors...)
 	}
 	audit.Metrics, policyErrors = buildMetrics(audit.Invocations, databaseTotals)
+	audit.Costs = buildCostTotals(audit.Invocations)
 	audit.IntegrityErrors = append(audit.IntegrityErrors, policyErrors...)
 	return audit, nil
 }
@@ -270,16 +309,34 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 		ID: row.ID, Name: row.StepName.Canonical(), Order: row.StepOrder, Status: row.Status,
 		ExitCode: cloneInt(row.ExitCode), DurationMS: cloneInt64(row.DurationMS),
 		StartedAt: cloneInt64(row.StartedAt), CompletedAt: cloneInt64(row.CompletedAt),
-		Rounds: []Round{},
+		Commands: []CommandReceipt{}, Rounds: []Round{},
+	}
+	var integrityErrors []string
+	evidence, err := row.Evidence()
+	if err != nil {
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s evidence could not be read: %v", row.StepName, err))
+	} else {
+		result.Commands = commandReceipts(evidence.Commands)
 	}
 	rounds, err := database.GetRoundsByStep(row.ID)
 	if err != nil {
-		return result, []string{fmt.Sprintf("step %s rounds could not be read: %v", row.StepName, err)}
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s rounds could not be read: %v", row.StepName, err))
+		return result, integrityErrors
 	}
 	result.Rounds = make([]Round, 0, len(rounds))
-	var integrityErrors []string
 	for _, round := range rounds {
-		result.Rounds = append(result.Rounds, Round{Number: round.Round, Trigger: round.Trigger, DurationMS: round.DurationMS, CreatedAt: round.CreatedAt})
+		result.Rounds = append(result.Rounds, Round{
+			Number: round.Round, Trigger: round.Trigger, SelectionSource: cloneString(round.SelectionSource),
+			RepairFailureFingerprint: cloneString(round.RepairFailureFingerprint), RepairResult: cloneString(round.RepairResult),
+			DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
+		})
+	}
+	findingStats, err := database.StepFindingStats(row)
+	if err != nil {
+		integrityErrors = append(integrityErrors, fmt.Sprintf("step %s finding stats could not be read: %v", row.StepName, err))
+	} else {
+		result.ReportedFindings = findingStats.ReportedFindings
+		result.FixedFindings = findingStats.FixedFindings
 	}
 	if row.SkipSource != nil {
 		source := types.SkipSource(*row.SkipSource)
@@ -306,10 +363,32 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 	return result, integrityErrors
 }
 
-func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
+func commandReceipts(commands []db.CommandEvidence) []CommandReceipt {
+	result := make([]CommandReceipt, 0, len(commands))
+	for _, command := range commands {
+		result = append(result, CommandReceipt{
+			Round: command.Round, Sequence: command.Sequence, Outcome: command.Outcome,
+			ExitCode: cloneInt(command.ExitCode), CommandSource: command.CommandSource,
+			Runner: cloneRunnerProvenance(command.Runner),
+		})
+	}
+	return result
+}
+
+func cloneRunnerProvenance(value *runner.Provenance) *runner.Provenance {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	cloned.Args = append([]string(nil), value.Args...)
+	cloned.Version = cloneString(value.Version)
+	return &cloned
+}
+
+func buildInvocation(row db.AgentInvocation, pricingProfileID string, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
-		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported,
+		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported, NestedAgentCount: cloneInt(row.NestedAgentCount),
 		NestedAgents: append([]types.AgentObservation(nil), row.AgentObservations...),
 		Model:        nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),
 		SessionMode: row.SessionMode, SessionKey: row.SessionKey, FallbackReason: cloneString(row.FallbackReason),
@@ -340,6 +419,8 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	result.RawUsage.CacheWriteTokens = cloneInt(row.CacheCreationTokens)
 	result.RawUsage.FreshInputTokens = cloneInt(row.FreshInputTokens)
 	result.RawUsage.ReasoningTokens = cloneInt(row.ReasoningTokens)
+	var integrityErrors []string
+	result.Costs, integrityErrors = invocationPricingCosts(row, pricingProfileID)
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
@@ -350,7 +431,53 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 			Selected:      Route{Agent: row.Agent, Model: nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider)},
 		}
 	}
-	return result, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)
+	integrityErrors = append(integrityErrors, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)...)
+	return result, integrityErrors
+}
+
+func invocationPricingCosts(row db.AgentInvocation, pricingProfileID string) (pricing.CostClasses, []string) {
+	if row.PricingReceiptJSON == nil {
+		reason := "missing_pricing_receipt"
+		if row.ExitStatus == "started" {
+			reason = "pricing_receipt_pending"
+			return unavailablePricingCosts(row, reason), nil
+		}
+		return unavailablePricingCosts(row, reason), []string{fmt.Sprintf("agent invocation %s has no immutable pricing receipt", row.ID)}
+	}
+	receipt, err := pricing.DecodeReceipt(*row.PricingReceiptJSON)
+	if err != nil {
+		return unavailablePricingCosts(row, "invalid_pricing_receipt"), []string{fmt.Sprintf("agent invocation %s pricing receipt could not be read: %v", row.ID, err)}
+	}
+	profileID := receipt.HarnessAdjustedEstimate.Provenance.ProfileID
+	if profileID != "" && pricingProfileID != "" && profileID != pricingProfileID {
+		return receipt, []string{fmt.Sprintf("agent invocation %s pricing receipt profile differs from resolved policy", row.ID)}
+	}
+	return receipt, nil
+}
+
+func unavailablePricingCosts(row db.AgentInvocation, reason string) pricing.CostClasses {
+	reported := pricing.CostEstimate{
+		Coverage: pricing.Coverage{Eligible: 1}, Basis: "agent_invocations.reported_cost_usd", Reason: "not_reported",
+	}
+	if row.ReportedCostUSD != nil && !math.IsNaN(*row.ReportedCostUSD) && !math.IsInf(*row.ReportedCostUSD, 0) && *row.ReportedCostUSD >= 0 {
+		value := *row.ReportedCostUSD
+		reported.ValueUSD = &value
+		reported.Coverage.Reported = 1
+		reported.Complete = true
+		reported.Reason = ""
+	} else if row.ReportedCostUSD != nil {
+		reported.Reason = "invalid_reported_cost"
+	}
+	coverage := pricing.Coverage{Eligible: 4}
+	_, uncachedInput := agent.CanonicalInputMeters(row.Agent, row.DeltaInputTokens, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens)
+	for _, meter := range []*int{uncachedInput, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens, row.DeltaOutputTokens} {
+		if meter != nil && *meter >= 0 {
+			coverage.Reported++
+		}
+	}
+	list := pricing.CostEstimate{Coverage: coverage, Basis: "canonical_delta_token_meters_x_public_list_rate", Reason: reason}
+	effective := pricing.CostEstimate{Coverage: coverage, Basis: "public_list_estimate_plus_harness_profile", Reason: reason}
+	return pricing.CostClasses{HarnessReported: reported, APIListEstimate: list, HarnessAdjustedEstimate: effective}
 }
 
 func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) []string {

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "cursor-token-rate",
+      "version": 1,
+      "harness": "cursor",
+      "status": "active",
+      "source_url": "https://cursor.com/docs/models-and-pricing",
+      "effective_from": "2026-08-15",
+      "adjustment": {
+        "kind": "additive_total_tokens_usd_per_million",
+        "usd_per_million": 0.25
+      },
+      "excluded_models": ["auto", "grok-4.6", "grok-4.5", "composer-2.5"]
+    },
+    {
+      "id": "claude-code-private",
+      "version": 1,
+      "harness": "claude",
+      "status": "inactive",
+      "adjustment": {}
+    },
+    {
+      "id": "codex-azure-private",
+      "version": 1,
+      "harness": "codex",
+      "status": "inactive",
+      "adjustment": {}
+    }
+  ]
+}

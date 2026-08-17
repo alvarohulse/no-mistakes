@@ -32,6 +32,7 @@ type PullRequest struct {
 	State            string
 	SourceCommitHash string
 	Base             string
+	Body             string
 }
 
 type CommitStatus struct {
@@ -322,9 +323,10 @@ func readTail(r io.Reader, maxBytes int) ([]byte, error) {
 }
 
 type bitbucketPullRequest struct {
-	ID     int    `json:"id"`
-	State  string `json:"state"`
-	Source struct {
+	ID          int    `json:"id"`
+	State       string `json:"state"`
+	Description string `json:"description"`
+	Source      struct {
 		Commit struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
@@ -348,6 +350,7 @@ func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 		State:            strings.TrimSpace(pr.State),
 		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
 		Base:             strings.TrimSpace(pr.Destination.Branch.Name),
+		Body:             pr.Description,
 	}
 }
 

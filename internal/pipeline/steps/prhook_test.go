@@ -42,14 +42,88 @@ func logsContain(logs []string, want string) bool {
 
 func TestApplyPRBodyHookUsesFormatterOutput(t *testing.T) {
 	t.Parallel()
-	sctx, _ := newHookTestContext(t, "cat > /dev/null; printf '## Templated\\n\\nformatted body\\n'")
+	sctx, _ := newHookTestContext(t, `cat > /dev/null; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"## Templated\n\nformatted body"}]}'`)
 
 	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in"}, "## What Changed\n\n- x", prBodyScope{branch: "feature", baseBranch: "main"})
-	if got.Body != "## Templated\n\nformatted body" {
+	if !strings.Contains(got.Body, "## Templated\n\nformatted body") || !strings.Contains(got.Body, "no-mistakes:owned-sections:v1") {
 		t.Fatalf("body = %q", got.Body)
 	}
 	if got.Title != "fix: x" {
 		t.Fatalf("title = %q, want the hook to leave it alone", got.Title)
+	}
+}
+
+func TestApplyPRBodyHookBootstrapsAndPreservesTemplateChecklist(t *testing.T) {
+	t.Parallel()
+	heading := "# Repository Summary\n\n"
+	checklist := "\n\n# Test Plan\n\n- [ ] Human-only verification\n"
+	sectionID := "summary"
+	patches := prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: "formatted body"}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &heading},
+			{Section: &sectionID},
+			{Literal: &checklist},
+		}},
+	}
+	payload, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	sctx, _ := newHookTestContext(t, "cat > /dev/null; printf '%s\\n' "+quoted)
+
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in"}, "wc", prBodyScope{})
+	if got.OwnedPatches.Bootstrap == nil {
+		t.Fatal("the hook bootstrap layout was not retained for initial publication")
+	}
+	for _, exact := range []string{heading, checklist} {
+		if !strings.Contains(got.Body, exact) {
+			t.Fatalf("bootstrap literal %q missing:\n%s", exact, got.Body)
+		}
+	}
+
+	replacementHeading := "# Replacement layout must not be used\n\n"
+	replacement := patches
+	replacement.Sections = []prbody.SectionPatch{{ID: sectionID, Content: "updated body"}}
+	replacement.Bootstrap = &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+		{Literal: &replacementHeading},
+		{Section: &sectionID},
+	}}
+	updated, err := prbody.ApplyOwnedPatches(got.Body, replacement)
+	if err != nil {
+		t.Fatalf("ApplyOwnedPatches: %v", err)
+	}
+	if !strings.Contains(updated, checklist) || strings.Contains(updated, replacementHeading) {
+		t.Fatalf("existing-body update changed the initial template layout:\n%s", updated)
+	}
+}
+
+func TestApplyPRBodyHookRejectsSecretInBootstrapLiteral(t *testing.T) {
+	t.Parallel()
+	literal := "# Summary\n\nghp_abcdefghijklmnopqrstuvwx12\n\n"
+	sectionID := "summary"
+	patches := prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: "formatted body"}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &literal},
+			{Section: &sectionID},
+		}},
+	}
+	payload, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx, logs := newHookTestContext(t, "cat > /dev/null; printf '%s\\n' '"+string(payload)+"'")
+
+	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in"}, "wc", prBodyScope{})
+	if got.Body != "built-in" {
+		t.Fatalf("body = %q, want safe built-in fallback", got.Body)
+	}
+	if !logsContain(*logs, "unsafe candidate") || !logsContain(*logs, "possible secret") {
+		t.Fatalf("expected bootstrap secret rejection in logs, got %v", *logs)
 	}
 }
 
@@ -79,7 +153,7 @@ func TestApplyPRBodyHookFallsBackOnEmptyOutput(t *testing.T) {
 	if got.Body != "built-in body" {
 		t.Fatalf("body = %q, want the built-in body", got.Body)
 	}
-	if !logsContain(*logs, "wrote no body") {
+	if !logsContain(*logs, "wrote no patches") {
 		t.Fatalf("expected the empty-output reason in the log, got %v", *logs)
 	}
 }
@@ -97,24 +171,23 @@ func TestApplyPRBodyHookNoopWithoutConfiguration(t *testing.T) {
 	}
 }
 
-func TestApplyPRBodyHookClampsOverLimitOutput(t *testing.T) {
+func TestApplyPRBodyHookRejectsOverLimitOutput(t *testing.T) {
 	t.Parallel()
-	sctx, logs := newHookTestContext(t, "cat > /dev/null; head -c 5000 /dev/zero | tr '\\0' 'x'")
+	sctx, logs := newHookTestContext(t, `cat > /dev/null; printf '%s' '{"version":1,"sections":[{"id":"summary","content":"'; head -c 5000 /dev/zero | tr '\0' 'x'; printf '%s\n' '"}]}'`)
 
 	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Body: "built-in"}, "wc", prBodyScope{bodyLimit: 4000})
-	// Measured the way a host measures it (UTF-16 units), not in bytes.
-	if n := scm.PRBodyLen(got.Body); n > 4000 {
-		t.Fatalf("body is %d characters, want it clamped to the host limit", n)
+	if got.Body != "built-in" {
+		t.Fatalf("body = %q, want the safe built-in fallback", got.Body)
 	}
-	if !logsContain(*logs, "clamping") {
-		t.Fatalf("expected the clamp to be reported, got %v", *logs)
+	if !logsContain(*logs, "unsafe candidate") || !logsContain(*logs, "exceeds") {
+		t.Fatalf("expected the fail-closed size rejection to be reported, got %v", *logs)
 	}
 }
 
 func TestApplyPRBodyHookPassesContractOnStdin(t *testing.T) {
 	t.Parallel()
 	dump := filepath.Join(t.TempDir(), "contract.json")
-	sctx, _ := newHookTestContext(t, "cat > "+dump+"; echo body")
+	sctx, _ := newHookTestContext(t, "cat > "+dump+`; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"body"}]}'`)
 	sctx.PRNote = "Skipping the dead-letter path deliberately."
 	sctx.UserIntent = "Bound the retry window."
 	sctx.IntentSource = db.RunIntentSourceAgent
@@ -197,7 +270,7 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Bound the retry window."
 	dump := filepath.Join(t.TempDir(), "contract.json")
-	sctx.Config.Hooks.PRBody = "cat > " + dump + "; printf 'formatted body\\n'"
+	sctx.Config.Hooks.PRBody = "cat > " + dump + `; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"formatted body"}]}'`
 
 	// A completed step, so assembly has a Pipeline section to add and this test
 	// can tell the assembled body from the prose that produced it.
@@ -213,7 +286,7 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if content.Body != "formatted body" {
+	if !strings.Contains(content.Body, "formatted body") || !strings.Contains(content.Body, "no-mistakes:owned-sections:v1") {
 		t.Fatalf("body = %q, want the formatter's output", content.Body)
 	}
 

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -32,13 +31,8 @@ func TestRunStartPostWorktreeHookReapsLeakedGrandchild(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		deadline := time.Now().Add(3 * time.Second)
-		for time.Now().Before(deadline) {
-			err = syscall.Kill(pid, 0)
-			if errors.Is(err, syscall.ESRCH) {
-				return nil
-			}
-			time.Sleep(20 * time.Millisecond)
+		if pidGoneWithin(pid, 3*time.Second) {
+			return nil
 		}
 		return errors.New("post-worktree grandchild remained alive after hook exit")
 	}}

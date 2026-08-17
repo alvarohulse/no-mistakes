@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
@@ -104,25 +105,41 @@ CI logs:
 	prompt += userIntentPromptSection(sctx)
 	prompt += configuredPromptSection(sctx, s.Name())
 	prompt = testguidance.LateRepairPrompt(string(s.Name()), prompt)
+	prompt += `
+- Return JSON with a single "summary" field when you are done.
+- The summary must be one concise sentence fragment suitable for a git commit subject.
+- Keep the summary under 10 words.`
 
 	sctx.Log("running agent to fix CI issues...")
-	_, err := sctx.Agent.Run(ctx, agent.RunOpts{
-		Prompt:  prompt,
-		CWD:     sctx.WorkDir,
-		OnChunk: sctx.LogChunk,
+	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        sctx.WorkDir,
+		JSONSchema: commitSummarySchema,
+		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
 		return false, fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	return s.commitAndPush(sctx)
+	return s.commitAndPushAttributed(sctx, result)
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the
 // configured push remote.
 // Returns (true, nil) when changes were pushed, (false, nil) when there was
 // nothing to commit, or (false, err) on failure.
-func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
+func (s *CIStep) commitAndPush(sctx *pipeline.StepContext, summary string) (bool, error) {
+	if strings.TrimSpace(summary) == "" {
+		return false, fmt.Errorf("read CI repair commit summary: summary is empty")
+	}
+	return s.commitAndPushResolved(sctx, nil, summary)
+}
+
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result) (bool, error) {
+	return s.commitAndPushResolved(sctx, result, "")
+}
+
+func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary string) (bool, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("check CI changes: %w", err)
@@ -135,11 +152,24 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
 		}
 		return false, nil
 	}
+	if summary == "" {
+		summary, err = extractCommitSummary(result)
+		if err != nil {
+			return false, fmt.Errorf("read CI repair commit summary: %w", err)
+		}
+		if summary == "" {
+			return false, fmt.Errorf("read CI repair commit summary: summary is empty")
+		}
+	}
 
 	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
 		return false, fmt.Errorf("stage CI changes: %w", err)
 	}
-	if _, err := stepGitRun(sctx, "commit", "-m", "no-mistakes: apply CI fixes"); err != nil {
+	message, err := attributedAgentFixCommitMessage(sctx, types.StepCI, summary, result)
+	if err != nil {
+		return false, err
+	}
+	if _, err := stepGitRun(sctx, "commit", "-m", message); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
 	headSHA, err := stepGitHeadSHA(sctx)

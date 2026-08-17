@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,12 +12,14 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	// Config with auto-fix enabled for review (max 3 attempts)
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
@@ -82,8 +85,10 @@ func TestExecutor_CommandSequenceRestartsForEachRound(t *testing.T) {
 		},
 	}
 
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 	executor := NewExecutor(database, paths, &config.Config{AutoFix: config.AutoFix{Lint: 1}}, nil, []Step{step}, nil)
-	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+	if err := executor.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	steps, err := database.GetStepsByRun(run.ID)
@@ -142,6 +147,46 @@ func TestStepContext_RecordCommandBoundsAndRedactsDisplayText(t *testing.T) {
 	}
 }
 
+func TestStepContext_RecordResolvedCommandPersistsRunnerProvenance(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	step, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := "5.2.26"
+	resolved := runner.Resolved{
+		Script:        "make build-linux",
+		CommandSource: runner.SourceLinux,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      "linux",
+			Source:        runner.SourceDefault,
+			Executable:    "zsh",
+			Args:          []string{"-lc"},
+			Version:       &version,
+		},
+	}
+	sctx := &StepContext{DB: database, StepResultID: step.ID, Round: 1}
+	zero := 0
+	sctx.RecordResolvedCommand(resolved, &zero, nil)
+
+	stored, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 {
+		t.Fatalf("commands = %+v", evidence.Commands)
+	}
+	command := evidence.Commands[0]
+	if command.Command != resolved.Script || command.CommandSource != runner.SourceLinux || command.Runner == nil || command.Runner.Executable != "zsh" || command.Runner.Version == nil || *command.Runner.Version != version {
+		t.Fatalf("command evidence = %+v", command)
+	}
+}
+
 func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -174,6 +219,7 @@ func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	// Config with auto-fix limited to 2 attempts for lint
 	cfg := &config.Config{AutoFix: config.AutoFix{Lint: 2}}
@@ -183,11 +229,14 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		name: types.StepLint,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
+			if callCount > 1 {
+				writeTestFile(t, workDir, "lint-fix.txt", fmt.Sprintf("progress %d\n", callCount))
+			}
 			// Always return NeedsApproval to exhaust auto-fix attempts
 			return &StepOutcome{
 				NeedsApproval: true,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
+				Findings:      failureJSON(fmt.Sprintf("style issue %d", callCount)),
 			}, nil
 		},
 	}
@@ -276,6 +325,7 @@ func TestExecutor_AutoFixNilConfigUsesDefaults(t *testing.T) {
 func TestExecutor_AutoFixEmitsEvents(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Lint: 1}}
 
@@ -346,6 +396,7 @@ func TestExecutor_DoesNotAutoFixManualApprovalOutcome(t *testing.T) {
 func TestExecutor_AutoFixInfoFindings(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
 
@@ -443,6 +494,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	initGitRepo(t, workDir)
 
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 3}}
 

@@ -55,6 +55,7 @@ func (d *DB) GetStats() (*Stats, error) {
 
 	stats := &Stats{TotalRepos: len(repos)}
 	stepStats := map[types.StepName]*StepStats{}
+	repoStatsIndex := make(map[string]int, len(repos))
 
 	for _, repo := range repos {
 		repoStats := RepoStats{RepoID: repo.ID, WorkingPath: repo.WorkingPath}
@@ -84,7 +85,45 @@ func (d *DB) GetStats() (*Stats, error) {
 			}
 		}
 
+		repoStatsIndex[repo.ID] = len(stats.RepoStats)
 		stats.RepoStats = append(stats.RepoStats, repoStats)
+	}
+
+	receipts, err := d.GetRunMetricReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for _, receipt := range receipts {
+		index, exists := repoStatsIndex[receipt.RepoID]
+		if !exists {
+			index = len(stats.RepoStats)
+			stats.RepoStats = append(stats.RepoStats, RepoStats{RepoID: receipt.RepoID, WorkingPath: receipt.RepoID})
+			repoStatsIndex[receipt.RepoID] = index
+			stats.TotalRepos++
+		}
+		repoStats := &stats.RepoStats[index]
+		stats.TotalRuns++
+		repoStats.Runs++
+		if receipt.PullRequest {
+			stats.PullRequests++
+		}
+		stats.ReportedFindings += receipt.ReportedFindings
+		stats.FixedFindings += receipt.FixedFindings
+		repoStats.ReportedFindings += receipt.ReportedFindings
+		repoStats.FixedFindings += receipt.FixedFindings
+		if receipt.ReportedFindings > 0 && receipt.FixedFindings > 0 {
+			stats.RescueRuns++
+			repoStats.RescueRuns++
+		}
+		for _, archivedStep := range receipt.StepStats {
+			stat := stepStats[archivedStep.StepName]
+			if stat == nil {
+				stat = &StepStats{StepName: archivedStep.StepName}
+				stepStats[archivedStep.StepName] = stat
+			}
+			stat.ReportedFindings += archivedStep.ReportedFindings
+			stat.FixedFindings += archivedStep.FixedFindings
+		}
 	}
 
 	for _, step := range stepStats {

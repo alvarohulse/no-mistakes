@@ -301,14 +301,18 @@ func renderedRunsFingerprint(runs []*db.Run, limit int) string {
 	if limit > 0 && len(shown) > limit {
 		shown = shown[:limit]
 	}
-	values := make([]string, 0, 1+len(shown)*5)
+	values := make([]string, 0, 1+len(shown)*6)
 	values = append(values, fmt.Sprintf("count:%d", len(runs)))
 	for _, r := range shown {
 		pr := ""
 		if r.PRURL != nil {
 			pr = *r.PRURL
 		}
-		values = append(values, r.ID, r.Branch, string(r.Status), r.HeadSHA, pr)
+		pinnedAt := ""
+		if r.PinnedAt != nil {
+			pinnedAt = fmt.Sprintf("%d", *r.PinnedAt)
+		}
+		values = append(values, r.ID, r.Branch, string(r.Status), r.HeadSHA, pr, pinnedAt)
 	}
 	return strings.Join(values, "\x00")
 }

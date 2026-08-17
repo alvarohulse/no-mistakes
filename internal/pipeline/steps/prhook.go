@@ -24,13 +24,12 @@ type prBodyScope struct {
 	bodyLimit  int
 }
 
-// applyPRBodyHook replaces the built-in body with an external formatter's,
-// when hooks.pr_body is configured.
+// applyPRBodyHook selects external owned-section patches instead of the
+// built-in generated section when hooks.pr_body is configured.
 //
-// Every failure returns the built-in body and says so in the pipeline log. A
-// formatter is a convenience; a PR that cannot be described is not a reason to
-// stop shipping, and a body that silently lost its template is worse than one
-// that never had it.
+// Every formatter failure selects built-in section content and says so in the
+// pipeline log. Publication still fails closed when an existing body lacks the
+// matching verified marker set; fallback never authorizes a full-body rewrite.
 func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prContent, whatChanged string, scope prBodyScope) prContent {
 	if sctx == nil || sctx.Config == nil {
 		return content
@@ -56,24 +55,21 @@ func applyPRBodyHook(sctx *pipeline.StepContext, records RunRecords, content prC
 		sctx.Log("pr_body hook: " + result.Diagnostics)
 	}
 
-	content.Body = clampHookPRBody(sctx, result.Body, scope.bodyLimit)
+	body, err := prbody.NewOwnedDocument(result.Patches)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("warning: pr_body hook returned invalid patches: %v; using the built-in PR body", err))
+		return content
+	}
+	if err := prbody.ValidateOwnedDocument(body, prbody.ValidationLimits{
+		MaxBytes:     maxPullRequestBodyBytes,
+		MaxUnits:     scope.bodyLimit,
+		MeasureUnits: scm.PRBodyLen,
+	}); err != nil {
+		sctx.Log(fmt.Sprintf("warning: pr_body hook returned an unsafe candidate: %v; using the built-in PR body", err))
+		return content
+	}
+	content.Body = body
+	content.OwnedPatches = result.Patches
 	sctx.Log(fmt.Sprintf("pr_body hook formatted the body in %s", result.Duration.Round(1e6)))
 	return content
-}
-
-// clampHookPRBody enforces the host caps on a formatter's output. The contract
-// tells the formatter what the caps are so it can degrade its own layout
-// deliberately; this is the backstop for one that did not.
-func clampHookPRBody(sctx *pipeline.StepContext, body string, bodyLimit int) string {
-	if bodyLimit > 0 && scm.PRBodyLen(body) > bodyLimit {
-		sctx.Log(fmt.Sprintf("pr_body hook returned %d characters against the host's %d limit; clamping",
-			scm.PRBodyLen(body), bodyLimit))
-		body = scm.ClampPRBody(body, bodyLimit)
-	}
-	if len(body) > maxPullRequestBodyBytes {
-		sctx.Log(fmt.Sprintf("pr_body hook returned %d bytes against the %d byte cap; truncating",
-			len(body), maxPullRequestBodyBytes))
-		body = truncateTextAtLineBoundary(body, maxPullRequestBodyBytes, essentialPRBodyTruncationMarker())
-	}
-	return body
 }

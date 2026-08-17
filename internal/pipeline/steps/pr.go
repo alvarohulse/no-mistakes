@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/prbody"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -27,6 +29,9 @@ type prContent struct {
 	// older test/fallback producers while the structured agent schema uses the
 	// three fields above.
 	Body string `json:"body,omitempty"`
+	// OwnedPatches is publication material produced by hooks.pr_body. It is
+	// never part of the drafting agent's JSON schema.
+	OwnedPatches prbody.PatchSet `json:"-"`
 }
 
 var prContentSchema = json.RawMessage(`{
@@ -41,11 +46,12 @@ var prContentSchema = json.RawMessage(`{
 
 const (
 	githubPullRequestBodyHardLimitChars = 65536
-	// Count bytes, not runes, so multi-byte markdown still stays under
-	// GitHub's character limit with room for provider-side formatting drift.
-	pullRequestBodySafetyBufferBytes = 2048
-	maxPullRequestBodyBytes          = githubPullRequestBodyHardLimitChars - pullRequestBodySafetyBufferBytes
-	minLatestPipelineUpdateBytes     = 256
+	// Count bytes, not runes, so multi-byte markdown stays within the shared
+	// publication ceiling with room for provider-side formatting drift.
+	maxPullRequestBodyBytes      = scm.MaxPRBodyBytes
+	ownedSectionEnvelopeBudget   = 512
+	maxBuiltInPRContentBytes     = maxPullRequestBodyBytes - ownedSectionEnvelopeBudget
+	minLatestPipelineUpdateBytes = 256
 )
 
 type pipelineUpdateGroup struct {
@@ -80,6 +86,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: fmt.Sprintf("No pull request was opened because the provider host was unavailable: %v.", err)}, nil
 	}
+	if err := requirePRBodyReadRevision(host); err != nil {
+		return nil, fmt.Errorf("provider cannot safely publish PR bodies: %w", err)
+	}
 
 	defaultBranch := strings.TrimSpace(sctx.Repo.DefaultBranch)
 	if defaultBranch == "" {
@@ -102,6 +111,17 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				return nil, fmt.Errorf("retarget pull request to %s: %w", baseBranch, err)
 			}
 		}
+
+		baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
+		content, buildErr := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		patches := ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider))
+		if err := updateOwnedPRBody(ctx, host, updated, patches, prBodyValidationLimits(scm.MaxPRBodyChars(provider))); err != nil {
+			return nil, fmt.Errorf("update pull request body: %w", err)
+		}
+		sctx.Log("updated owned pull request sections and verified the hosted body")
 		if updated != nil && updated.URL != "" {
 			if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, updated.URL); err != nil {
 				slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", updated.URL, "err", err)
@@ -111,20 +131,35 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 
-	// Resolve the branch base only when a new PR needs drafted content. Existing
-	// PRs keep their original title and body; reruns may only retarget them.
+	// Resolve the complete owned branch delta for the initial marked body.
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
 	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
 	if err != nil {
 		return nil, err
 	}
 
+	body, err := prbody.NewOwnedDocument(ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider)))
+	if err != nil {
+		return nil, fmt.Errorf("build owned pull request body: %w", err)
+	}
+	limits := prBodyValidationLimits(scm.MaxPRBodyChars(provider))
+	if err := prbody.ValidateOwnedDocument(body, limits); err != nil {
+		return nil, fmt.Errorf("validate pull request body: %w", err)
+	}
+
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent{Title: content.Title, Body: content.Body})
+	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent{Title: content.Title, Body: body})
 	if err != nil {
 		return nil, err
 	}
-	if created == nil || strings.TrimSpace(created.URL) == "" {
+	if created == nil || (strings.TrimSpace(created.URL) == "" && strings.TrimSpace(created.Number) == "") {
+		return nil, errors.New("provider created a pull request without an identity; hosted body cannot be verified")
+	}
+	if err := verifyCreatedPRBody(ctx, host, created, body, limits); err != nil {
+		return nil, fmt.Errorf("verify created pull request body: %w", err)
+	}
+	sctx.Log("verified created pull request body")
+	if strings.TrimSpace(created.URL) == "" {
 		return &pipeline.StepOutcome{}, nil
 	}
 	sctx.Log(fmt.Sprintf("created pull request: %s", created.URL))
@@ -132,6 +167,45 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
+}
+
+func ownedPatchesForPRContent(content prContent, bodyLimit int) prbody.PatchSet {
+	if len(content.OwnedPatches.Sections) > 0 {
+		return content.OwnedPatches
+	}
+	body := content.Body
+	empty, err := prbody.NewOwnedDocument(prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: "generated", Content: ""}},
+	})
+	if err == nil {
+		if bodyLimit > 0 {
+			budget := bodyLimit - scm.PRBodyLen(empty)
+			if budget < 0 {
+				budget = 0
+			}
+			body = scm.ClampPRBody(body, budget)
+		}
+		budget := maxPullRequestBodyBytes - len(empty)
+		if budget < 0 {
+			budget = 0
+		}
+		if len(body) > budget {
+			body = truncateTextAtLineBoundary(body, budget, essentialPRBodyTruncationMarker())
+		}
+	}
+	return prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: "generated", Content: body}},
+	}
+}
+
+func prBodyValidationLimits(bodyLimit int) prbody.ValidationLimits {
+	return prbody.ValidationLimits{
+		MaxBytes:     maxPullRequestBodyBytes,
+		MaxUnits:     bodyLimit,
+		MeasureUnits: scm.PRBodyLen,
+	}
 }
 
 func describePR(pr *scm.PR) string {
@@ -149,6 +223,16 @@ func describePR(pr *scm.PR) string {
 
 func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
+	renderBodyLimit := bodyLimit
+	if renderBodyLimit > 0 {
+		renderBodyLimit -= ownedSectionEnvelopeBudget
+		if renderBodyLimit < 0 {
+			renderBodyLimit = 0
+		}
+		if renderBodyLimit > maxBuiltInPRContentBytes {
+			renderBodyLimit = maxBuiltInPRContentBytes
+		}
+	}
 	scope := prBodyScope{
 		branch:     branch,
 		baseBranch: baseBranch,
@@ -202,7 +286,7 @@ Final diff paths and statuses:
 	})
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
+		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
 		return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit), nil
 	}
 
@@ -229,8 +313,8 @@ Final diff paths and statuses:
 				// What Changed prose, not the assembled body it ends up in.
 				whatChanged := content.WhatChanged
 				narrative := buildPRNarrative(content.Summary, whatChanged)
-				if bodyLimit > 0 {
-					content.Body = assemblePRBody(sctx, narrative, riskLine, testingMD, pipelineMD, bodyLimit)
+				if renderBodyLimit > 0 {
+					content.Body = assemblePRBody(sctx, narrative, riskLine, testingMD, pipelineMD, renderBodyLimit)
 				} else {
 					content.Body = buildPRBody(narrative, riskLine, testingMD, pipelineMD, sctx)
 				}
@@ -239,7 +323,7 @@ Final diff paths and statuses:
 		}
 	}
 
-	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
+	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
 	return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit), nil
 }
 
@@ -276,14 +360,11 @@ func buildPRNarrative(summary, whatChanged string) string {
 	return strings.Join(sections, "\n\n")
 }
 
-// redactOutboundPRContent is the last gate before a title and body leave for a
-// hosted pull request. Every upstream section is escaped for markup but not for
-// credentials: agent findings, risk rationale, recorded test commands, embedded
-// artifact contents, and a pr_body formatter's output all reach here verbatim,
-// and a PR description is a permanent, often public record. Redaction runs
-// after the formatter hook so a hook cannot reintroduce a secret, and the caps
-// are re-applied because a replacement marker is not guaranteed shorter than
-// the credential shape it replaced.
+// redactOutboundPRContent is the last mutation of the pipeline-drafted title
+// and built-in body before owned markers are generated. Built-in evidence can
+// contain credentials, so it is redacted and re-bounded here. Formatter-owned
+// patches are validated and rejected for possible secrets before this point;
+// they are never redacted or truncated after their section hashes are chosen.
 func redactOutboundPRContent(content prContent, bodyLimit int) prContent {
 	content.Title = intent.RedactSecrets(content.Title)
 	body := intent.RedactSecrets(content.Body)
@@ -432,7 +513,7 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 }
 
 func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
-	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes)
+	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBuiltInPRContentBytes)
 }
 
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int) string {

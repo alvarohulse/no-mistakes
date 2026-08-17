@@ -30,6 +30,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	cfg.Review = config.Review{PathInstructions: []config.PathInstruction{{Path: "private/**", Instructions: "private review steering"}}}
 	cfg.DisableProjectSettings = true
 	cfg.NoCI = true
+	cfg.PricingProfiles = map[string]string{"cursor": "cursor-token-rate"}
 
 	policySteps := []pipeline.Step{policyTestStep{name: types.StepReview}, policyTestStep{name: types.StepBuild}, policyTestStep{name: types.StepPush}}
 	sources := []db.ConfigSource{{Kind: db.ConfigSourceGlobal, Digest: strings.Repeat("a", 64), Path: "/private/config.yaml"}, {Kind: db.ConfigSourceDefault, Digest: strings.Repeat("b", 64), Ref: "abc123"}}
@@ -44,7 +45,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if encoded != encodedAgain || digest != digestAgain {
 		t.Fatalf("resolved policy is not canonical:\n%s\n%s\n%s\n%s", encoded, encodedAgain, digest, digestAgain)
 	}
-	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`} {
+	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`, `"pricing":{"profiles":{"cursor":"cursor-token-rate"}}`} {
 		if !strings.Contains(encoded, required) {
 			t.Errorf("resolved policy omitted %q:\n%s", required, encoded)
 		}
@@ -63,6 +64,9 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	}
 	if decoded.Steps[1].SkipSource != types.SkipSourceRunRequest {
 		t.Fatalf("decoded skip source = %q", decoded.Steps[1].SkipSource)
+	}
+	if decoded.Pricing.Profiles["cursor"] != "cursor-token-rate" {
+		t.Fatalf("decoded pricing profiles = %#v", decoded.Pricing.Profiles)
 	}
 }
 

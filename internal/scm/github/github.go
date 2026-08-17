@@ -159,7 +159,7 @@ func repoOwner(slug string) string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, PRBodyReadRevision: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -289,6 +289,26 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		pr.Base = strings.TrimSpace(content.Base)
 	}
 	return pr, nil
+}
+
+func (h *Host) ReadPRBody(ctx context.Context, pr *scm.PR) (scm.PRBodySnapshot, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return scm.PRBodySnapshot{}, err
+	}
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "body")
+	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	if err != nil {
+		return scm.PRBodySnapshot{}, fmt.Errorf("gh pr view body: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	var payload struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return scm.PRBodySnapshot{}, fmt.Errorf("parse gh PR body: %w", err)
+	}
+	return scm.NewPRBodySnapshot(payload.Body), nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

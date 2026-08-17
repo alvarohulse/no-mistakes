@@ -39,7 +39,7 @@ What you do not get is PR automation and CI monitoring.
 Once the host is wired up, `no-mistakes` can keep owning the branch after it
 pushes to the configured target:
 
-- create a PR or adopt and, when necessary, retarget an existing PR without replacing its body
+- create a PR or update verified owned body sections while preserving unowned bytes; base retargeting stays a separate base-only write
 - keep polling hosted CI until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses
 - fetch failing job logs for the CI auto-fix loop
 - on GitHub, GitLab, and Azure DevOps, watch mergeability and fix merge conflicts when possible

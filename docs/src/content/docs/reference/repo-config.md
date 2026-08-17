@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
@@ -93,7 +93,7 @@ ci:
   rerun_transient: 0
 
 commit:
-  fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+  fix_message: "fix({{.Step}}): {{.Summary}}"
 
 intent:
   enabled: true
@@ -249,21 +249,52 @@ Because the hook executes arbitrary shell with the daemon's credentials, it foll
 
 ### hooks.pr_body
 
-External pull request body formatter. Receives the PR body contract as JSON on stdin and returns the finished body on stdout. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+External pull request section formatter. Receives the PR body contract as JSON on stdin and returns typed owned-section patches on stdout. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
 
 | | |
 | --- | --- |
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v3 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, structured per-round command evidence, the Intent step's provenance/absence result, risk fields, test evidence, and one telemetry row per agent invocation. Layout and API-cost estimation are entirely the formatter's decision. Formatters should accept both v2 and v3 while a producer rollout is in progress.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v4 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, pipeline telemetry, and distinct `static_tests`, `review_evidence`, and `user_testing` records. User Testing is an instruction unless `attested` is explicitly true. It also supplies harness-reported, public API-list, and harness-adjusted cost receipts with completeness and provenance. no-mistakes owns those calculations; the formatter only presents supplied facts. Formatters should accept v2, v3, and v4 while a producer rollout is in progress.
+
+Successful stdout is strict JSON. It has no full-body field:
+
+```json
+{
+  "version": 1,
+  "sections": [
+    {"id": "summary", "content": "Generated summary"},
+    {"id": "static-tests", "content": "### Static Tests\n\n- `go test ./...` passed"},
+    {"id": "review-evidence", "content": "### Review Evidence\n\nNo blocking findings."},
+    {"id": "user-testing", "content": "### User Testing\n\n1. Exercise the saved flow."}
+  ],
+  "bootstrap": {
+    "parts": [
+      {"literal": "# Summary\n\n"},
+      {"section": "summary"},
+      {"literal": "\n\n# Test Plan\n\n"},
+      {"section": "static-tests"},
+      {"literal": "\n\n"},
+      {"section": "review-evidence"},
+      {"literal": "\n\n"},
+      {"section": "user-testing"},
+      {"literal": "\n\n- [ ] Complete the repository checklist.\n"}
+    ]
+  }
+}
+```
+
+`bootstrap` is optional and is consumed only when creating the initial body. Each part has exactly one string field: `literal` is exact unowned UTF-8 text, while `section` references one patch ID. Every patch ID must be referenced exactly once; missing, duplicate, or unknown references, reserved no-mistakes markers, and layouts that do not leave section markers on their own lines are rejected. Omitting `bootstrap` keeps the sections-only layout.
+
+no-mistakes wraps each section in versioned begin/end/hash markers. On later runs it ignores `bootstrap`, reads the hosted body, and replaces only those owned ranges; every byte outside them, including human edits, third-party content, and template checklists, remains unchanged. Missing, duplicate, conflicting, or hash-invalid markers stop publication rather than guessing an insertion point.
 
 ```yaml
 hooks:
   pr_body: "~/scripts/format-pr --auto-linear"
 ```
 
-Any failure - a non-zero exit, a timeout past 60 seconds, empty output, or output over 1 MiB - falls back to the built-in body and reports the reason (including the formatter's own stderr) in the run log. A formatter is a convenience, so a broken one never blocks shipping; the failure is stated rather than swallowed, because a body that silently lost its template is worse than one that never had it. Output is still clamped to the host's body limit, which the contract also supplies as `body_limit` so a formatter can degrade its own layout deliberately.
+An execution failure - a non-zero exit, a timeout past 60 seconds, empty output, malformed patch JSON, or output over 1 MiB - falls back to built-in generated content and reports the reason (including the formatter's own stderr) in the run log. The resulting candidate is never truncated into validity: invalid UTF-8, possible secrets, marker conflicts, or host/byte-limit overflow fail closed. Existing bodies can use a fallback only when they already contain the matching owned marker set.
 
 Iterate on a formatter without running a gate:
 
@@ -321,7 +352,7 @@ Platform fields override `run` and `runner` independently. Resolution precedence
 
 Runner identities use the same secret-free contract as the global default: `sh`, `bash`, or `zsh` with `[-c]` or `[-lc]`, and `pwsh` or `powershell` with `[-NoLogo, -NoProfile, -NonInteractive, -Command]`. Executable paths and extra arguments are rejected, including in inactive platform overrides, because the full structured definition is persisted in the resolved policy.
 
-This schema is active for trusted preflight commands. Build, Test, Lint, and Format retain their existing `sh -c` / `cmd.exe /c` execution path until their dedicated migration; for those four fields, structured runner/platform metadata is preserved and explained but the compatibility `run` value remains the executed command.
+This schema is active for trusted preflight commands and for Build, Test, Lint, and Format. Every call site executes the resolved platform command through its resolved runner. Pipeline commands record content-free command-source and runner provenance in step evidence; preflight runs before a run row exists, so its canonical command stays in the resolved policy and its provenance appears only in a bounded failure diagnostic.
 
 Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
 
@@ -337,7 +368,7 @@ preflight:
     windows: Get-Command git | Out-Null
 ```
 
-no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Failure diagnostics are secret-redacted, control-sanitized, and bounded, and identify the command index plus resolved command/runner source.
+no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Because no run or step log exists yet, preflight exposes only a secret-redacted, control-sanitized, bounded failure diagnostic identifying the command index plus resolved command/runner source. This is distinct from the complete command output retained by an executed pipeline step's authoritative log.
 
 A top-level global `preflight` is rejected. Use a trusted default-branch repo config or a matching machine-owned `overrides.<owner>/<repo>.preflight` list. A machine override replaces the full committed list; an explicit empty list clears it.
 
@@ -348,7 +379,7 @@ A top-level global `preflight` is rejected. Use a trusted default-branch repo co
 
 ### commands.build
 
-Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit build or compile command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -379,7 +410,7 @@ A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot 
 
 ### commands.test
 
-Explicit **targeted** local test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit **targeted** local test command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -395,7 +426,7 @@ When empty, the agent selects one exact focused test command in a read-only plan
 
 ### commands.lint
 
-Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+Explicit lint command. Run through the resolved platform command and runner.
 
 | | |
 | --- | --- |
@@ -414,7 +445,7 @@ Formatter command run before the push step commits agent fixes.
 | Type | `string` or structured command |
 | Default | Empty (no separate push-step formatter) |
 
-This remains separate from the Lint step's planned or configured command.
+The Push step resolves its platform command and runner before execution. This remains separate from the Lint step's planned or configured command.
 
 ### document.instructions
 
@@ -538,6 +569,8 @@ Unconfigured Build, Test, and Lint still use their own repair loops after the pi
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
+Review, Build, Test, Document, Lint, and CI use a hard ceiling of three automatic repair attempts; larger values are evaluated as `3`. They stop earlier on a repeated normalized failure or when Git HEAD/worktree content does not change. Timestamp-only log changes are ignored. Refresh retains its separate configured conflict budget.
+
 Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
 
 ### ci.rerun_transient
@@ -594,11 +627,11 @@ Override the auto-fix commit subject template for this repository.
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Inherits from global config, whose default is `no-mistakes({{.Step}}): {{.Summary}}` |
+| Default | Inherits from global config, whose default is `fix({{.Step}}): {{.Summary}}` |
 
 The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
 That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
-The setting applies to the Review, Build, Test, Document, and Lint fix path, not commits created by the Refresh, CI, or Push steps.
+The setting applies to the Review, Build, Test, Document, Lint, and CI fix path, not commits created by the Refresh or Push steps.
 
 This non-executing field is read from the pushed branch, so a branch can adopt its own commit convention without enabling `allow_repo_commands`.
 

@@ -1,6 +1,7 @@
 package prbody
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -33,8 +34,14 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	if !s.Risk.Reported || s.Risk.Level == "" || s.Risk.Rationale == "" || s.Risk.Scope == "" {
 		t.Errorf("sample risk is incomplete: %+v", s.Risk)
 	}
-	if s.Testing == nil || s.Testing.Summary == "" || len(s.Testing.Tested) == 0 || len(s.Testing.Artifacts) == 0 {
-		t.Error("sample testing is incomplete")
+	if s.StaticTests == nil || s.StaticTests.Summary == "" || len(s.StaticTests.Commands) == 0 || len(s.StaticTests.Reported) == 0 || len(s.StaticTests.Artifacts) == 0 {
+		t.Error("sample static testing is incomplete")
+	}
+	if s.ReviewEvidence == nil || s.ReviewEvidence.Status == "" || s.ReviewEvidence.Rounds == 0 || len(s.ReviewEvidence.Evidence) == 0 {
+		t.Error("sample review evidence is incomplete")
+	}
+	if s.UserTesting == nil || len(s.UserTesting.Instructions) == 0 || s.UserTesting.Attested {
+		t.Error("sample user testing must be an unattested instruction")
 	}
 	if s.Pipeline == nil || len(s.Pipeline.Steps) == 0 || len(s.Pipeline.ConfigSources) == 0 {
 		t.Fatal("sample pipeline is incomplete")
@@ -44,7 +51,7 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 
 	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
-	var completeTelemetry, supportedNested, unsupportedNested bool
+	var completeTelemetry, completeCosts, supportedNested, unsupportedNested bool
 	for _, step := range s.Pipeline.Steps {
 		if _, ok := commandSteps[step.Name]; ok {
 			commandSteps[step.Name] = len(step.Commands) > 0
@@ -76,6 +83,9 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
 				completeTelemetry = true
 			}
+			if run.Costs != nil && run.Costs.HarnessReported.ValueUSD != nil && run.Costs.APIListEstimate.ValueUSD != nil && run.Costs.HarnessAdjustedEstimate.ValueUSD != nil {
+				completeCosts = true
+			}
 			if !run.NestedReported {
 				unsupportedNested = true
 			}
@@ -88,6 +98,9 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if !completeTelemetry {
 		t.Error("sample has no fully populated telemetry row")
+	}
+	if !completeCosts {
+		t.Error("sample has no fully populated cost receipt")
 	}
 	if !supportedNested {
 		t.Error("sample does not exercise supported nested-agent telemetry")
@@ -182,7 +195,7 @@ func TestSampleRoundTripsThroughJSON(t *testing.T) {
 	}
 }
 
-// A formatter under a v2-to-v3 rollout is told to accept both shapes, so the
+// A formatter under a multi-version rollout is told to accept older shapes, so the
 // v2 sample has to stay reachable and has to be a real v2 contract: intent in
 // its own section, and none of the v3-only additions present.
 func TestSampleV2IsAVersion2Contract(t *testing.T) {
@@ -214,23 +227,49 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 		for _, run := range step.Agents {
 			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 || run.NestedCount != nil ||
 				run.InputTokens != nil || run.OutputTokens != nil || run.UncachedInputTokens != nil ||
-				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil {
+				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil || run.Costs != nil {
 				t.Errorf("v2 sample agent row carries v3-only telemetry: %+v", run)
 			}
 		}
 	}
 
-	if SampleForVersion(2) == nil || SampleForVersion(Version) == nil {
+	if SampleForVersion(2) == nil || SampleForVersion(3) == nil || SampleForVersion(Version) == nil {
 		t.Error("SampleForVersion does not cover every supported version")
 	}
 	if SampleForVersion(1) != nil {
 		t.Error("SampleForVersion returned a contract for an unsupported version")
 	}
-	if !IsSupportedVersion(2) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
+	if !IsSupportedVersion(2) || !IsSupportedVersion(3) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
 		t.Error("IsSupportedVersion disagrees with SupportedVersions")
 	}
 	// Sample must stay unaffected by the downgrade.
 	if Sample().Sections.Summary == nil {
-		t.Error("SampleV2 mutated the shared v3 sample")
+		t.Error("SampleV2 mutated the shared current sample")
+	}
+}
+func TestSampleV3OmitsVersion4CostReceipts(t *testing.T) {
+	t.Parallel()
+	for _, step := range SampleV3().Sections.Pipeline.Steps {
+		for _, run := range step.Agents {
+			if run.Costs != nil {
+				t.Errorf("v3 sample agent row carries v4 costs: %+v", run.Costs)
+			}
+		}
+	}
+}
+
+func TestOlderSamplesOmitVersion4SectionsFromJSON(t *testing.T) {
+	t.Parallel()
+
+	for _, sample := range []*Contract{SampleV2(), SampleV3()} {
+		raw, err := json.Marshal(sample)
+		if err != nil {
+			t.Fatalf("marshal v%d sample: %v", sample.Version, err)
+		}
+		for _, key := range []string{`"static_tests"`, `"review_evidence"`, `"user_testing"`} {
+			if bytes.Contains(raw, []byte(key)) {
+				t.Errorf("v%d sample carries v4-only key %s: %s", sample.Version, key, raw)
+			}
+		}
 	}
 }

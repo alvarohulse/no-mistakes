@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/prbody"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 // prBodyRepo is a git repo whose default branch is main, registered in an
@@ -78,6 +80,35 @@ func yamlScalar(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
+func patchHook(content string) string {
+	payload, err := json.Marshal(prbody.PatchSet{Version: prbody.PatchVersion, Sections: []prbody.SectionPatch{{ID: "summary", Content: content}}})
+	if err != nil {
+		panic(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	return "cat > /dev/null; printf '%s\\n' " + quoted
+}
+
+func bootstrapHook(content string) string {
+	heading := "# Repository Summary\n\n"
+	checklist := "\n\n# Test Plan\n\n- [ ] Human verification\n"
+	sectionID := "summary"
+	payload, err := json.Marshal(prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: sectionID, Content: content}},
+		Bootstrap: &prbody.BootstrapLayout{Parts: []prbody.BootstrapPart{
+			{Literal: &heading},
+			{Section: &sectionID},
+			{Literal: &checklist},
+		}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	quoted := "'" + strings.ReplaceAll(string(payload), "'", `'"'"'`) + "'"
+	return "cat > /dev/null; printf '%s\\n' " + quoted
+}
+
 func runPRBody(t *testing.T, stdin string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	cmd := newRootCmd()
@@ -120,7 +151,7 @@ func TestPRBodyPrintsTheSampleContract(t *testing.T) {
 func TestPRBodyRunsTheHookOverride(t *testing.T) {
 	setupPRBodyRepo(t)
 
-	out, errOut, err := runPRBody(t, "", "--sample", "--hook", "cat > /dev/null; echo overridden-body")
+	out, errOut, err := runPRBody(t, "", "--sample", "--hook", patchHook("overridden-body"))
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
@@ -132,6 +163,32 @@ func TestPRBodyRunsTheHookOverride(t *testing.T) {
 	}
 }
 
+func TestPRBodyRendersFormatterBootstrapLayout(t *testing.T) {
+	setupPRBodyRepo(t)
+
+	out, errOut, err := runPRBody(t, "", "--sample", "--hook", bootstrapHook("generated summary"))
+	if err != nil {
+		t.Fatalf("pr-body: %v\n%s", err, errOut)
+	}
+	for _, exact := range []string{"# Repository Summary\n\n", "\n\n# Test Plan\n\n- [ ] Human verification\n"} {
+		if !strings.Contains(out, exact) {
+			t.Fatalf("bootstrap literal %q missing from stdout:\n%s", exact, out)
+		}
+	}
+	if !strings.Contains(out, "no-mistakes:section:v1:summary:begin") || !strings.Contains(out, "generated summary") {
+		t.Fatalf("owned summary missing from bootstrap layout:\n%s", out)
+	}
+}
+
+func TestPRBodyEnforcesThePublicationByteLimit(t *testing.T) {
+	setupPRBodyRepo(t)
+
+	_, _, err := runPRBody(t, "", "--sample", "--hook", patchHook(strings.Repeat("x", scm.MaxPRBodyBytes)))
+	if !errors.Is(err, prbody.ErrOversize) {
+		t.Fatalf("err = %v, want ErrOversize", err)
+	}
+}
+
 // The security boundary: hooks.pr_body executes arbitrary shell, so a preview
 // must read the repo layer from the default branch. Reading the checkout would
 // run whatever a contributor's branch declares the moment a reviewer checks it
@@ -139,9 +196,9 @@ func TestPRBodyRunsTheHookOverride(t *testing.T) {
 func TestPRBodyRepoFormatterComesFromDefaultBranchNotTheCheckout(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo trusted-body", "add trusted formatter")
+	commitRepoConfig(t, local.root, patchHook("trusted-body"), "add trusted formatter")
 	run(t, local.root, "git", "checkout", "-b", "contributor")
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo hostile-body", "swap the formatter")
+	commitRepoConfig(t, local.root, patchHook("hostile-body"), "swap the formatter")
 
 	out, errOut, err := runPRBody(t, "", "--sample")
 	if err != nil {
@@ -160,7 +217,7 @@ func TestPRBodyRepoFormatterComesFromDefaultBranchNotTheCheckout(t *testing.T) {
 func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; pwd", "add formatter")
+	commitRepoConfig(t, local.root, `cat > /dev/null; printf '%s' '{"version":1,"sections":[{"id":"summary","content":"'; pwd | tr -d '\n'; printf '%s\n' '"}]}'`, "add formatter")
 	sub := filepath.Join(local.root, "internal", "cli")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -171,12 +228,8 @@ func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
-	printed, resolveErr := filepath.EvalSymlinks(strings.TrimSpace(out))
-	if resolveErr != nil {
-		t.Fatalf("formatter printed %q: %v", out, resolveErr)
-	}
-	if printed != local.root {
-		t.Fatalf("formatter ran in %q, want the repository root %q", printed, local.root)
+	if !strings.Contains(out, "\n"+local.root+"\n") {
+		t.Fatalf("formatter output %q does not contain repository root %q", out, local.root)
 	}
 }
 
@@ -185,7 +238,7 @@ func TestPRBodyRunsTheFormatterFromTheRepositoryRoot(t *testing.T) {
 func TestPRBodyFindsTheRepoFormatterFromASubdirectory(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo subdir-body", "add formatter")
+	commitRepoConfig(t, local.root, patchHook("subdir-body"), "add formatter")
 	sub := filepath.Join(local.root, "internal")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -218,7 +271,7 @@ func TestPRBodyReadsAContractFromStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, errOut, err := runPRBody(t, string(raw),
-		"--contract-file", "-", "--hook", `grep -o '"run_id":"01SAMPLE0000000000000000000"' && echo piped-body`)
+		"--contract-file", "-", "--hook", `grep -q '"run_id":"01SAMPLE0000000000000000000"' && `+patchHook("piped-body"))
 	if err != nil {
 		t.Fatalf("pr-body: %v\n%s", err, errOut)
 	}
@@ -306,8 +359,8 @@ func TestPRBodyReportsThatARunWouldFallBack(t *testing.T) {
 func TestPRBodyHookComesFromMatchingGlobalOverride(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
-	globalConfig := "overrides:\n  Example/Example:\n    hooks:\n      pr_body: 'cat > /dev/null; echo override-body'\n"
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
+	globalConfig := "overrides:\n  Example/Example:\n    hooks:\n      pr_body: " + yamlScalar(patchHook("override-body")) + "\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +382,7 @@ func TestPRBodyHookComesFromMatchingGlobalOverride(t *testing.T) {
 func TestPRBodyGlobalOverrideExplicitEmptyClearsRepoFormatter(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
 	globalConfig := "overrides:\n  example/example:\n    hooks:\n      pr_body: \"\"\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -346,8 +399,8 @@ func TestPRBodyGlobalOverrideExplicitEmptyClearsRepoFormatter(t *testing.T) {
 func TestPRBodyIgnoresNonMatchingGlobalOverride(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	commitRepoConfig(t, local.root, "cat > /dev/null; echo repo-body", "add repo formatter")
-	globalConfig := "overrides:\n  other/project:\n    hooks:\n      pr_body: 'cat > /dev/null; echo other-body'\n"
+	commitRepoConfig(t, local.root, patchHook("repo-body"), "add repo formatter")
+	globalConfig := "overrides:\n  other/project:\n    hooks:\n      pr_body: " + yamlScalar(patchHook("other-body")) + "\n"
 	if err := os.WriteFile(filepath.Join(os.Getenv("NM_HOME"), "config.yaml"), []byte(globalConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -74,16 +75,16 @@ const (
 	// DefaultEvalDiversifiedSize caps the official gold-only eval set.
 	// 0 means one gold case per stratum with no Hamilton bound.
 	DefaultEvalDiversifiedSize = 32
-	// DefaultEvidenceRetention is how long a run's on-disk evidence survives
-	// before the daemon reaps it. It is comfortably longer than typical PR
-	// review latency because a PR body references these artifacts by local path
-	// whenever publishing is off or the provider has no derivable links. This
+	// DefaultEvidenceRetention is the minimum run age from creation before
+	// terminal rich data becomes eligible for pruning. It is comfortably longer
+	// than typical PR review latency. A PR body can reference artifacts by local
+	// path whenever publishing is off or the provider has no derivable links. This
 	// is no-mistakes' own budget: the point of owning it is that no OS temp
 	// timer decides when a user's screenshots disappear.
 	DefaultEvidenceRetention = 14 * 24 * time.Hour
-	// DefaultEvidenceMaxRuns caps how many run directories survive regardless
-	// of age, so a burst of parallel runs that all land inside the retention
-	// window still cannot grow the directory without bound.
+	// DefaultEvidenceMaxRuns is the requested newest-terminal floor retained
+	// regardless of age. Active, pinned, and age-window runs can keep the rich
+	// set above it.
 	DefaultEvidenceMaxRuns = 200
 )
 
@@ -97,6 +98,7 @@ type GlobalConfig struct {
 	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
+	PricingProfiles         map[string]string   `yaml:"-"`
 	Runner                  runner.Spec         `yaml:"runner"`
 	CITimeout               time.Duration       `yaml:"-"`
 	StepQuietWarning        time.Duration       `yaml:"-"`
@@ -150,6 +152,7 @@ type globalConfigRaw struct {
 	ACPRegistryOverrides    map[string]string      `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string      `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string    `yaml:"agent_args_override"`
+	Pricing                 PricingRaw             `yaml:"pricing"`
 	Runner                  runner.Spec            `yaml:"runner"`
 	CITimeout               string                 `yaml:"ci_timeout"`
 	DaemonConnectTimeout    string                 `yaml:"daemon_connect_timeout"`
@@ -174,6 +177,10 @@ type globalConfigRaw struct {
 	CI                      CIRaw                  `yaml:"ci"`
 	Prompts                 PromptConfig           `yaml:"prompts"`
 	Eval                    EvalRaw                `yaml:"eval"`
+}
+
+type PricingRaw struct {
+	Profiles map[string]string `yaml:"profiles"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -1321,9 +1328,9 @@ func commandWithRun(command runner.Command, run string) runner.Command {
 type Hooks struct {
 	PostWorktree string `yaml:"post_worktree"`
 	// PRBody is an external PR body formatter. It receives the prbody
-	// contract on stdin and returns the finished body on stdout. A non-zero
-	// exit falls back to the built-in body and is reported, so a broken
-	// formatter never blocks shipping.
+	// contract on stdin and returns typed owned-section patches on stdout.
+	// The publisher, not the formatter, merges those patches into a hosted
+	// body and verifies the exact published bytes.
 	PRBody string `yaml:"pr_body"`
 }
 
@@ -1466,6 +1473,7 @@ type Config struct {
 	ACPRegistryOverrides    map[string]string
 	AgentPathOverride       map[string]string
 	AgentArgsOverride       map[string][]string
+	PricingProfiles         map[string]string
 	CITimeout               time.Duration
 	StepQuietWarning        time.Duration
 	ProcessTerminationGrace time.Duration
@@ -2243,7 +2251,7 @@ ci:
 # Auto-fix commit subject template. Available variables: {{.Step}} and {{.Summary}}.
 # Repo config may override this value.
 # commit:
-#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
+#   fix_message: "fix({{.Step}}): {{.Summary}}"
 
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
@@ -2265,12 +2273,14 @@ intent:
 # the default branch.
 #
 # no-mistakes reaps its own evidence rather than leaving that to an OS temp
-# directory timer: retention ages run directories out (default 14 days) and
-# max_runs caps how many survive regardless of age (default 200). Set retention
-# to "unlimited", or either to 0, to disable that bound. local_root moves the
-# directory to another disk and must be an absolute path. These three are
-# global-only - a repository's .no-mistakes.yaml cannot change where this
-# machine writes evidence or how long it keeps it.
+# directory timer. Rich data survives while a run is active, pinned, inside the
+# retention age window (default 14 days, with a hard minimum of 14 days), or
+# among the newest max_runs terminal unpinned runs (default 200, with a hard
+# minimum of 50). Set retention to "unlimited" or 0 to retain rich data
+# indefinitely. local_root must be absolute and can move evidence to another disk.
+#
+# local_root, retention, and max_runs are global-only.
+# A repository's .no-mistakes.yaml cannot change where this machine writes evidence or how long it keeps it.
 # test:
 #   evidence:
 #     store_in_repo: true
@@ -3101,6 +3111,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		ProcessTerminationGrace: DefaultProcessTerminationGrace,
 		LogLevel:                "info",
 		SessionReuse:            true,
+		PricingProfiles:         map[string]string{},
 		Eval:                    evalDefaults(),
 	}
 }
@@ -3172,6 +3183,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
+	profiles, err := normalizePricingProfiles(raw.Pricing.Profiles)
+	if err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	cfg.PricingProfiles = profiles
 	cfg.Runner = raw.Runner.Clone()
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
@@ -3262,6 +3278,33 @@ func parseCITimeout(value string) (time.Duration, error) {
 		return CITimeoutUnlimited, nil
 	}
 	return d, nil
+}
+
+func normalizePricingProfiles(values map[string]string) (map[string]string, error) {
+	result := make(map[string]string, len(values))
+	for harness, profileID := range values {
+		normalizedHarness := strings.ToLower(strings.TrimSpace(harness))
+		normalizedProfile := strings.TrimSpace(profileID)
+		if normalizedHarness == "" || normalizedProfile == "" {
+			return nil, fmt.Errorf("pricing.profiles keys and values must be non-empty")
+		}
+		if err := pricing.ValidateProfileSelection(normalizedHarness, normalizedProfile); err != nil {
+			return nil, err
+		}
+		if _, exists := result[normalizedHarness]; exists {
+			return nil, fmt.Errorf("duplicate pricing profile for harness %q", normalizedHarness)
+		}
+		result[normalizedHarness] = normalizedProfile
+	}
+	return result, nil
+}
+
+func copyPricingProfiles(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for harness, profileID := range values {
+		result[harness] = profileID
+	}
+	return result
 }
 
 func parsePositiveDuration(name, value string) (time.Duration, error) {
@@ -3881,6 +3924,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ACPRegistryOverrides:    global.ACPRegistryOverrides,
 		AgentPathOverride:       global.AgentPathOverride,
 		AgentArgsOverride:       global.AgentArgsOverride,
+		PricingProfiles:         copyPricingProfiles(global.PricingProfiles),
 		CITimeout:               global.CITimeout,
 		StepQuietWarning:        global.StepQuietWarning,
 		ProcessTerminationGrace: global.ProcessTerminationGrace,

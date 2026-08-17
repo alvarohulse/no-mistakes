@@ -20,6 +20,8 @@ func TestGateControlPolicyCoversEveryMutationEntrypoint(t *testing.T) {
 		{args: []string{"eject"}, mutates: true},
 		{args: []string{"rerun"}, mutates: true},
 		{args: []string{"config", "explain"}, mutates: true},
+		{args: []string{"runs", "pin", "run-id"}, mutates: true},
+		{args: []string{"runs", "unpin", "run-id"}, mutates: true},
 		{args: []string{"sync"}, mutates: true},
 		{args: []string{"sync", "--recover"}, mutates: true},
 		{args: []string{"sync", "--check"}, mutates: false},

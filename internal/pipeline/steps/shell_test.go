@@ -12,7 +12,7 @@ import (
 
 func TestRunShellCommandWithEnv_UsesShAndIgnoresUserShell(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows uses cmd.exe; SHELL is only honored on POSIX")
+		t.Skip("Windows uses noninteractive PowerShell; SHELL is only honored on POSIX")
 	}
 	workDir := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "user-shell-used")

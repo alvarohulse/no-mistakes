@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -13,8 +14,18 @@ func TestStepEvidenceRoundTripsCommandsAndRejectsOversizedPayloads(t *testing.T)
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
 	step, _ := d.InsertStepResult(run.ID, types.StepBuild)
 	exitCode := 0
+	version := "5.2.26"
 	evidence := StepEvidence{Commands: []CommandEvidence{{
 		Round: 1, Sequence: 1, Command: "make build", Outcome: CommandOutcomePassed, ExitCode: &exitCode,
+		CommandSource: runner.SourceLinux,
+		Runner: &runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      "linux",
+			Source:        runner.SourceDefault,
+			Executable:    "zsh",
+			Args:          []string{"-lc"},
+			Version:       &version,
+		},
 	}}}
 
 	if err := d.SetStepEvidence(step.ID, evidence); err != nil {
@@ -30,6 +41,10 @@ func TestStepEvidenceRoundTripsCommandsAndRejectsOversizedPayloads(t *testing.T)
 	}
 	if len(decoded.Commands) != 1 || decoded.Commands[0].Command != "make build" || decoded.Commands[0].ExitCode == nil || *decoded.Commands[0].ExitCode != 0 {
 		t.Fatalf("evidence = %+v", decoded)
+	}
+	command := decoded.Commands[0]
+	if command.CommandSource != runner.SourceLinux || command.Runner == nil || command.Runner.Executable != "zsh" || command.Runner.Version == nil || *command.Runner.Version != version {
+		t.Fatalf("runner provenance = %+v", command)
 	}
 	if err := d.SetStepEvidence(step.ID, StepEvidence{Explanation: strings.Repeat("x", MaxStepEvidenceBytes+1)}); err == nil {
 		t.Fatal("oversized step evidence was accepted")

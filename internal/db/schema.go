@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS repos (
     created_at     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS repo_eject_claims (
+    repo_id     TEXT PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+    claimed_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
@@ -27,11 +32,13 @@ CREATE TABLE IF NOT EXISTS runs (
     no_mistakes_build_sha   TEXT,
     review_approved_head_sha TEXT,
     status                  TEXT NOT NULL DEFAULT 'pending',
+	pinned_at               INTEGER,
     pr_url                  TEXT,
     pr_state                TEXT,
     pr_state_observed_at    INTEGER,
     ci_ready_at             INTEGER,
     ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    ci_fix_attempts         INTEGER,
     last_pushed_sha         TEXT,
     push_target_kind        TEXT,
     push_target_fingerprint TEXT,
@@ -47,6 +54,13 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
+
+CREATE TRIGGER IF NOT EXISTS prevent_run_during_repo_eject
+BEFORE INSERT ON runs
+WHEN EXISTS (SELECT 1 FROM repo_eject_claims WHERE repo_id = NEW.repo_id)
+BEGIN
+    SELECT RAISE(ABORT, 'repository eject in progress');
+END;
 
 CREATE TABLE IF NOT EXISTS step_results (
     id               TEXT PRIMARY KEY,
@@ -86,6 +100,8 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     selected_finding_ids TEXT,
     selection_source     TEXT,
     fix_summary          TEXT,
+    repair_failure_fingerprint TEXT,
+    repair_result        TEXT,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
@@ -123,6 +139,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     delta_cache_read_tokens INTEGER,
 	delta_cache_creation_tokens INTEGER,
 	reported_cost_usd       REAL,
+	pricing_receipt_json    TEXT,
     model_roundtrips      INTEGER,
     tool_calls            INTEGER,
     tool_wait_calls       INTEGER,
@@ -148,6 +165,31 @@ CREATE TABLE IF NOT EXISTS run_agent_sessions (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (run_id, role)
 );
+
+-- Long-lived content-free metric receipts intentionally have no foreign key.
+-- Rich run rows and repository registrations may be deleted without cascading
+-- away the historical facts that power stats.
+CREATE TABLE IF NOT EXISTS run_metric_receipts (
+    run_id                 TEXT PRIMARY KEY,
+    repo_id                TEXT NOT NULL,
+    run_created_at         INTEGER NOT NULL,
+    run_status             TEXT NOT NULL,
+    schema_version         INTEGER NOT NULL,
+    payload_json           TEXT NOT NULL,
+    receipt_sha256         TEXT NOT NULL,
+    archived_at            INTEGER NOT NULL,
+    pull_request           INTEGER NOT NULL DEFAULT 0,
+    reported_findings      INTEGER NOT NULL DEFAULT 0,
+    fixed_findings         INTEGER NOT NULL DEFAULT 0,
+    step_stats_json        TEXT NOT NULL DEFAULT '[]',
+    agent_aggregates_json  TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
+    ON run_metric_receipts (repo_id, run_created_at DESC, run_id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_status_created
+    ON run_metric_receipts (run_status, run_created_at DESC, run_id DESC);
 
 CREATE TABLE IF NOT EXISTS intent_cache (
     cache_key   TEXT PRIMARY KEY,
@@ -186,6 +228,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN resolved_agent_routing_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN resolved_policy_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN resolved_policy_digest TEXT`,
+	`ALTER TABLE runs ADD COLUMN pinned_at INTEGER`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
@@ -198,6 +241,10 @@ var migrationStatements = []string{
 	`ALTER TABLE step_rounds ADD COLUMN replay_config_json BLOB`,
 	`ALTER TABLE step_rounds ADD COLUMN global_config_yaml BLOB`,
 	`ALTER TABLE step_rounds ADD COLUMN repo_config_yaml BLOB`,
+	// Repair audit retains only a normalized hash and low-cardinality result;
+	// prompts, output, diffs, paths, and tool arguments stay out of this table.
+	`ALTER TABLE step_rounds ADD COLUMN repair_failure_fingerprint TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN repair_result TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
@@ -210,6 +257,11 @@ var migrationStatements = []string{
 	// written before the provider call, so a crash mid-request spends the
 	// budget rather than silently granting a free retry.
 	`ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT`,
+	// CI performs its automatic fixes inside one executor round, so round
+	// selections cannot reconstruct the spent budget after a daemon restart.
+	// NULL deliberately preserves historical runs as unknown (and therefore
+	// exhausted); new runs stamp zero, then reserve before invoking the fix agent.
+	`ALTER TABLE runs ADD COLUMN ci_fix_attempts INTEGER`,
 	// Branch synchronization provenance is intentionally nullable. Historical
 	// rows stay unbound because mutable head_sha cannot prove a successful push.
 	`ALTER TABLE runs ADD COLUMN submitted_head_sha TEXT`,
@@ -254,6 +306,10 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_read_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_creation_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN reported_cost_usd REAL`,
+	// Pricing receipts are content-free immutable calculations captured when
+	// an invocation completes. Historical rows remain NULL rather than being
+	// repriced by a newer binary.
+	`ALTER TABLE agent_invocations ADD COLUMN pricing_receipt_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN model_roundtrips INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_calls INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_wait_calls INTEGER`,

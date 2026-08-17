@@ -1,13 +1,17 @@
 package prbody
 
+import "github.com/kunchenguid/no-mistakes/internal/pricing"
+
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
-// both v2 and v3 during a producer rollout, so both shapes have to be
+// v2, v3, and v4 during a producer rollout, so every shape has to be
 // reachable from a single command rather than only the newest one.
 func SampleForVersion(version int) *Contract {
 	switch version {
 	case 2:
 		return SampleV2()
+	case 3:
+		return SampleV3()
 	case Version:
 		return Sample()
 	default:
@@ -17,7 +21,7 @@ func SampleForVersion(version int) *Contract {
 
 // SupportedVersions lists the contract versions this build can emit and read,
 // newest first.
-func SupportedVersions() []int { return []int{Version, 2} }
+func SupportedVersions() []int { return []int{Version, 3, 2} }
 
 // IsSupportedVersion reports whether a decoded contract's version is one this
 // build understands.
@@ -31,10 +35,10 @@ func IsSupportedVersion(version int) bool {
 }
 
 // SampleV2 returns the version 2 shape of the same sample run: intent lives in
-// its own top-level section, and none of the version 3 additions are present.
+// its own top-level section, and none of the later contract additions are present.
 // It is derived from Sample so the two cannot drift apart.
 func SampleV2() *Contract {
-	contract := Sample()
+	contract := SampleV3()
 	contract.Version = 2
 	contract.Metadata = ""
 
@@ -72,6 +76,32 @@ func SampleV2() *Contract {
 	return contract
 }
 
+// SampleV3 returns the pre-v4 contract shape. Static test evidence is projected
+// back into the legacy testing field, and v4-only review, user-testing, and cost
+// receipt fields are absent.
+func SampleV3() *Contract {
+	contract := Sample()
+	contract.Version = 3
+	if static := contract.Sections.StaticTests; static != nil {
+		contract.Sections.Testing = &TestingSection{
+			Summary:   static.Summary,
+			Tested:    append([]string(nil), static.Reported...),
+			Artifacts: append([]Artifact(nil), static.Artifacts...),
+		}
+	}
+	contract.Sections.StaticTests = nil
+	contract.Sections.ReviewEvidence = nil
+	contract.Sections.UserTesting = nil
+	if pipeline := contract.Sections.Pipeline; pipeline != nil {
+		for i := range pipeline.Steps {
+			for j := range pipeline.Steps[i].Agents {
+				pipeline.Steps[i].Agents[j].Costs = nil
+			}
+		}
+	}
+	return contract
+}
+
 // Sample returns a contract that exercises every section.
 //
 // This is deliberately not a transcript of a real run. A sample built to be
@@ -86,6 +116,24 @@ func Sample() *Contract {
 	ms := func(v int64) *int64 { return &v }
 	integer := func(v int) *int { return &v }
 	usd := func(v float64) *float64 { return &v }
+	costs := func(reported, list, adjusted float64) *pricing.CostClasses {
+		return &pricing.CostClasses{
+			HarnessReported: pricing.CostEstimate{
+				ValueUSD: usd(reported), Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true,
+				Basis: "agent_invocations.reported_cost_usd",
+			},
+			APIListEstimate: pricing.CostEstimate{
+				ValueUSD: usd(list), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+				Basis:      "canonical_delta_token_meters_x_public_list_rate",
+				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
+			},
+			HarnessAdjustedEstimate: pricing.CostEstimate{
+				ValueUSD: usd(adjusted), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+				Basis:      "public_list_estimate_plus_harness_profile",
+				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
+			},
+		}
+	}
 	command := func(round, sequence int, text, outcome string, exitCode *int) PipelineCommand {
 		return PipelineCommand{Round: round, Sequence: sequence, Command: text, Outcome: outcome, ExitCode: exitCode}
 	}
@@ -129,10 +177,23 @@ func Sample() *Contract {
 				Scope:     "source-or-external",
 				Reported:  true,
 			},
-			Testing: &TestingSection{
-				Summary:   "Added coverage for the exhausted-budget path and the invalid-window rejection; ran the scheduler package plus the queue integration suite.",
-				Tested:    []string{"go test ./internal/scheduler/...", "go test -tags=integration ./internal/queue/..."},
+			StaticTests: &StaticTestsSection{
+				Summary:  "Added coverage for the exhausted-budget path and the invalid-window rejection; ran the scheduler package plus the queue integration suite.",
+				Reported: []string{"go test ./internal/scheduler/...", "go test -tags=integration ./internal/queue/..."},
+				Commands: []PipelineCommand{
+					command(1, 1, "go test ./internal/scheduler/...", "passed", &exit),
+					command(1, 2, "go test -tags=integration ./internal/queue/...", "passed", &exit),
+				},
 				Artifacts: []Artifact{{Kind: "log", Label: "scheduler suite output", Path: ".no-mistakes/artifacts/scheduler-test.log"}},
+			},
+			ReviewEvidence: &ReviewEvidenceSection{
+				Status: "completed", Rounds: 2,
+				Findings: StepFindings{Total: 3, BySeverity: map[string]int{"P1": 1, "P2": 2}},
+				Evidence: []string{"Reviewed the complete branch diff against the explicit intent."},
+			},
+			UserTesting: &UserTestingSection{
+				Instructions: []string{"Trigger a retry-exhausted job and confirm the operator-facing failure state."},
+				Attested:     false,
 			},
 			Pipeline: &PipelineSection{
 				Attribution: Attribution{Name: "no-mistakes", URL: "https://github.com/kunchenguid/no-mistakes"},
@@ -155,6 +216,7 @@ func Sample() *Contract {
 							StartedAt: 1786500000, DurationMS: 2140,
 							InputTokens: integer(1400), OutputTokens: integer(180), UncachedInputTokens: integer(700),
 							CacheReadTokens: integer(500), CacheWriteTokens: integer(200), ReportedCostUSD: usd(0.08),
+							Costs:          costs(0.08, 0.09, 0.09),
 							NestedReported: true, NestedCount: integer(0),
 						}},
 					},

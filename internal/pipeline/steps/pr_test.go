@@ -46,7 +46,7 @@ func TestPRStep_GhNotAvailable(t *testing.T) {
 	}
 }
 
-func TestPRStep_DiscoversExistingPRWithoutRewritingItsBody(t *testing.T) {
+func TestPRStep_UpdatesExistingPROnlyThroughVerifiedOwnedSections(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -77,11 +77,17 @@ func TestPRStep_DiscoversExistingPRWithoutRewritingItsBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if strings.Contains(ghLog, "pr edit") || strings.Contains(ghLog, "--body") || strings.Contains(ghLog, "--title") {
-		t.Errorf("existing PR body or title was rewritten:\n%s", ghLog)
+	if !strings.Contains(ghLog, "pr edit 42 --repo test/repo --body-file -") || !strings.Contains(ghLog, "no-mistakes:owned-sections:v1") {
+		t.Errorf("existing PR body did not use the owned-section path:\n%s", ghLog)
 	}
-	if len(ag.calls) != 0 {
-		t.Fatalf("PR drafting agent calls = %d, want 0 for an existing PR", len(ag.calls))
+	if strings.Contains(lineContaining(ghLog, "pr edit 42 --repo test/repo --body-file -"), "--title") {
+		t.Errorf("existing PR title was rewritten:\n%s", ghLog)
+	}
+	if got := strings.Count(ghLog, "pr view 42 --repo test/repo --json body"); got != 3 {
+		t.Fatalf("hosted body reads = %d, want read/compare/reread:\n%s", got, ghLog)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("PR drafting agent calls = %d, want 1 for the updated branch body", len(ag.calls))
 	}
 
 	// Verify PR URL was stored
@@ -517,7 +523,7 @@ func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing
 	}
 }
 
-func TestPRStep_BitbucketDiscoversExistingPRWithoutRewritingIt(t *testing.T) {
+func TestPRStep_BitbucketUpdatesExistingPRThroughOwnedSections(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 42, "https://bitbucket.org/test/repo/pull-requests/42")
@@ -538,8 +544,8 @@ func TestPRStep_BitbucketDiscoversExistingPRWithoutRewritingIt(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 0 {
-		t.Fatalf("update calls = %d, want 0", api.updateCalls)
+	if api.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", api.updateCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
@@ -547,8 +553,11 @@ func TestPRStep_BitbucketDiscoversExistingPRWithoutRewritingIt(t *testing.T) {
 	if api.lastAuthHeader == "" {
 		t.Fatal("expected Authorization header for Bitbucket API")
 	}
-	if len(ag.calls) != 0 {
-		t.Fatalf("PR drafting agent calls = %d, want 0", len(ag.calls))
+	if len(ag.calls) != 1 {
+		t.Fatalf("PR drafting agent calls = %d, want 1", len(ag.calls))
+	}
+	if !strings.Contains(api.lastUpdateBody, "no-mistakes:owned-sections:v1") {
+		t.Fatalf("Bitbucket update did not carry owned markers: %s", api.lastUpdateBody)
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -589,10 +598,20 @@ func TestPRStep_BitbucketDiscoversExistingPRWithoutHTMLLink(t *testing.T) {
 				t.Fatalf("read update body: %v", err)
 			}
 			api.lastUpdateBody = string(body)
+			var payload struct {
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			api.body = payload.Description
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"id":%d}`,
 				api.existingPRID,
 			)
+		case r.Method == http.MethodGet && r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d", api.existingPRID):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":%d,"description":%q}`, api.existingPRID, api.body)
 		default:
 			t.Fatalf("unexpected Bitbucket PR API request: %s %s", r.Method, r.URL.String())
 		}
@@ -609,8 +628,8 @@ func TestPRStep_BitbucketDiscoversExistingPRWithoutHTMLLink(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 0 {
-		t.Fatalf("update calls = %d, want 0", api.updateCalls)
+	if api.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", api.updateCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
@@ -618,8 +637,8 @@ func TestPRStep_BitbucketDiscoversExistingPRWithoutHTMLLink(t *testing.T) {
 	if outcome.PRURL != api.existingPRURL {
 		t.Fatalf("outcome PR URL = %q, want %q", outcome.PRURL, api.existingPRURL)
 	}
-	if len(ag.calls) != 0 {
-		t.Fatalf("PR drafting agent calls = %d, want 0", len(ag.calls))
+	if len(ag.calls) != 1 {
+		t.Fatalf("PR drafting agent calls = %d, want 1", len(ag.calls))
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -867,9 +886,19 @@ func TestPRStep_BitbucketCreatesNewPRWithoutHTMLLink(t *testing.T) {
 				t.Fatalf("read create body: %v", err)
 			}
 			api.lastCreateBody = string(body)
+			var payload struct {
+				Description string `json:"description"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			api.body = payload.Description
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":99}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/2.0/repositories/test/repo/pullrequests/99":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":99,"description":%q}`, api.body)
 		default:
 			t.Fatalf("unexpected Bitbucket PR API request: %s %s", r.Method, r.URL.String())
 		}
