@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -139,6 +140,46 @@ func TestStepContext_RecordCommandBoundsAndRedactsDisplayText(t *testing.T) {
 	}
 	if !strings.Contains(display, "command truncated") {
 		t.Fatalf("display command lacks truncation marker: %q", display)
+	}
+}
+
+func TestStepContext_RecordResolvedCommandPersistsRunnerProvenance(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	step, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := "5.2.26"
+	resolved := runner.Resolved{
+		Script:        "make build-linux",
+		CommandSource: runner.SourceLinux,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      "linux",
+			Source:        runner.SourceDefault,
+			Executable:    "zsh",
+			Args:          []string{"-lc"},
+			Version:       &version,
+		},
+	}
+	sctx := &StepContext{DB: database, StepResultID: step.ID, Round: 1}
+	zero := 0
+	sctx.RecordResolvedCommand(resolved, &zero, nil)
+
+	stored, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 {
+		t.Fatalf("commands = %+v", evidence.Commands)
+	}
+	command := evidence.Commands[0]
+	if command.Command != resolved.Script || command.CommandSource != runner.SourceLinux || command.Runner == nil || command.Runner.Executable != "zsh" || command.Runner.Version == nil || *command.Runner.Version != version {
+		t.Fatalf("command evidence = %+v", command)
 	}
 }
 

@@ -217,6 +217,38 @@ func TestPreparedExecuteBoundsCapturedOutputAndReportsTruncation(t *testing.T) {
 	}
 }
 
+func TestPreparedExecuteRetainsFullOutputWhenPipelineLoggingRequestsIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	prepared, err := Prepare(context.Background(), Command{Run: `head -c 131072 /dev/zero`}, Spec{}, ExecuteOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := prepared.Execute(context.Background(), ExecuteOptions{Timeout: time.Second, CaptureFullOutput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Output) != 131072 || result.Truncated {
+		t.Fatalf("captured output = %d bytes, truncated=%t; want 131072/false", len(result.Output), result.Truncated)
+	}
+}
+
+func TestPrepareRetainsResolvedProvenanceWhenSyntaxValidationFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	prepared, err := Prepare(context.Background(), Command{Run: "if true; then"}, Spec{}, ExecuteOptions{Timeout: time.Second})
+	if err == nil || !errors.Is(err, ErrInvalidSyntax) {
+		t.Fatalf("Prepare() error = %v, want invalid syntax", err)
+	}
+	resolved := prepared.Resolution()
+	if resolved.Script != "if true; then" || resolved.CommandSource != SourceBase || resolved.Provenance.Executable != "sh" {
+		t.Fatalf("resolved syntax failure = %+v", resolved)
+	}
+}
+
 func TestPreparedExecutePreservesParentCancellationIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fixture")

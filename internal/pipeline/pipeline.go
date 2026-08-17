@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -100,6 +101,17 @@ type StepContext struct {
 // oversized evidence blob must not abort a step whose remote branch, worktree,
 // or commit history has already moved.
 func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) {
+	sctx.recordCommand(command, exitCode, runErr, "", nil)
+}
+
+// RecordResolvedCommand records a configured or planned pipeline command with
+// the exact runner identity that parsed and executed it.
+func (sctx *StepContext) RecordResolvedCommand(resolved runner.Resolved, exitCode *int, runErr error) {
+	provenance := resolved.Provenance
+	sctx.recordCommand(resolved.Script, exitCode, runErr, resolved.CommandSource, &provenance)
+}
+
+func (sctx *StepContext) recordCommand(command string, exitCode *int, runErr error, commandSource string, provenance *runner.Provenance) {
 	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
 		return
 	}
@@ -113,6 +125,7 @@ func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr err
 	display := boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(command))))
 	if err := sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
 		Round: sctx.Round, Sequence: sctx.commandSequence, Command: display, Outcome: outcome, ExitCode: exitCode,
+		CommandSource: commandSource, Runner: provenance,
 	}); err != nil {
 		slog.Warn("failed to record step command evidence", "step_result", sctx.StepResultID, "err", err)
 	}
