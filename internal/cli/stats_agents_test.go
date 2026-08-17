@@ -231,11 +231,70 @@ func TestStatsRunJSONUsesCanonicalRunAudit(t *testing.T) {
 	}
 }
 
-func TestStatsJSONRequiresRun(t *testing.T) {
+func TestStatsJSONSupportsAggregateReportWithoutRun(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
 	out, err := executeCmd("stats", "--format", "json")
-	if err == nil || !strings.Contains(err.Error(), "requires --run") {
-		t.Fatalf("stats --format json = error %v output %q", err, out)
+	if err != nil {
+		t.Fatalf("stats --format json: %v\n%s", err, out)
+	}
+	var report runstats.Report
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decode stats report: %v\n%s", err, out)
+	}
+	if report.SchemaVersion != runstats.ReportSchemaVersion || report.Runs.Count != 0 {
+		t.Fatalf("stats report = %+v", report)
+	}
+}
+
+func TestStatsDirectFiltersUseOneReportForTextJSONAndCSV(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepoWithID("repo-filter", "/tmp/repo-filter", "https://github.com/test/repo-filter", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/filter", "abc", "def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	provider := "openai"
+	if _, err := database.InsertAgentInvocation(db.AgentInvocation{
+		RunID: run.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex",
+		Model: "gpt-5.6-sol", ModelProvider: &provider, InvocationMode: types.AgentInvocationModeHarnessCLI,
+		SessionMode: db.InvocationModeCold, StartedAt: run.CreatedAt, CompletedAt: run.CreatedAt + 1, ExitStatus: "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{"stats", "--repo", repo.ID, "--step", "review", "--agent", "codex", "--model", "gpt-5.6-sol", "--purpose", "review", "--status", "completed"}
+	for _, format := range []string{"text", "json", "csv"} {
+		out, err := executeCmd(append(args, "--format", format)...)
+		if err != nil {
+			t.Fatalf("stats --format %s: %v\n%s", format, err, out)
+		}
+		for _, want := range []string{run.ID, "completed"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s output missing %q:\n%s", format, want, out)
+			}
+		}
 	}
 }
 

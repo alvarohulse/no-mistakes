@@ -63,10 +63,11 @@ type Step struct {
 }
 
 type Round struct {
-	Number     int    `json:"number"`
-	Trigger    string `json:"trigger"`
-	DurationMS int64  `json:"duration_ms"`
-	CreatedAt  int64  `json:"created_at"`
+	Number          int     `json:"number"`
+	Trigger         string  `json:"trigger"`
+	SelectionSource *string `json:"selection_source"`
+	DurationMS      int64   `json:"duration_ms"`
+	CreatedAt       int64   `json:"created_at"`
 }
 
 type SkipReceipt struct {
@@ -289,7 +290,7 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 	result.Rounds = make([]Round, 0, len(rounds))
 	var integrityErrors []string
 	for _, round := range rounds {
-		result.Rounds = append(result.Rounds, Round{Number: round.Round, Trigger: round.Trigger, DurationMS: round.DurationMS, CreatedAt: round.CreatedAt})
+		result.Rounds = append(result.Rounds, Round{Number: round.Round, Trigger: round.Trigger, SelectionSource: cloneString(round.SelectionSource), DurationMS: round.DurationMS, CreatedAt: round.CreatedAt})
 	}
 	if row.SkipSource != nil {
 		source := types.SkipSource(*row.SkipSource)

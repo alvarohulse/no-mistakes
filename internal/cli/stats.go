@@ -28,27 +28,88 @@ func newStatsCmd() *cobra.Command {
 	var agents bool
 	var runID string
 	var format string
+	var repoSelectors []string
+	var currentRepo bool
+	var sinceValue string
+	var untilValue string
+	var stepValues []string
+	var agentValues []string
+	var modelValues []string
+	var purposeValues []string
+	var statusValues []string
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Show historical no-mistakes usage stats",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackCommand("stats", func() error {
+				now := time.Now().UTC()
 				format = strings.ToLower(strings.TrimSpace(format))
 				if format == "" {
 					format = "text"
 				}
-				if format != "text" && format != "json" {
-					return fmt.Errorf("unsupported stats format %q (expected text or json)", format)
-				}
-				if format == "json" && runID == "" {
-					return fmt.Errorf("stats --format json requires --run")
+				if format != "text" && format != "json" && format != "csv" {
+					return fmt.Errorf("unsupported stats format %q (expected text, json, or csv)", format)
 				}
 				_, database, err := openResources()
 				if err != nil {
 					return err
 				}
 				defer database.Close()
+				if currentRepo && len(repoSelectors) > 0 {
+					return fmt.Errorf("stats --current-repo cannot be combined with --repo")
+				}
+				if runID != "" && (currentRepo || len(repoSelectors) > 0 || strings.TrimSpace(sinceValue) != "" || strings.TrimSpace(untilValue) != "" || len(statusValues) > 0) {
+					return fmt.Errorf("stats --run cannot be combined with repository, time, or status selectors")
+				}
+				repoIDs, err := resolveStatsRepoIDs(database, repoSelectors, currentRepo)
+				if err != nil {
+					return err
+				}
+				since, err := parseStatsSince(sinceValue, now)
+				if err != nil {
+					return err
+				}
+				until, err := parseStatsUntil(untilValue)
+				if err != nil {
+					return err
+				}
+				steps, err := parseStatsSteps(stepValues)
+				if err != nil {
+					return err
+				}
+				statuses, err := parseStatsStatuses(statusValues)
+				if err != nil {
+					return err
+				}
+				query := runstats.Query{
+					RunID: runID, RepoIDs: repoIDs, Since: since, Until: until, Steps: steps,
+					Agents: agentValues, Models: modelValues, Purposes: purposeValues, Statuses: statuses,
+				}
+				reportSelected := format == "csv" || (format == "json" && runID == "") || len(repoIDs) > 0 || since != nil || until != nil || len(steps) > 0 || len(agentValues) > 0 || len(modelValues) > 0 || len(purposeValues) > 0 || len(statuses) > 0
+				if reportSelected {
+					report, err := runstats.BuildReport(database, query, now)
+					if err != nil {
+						return err
+					}
+					switch format {
+					case "json":
+						encoded, err := report.CanonicalJSON()
+						if err != nil {
+							return err
+						}
+						fmt.Fprintln(cmd.OutOrStdout(), encoded)
+					case "csv":
+						encoded, err := runstats.RenderCSV(report)
+						if err != nil {
+							return err
+						}
+						fmt.Fprint(cmd.OutOrStdout(), encoded)
+					default:
+						fmt.Fprint(cmd.OutOrStdout(), runstats.RenderText(report))
+					}
+					return nil
+				}
 
 				if runID != "" {
 					audit, err := runstats.BuildRunAudit(database, runID)
@@ -81,8 +142,112 @@ func newStatsCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&agents, "agents", false, "show local agent performance telemetry (per-purpose invocation aggregates)")
 	cmd.Flags().StringVar(&runID, "run", "", "show one run's steps, agent receipts, and parked time (implies --agents)")
-	cmd.Flags().StringVar(&format, "format", "text", "output format for --run: text or json")
+	cmd.Flags().StringArrayVar(&repoSelectors, "repo", nil, "select an exact repository ID or registered path (repeatable)")
+	cmd.Flags().BoolVar(&currentRepo, "current-repo", false, "select the registered repository containing the current directory")
+	cmd.Flags().StringVar(&sinceValue, "since", "", "include runs created on or after an RFC3339 time or duration ago")
+	cmd.Flags().StringVar(&untilValue, "until", "", "exclude runs created on or after an RFC3339 time")
+	cmd.Flags().StringArrayVar(&stepValues, "step", nil, "select a pipeline step (repeatable)")
+	cmd.Flags().StringArrayVar(&agentValues, "agent", nil, "select an agent harness (repeatable)")
+	cmd.Flags().StringArrayVar(&modelValues, "model", nil, "select an exact model identity (repeatable)")
+	cmd.Flags().StringArrayVar(&purposeValues, "purpose", nil, "select an invocation purpose (repeatable)")
+	cmd.Flags().StringArrayVar(&statusValues, "status", nil, "select a run status (repeatable)")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json, or csv")
 	return cmd
+}
+
+func resolveStatsRepoIDs(database *db.DB, selectors []string, current bool) ([]string, error) {
+	if current {
+		repo, err := findRepo(database)
+		if err != nil {
+			return nil, err
+		}
+		return []string{repo.ID}, nil
+	}
+	result := make([]string, 0, len(selectors))
+	seen := make(map[string]bool, len(selectors))
+	for _, selector := range selectors {
+		selector = strings.TrimSpace(selector)
+		if selector == "" {
+			return nil, fmt.Errorf("stats --repo cannot be empty")
+		}
+		repo, err := database.GetRepo(selector)
+		if err != nil {
+			return nil, err
+		}
+		if repo == nil {
+			repo, err = database.GetRepoByPath(selector)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if repo == nil {
+			return nil, fmt.Errorf("repository %q is not registered", selector)
+		}
+		if !seen[repo.ID] {
+			seen[repo.ID] = true
+			result = append(result, repo.ID)
+		}
+	}
+	return result, nil
+}
+
+func parseStatsSince(value string, now time.Time) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if duration, err := time.ParseDuration(value); err == nil {
+		if duration <= 0 {
+			return nil, fmt.Errorf("stats --since duration must be positive")
+		}
+		boundary := now.Add(-duration)
+		return &boundary, nil
+	}
+	boundary, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, fmt.Errorf("parse stats --since %q as duration or RFC3339: %w", value, err)
+	}
+	boundary = boundary.UTC()
+	return &boundary, nil
+}
+
+func parseStatsUntil(value string) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	boundary, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return nil, fmt.Errorf("parse stats --until %q as RFC3339: %w", value, err)
+	}
+	boundary = boundary.UTC()
+	return &boundary, nil
+}
+
+func parseStatsSteps(values []string) ([]types.StepName, error) {
+	result := make([]types.StepName, 0, len(values))
+	for _, value := range values {
+		step := types.StepName(strings.ToLower(strings.TrimSpace(value))).Canonical()
+		if step.Order() == 0 {
+			return nil, fmt.Errorf("unsupported stats step %q", value)
+		}
+		result = append(result, step)
+	}
+	return result, nil
+}
+
+func parseStatsStatuses(values []string) ([]types.RunStatus, error) {
+	result := make([]types.RunStatus, 0, len(values))
+	for _, value := range values {
+		status := types.RunStatus(strings.ToLower(strings.TrimSpace(value)))
+		switch status {
+		case types.RunPending, types.RunRunning, types.RunCompleted, types.RunFailed, types.RunCancelled:
+			result = append(result, status)
+		default:
+			return nil, fmt.Errorf("unsupported stats run status %q", value)
+		}
+	}
+	return result, nil
 }
 
 // renderAgentPerfReport prints the local performance telemetry: per-purpose
