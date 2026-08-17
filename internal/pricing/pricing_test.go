@@ -189,6 +189,78 @@ func TestEstimatorRejectsOverlappingEffectiveWindows(t *testing.T) {
 	}
 }
 
+func TestProfileSelectionPrefersDatedActivationOverInactiveFallback(t *testing.T) {
+	estimator, err := NewEstimator(Catalog{
+		Version: 2,
+		Models: []ModelPrice{{
+			Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/model", EffectiveFrom: "2026-01-01",
+			USDPerMillion: Rates{OutputTokens: 10},
+		}},
+	}, ProfileCatalog{
+		Version: 2,
+		Profiles: []HarnessProfile{
+			{ID: "claude-code-private", Version: 1, Harness: "claude", Status: "inactive"},
+			{
+				ID: "claude-code-private", Version: 2, Harness: "claude", Status: "active", SourceURL: "https://example.com/active", EffectiveFrom: "2027-01-01",
+				Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million", USDPerMillion: 2},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := Observation{
+		Harness: "claude", ProfileID: "claude-code-private", Provider: "anthropic", Model: "claude-opus-5",
+		Meters: TokenMeters{UncachedInputTokens: int64Ptr(0), CacheReadTokens: int64Ptr(0), CacheWriteTokens: int64Ptr(0), OutputTokens: int64Ptr(1_000_000)},
+	}
+	observation.StartedAt = time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	before := estimator.Estimate(observation).HarnessAdjustedEstimate
+	assertUnknownCost(t, before, "inactive_profile", 4, 4)
+	if before.Provenance.ProfileVersion != 1 || before.Provenance.ProfileStatus != "inactive" {
+		t.Fatalf("pre-window fallback provenance = %+v", before.Provenance)
+	}
+
+	observation.StartedAt = time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	after := estimator.Estimate(observation).HarnessAdjustedEstimate
+	assertCost(t, after, 12, true, 4, 4)
+	if after.Provenance.ProfileVersion != 2 || after.Provenance.ProfileStatus != "active" {
+		t.Fatalf("dated activation provenance = %+v", after.Provenance)
+	}
+}
+
+func TestProfileValidationRejectsAmbiguousFallbacksAndDatedWindows(t *testing.T) {
+	catalog := Catalog{Version: 1, Models: []ModelPrice{{Provider: "anthropic", Model: "claude-opus-5", SourceURL: "https://example.com/model", EffectiveFrom: "2026-01-01"}}}
+	_, err := NewEstimator(catalog, ProfileCatalog{Version: 2, Profiles: []HarnessProfile{
+		{ID: "claude-code-private", Version: 1, Harness: "claude", Status: "inactive"},
+		{ID: "claude-code-private", Version: 2, Harness: "claude", Status: "inactive"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "multiple timeless fallbacks") {
+		t.Fatalf("duplicate fallback error = %v", err)
+	}
+
+	_, err = NewEstimator(catalog, ProfileCatalog{Version: 2, Profiles: []HarnessProfile{
+		{
+			ID: "claude-code-private", Version: 1, Harness: "claude", Status: "active", SourceURL: "https://example.com/v1", EffectiveFrom: "2026-01-01", EffectiveUntil: "2027-01-01",
+			Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million"},
+		},
+		{
+			ID: "claude-code-private", Version: 2, Harness: "claude", Status: "active", SourceURL: "https://example.com/v2", EffectiveFrom: "2027-01-01",
+			Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million"},
+		},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "overlapping effective windows") {
+		t.Fatalf("overlapping dated-window error = %v", err)
+	}
+
+	_, err = NewEstimator(catalog, ProfileCatalog{Version: 1, Profiles: []HarnessProfile{{
+		ID: "claude-code-private", Version: 1, Harness: "claude", Status: "active", SourceURL: "https://example.com/timeless",
+		Adjustment: Adjustment{Kind: "additive_total_tokens_usd_per_million"},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "timeless profile must be inactive") {
+		t.Fatalf("active timeless error = %v", err)
+	}
+}
+
 func testEstimator(t *testing.T) *Estimator {
 	t.Helper()
 	estimator, err := NewEstimator(Catalog{

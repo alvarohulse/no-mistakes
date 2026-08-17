@@ -308,13 +308,21 @@ func (e *Estimator) findProfile(harness, profileID string, at time.Time) *Harnes
 	if profileID == "" {
 		return nil
 	}
+	var fallback *HarnessProfile
 	for i := range e.profiles.Profiles {
 		profile := &e.profiles.Profiles[i]
-		if profile.Harness == harness && profile.ID == profileID && withinWindow(at, profile.EffectiveFrom, profile.EffectiveUntil) {
+		if profile.Harness != harness || profile.ID != profileID {
+			continue
+		}
+		if profile.EffectiveFrom == "" {
+			fallback = profile
+			continue
+		}
+		if withinWindow(at, profile.EffectiveFrom, profile.EffectiveUntil) {
 			return profile
 		}
 	}
-	return nil
+	return fallback
 }
 
 func validateCatalog(catalog Catalog) error {
@@ -357,6 +365,7 @@ func validateProfiles(catalog ProfileCatalog) error {
 	}
 	windows := make(map[string][]effectiveWindow, len(catalog.Profiles))
 	versions := make(map[string]bool, len(catalog.Profiles))
+	fallbacks := make(map[string]bool, len(catalog.Profiles))
 	for _, profile := range catalog.Profiles {
 		if profile.ID == "" || profile.Version <= 0 || profile.Harness == "" {
 			return fmt.Errorf("harness profiles: each profile needs id, version, and harness")
@@ -380,11 +389,21 @@ func validateProfiles(catalog ProfileCatalog) error {
 		if versions[versionKey] {
 			return fmt.Errorf("harness profiles: duplicate version %d for %s", profile.Version, profile.ID)
 		}
-		if overlapsAnyWindow(windows[key], profile.EffectiveFrom, profile.EffectiveUntil) {
-			return fmt.Errorf("harness profiles: overlapping effective windows for %s", profile.ID)
+		if profile.EffectiveFrom == "" {
+			if profile.Status != "inactive" {
+				return fmt.Errorf("harness profile %s: a timeless profile must be inactive", profile.ID)
+			}
+			if fallbacks[key] {
+				return fmt.Errorf("harness profiles: multiple timeless fallbacks for %s", profile.ID)
+			}
+			fallbacks[key] = true
+		} else {
+			if overlapsAnyWindow(windows[key], profile.EffectiveFrom, profile.EffectiveUntil) {
+				return fmt.Errorf("harness profiles: overlapping effective windows for %s", profile.ID)
+			}
+			windows[key] = append(windows[key], effectiveWindow{from: profile.EffectiveFrom, until: profile.EffectiveUntil})
 		}
 		versions[versionKey] = true
-		windows[key] = append(windows[key], effectiveWindow{from: profile.EffectiveFrom, until: profile.EffectiveUntil})
 	}
 	return nil
 }
