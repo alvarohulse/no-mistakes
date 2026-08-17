@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -243,37 +244,51 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
+	return runStepRunnerCommand(sctx, runner.Command{Run: cmdStr})
+}
+
+func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command) (string, int, error) {
 	processTerminationGrace := shellenv.DefaultProcessTerminationGrace
+	defaultRunner := runner.Spec{}
 	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
 		processTerminationGrace = sctx.Config.ProcessTerminationGrace
 	}
-	output, exitCode, err := runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr, processTerminationGrace)
+	if sctx.Config != nil {
+		defaultRunner = sctx.Config.Runner
+	}
+	result, resolved, err := runRunnerCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, command, defaultRunner, processTerminationGrace)
 	var recordedExitCode *int
 	if err == nil {
-		recordedExitCode = &exitCode
+		recordedExitCode = &result.ExitCode
 	}
-	sctx.RecordCommand(cmdStr, recordedExitCode, err)
-	return output, exitCode, err
+	if resolved.Script != "" {
+		sctx.RecordResolvedCommand(resolved, recordedExitCode, err)
+	} else {
+		sctx.RecordCommand(command.Run, recordedExitCode, err)
+	}
+	return result.Output, result.ExitCode, err
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string, processTerminationGrace time.Duration) (string, int, error) {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	result, _, err := runRunnerCommandWithEnv(ctx, dir, env, runner.Command{Run: cmdStr}, runner.Spec{}, processTerminationGrace)
+	return result.Output, result.ExitCode, err
+}
+
+func runRunnerCommandWithEnv(ctx context.Context, dir string, env []string, command runner.Command, defaultRunner runner.Spec, processTerminationGrace time.Duration) (runner.Result, runner.Resolved, error) {
+	options := runner.ExecuteOptions{
+		Dir:                     dir,
+		ExtraEnv:                env,
+		ProcessTerminationGrace: processTerminationGrace,
+		CaptureFullOutput:       true,
 	}
-	shellenv.ConfigureShellCommand(cmd, processTerminationGrace)
-	cmd.Dir = dir
-	if len(env) > 0 {
-		cmd.Env = mergeEnv(env)
-	}
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	prepared, err := runner.Prepare(ctx, command, defaultRunner, options)
+	resolved := prepared.Resolution()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return string(out), ee.ExitCode(), nil
-		}
-		return "", -1, fmt.Errorf("run command %q: %w", cmdStr, err)
+		return runner.Result{ExitCode: -1}, resolved, fmt.Errorf("prepare command %q: %w", command.Run, err)
 	}
-	return string(out), 0, nil
+	result, err := prepared.Execute(ctx, options)
+	if err != nil {
+		return result, resolved, fmt.Errorf("run command %q: %w", resolved.Script, err)
+	}
+	return result, resolved, nil
 }

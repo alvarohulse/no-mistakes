@@ -19,9 +19,11 @@ func (s *LintStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	lintCmd := sctx.Config.Commands.Lint
+	configuredCommand := sctx.Config.Commands.LintCommand()
+	lintCmd := configuredCommand.Run
+	plannedLint := configuredCommand.IsZero()
 
-	if lintCmd == "" {
+	if plannedLint {
 		if sctx.PlannedCommand == "" {
 			sctx.Log("no lint command configured, asking agent to plan one...")
 			command, err := planPipelineCommand(sctx, s.Name(), `Return the exact formatter, linter, or static-analysis command that checks the relevant changed files when possible.
@@ -83,7 +85,14 @@ Previous lint findings to address:
 
 	// Run configured lint command
 	sctx.Log(fmt.Sprintf("running linter: %s", lintCmd))
-	output, exitCode, err := runStepShellCommand(sctx, lintCmd)
+	var output string
+	var exitCode int
+	var err error
+	if plannedLint {
+		output, exitCode, err = runStepShellCommand(sctx, lintCmd)
+	} else {
+		output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("run lint command: %w", err)
 	}

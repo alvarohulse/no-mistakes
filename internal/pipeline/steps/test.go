@@ -23,8 +23,9 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, effectiveBaseBranch(sctx))
-	testCmd := sctx.Config.Commands.Test
-	plannedTest := testCmd == ""
+	configuredCommand := sctx.Config.Commands.TestCommand()
+	testCmd := configuredCommand.Run
+	plannedTest := configuredCommand.IsZero()
 	if plannedTest {
 		if sctx.PlannedCommand == "" {
 			sctx.Log("no test command configured, asking agent to plan one...")
@@ -110,9 +111,16 @@ Previous test findings to address:
 	}
 
 	tested := []string{}
-	if testCmd != "" {
+	if !configuredCommand.IsZero() || testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runStepShellCommand(sctx, testCmd)
+		var output string
+		var exitCode int
+		var err error
+		if plannedTest {
+			output, exitCode, err = runStepShellCommand(sctx, testCmd)
+		} else {
+			output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)
 		}

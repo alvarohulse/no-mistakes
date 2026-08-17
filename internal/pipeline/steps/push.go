@@ -29,9 +29,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 
 	// Run format command if configured (before committing, so changes are formatted)
-	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
-		sctx.Log(fmt.Sprintf("running formatter: %s", fmtCmd))
-		output, exitCode, err := runStepShellCommand(sctx, fmtCmd)
+	if formatCommand := sctx.Config.Commands.FormatCommand(); !formatCommand.IsZero() {
+		sctx.Log(fmt.Sprintf("running formatter: %s", formatCommand.Run))
+		output, exitCode, err := runStepRunnerCommand(sctx, formatCommand)
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: format command failed: %v", err))
 		} else if exitCode != 0 {
