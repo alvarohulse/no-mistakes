@@ -24,6 +24,9 @@ type Catalog struct {
 	Models  []ModelPrice `json:"models"`
 }
 
+// ModelPrice is one inclusive UTC-date pricing window. A provider/model may
+// append later non-overlapping windows; completed invocations keep the exact
+// window in their immutable receipt instead of being repriced.
 type ModelPrice struct {
 	Provider       string `json:"provider"`
 	Model          string `json:"model"`
@@ -45,6 +48,9 @@ type ProfileCatalog struct {
 	Profiles []HarnessProfile `json:"profiles"`
 }
 
+// HarnessProfile is one billing adjustment window. Non-overlapping dated
+// versions let one harness/profile ID append later windows; an optional
+// timeless inactive row is only the explicit no-adjustment fallback.
 type HarnessProfile struct {
 	ID             string     `json:"id"`
 	Version        int        `json:"version"`

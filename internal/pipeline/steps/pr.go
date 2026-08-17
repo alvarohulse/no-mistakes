@@ -360,14 +360,11 @@ func buildPRNarrative(summary, whatChanged string) string {
 	return strings.Join(sections, "\n\n")
 }
 
-// redactOutboundPRContent is the last gate before a title and body leave for a
-// hosted pull request. Every upstream section is escaped for markup but not for
-// credentials: agent findings, risk rationale, recorded test commands, embedded
-// artifact contents, and a pr_body formatter's output all reach here verbatim,
-// and a PR description is a permanent, often public record. Redaction runs
-// after the formatter hook so a hook cannot reintroduce a secret, and the caps
-// are re-applied because a replacement marker is not guaranteed shorter than
-// the credential shape it replaced.
+// redactOutboundPRContent is the last mutation of the pipeline-drafted title
+// and built-in body before owned markers are generated. Built-in evidence can
+// contain credentials, so it is redacted and re-bounded here. Formatter-owned
+// patches are validated and rejected for possible secrets before this point;
+// they are never redacted or truncated after their section hashes are chosen.
 func redactOutboundPRContent(content prContent, bodyLimit int) prContent {
 	content.Title = intent.RedactSecrets(content.Title)
 	body := intent.RedactSecrets(content.Body)

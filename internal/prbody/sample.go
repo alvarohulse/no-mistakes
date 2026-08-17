@@ -4,7 +4,7 @@ import "github.com/kunchenguid/no-mistakes/internal/pricing"
 
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
-// both v2 and v3 during a producer rollout, so both shapes have to be
+// v2, v3, and v4 during a producer rollout, so every shape has to be
 // reachable from a single command rather than only the newest one.
 func SampleForVersion(version int) *Contract {
 	switch version {

@@ -4,8 +4,8 @@
 // The contract carries the PR body's raw material, never a pre-rendered
 // layout. A formatter that receives markdown has already had its layout
 // decision made for it, which defeats the point of the hook; so the pipeline
-// section is per-step records, risk is its three stored fields, and testing is
-// the test step's own summary, tested list, and artifacts.
+// section is per-step records, risk is its three stored fields, and static
+// tests, review evidence, and user-testing instructions remain distinct.
 package prbody
 
 import "github.com/kunchenguid/no-mistakes/internal/pricing"
@@ -42,12 +42,13 @@ type Contract struct {
 	// Provider is the detected SCM host ("github", "azure", ...).
 	Provider string `json:"provider"`
 	// BodyLimit is the host's PR body character cap, 0 when unlimited. A
-	// formatter should respect it; the pipeline clamps anything over it
-	// afterwards and logs that it did.
+	// formatter should respect it; the pipeline rejects an oversized marked
+	// candidate rather than truncating section content after hashing it.
 	BodyLimit int `json:"body_limit"`
 
 	// Title is the drafted conventional-commit PR title. The formatter owns
-	// the body only - returning a title has no effect.
+	// section content and the optional bootstrap layout only; returning a title
+	// has no effect.
 	Title string `json:"title"`
 	// Metadata is opaque operator-supplied context. no-mistakes does not parse
 	// or assign structure to it; formatters may interpret it for their own use.
@@ -72,8 +73,8 @@ type Commit struct {
 
 // Sections holds the body's raw material.
 type Sections struct {
-	// Intent is retained only so callers can decode a version 2 contract. Version
-	// 3 producers leave it empty and report intent on the Intent pipeline step.
+	// Intent is retained only so callers can decode a version 2 contract.
+	// Versions 3 and 4 report intent on the Intent pipeline step instead.
 	Intent      *IntentSection `json:"intent,omitempty"`
 	Summary     *TextSection   `json:"summary,omitempty"`
 	Notes       NotesSection   `json:"notes"`

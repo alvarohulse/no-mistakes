@@ -24,8 +24,8 @@ type prBodyScope struct {
 	bodyLimit  int
 }
 
-// applyPRBodyHook replaces the built-in body with an external formatter's,
-// when hooks.pr_body is configured.
+// applyPRBodyHook selects external owned-section patches instead of the
+// built-in generated section when hooks.pr_body is configured.
 //
 // Every formatter failure selects built-in section content and says so in the
 // pipeline log. Publication still fails closed when an existing body lacks the

@@ -93,7 +93,7 @@ ci:
   rerun_transient: 0
 
 commit:
-  fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+  fix_message: "fix({{.Step}}): {{.Summary}}"
 
 intent:
   enabled: true
@@ -352,7 +352,7 @@ Platform fields override `run` and `runner` independently. Resolution precedence
 
 Runner identities use the same secret-free contract as the global default: `sh`, `bash`, or `zsh` with `[-c]` or `[-lc]`, and `pwsh` or `powershell` with `[-NoLogo, -NoProfile, -NonInteractive, -Command]`. Executable paths and extra arguments are rejected, including in inactive platform overrides, because the full structured definition is persisted in the resolved policy.
 
-This schema is active for trusted preflight commands and for Build, Test, Lint, and Format. Each call site executes the resolved platform command through its resolved runner and records content-free command-source and runner provenance with the pipeline evidence.
+This schema is active for trusted preflight commands and for Build, Test, Lint, and Format. Every call site executes the resolved platform command through its resolved runner. Pipeline commands record content-free command-source and runner provenance in step evidence; preflight runs before a run row exists, so its canonical command stays in the resolved policy and its provenance appears only in a bounded failure diagnostic.
 
 Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
 

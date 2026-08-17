@@ -82,7 +82,7 @@ ci:
   rerun_transient: 0
 
 commit:
-  fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+  fix_message: "fix({{.Step}}): {{.Summary}}"
 
 intent:
   enabled: true
@@ -497,7 +497,7 @@ Template functions, control actions, named templates, unknown placeholders, malf
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 
-The commit body records the actual authoring harness when it has a defined identity (`claude`, `codex`, or `cursor`) and always records `No-Mistakes-Model`. The adapter-observed model wins; the configured model is the fallback, and unavailable or unsafe metadata is recorded as `unknown`.
+The commit body records the actual authoring harness when it has a defined identity (`claude`, `codex`, native `cursor`, or `acp:cursor`) and always records `No-Mistakes-Model`. The adapter-observed model wins; the configured model is the fallback, and unavailable or unsafe metadata is recorded as `unknown`.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
 The setting does not change commit subjects created by the Refresh or Push steps.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
@@ -543,8 +543,8 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and 
 | `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
 | `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
-| `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
-| `test.evidence.max_runs`      | `int`    | `200`                    | How many terminal run directories survive regardless of age; values below 50 retain the required floor |
+| `test.evidence.retention`     | `string` | `336h` (14 days)         | Minimum run age from creation before rich terminal data is eligible for pruning; positive values below 14 days use the 14-day floor, while `unlimited`/`none`/`off`/`never` or a non-positive duration disables rich pruning |
+| `test.evidence.max_runs`      | `int`    | `200`                    | Minimum newest terminal-unpinned set retained regardless of age; values below 50 retain the required floor |
 
 The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
 When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
@@ -564,13 +564,13 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 
 - A finished run that produced no artifacts leaves nothing behind.
 - Pending, running, and explicitly pinned runs are never touched.
-- Every run inside `retention` is retained.
+- Every run created inside the configured `retention` window or the mandatory 14-day floor is retained.
 - At least the newest 50 terminal unpinned runs, or the configured larger `max_runs` set, are retained regardless of age.
 - Older unpinned evidence and run logs are removed before their rich database rows are pruned.
 
-Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt. The receipt keeps binary build provenance, content-free statuses, timings, routes, nullable usage/activity metrics, finding counts, cost provenance, bounded-repair fingerprints/results, and per-command round/sequence/outcome/nullable-exit/source plus validated runner provenance for `stats`. It excludes run branch/head/base identity, paths, config refs, session keys, findings prose, prompts, outputs, diffs, command text, resolved executable paths/command argv, and tool arguments; runner provenance is limited to the bare shell identity, fixed shell args, source/platform category, and optional numeric version. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
+Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt so historical stats survive. The [local/remote data boundary](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns that receipt's content-free fields and privacy exclusions. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` sets the guaranteed age window for a PR body's local artifact links, raise it rather than lowering it if your reviews run long.
 
 The publication fields are global defaults. Repo config can override `store_in_repo` and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 

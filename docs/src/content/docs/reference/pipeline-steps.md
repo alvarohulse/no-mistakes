@@ -293,8 +293,9 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - On CI failure: fetches failed job logs (GitHub via `gh run view --log-failed`, GitLab via `glab ci trace`, Bitbucket Cloud via failed pipeline step logs; Azure DevOps has no first-class build-log command, so the agent fixes from the failing-check list without logs), sends them to the agent with user intent when available, and, if the agent produces changes, commits them and uses the same force-push safety guard as the push step
 - On GitHub, GitLab, or Azure DevOps merge conflict: asks the agent to rebase onto the latest default-branch tip and make the smallest correct root-cause fix for the conflicts, using user intent when available
 - If both CI failures and a GitHub, GitLab, or Azure DevOps merge conflict are present: fixes both in the same attempt
-- If a fix attempt produces no changes: automatic mode leaves the failure undeduplicated so it can retry until the auto-fix limit, while manual fix mode returns immediately for manual intervention
+- If a fix attempt produces no Git content change, automatic mode spends that attempt and stops immediately for manual intervention; manual fix mode also returns immediately
 - Deduplicates fix attempts only after a fix is actually committed and pushed
+- Persists the spent automatic CI repair count before launching each fix agent, so recreating or recovering the CI step cannot reset its budget. Legacy runs without that counter are treated as having exhausted automatic repair, while an explicit user-requested fix remains available
 - Exits cleanly when the PR is merged, closed, or declined
 - If the idle timeout is reached while the PR is still open: pauses for user approval, even when CI checks are currently healthy
 - If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses for user approval with findings for the remaining issues
