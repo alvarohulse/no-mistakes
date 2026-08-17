@@ -57,6 +57,18 @@ func TestRunViewFromDBRendersBuildStep(t *testing.T) {
 	}
 }
 
+func TestRunObjectRendersConfiguredSkipReceipt(t *testing.T) {
+	source := string(types.SkipSourceGlobalOverride)
+	run := &db.Run{ID: "r1", Branch: "feature/x", HeadSHA: "abcdef1234567890", Status: types.RunCompleted}
+	rv := runViewFromDB(run, []*db.StepResult{{
+		StepName: types.StepCI, Status: types.StepStatusSkipped, SkipSource: &source,
+	}})
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, "skip_receipts") || !strings.Contains(out, "ci,global-override") {
+		t.Fatalf("configured skip receipt missing from output:\n%s", out)
+	}
+}
+
 func TestPostWorktreeEnvironmentParkRendering(t *testing.T) {
 	parkedSince := time.Now().Unix()
 	errMsg := "post-worktree hook failed with exit code 23: authenticate first"
@@ -1001,9 +1013,9 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 }
 
 // TestAxiAbortByRunIDNoOpWhenDaemonStopped covers the abort-by-id path when no
-// daemon is running: a run only exists in a live daemon's memory, so there is
-// nothing to cancel and the command reports a successful no-op without needing
-// a repo or worktree.
+// daemon is running and the durable database proves the requested id is
+// unknown. That exact case remains a successful no-op without needing a repo
+// or worktree.
 func TestAxiAbortByRunIDNoOpWhenDaemonStopped(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)

@@ -150,7 +150,7 @@ Pipeline prompts steer agents to keep intentional writes inside the disposable w
 This reduces macOS App Management prompts from agent-invoked commands, but it is not an OS sandbox.
 
 If you still see prompts, check the step log for commands that intentionally write outside the worktree and move that setup into your normal development environment or an explicit repo-local command.
-Requested test evidence may still be written under the managed temporary `no-mistakes-evidence` directory, or under the configured in-repo evidence directory when `test.evidence.store_in_repo` is enabled.
+Requested test evidence may still be written under the managed evidence directory (`<NM_HOME>/evidence/<run-id>` by default). On GitHub, it is published to the push-target repository's orphan evidence branch when `test.evidence.store_in_repo` is enabled; the [Global Config Reference](/no-mistakes/reference/global-config/#testevidence) lists the cases that leave it local instead.
 Normal tool temp or cache writes can still happen outside the worktree.
 Testing prompts ask agents to remove transient working-tree artifacts they created, such as downloaded models, caches, build outputs, large binaries, or generated data directories, before completion.
 
@@ -236,7 +236,7 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 Symptom: CI step keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
 
 Monitoring while the PR remains open - even after checks are currently healthy - is intended behavior, because a later default-branch update can make the PR conflict or rerun CI.
-Once checks are green and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR; the signal clears automatically if checks start re-running or a new failure appears.
+Once the CI monitor reports readiness and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR; the signal clears automatically if checks start re-running or a new failure appears. A trusted [`no_ci: true` declaration](/no-mistakes/reference/repo-config/#no_ci) can establish readiness for a zero-check repository; an empty forge response without that declaration is not ready.
 
 How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.
@@ -263,7 +263,8 @@ no-mistakes axi logs --step <step> --full
 The `active_steps` table shows how long the step has been active, the latest activity, the native subprocess PID when one is running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 The step log records native subprocess start, exit, and retry lines plus markers for automatic and user-triggered fix rounds.
 If the step is parked at a gate, use `no-mistakes axi respond` instead of waiting.
-If the run is genuinely stuck and you want to discard it, use `no-mistakes axi abort` and then start a new run.
+If the run is genuinely stuck and you want to discard it, use `no-mistakes axi abort`.
+Start a new run only after abort confirms the terminal state; see the [abort command contract](/no-mistakes/reference/cli/#no-mistakes-axi-abort).
 
 ## Worktree won't clean up
 

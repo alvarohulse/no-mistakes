@@ -24,14 +24,10 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 // AgentRoutes is an immutable run-scoped routing table. Steps with no explicit
 // entry use Default, preserving the run-wide agent behavior.
 type AgentRoutes struct {
-	Default         agent.Agent
-	ByStep          map[types.StepName]agent.Agent
-	ReviewAdversary agent.Agent
+	Default          agent.Agent
+	ByStep           map[types.StepName]agent.Agent
+	ReviewCandidates []agent.Agent
 }
-
-// AdversaryForReview returns the separately configured high-risk reviewer.
-// It is deliberately not part of the primary Review fallback list.
-func (r AgentRoutes) AdversaryForReview() agent.Agent { return r.ReviewAdversary }
 
 // AgentForStep returns the configured step route or the run-wide fallback.
 func (r AgentRoutes) AgentForStep(step types.StepName) agent.Agent {
@@ -43,19 +39,21 @@ func (r AgentRoutes) AgentForStep(step types.StepName) agent.Agent {
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
-	Ctx              context.Context
-	Run              *db.Run
-	Repo             *db.Repo
-	WorkDir          string
-	Agent            agent.Agent
-	ReviewAdversary  agent.Agent
-	Config           *config.Config
-	DB               *db.DB
-	Log              func(string) // discrete log line (newline-terminated, user-visible + file)
-	LogChunk         func(string) // raw streaming chunk (user-visible + file)
-	LogFile          func(string) // file-only log callback (not shown to user)
-	Fixing           bool         // true when re-executing after a "fix" action
-	PreviousFindings string       // JSON findings from the previous execution (set during fix loop)
+	Ctx                   context.Context
+	Run                   *db.Run
+	Repo                  *db.Repo
+	WorkDir               string
+	Agent                 agent.Agent
+	Reviewer              agent.Agent
+	Config                *config.Config
+	DB                    *db.DB
+	Log                   func(string) // discrete log line (newline-terminated, user-visible + file)
+	LogChunk              func(string) // raw streaming chunk (user-visible + file)
+	LogFile               func(string) // file-only log callback (not shown to user)
+	Fixing                bool         // true when re-executing after a "fix" action
+	SkipFixExecution      bool         // replay an already-completed fix round's review turn only
+	ReviewStartingHeadSHA string
+	PreviousFindings      string // JSON findings from the previous execution (set during fix loop)
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
@@ -64,6 +62,7 @@ type StepContext struct {
 	// command gate reruns the exact command selected before the failure.
 	PlannedCommand  string
 	commandSequence int
+	EvidenceDir     string
 	Env             []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
@@ -73,17 +72,26 @@ type StepContext struct {
 	UserIntent string
 	// IntentSource records the provenance of UserIntent so steps can weigh
 	// its authority. db.RunIntentSourceAgent ("agent") means the driving
-	// agent supplied it explicitly via `axi run --intent` (authoritative
-	// acceptance criteria); an agent name ("claude", "codex", ...) means it
-	// was inferred from a transcript (a hint). Empty when no intent exists.
+	// agent supplied it explicitly via `axi run --intent`; db.RunIntentSourceRerun
+	// ("rerun") means that authoritative intent was inherited. Both are
+	// authoritative acceptance criteria; an agent name ("claude", "codex", ...)
+	// means it was inferred from a transcript (a hint). Empty when no intent exists.
 	IntentSource string
 	// PRNote is optional author-supplied content that the PR step renders
 	// verbatim and supplies to the summary prompt as trusted guidance.
 	PRNote string
+	// UncertifiedFromSHA/ToSHA/SourceRunID name a previous run's fixer commits
+	// whose replacement full review did not complete.
+	UncertifiedFromSHA     string
+	UncertifiedToSHA       string
+	UncertifiedSourceRunID string
+	UncertifiedPriorRounds []*db.StepRound
 	// Sessions manages the run's durable review-loop agent sessions
 	// (reviewer and fixer roles). nil runs every invocation cold.
-	Sessions        *RunSessions
-	CommandPlanning *CommandPlanningWorkspace
+	Sessions           *RunSessions
+	CommandPlanning    *CommandPlanningWorkspace
+	CIReadinessChanged func(ready, declaredNoCI bool)
+	OnPRMerged         func(ctx context.Context, runID string)
 }
 
 // RecordCommand appends one primary step command to the run's bounded
@@ -137,9 +145,10 @@ func boundedCommandDisplay(command string) string {
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
-// running cold when sessions are unavailable. Only the review step's
-// reviewer/fixer turns use this; every other agent invocation goes through
-// sctx.Agent.Run directly and stays session-isolated.
+// running cold when sessions are unavailable. Only the review step's fixer
+// turns use this; every other agent invocation - including every review turn,
+// which must stay independent of the session that prescribed the fixes under
+// review - goes through sctx.Agent.Run directly and stays session-isolated.
 func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (*agent.Result, error) {
 	if sctx.Sessions == nil {
 		return sctx.Agent.Run(sctx.Ctx, opts)

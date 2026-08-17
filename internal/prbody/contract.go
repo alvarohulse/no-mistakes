@@ -170,6 +170,7 @@ type PipelineStep struct {
 	Label       string            `json:"label"`
 	Order       int               `json:"order"`
 	Status      string            `json:"status"`
+	SkipSource  *string           `json:"skip_source,omitempty"`
 	ExitCode    *int              `json:"exit_code,omitempty"`
 	DurationMS  *int64            `json:"duration_ms,omitempty"`
 	Rounds      int               `json:"rounds"`

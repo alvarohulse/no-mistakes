@@ -36,6 +36,11 @@ type stepRow struct {
 	DurationMS int64  `toon:"duration_ms"`
 }
 
+type skipReceiptRow struct {
+	Step   string `toon:"step"`
+	Source string `toon:"source"`
+}
+
 type activeStepRow struct {
 	Step         string `toon:"step"`
 	Label        string `toon:"label"`
@@ -93,6 +98,7 @@ type stepView struct {
 	FixRoundCount    int
 	AutoFixLimit     int
 	PendingFixSource string
+	SkipSource       string
 	QuietWarning     time.Duration
 }
 
@@ -105,6 +111,8 @@ type runView struct {
 	RefreshStrategy types.RefreshStrategy
 	PRURL           string
 	Error           string
+	CIReady         bool
+	CIReadyNoCI     bool
 	// AwaitingAgentSince is the unix-seconds time the run parked awaiting the
 	// driving agent, or nil when the run is not parked. It powers the top-level
 	// parked signal in the run object.
@@ -119,6 +127,8 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		RefreshStrategy:    r.RefreshStrategy.OrDefault(),
+		CIReady:            r.CIReady,
+		CIReadyNoCI:        r.CIReadyNoCI,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
@@ -142,6 +152,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 			FixRoundCount:    s.FixRoundCount,
 			AutoFixLimit:     s.AutoFixLimit,
 			PendingFixSource: s.PendingFixSource,
+		}
+		if s.SkipSource != nil {
+			sv.SkipSource = *s.SkipSource
 		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
@@ -182,6 +195,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 			StartedAt:      s.StartedAt,
 			LastActivityAt: s.LastActivityAt,
 			AgentPID:       s.AgentPID,
+		}
+		if s.SkipSource != nil {
+			sv.SkipSource = *s.SkipSource
 		}
 		if s.AutoFixLimit != nil {
 			sv.AutoFixLimit = *s.AutoFixLimit
@@ -459,10 +475,17 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	fields = append(fields, toon.Field{Key: "findings", Value: rv.findingsTally()})
 
 	rows := make([]stepRow, 0, len(rv.Steps))
+	skipReceipts := make([]skipReceiptRow, 0)
 	for _, s := range rv.Steps {
 		rows = append(rows, stepRow{Step: s.Name, Label: s.displayName(rv.RefreshStrategy), Status: s.Status, Findings: s.findingCount(), DurationMS: s.DurationMS})
+		if s.SkipSource != "" {
+			skipReceipts = append(skipReceipts, skipReceiptRow{Step: s.Name, Source: s.SkipSource})
+		}
 	}
 	fields = append(fields, toon.Field{Key: "steps", Value: rows})
+	if len(skipReceipts) > 0 {
+		fields = append(fields, toon.Field{Key: "skip_receipts", Value: skipReceipts})
+	}
 	if activeRows := rv.activeRows(); len(activeRows) > 0 {
 		fields = append(fields, toon.Field{Key: "active_steps", Value: activeRows})
 	}

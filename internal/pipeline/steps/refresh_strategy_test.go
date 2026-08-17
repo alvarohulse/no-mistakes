@@ -203,6 +203,7 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "git merge --continue") || !strings.Contains(ag.calls[0].Prompt, "shared.txt") {
 		t.Fatalf("merge conflict prompt missing instructions: %s", ag.calls[0].Prompt)
 	}
+	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	gitCmd(t, dir, "merge-base", "--is-ancestor", "origin/dependency", "HEAD")
 	parents := strings.Fields(gitCmd(t, dir, "rev-list", "--parents", "-n", "1", "HEAD"))
 	if len(parents) != 3 {

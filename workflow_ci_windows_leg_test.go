@@ -13,20 +13,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// The Windows test leg is process-spawn bound: the git-backed packages run
+// thousands of git.exe invocations, and Defender real-time scanning taxes every
+// one. Untuned, a single ./... job compiled every binary and then ran those
+// packages sequentially until timeout-minutes cancelled it with no verdict.
+// These tests pin the properties that keep that from silently coming back - the
+// scan-exclusion step, a git-heavy/core shard split so each job's wall stays
+// inside the cap, and a per-binary Go timeout well inside that cap so a genuine
+// hang lands as a goroutine dump instead of an opaque job cancellation.
+//
+// The workflow cannot be exercised from `go test` (it needs a Windows runner),
+// so it is asserted through a typed workflow, `go list` package sets, and a
+// normalized command view.
+
 func loadCIWorkflowDoc(t *testing.T) *wfDoc {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatalf("read CI workflow: %v", err)
 	}
-	var workflow wfDoc
-	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+	var wf wfDoc
+	if err := yaml.Unmarshal(raw, &wf); err != nil {
 		t.Fatalf("parse CI workflow: %v", err)
 	}
-	for name, job := range workflow.Jobs {
+	for name, job := range wf.Jobs {
 		job.name = name
 	}
-	return &workflow
+	return &wf
 }
 
 func ciTestJob(t *testing.T) *wfJob {
@@ -38,6 +51,20 @@ func ciTestJob(t *testing.T) *wfJob {
 	return job
 }
 
+func TestCIWorkflow_TestJobChecksOutFullHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, step := range ciTestJob(t).Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") {
+			if step.With["fetch-depth"] != "0" {
+				t.Fatalf("test job checkout fetch-depth = %q, want 0 for historical guard fixtures", step.With["fetch-depth"])
+			}
+			return
+		}
+	}
+	t.Fatal("CI test job has no checkout step")
+}
+
 type workflowCommand struct {
 	step int
 	line int
@@ -46,25 +73,16 @@ type workflowCommand struct {
 }
 
 func windowsOnly(condition string) bool {
-	value, ok := workflowConditionValue(condition, "runner.os")
-	return ok && value == "Windows"
-}
-
-func workflowConditionValue(condition, variable string) (string, bool) {
 	condition = strings.TrimSpace(condition)
 	condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
 	for _, part := range strings.Split(condition, "&&") {
 		fields := strings.Fields(strings.TrimSpace(part))
-		if len(fields) == 3 && fields[0] == variable && fields[1] == "==" {
-			return strings.Trim(fields[2], `'"`), true
+		if len(fields) == 3 && fields[0] == "runner.os" && fields[1] == "==" &&
+			(fields[2] == "'Windows'" || fields[2] == `"Windows"`) {
+			return true
 		}
 	}
-	return "", false
-}
-
-func windowsShard(condition string) string {
-	shard, _ := workflowConditionValue(condition, "matrix.shard")
-	return shard
+	return false
 }
 
 func windowsGoTestCommands(t *testing.T) []workflowCommand {
@@ -79,27 +97,6 @@ func windowsGoTestCommands(t *testing.T) []workflowCommand {
 		t.Fatal("CI workflow has no Windows test step")
 	}
 	return tests
-}
-
-func workflowCommands(steps []wfStep) []workflowCommand {
-	var commands []workflowCommand
-	for stepIndex, step := range steps {
-		if !windowsOnly(step.If) {
-			continue
-		}
-		for lineIndex, line := range strings.Split(step.Run, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) == 0 || strings.HasPrefix(fields[0], "$p") || strings.ContainsAny(fields[0], "{}()") {
-				continue
-			}
-			commands = append(commands, workflowCommand{step: stepIndex, line: lineIndex, name: fields[0], args: fields[1:]})
-		}
-	}
-	return commands
 }
 
 func goListPackages(t *testing.T, patterns ...string) []string {
@@ -131,74 +128,115 @@ func goTestPackagePatterns(command workflowCommand) []string {
 	return patterns
 }
 
-func TestCIWorkflow_TestJobChecksOutFullHistory(t *testing.T) {
-	t.Parallel()
-
-	for _, step := range ciTestJob(t).Steps {
-		if strings.HasPrefix(step.Uses, "actions/checkout@") {
-			if step.With["fetch-depth"] != "0" {
-				t.Fatalf("test job checkout fetch-depth = %q, want 0 for historical guard fixtures", step.With["fetch-depth"])
+func workflowCommands(steps []wfStep) []workflowCommand {
+	var commands []workflowCommand
+	for stepIndex, step := range steps {
+		if !windowsOnly(step.If) {
+			continue
+		}
+		for lineIndex, line := range strings.Split(step.Run, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
 			}
-			return
+			fields := strings.Fields(line)
+			if len(fields) == 0 || strings.HasPrefix(fields[0], "$p") || strings.ContainsAny(fields[0], "{}()") {
+				continue
+			}
+			commands = append(commands, workflowCommand{step: stepIndex, line: lineIndex, name: fields[0], args: fields[1:]})
 		}
 	}
-	t.Fatal("CI test job has no checkout step")
+	return commands
 }
 
-func TestCIWorkflow_WindowsShardsCoverEveryPackageWithinTheJobCap(t *testing.T) {
+func findWorkflowCommandWithArg(commands []workflowCommand, name, arg string) (workflowCommand, bool) {
+	for _, command := range commands {
+		if strings.EqualFold(command.name, name) && command.hasArg(arg) {
+			return command, true
+		}
+	}
+	return workflowCommand{}, false
+}
+
+func (c workflowCommand) before(other workflowCommand) bool {
+	return c.step < other.step || c.step == other.step && c.line < other.line
+}
+
+func (c workflowCommand) hasArg(want string) bool {
+	for _, arg := range c.args {
+		if strings.EqualFold(arg, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCIWorkflow_WindowsTestsRunWithScanExclusions(t *testing.T) {
+	t.Parallel()
+
+	job := ciTestJob(t)
+	commands := workflowCommands(job.Steps)
+	var exclusions []workflowCommand
+	for _, option := range []string{"-ExclusionPath", "-ExclusionProcess"} {
+		command, ok := findWorkflowCommandWithArg(commands, "Add-MpPreference", option)
+		if !ok {
+			t.Fatalf("Windows Defender command must apply %s before tests", option)
+		}
+		if job.Steps[command.step].Shell != "pwsh" {
+			t.Fatalf("Defender exclusions must execute with pwsh, got %q", job.Steps[command.step].Shell)
+		}
+		exclusions = append(exclusions, command)
+	}
+
+	tests := windowsGoTestCommands(t)
+	for _, test := range tests {
+		for _, exclusion := range exclusions {
+			if !exclusion.before(test) {
+				t.Errorf("Defender exclusion command at step %d line %d must execute before Windows tests at step %d line %d", exclusion.step, exclusion.line, test.step, test.line)
+			}
+		}
+	}
+}
+
+func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.T) {
 	t.Parallel()
 
 	job := ciTestJob(t)
 	if job.TimeoutMinutes != 40 {
-		t.Fatalf("test job timeout-minutes = %d, want 40 as a bounded runaway guard", job.TimeoutMinutes)
-	}
-
-	windowsMatrix := map[string]string{}
-	for _, entry := range job.Strategy.Matrix.Include {
-		if entry["os"] == "windows-latest" {
-			windowsMatrix[entry["shard"]] = entry["name"]
-		}
-	}
-	if windowsMatrix["core"] != "test (windows-core)" || windowsMatrix["git"] != "test (windows-git)" {
-		t.Fatalf("Windows matrix = %v, want stable core and git shard names", windowsMatrix)
+		t.Fatalf("test job timeout-minutes = %d, want 40 so a wedged runner cannot burn a full six-hour budget", job.TimeoutMinutes)
 	}
 
 	tests := windowsGoTestCommands(t)
-	if len(tests) != 2 {
-		t.Fatalf("Windows tests must have one core and one git-heavy shard, got %d go test invocations", len(tests))
+	if len(tests) < 2 {
+		t.Fatalf("Windows tests must be split across shards so one ./... job cannot exceed the cap without a binary hitting -timeout, got %d go test invocations", len(tests))
 	}
 
 	jobTimeout := time.Duration(job.TimeoutMinutes) * time.Minute
-	commandsByShard := map[string]workflowCommand{}
+	var gitCommand workflowCommand
+	var coreCommand workflowCommand
 	for _, command := range tests {
 		goTimeout := goTestTimeout(t, command)
 		if goTimeout >= jobTimeout {
-			t.Fatalf("go test -timeout is %s and the job cap is %s; a package timeout must produce evidence before job cancellation", goTimeout, jobTimeout)
+			t.Fatalf("go test -timeout is %s and the job cap is %s; the Go timeout must fire first so a hang produces a goroutine dump instead of an evidence-free cancellation", goTimeout, jobTimeout)
 		}
-		shard := windowsShard(job.Steps[command.step].If)
-		if shard != "core" && shard != "git" {
-			t.Fatalf("Windows test step %d is not routed to exactly one known shard: %q", command.step, job.Steps[command.step].If)
-		}
-		if _, exists := commandsByShard[shard]; exists {
-			t.Fatalf("Windows shard %q has more than one go test invocation", shard)
-		}
-		commandsByShard[shard] = command
-
 		patterns := goTestPackagePatterns(command)
-		if slices.Contains(patterns, "./...") {
-			t.Fatalf("Windows shard at step %d still runs ./...", command.step)
+		switch {
+		case slices.Contains(patterns, "./..."):
+			t.Fatalf("Windows shard at step %d still runs ./...; a hang in a late package would cancel the job before go test -timeout fires", command.step)
+		case len(patterns) > 0:
+			if gitCommand.name != "" {
+				t.Fatalf("multiple Windows shards list explicit packages; want one git-heavy shard and one go-list remainder")
+			}
+			gitCommand = command
+		default:
+			if coreCommand.name != "" {
+				t.Fatalf("multiple Windows remainder shards; want one git-heavy shard and one go-list remainder")
+			}
+			coreCommand = command
 		}
 	}
-	gitCommand, hasGitCommand := commandsByShard["git"]
-	coreCommand, hasCoreCommand := commandsByShard["core"]
-	if !hasGitCommand || !hasCoreCommand {
-		t.Fatalf("Windows tests must have one invocation per shard, got %v", commandsByShard)
-	}
-	if len(goTestPackagePatterns(gitCommand)) == 0 {
-		t.Fatal("Windows git shard must test explicit package patterns")
-	}
-	if !slices.Contains(coreCommand.args, "@pkgs") {
-		t.Fatalf("Windows core shard must test the filtered @pkgs list, got %#v", coreCommand.args)
+	if gitCommand.name == "" || coreCommand.name == "" {
+		t.Fatal("Windows tests must split git-heavy packages from the remainder")
 	}
 
 	coreStep := job.Steps[coreCommand.step]
@@ -210,6 +248,20 @@ func TestCIWorkflow_WindowsShardsCoverEveryPackageWithinTheJobCap(t *testing.T) 
 	gitFromArgs := goListPackages(t, goTestPackagePatterns(gitCommand)...)
 	if !slices.Equal(gitFromArgs, gitFromFilter) {
 		t.Fatalf("git-heavy shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitFromArgs, exclude, gitFromFilter)
+	}
+
+	requiredGitHeavy := []string{
+		"github.com/kunchenguid/no-mistakes/internal/git",
+		"github.com/kunchenguid/no-mistakes/internal/branchsync",
+		"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
+	}
+	for _, pkg := range requiredGitHeavy {
+		if !slices.Contains(gitFromFilter, pkg) {
+			t.Errorf("git-heavy shard must include %s, the documented Windows wall floor", pkg)
+		}
+		if slices.Contains(coreFromFilter, pkg) {
+			t.Errorf("core shard must not include git-heavy package %s", pkg)
+		}
 	}
 
 	var union []string
@@ -238,7 +290,7 @@ func windowsGitExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {
 	t.Helper()
 	pattern := step.Env["NM_CI_WINDOWS_GIT_EXCLUDE"]
 	if pattern == "" {
-		t.Fatal("Windows core shard must define the git-heavy package filter")
+		t.Fatal("Windows core shard must set NM_CI_WINDOWS_GIT_EXCLUDE so the remainder filter is a typed contract")
 	}
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
@@ -248,24 +300,24 @@ func windowsGitExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {
 }
 
 func filterPackages(packages []string, exclude *regexp.Regexp, wantMatch bool) []string {
-	var filtered []string
+	var out []string
 	for _, pkg := range packages {
 		if exclude.MatchString(pkg) == wantMatch {
-			filtered = append(filtered, pkg)
+			out = append(out, pkg)
 		}
 	}
-	return filtered
+	return out
 }
 
 func goTestTimeout(t *testing.T, command workflowCommand) time.Duration {
 	t.Helper()
-	for index, arg := range command.args[1:] {
+	for i, arg := range command.args[1:] {
 		var value string
 		switch {
 		case strings.HasPrefix(arg, "-timeout="):
 			value = strings.TrimPrefix(arg, "-timeout=")
-		case arg == "-timeout" && index+2 < len(command.args):
-			value = command.args[index+2]
+		case arg == "-timeout" && i+2 < len(command.args):
+			value = command.args[i+2]
 		default:
 			continue
 		}

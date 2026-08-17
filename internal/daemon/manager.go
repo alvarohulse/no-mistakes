@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,12 +16,15 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/eval"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -45,13 +49,40 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
+	preflightTimeout time.Duration
+	preparePreflight func(context.Context, runner.Command, runner.Spec, runner.ExecuteOptions) (runner.Prepared, error)
+	executePreflight func(context.Context, runner.Prepared, runner.ExecuteOptions) (runner.Result, error)
+
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
-	subMu          sync.RWMutex
-	subscribers    map[string][]chan<- ipc.Event // runID → subscriber channels
-	completedRuns  map[string]bool               // runIDs whose goroutines have finished
-	completedOrder []string                      // insertion order for FIFO eviction
+	// evalCaptureMu serializes automatic eval collection. Concurrent runs
+	// finishing together would otherwise write the same per-repository object
+	// pool and the same registry file at once.
+	evalCaptureMu sync.Mutex
+
+	// subMu guards the subscriber set and the per-run state revisions. It is
+	// a plain Mutex, not an RWMutex, because revision assignment and fan-out
+	// must be one atomic step: if two concurrent state events could be
+	// enqueued out of revision order, a consumer's monotonic guard would
+	// permanently discard the older one's payload. The critical section
+	// contains no blocking operation and no I/O, so hold time is
+	// O(subscribers) memory writes.
+	subMu          sync.Mutex
+	subscribers    map[string][]*eventMailbox // runID → subscriber mailboxes
+	stateRevs      map[string]int64           // runID → monotonic state revision
+	completedRuns  map[string]bool            // runIDs whose goroutines have finished
+	completedOrder []string                   // insertion order for FIFO eviction
 }
+
+// maxSubscribersPerRun bounds the global mailbox footprint: queued bytes can
+// never exceed activeRuns × maxSubscribersPerRun × mailboxMaxBytes. Refusing
+// past the cap is an ordinary error, never unbounded growth.
+const maxSubscribersPerRun = 32
+
+const (
+	defaultPreflightTimeout = 30 * time.Second
+	preflightOutputLimit    = 8 * 1024
+)
 
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
@@ -59,13 +90,19 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
-		db:            database,
-		paths:         p,
-		steps:         stepFactory,
-		subscribers:   make(map[string][]chan<- ipc.Event),
+		executors:        make(map[string]*pipeline.Executor),
+		cancels:          make(map[string]context.CancelCauseFunc),
+		dones:            make(map[string]chan struct{}),
+		db:               database,
+		paths:            p,
+		steps:            stepFactory,
+		preflightTimeout: defaultPreflightTimeout,
+		preparePreflight: runner.Prepare,
+		executePreflight: func(ctx context.Context, prepared runner.Prepared, options runner.ExecuteOptions) (runner.Result, error) {
+			return prepared.Execute(ctx, options)
+		},
+		subscribers:   make(map[string][]*eventMailbox),
+		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
 	}
 }
@@ -77,7 +114,11 @@ type recoveredRunPlan struct {
 	gateDir string
 	cfg     *config.Config
 	agents  *pipelineAgents
-	steps   []pipeline.Step
+	// agent is retained for compatibility with focused recovery fixtures. Live
+	// recovery always populates agents so per-step routing remains authoritative.
+	agent agent.Agent
+	steps []pipeline.Step
+	skips []types.StepSkip
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -154,7 +195,14 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
-	agents, err := newPipelineAgents(ctx, cfg, exec.LookPath)
+	if err := validateResolvedPolicy(cfg, run, execSteps); err != nil {
+		return nil, err
+	}
+	resolvedSkips, err := resolvedPolicySkips(run)
+	if err != nil {
+		return nil, err
+	}
+	agents, err := newPipelineAgentsWithEvidenceRoot(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +224,26 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		cfg:     cfg,
 		agents:  agents,
 		steps:   execSteps,
+		skips:   resolvedSkips,
 	}, nil
+}
+
+func resolvedPolicySkips(run *db.Run) ([]types.StepSkip, error) {
+	if run == nil {
+		return nil, fmt.Errorf("resolved policy run is nil")
+	}
+	policy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+	if err != nil || legacy {
+		return nil, err
+	}
+	normalizeResolvedPolicyForComparison(policy)
+	var skips []types.StepSkip
+	for _, step := range policy.Steps {
+		if step.Status == resolvedPolicyStepSkipped {
+			skips = append(skips, types.StepSkip{Step: step.Name, Source: step.SkipSource})
+		}
+	}
+	return skips, nil
 }
 
 func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.Agent) error {
@@ -191,7 +258,7 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 		if session.Agent == "" || session.SessionID == "" {
 			return fmt.Errorf("recovered run has incomplete session metadata")
 		}
-		if !agent.SupportsSessionProvider(ag, session.Agent) {
+		if session.Role == string(pipeline.SessionRoleFixer) && !agent.SupportsSessionProvider(ag, session.Agent) {
 			return fmt.Errorf("session provider %q is no longer configured", session.Agent)
 		}
 	}
@@ -209,6 +276,41 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	override := resolveGlobalOverride(globalInput, repo)
 	if err := validateRecoveredGlobalOverride(run.ConfigSources, override); err != nil {
 		return nil, err
+	}
+	if run.ResolvedPolicy != nil || run.ResolvedPolicyDigest != nil {
+		resolvedPolicy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+		if err != nil {
+			return nil, err
+		} else if legacy {
+			return nil, fmt.Errorf("resolved policy recovery state is inconsistent")
+		}
+		cfg, err := loadRecordedRunConfig(ctx, run, workDir, override)
+		if err != nil {
+			return nil, err
+		}
+		cfg.TrustedConfigSHA = resolvedPolicy.TrustedConfigSHA
+		if cfg.Eval.CaptureProvenance {
+			replayConfig, err := config.MarshalEvalReplayConfig(cfg)
+			if err != nil {
+				return nil, err
+			}
+			cfg.ReplayConfigJSON = replayConfig
+			cfg.CaptureEvalProvenance = true
+		}
+		if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+			return nil, err
+		}
+		if resolvedPolicy.Runner.SchemaVersion > 0 {
+			resolvedRunner, err := runner.ResolveDefault(ctx, cfg.Runner)
+			if err != nil {
+				return nil, fmt.Errorf("resolve recovered default runner: %w", err)
+			}
+			cfg.ResolvedRunner = &resolvedRunner
+		}
+		if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
+			return nil, err
+		}
+		return cfg, nil
 	}
 	if hasConfigSourceKind(run.ConfigSources, db.ConfigSourceGlobalOverride) {
 		cfg, err := loadRecordedRunConfig(ctx, run, workDir, override)
@@ -250,14 +352,23 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	trustedRepoInput := loadTrustedRepoConfigInput(ctx, workDir, trustedSHA, run.ID)
 	effectiveRepoCfg := config.EffectiveRepoConfig(pushedRepoInput.Config, repoConfigFromInput(trustedRepoInput), trustedRepoInput != nil && trustedRepoInput.Config.AllowRepoCommands)
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		return nil, err
+	}
+	cfg.TrustedConfigSHA = trustedSHA
+	if globalCfg.Eval.CaptureProvenance {
+		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
-func newPipelineAgent(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (agent.Agent, error) {
-	return newPipelineAgents(ctx, cfg, lookPath)
+func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error)) (agent.Agent, error) {
+	return newPipelineAgentsWithEvidenceRoot(ctx, cfg, evidenceRoot, lookPath)
 }
 
 type pipelineAgents struct {
@@ -313,12 +424,38 @@ func (a *pipelineAgents) NeutralizesGateInstructions() bool {
 }
 
 func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (*pipelineAgents, error) {
+	return newPipelineAgentsWithEvidenceRoot(ctx, cfg, "", lookPath)
+}
+
+func newPipelineAgentsWithEvidenceRoot(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error)) (*pipelineAgents, error) {
+	if !steps.IsDemoMode() {
+		if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
+			return nil, err
+		}
+	}
+	return newResolvedPipelineAgentsWithEvidenceRoot(cfg, evidenceRoot)
+}
+
+// newResolvedPipelineAgentsWithEvidenceRoot constructs the concrete routes
+// selected by pre-run policy resolution. It must not probe or re-resolve them:
+// doing so after run insertion would make persisted policy differ from the
+// agents that actually execute.
+func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot string) (*pipelineAgents, error) {
 	if steps.IsDemoMode() {
 		noop := agent.NewNoop()
 		return &pipelineAgents{routes: pipeline.AgentRoutes{Default: noop}, owned: []agent.Agent{noop}}, nil
 	}
-	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
-		return nil, err
+	if cfg == nil {
+		return nil, fmt.Errorf("resolved pipeline config is nil")
+	}
+	if len(cfg.Agents) == 0 {
+		return nil, fmt.Errorf("resolved pipeline agent route is empty")
+	}
+	if cfg.Agent == "" || cfg.Agent == types.AgentAuto {
+		return nil, fmt.Errorf("resolved pipeline agent route contains non-concrete default %q", cfg.Agent)
+	}
+	if cfg.Agent != cfg.Agents[0] {
+		return nil, fmt.Errorf("resolved pipeline default agent does not match route order")
 	}
 	routes := &pipelineAgents{routes: pipeline.AgentRoutes{ByStep: make(map[types.StepName]agent.Agent)}}
 	build := func(names []types.AgentName, model config.ModelRoute) (agent.Agent, error) {
@@ -337,7 +474,7 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 				}
 				return nil, fmt.Errorf("create agent %s: %w", name, err)
 			}
-			created = append(created, agent.WithSteering(next))
+			created = append(created, agent.WithSteering(next, evidenceRoot))
 		}
 		routed := agent.NewFallback(created)
 		if cfg.DisableProjectSettings {
@@ -381,13 +518,13 @@ func newPipelineAgents(ctx context.Context, cfg *config.Config, lookPath func(st
 		}
 		routes.routes.ByStep[step] = routed
 	}
-	if len(cfg.ReviewAdversaryAgents) > 0 {
-		adversary, routeErr := build(cfg.ReviewAdversaryAgents, cfg.ReviewAdversaryModel)
+	for i, candidate := range cfg.ReviewCandidates {
+		routed, routeErr := build([]types.AgentName{candidate.Agent}, candidate.Model)
 		if routeErr != nil {
 			_ = routes.Close()
-			return nil, fmt.Errorf("create review adversary route: %w", routeErr)
+			return nil, fmt.Errorf("create review candidate %d route: %w", i+1, routeErr)
 		}
-		routes.routes.ReviewAdversary = adversary
+		routes.routes.ReviewCandidates = append(routes.routes.ReviewCandidates, routed)
 	}
 	return routes, nil
 }
@@ -419,12 +556,31 @@ func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
+	agents := plan.agents
+	if agents == nil && plan.agent != nil {
+		agents = &pipelineAgents{
+			routes: pipeline.AgentRoutes{Default: plan.agent},
+			owned:  []agent.Agent{plan.agent},
+		}
+	}
+	if agents == nil {
+		slog.Error("recovered run has no configured agent", "run_id", plan.run.ID)
+		return
+	}
 	if m.shuttingDown.Load() {
-		_ = plan.agents.Close()
+		_ = agents.Close()
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutorWithAgentRoutes(m.db, m.paths, plan.cfg, plan.agents.routes, plan.steps, m.broadcast)
+	executor := pipeline.NewExecutorWithAgentRoutes(m.db, m.paths, plan.cfg, agents.routes, plan.steps, m.broadcast)
+	executor.SetStepSkips(plan.skips)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), plan.cfg, runID)
+		}()
+	})
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -447,11 +603,18 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			cancel(nil)
-			_ = plan.agents.Close()
+			_ = agents.Close()
+			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.closeSubscribers(plan.run.ID)
+			m.sweepRunWorktreeProcesses(plan.workDir)
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
 			}
+			// A recovered run is a finished run too. This is the second of the
+			// two completion boundaries, and leaving it out is what let a run
+			// resumed after a daemon restart keep its empty evidence directory
+			// until some later run or restart happened to sweep it.
+			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -485,6 +648,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}
 		addRunPerformanceSummary(m.db, plan.run.ID, fields)
 		telemetry.Track("run", fields)
+		// Recovery is the second run-completion path. It must feed the same
+		// self-populating eval corpus as a run that never lost its daemon.
+		m.autoCaptureEvalCase(runCtx, plan.cfg, plan.run.ID)
 	}()
 }
 
@@ -524,58 +690,163 @@ func stepModelRoutesEqual(a, b map[types.StepName]config.ModelRoute) bool {
 	return true
 }
 
-func reviewAdversaryRoutesEqual(a, b config.ReviewRaw) bool {
-	return agentListsEqual(a.AdversaryAgents, b.AdversaryAgents) && a.AdversaryModel == b.AdversaryModel
+func reviewCandidateRoutesEqual(a, b config.ReviewRaw) bool {
+	if len(a.Candidates) != len(b.Candidates) {
+		return false
+	}
+	for i := range a.Candidates {
+		if a.Candidates[i] != b.Candidates[i] {
+			return false
+		}
+	}
+	return true
 }
 
-// Subscribe registers a channel to receive events for a run.
-// Returns the channel and an unsubscribe function.
-// If the run has already completed, the returned channel is immediately closed.
-func (m *RunManager) Subscribe(runID string) (<-chan ipc.Event, func()) {
-	ch := make(chan ipc.Event, 64)
+// Subscribe registers a subscriber mailbox for a run.
+//
+// The returned subscription always opens with a stream-gap frame, so a
+// subscriber's first action is always one authoritative read. That makes
+// attach and reconnect converge without each consumer needing its own
+// subscribe-then-reconcile ordering rule. A run that has already completed
+// yields that one gap and then finishes.
+func (m *RunManager) Subscribe(runID string) (*Subscription, error) {
 	m.subMu.Lock()
+	defer m.subMu.Unlock()
+
+	mb := newEventMailbox(runID, m.stateRevs[runID])
 	if m.completedRuns[runID] {
-		m.subMu.Unlock()
-		close(ch)
-		return ch, func() {}
+		mb.close()
+		return &Subscription{mb: mb, unsub: func() {}}, nil
 	}
-	m.subscribers[runID] = append(m.subscribers[runID], ch)
-	m.subMu.Unlock()
+	if len(m.subscribers[runID]) >= maxSubscribersPerRun {
+		return nil, fmt.Errorf("run %s already has the maximum of %d event subscribers", runID, maxSubscribersPerRun)
+	}
+	m.subscribers[runID] = append(m.subscribers[runID], mb)
 
+	var once sync.Once
 	unsub := func() {
-		m.subMu.Lock()
-		defer m.subMu.Unlock()
-		subs := m.subscribers[runID]
-		for i, s := range subs {
-			if s == ch {
-				m.subscribers[runID] = append(subs[:i], subs[i+1:]...)
-				break
+		once.Do(func() {
+			m.subMu.Lock()
+			subs := m.subscribers[runID]
+			for i, s := range subs {
+				if s == mb {
+					m.subscribers[runID] = append(subs[:i], subs[i+1:]...)
+					break
+				}
 			}
-		}
+			if len(m.subscribers[runID]) == 0 {
+				delete(m.subscribers, runID)
+			}
+			m.subMu.Unlock()
+			mb.release()
+		})
 	}
-	return ch, unsub
+	return &Subscription{mb: mb, unsub: unsub}, nil
 }
 
-// broadcast sends an event to all subscribers of the event's run.
+// Subscription is one subscriber's view of a run's event stream. It owns no
+// goroutine: the caller drives it with Next.
+type Subscription struct {
+	mb    *eventMailbox
+	unsub func()
+}
+
+// Next blocks until the next frame is available and returns it. ok is false
+// once the stream is finished or ctx is done.
+func (s *Subscription) Next(ctx context.Context) (ipc.Event, bool) { return s.mb.next(ctx) }
+
+// Close unsubscribes and releases every retained payload. It is idempotent.
+func (s *Subscription) Close() { s.unsub() }
+
+// StateRev returns the current monotonic state revision for a run.
+//
+// A caller serving an authoritative snapshot must sample this BEFORE reading
+// the database. Every producer writes state and only then broadcasts, so a
+// revision sampled first is never newer than the snapshot that follows it:
+// every event at or below it is already reflected in that read, and every
+// event above it still reaches the subscriber and still applies on top.
+func (m *RunManager) StateRev(runID string) int64 {
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	return m.stateRevs[runID]
+}
+
+// broadcast stamps a state revision and publishes an event to every subscriber
+// of the event's run. It performs no blocking channel operation and no I/O, so
+// the executor can never be stalled by a slow or dead subscriber.
 func (m *RunManager) broadcast(event ipc.Event) {
-	m.subMu.RLock()
-	defer m.subMu.RUnlock()
-	for _, ch := range m.subscribers[event.RunID] {
-		select {
-		case ch <- event:
-		default:
-			slog.Debug("dropped event for slow subscriber", "run_id", event.RunID, "type", event.Type)
-		}
+	m.subMu.Lock()
+	defer m.subMu.Unlock()
+	if ipc.ClassOf(event.Type) == ipc.ClassState {
+		m.stateRevs[event.RunID]++
+		event.StateRev = m.stateRevs[event.RunID]
+	}
+	for _, mb := range m.subscribers[event.RunID] {
+		mb.publish(event)
 	}
 }
 
-// closeSubscribers closes all subscriber channels for a run and marks it
-// as completed so future Subscribe calls return an immediately-closed channel.
+// sweepRunWorktreeProcesses terminates whatever is still standing in a
+// finished run's worktree. Cancelling the run context tears down each step's
+// process group, but a descendant that called setsid(2) is no longer in any
+// group the pipeline can name - only the worktree it is standing in still
+// identifies it (see internal/procreap).
+//
+// It runs before the worktree directory is removed, because a process that
+// outlives its worktree holds the deleted directory open through its cwd and
+// can no longer be attributed to any run. No age floor applies: the caller
+// owns this run and has already observed its execution return, so nothing
+// standing in it can still be legitimate work.
+func (m *RunManager) sweepRunWorktreeProcesses(wtDir string) {
+	procreap.SweepAndLog(procreap.Options{
+		WorktreesRoot: m.paths.WorktreesDir(),
+		Scope:         wtDir,
+	}, "run_cleanup")
+}
+
+// cleanupRunEvidence tidies up after one finished run, then bounds the whole
+// evidence directory.
+//
+// The per-run half is deliberately os.Remove and not os.RemoveAll: it succeeds
+// only when the directory is empty, so a run that produced no artifact leaves
+// nothing behind while a run that did keeps every file. The test step creates
+// the directory before the agent decides whether it has evidence to write, so
+// without this nearly every run left a permanent empty directory - that alone
+// was the overwhelming majority of the accumulation this reaper exists to stop.
+//
+// The sweep that follows keeps a long-lived daemon converging on the retention
+// budget instead of waiting for a restart. Both halves are best effort: losing
+// a cleanup pass costs disk, while failing a finished run over it would cost
+// the user their result.
+func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
+	configured := ""
+	policy := evidenceReapPolicy{
+		Retention: config.DefaultEvidenceRetention,
+		MaxRuns:   config.DefaultEvidenceMaxRuns,
+	}
+	if cfg != nil {
+		configured = cfg.Test.Evidence.LocalRoot
+		policy = evidenceReapPolicy{
+			Retention: cfg.Test.Evidence.Retention,
+			MaxRuns:   cfg.Test.Evidence.MaxRuns,
+		}
+	}
+	root := m.paths.EvidenceRoot(configured)
+	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
+		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
+	}
+	reapEvidence(m.db, root, policy, time.Now())
+}
+
+// closeSubscribers soft-closes every subscriber for a run and marks the run
+// completed so future Subscribe calls return a gapped, immediately-finished
+// subscription. Soft close still drains queued frames and any pending gap, so
+// a coalesced terminal transition cannot be discarded by completion.
 func (m *RunManager) closeSubscribers(runID string) {
 	m.subMu.Lock()
 	defer m.subMu.Unlock()
-	for _, ch := range m.subscribers[runID] {
-		close(ch)
+	for _, mb := range m.subscribers[runID] {
+		mb.close()
 	}
 	delete(m.subscribers, runID)
 	m.completedRuns[runID] = true
@@ -584,6 +855,7 @@ func (m *RunManager) closeSubscribers(runID string) {
 		half := len(m.completedOrder) / 2
 		for _, id := range m.completedOrder[:half] {
 			delete(m.completedRuns, id)
+			delete(m.stateRevs, id)
 		}
 		m.completedOrder = m.completedOrder[half:]
 	}
@@ -718,19 +990,19 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	return m.startRunWithMetadata(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote, params.Metadata, params.RefreshStrategy, params.StackedOn)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch. An
-// optional intent and PR note are stamped onto the new run.
+// HandleRerun creates a new run for the latest gate head on a branch. Optional
+// intent and PR-note values are stamped onto the new run.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.handleRerun(ctx, repoID, branch, skipSteps, intent, prNote, nil, refreshStrategy, stackedOn)
+	return m.handleRerun(ctx, repoID, branch, "", skipSteps, intent, prNote, nil, refreshStrategy, stackedOn)
 }
 
 // HandleRerunWithMetadata creates a rerun while distinguishing absent metadata
 // (inherit) from an explicitly supplied empty string (clear).
-func (m *RunManager) HandleRerunWithMetadata(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.handleRerun(ctx, repoID, branch, skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
+func (m *RunManager) HandleRerunWithMetadata(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.handleRerun(ctx, repoID, branch, previousRunID, skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
 }
 
-func (m *RunManager) handleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+func (m *RunManager) handleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -767,14 +1039,24 @@ func (m *RunManager) handleRerun(ctx context.Context, repoID, branch string, ski
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
+	selectedRun := latestForBranch
+	if previousRunID != "" {
+		selectedRun, err = m.db.GetRun(previousRunID)
+		if err != nil {
+			return "", fmt.Errorf("get selected run: %w", err)
+		}
+		if selectedRun == nil || selectedRun.RepoID != repoID || selectedRun.Branch != branch {
+			return "", fmt.Errorf("selected run %s does not belong to repo %s branch %s", previousRunID, repoID, branch)
+		}
+	}
 	if strings.TrimSpace(stackedOn) == "" {
-		stackedOn = latestForBranch.StackedOn
+		stackedOn = selectedRun.StackedOn
 	}
 	if strings.TrimSpace(string(refreshStrategy)) == "" {
-		refreshStrategy = latestForBranch.RefreshStrategy
+		refreshStrategy = selectedRun.RefreshStrategy
 	}
-	if metadata == nil && latestForBranch.Metadata != nil {
-		inherited := *latestForBranch.Metadata
+	if metadata == nil && selectedRun.Metadata != nil {
+		inherited := *selectedRun.Metadata
 		metadata = &inherited
 	}
 
@@ -783,7 +1065,20 @@ func (m *RunManager) handleRerun(ctx context.Context, repoID, branch string, ski
 		baseSHA = matchingHead.BaseSHA
 	}
 
-	return m.startRunWithMetadata(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
+	intentSource := db.RunIntentSourceAgent
+	if strings.TrimSpace(intent) == "" {
+		intentSource = ""
+		if selectedRun.Intent != nil && selectedRun.IntentSource != nil &&
+			db.IsAuthoritativeRunIntentSource(*selectedRun.IntentSource) {
+			// Do not normalize or regenerate this value. The selected run's
+			// persisted bytes are the canonical acceptance criteria for the
+			// replacement run.
+			intent = *selectedRun.Intent
+			intentSource = db.RunIntentSourceRerun
+		}
+	}
+
+	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, prNote, metadata, refreshStrategy, stackedOn)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -798,6 +1093,18 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 		return git.FetchRemoteBranch(ctx, workDir, "origin", repo.DefaultBranch)
 	}
 	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
+}
+
+// fetchRunDefaultBranchToPrivateRef pins one resolution without updating
+// FETCH_HEAD or the shared origin/<default> ref. Starts for different branches
+// and config-explain requests can run concurrently, including across
+// processes, so every caller owns a unique ref until its run finishes.
+func fetchRunDefaultBranchToPrivateRef(ctx context.Context, gateDir string, repo *db.Repo, privateRef string) error {
+	originURL, err := git.GetRemoteURL(ctx, gateDir, "origin")
+	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
+		return git.FetchRemoteBranchToPrivateRef(ctx, gateDir, "origin", repo.DefaultBranch, privateRef)
+	}
+	return git.FetchRemoteBranchToPrivateRef(ctx, gateDir, repo.UpstreamURL, repo.DefaultBranch, privateRef)
 }
 
 func resolveRefreshStrategy(explicit, configured types.RefreshStrategy) types.RefreshStrategy {
@@ -817,6 +1124,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 }
 
 func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prNote, metadata, refreshStrategy, stackedOn)
+}
+
+// startRunWithMetadataAndIntentSource is the common run-creation path. source is empty
+// when no intent is supplied, RunIntentSourceAgent for a new explicit
+// override, and RunIntentSourceRerun for inherited explicit intent.
+func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -848,6 +1162,7 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 			return "", fmt.Errorf("invalid stacked-on branch: %w", err)
 		}
 	}
+	runOptions := newRunOptions(intent, source, prNote, metadata, refreshStrategy, stackedOn)
 
 	// Serialize per repo+branch to prevent two concurrent pushes from both
 	// passing cancelActiveRuns and creating duplicate pipelines.
@@ -867,6 +1182,28 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 	} else {
 		repo = refreshed
 	}
+	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipSteps, refreshStrategy)
+	if err != nil {
+		trackStartFailure("resolve_policy")
+		var routeErr *agentRouteResolutionError
+		if errors.As(err, &routeErr) {
+			if _, recordErr := m.db.InsertFailedRunWithOptions(repo.ID, branch, headSHA, baseSHA, runOptions, err.Error()); recordErr != nil {
+				return "", fmt.Errorf("%w (record failed launch: %v)", err, recordErr)
+			}
+		}
+		return "", err
+	}
+	policyRefOwnedByRun := false
+	defer func() {
+		if !policyRefOwnedByRun {
+			resolved.releaseTrustedRef(context.Background())
+		}
+	}()
+	if err := m.executeResolvedPreflight(ctx, resolved, repo.WorkingPath); err != nil {
+		trackStartFailure("preflight")
+		return "", err
+	}
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -875,69 +1212,49 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 	// intent (which falls back to transcript inference), the note has no
 	// fallback, so writing it in the same insert avoids ever creating a run that
 	// is missing its guaranteed PR-note content.
-	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, db.RunOptions{
-		PRNote:          strings.TrimSpace(prNote),
-		Metadata:        metadata,
-		RefreshStrategy: refreshStrategy,
-		StackedOn:       stackedOn,
-	})
+	runOptions.RefreshStrategy = resolved.RefreshStrategy
+	run, err := m.db.InsertRunWithOptions(repo.ID, branch, resolved.HeadSHA, baseSHA, runOptions)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
-
-	// Stamp an agent-supplied intent onto the run before the pipeline starts,
-	// so the intent step finds it already present and skips transcript-based
-	// inference. A persist failure is non-fatal: the intent step would simply
-	// fall back to inference.
-	if trimmed := strings.TrimSpace(intent); trimmed != "" {
-		if err := m.db.UpdateRunIntent(run.ID, db.RunIntent{Summary: trimmed, Source: db.RunIntentSourceAgent, Score: 1}); err != nil {
-			slog.Warn("failed to persist agent-supplied intent", "run_id", run.ID, "error", err)
-		} else {
-			run.Intent = &trimmed
-			source := db.RunIntentSourceAgent
-			run.IntentSource = &source
-			score := 1.0
-			run.IntentScore = &score
-		}
+	if err := resolved.bindTrustedRefToRun(ctx, run.ID); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_trusted_ref")
+		return "", err
 	}
 
-	// Create worktree from the gate bare repo.
+	if err := m.db.UpdateRunConfigSources(run.ID, resolved.Sources); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_config_sources")
+		return "", err
+	}
+	run.ConfigSources = resolved.Sources
+	if err := m.db.UpdateRunResolvedAgentRouting(run.ID, resolved.ResolvedRouting); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_agent_routing")
+		return "", err
+	}
+	run.ResolvedAgentRouting = &resolved.ResolvedRouting
+	if err := m.db.UpdateRunResolvedPolicy(run.ID, resolved.ResolvedPolicy, resolved.ResolvedPolicyDigest); err != nil {
+		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("persist_resolved_policy")
+		return "", err
+	}
+	run.ResolvedPolicy = &resolved.ResolvedPolicy
+	run.ResolvedPolicyDigest = &resolved.ResolvedPolicyDigest
+	run.RefreshStrategy = resolved.RefreshStrategy
+	run.StackedOn = stackedOn
+
+	// Create the worktree only after the complete policy has resolved and been
+	// persisted. From this point, setup cleanup owns every pre-launch failure.
 	gateDir := m.paths.RepoDir(repo.ID)
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+	if err := git.WorktreeAdd(ctx, gateDir, wtDir, resolved.HeadSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
-		trackStartFailure("configure_worktree_identity")
-		return "", fmt.Errorf("configure worktree git identity: %w", err)
-	}
-	// Fetch the trusted default branch and resolve it to an exact commit SHA
-	// before any read. Reading the trusted config at this pinned SHA (rather
-	// than the origin/<defaultBranch> remote-tracking ref) is what makes a
-	// fetch failure fail closed: if the fetch errors or the ref does not
-	// resolve, trustedSHA stays empty, loadTrustedRepoConfig returns nil, and
-	// EffectiveRepoConfig drops the pushed branch's commands/agent routes. Without
-	// the resolve, a stale origin/<defaultBranch> left in the shared bare
-	// repo by a previous run could serve a trusted copy that the live default
-	// branch has already removed - silently running stale shell.
-	var trustedSHA string
-	if repo.DefaultBranch != "" {
-		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
-		if fetchErr != nil {
-			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent routes from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
-			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else {
-			trustedSHA = sha
-		}
-	}
-
-	// Track whether the background goroutine takes ownership of worktree cleanup.
-	// If setup fails before the goroutine launches, we must clean up here.
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
@@ -946,105 +1263,21 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 			}
 		}
 	}()
+	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
+		trackStartFailure("configure_worktree_identity")
+		return "", fmt.Errorf("configure worktree git identity: %w", err)
+	}
 
-	// A malformed global config (including a malformed overrides section) is
-	// recorded on the run rather than refusing run creation: the run row plus
-	// its error is the only feedback a push-triggered pipeline can give, and
-	// the deferred cleanup above still removes the setup worktree.
-	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
+	cfg := resolved.Config
+	execSteps := resolved.Steps
+	agents, err := newResolvedPipelineAgentsWithEvidenceRoot(cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot))
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_global_config")
-		return "", fmt.Errorf("load global config: %w", err)
-	}
-	globalCfg := globalInput.Config
-	globalOverride := resolveGlobalOverride(globalInput, repo)
-	pushedRepoInput, err := loadPushedRepoConfigInput(ctx, wtDir, headSHA)
-	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
-		trackStartFailure("load_repo_config")
-		return "", fmt.Errorf("load repo config: %w", err)
-	}
-	repoCfg := pushedRepoInput.Config
-	// SECURITY: load the code-executing selection fields (commands.*,
-	// hooks.post_worktree, the
-	// run-wide agent, per-step agent/model routes, and the Review adversary) from the trusted default-branch
-	// copy of .no-mistakes.yaml rather
-	// than the pushed SHA. The worktree is checked out at headSHA (the
-	// contributor's branch), so reading repoCfg above would honor a
-	// contributor's commands/hooks/agent routes and let any pushed SHA run arbitrary shell
-	// (sh -c) or pick the launched agent (incl. acp: targets) on the daemon
-	// host with the maintainer's env (GH_TOKEN, SSH agent, ...).
-	// EffectiveRepoConfig replaces commands + hooks + agent routes with the trusted
-	// default-branch values unless the maintainer has explicitly opted in.
-	//
-	// allow_repo_commands is itself read ONLY from the trusted copy: a
-	// contributor cannot self-enable it from the pushed branch. A readable
-	// trusted tree with no config leaves the opt-in false and forces
-	// commands/hooks/agent routes empty. An unreadable trusted tree aborts below.
-	// SECURITY: a trusted-config fetch failure must abort, not silently disable
-	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("trusted_config_unreadable")
+		trackStartFailure("create_agents")
 		return "", err
 	}
-	trustedRepoInput := loadTrustedRepoConfigInput(ctx, wtDir, trustedSHA, run.ID)
-	var trustedRepoCfg *config.RepoConfig
-	if trustedRepoInput != nil {
-		trustedRepoCfg = trustedRepoInput.Config
-	}
-	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effectiveRepoCfg, configSources := effectiveRepoConfigAndSources(globalInput, pushedRepoInput, trustedRepoInput, globalOverride)
-	if globalOverride != nil {
-		slog.Warn("global config override is active: honoring machine-local repository configuration", "run_id", run.ID, "override", globalOverride.Key)
-	}
-	if allowRepoCommands {
-		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "run_id", run.ID, "branch", branch)
-	} else if repoCfg.Commands != effectiveRepoCfg.Commands || repoCfg.Hooks != effectiveRepoCfg.Hooks || repoCfg.Agent != effectiveRepoCfg.Agent || !agentListsEqual(repoCfg.Agents, effectiveRepoCfg.Agents) || !stepAgentRoutesEqual(repoCfg.ConfiguredStepAgents(), effectiveRepoCfg.ConfiguredStepAgents()) || !stepModelRoutesEqual(repoCfg.ConfiguredStepModels(), effectiveRepoCfg.ConfiguredStepModels()) || !reviewAdversaryRoutesEqual(repoCfg.Review, effectiveRepoCfg.Review) {
-		// Surface the silent override so a maintainer who shipped a commands.*,
-		// hooks.*, or agent change on a feature branch understands why it did not run.
-		// This is not an error: it is the secure default in action.
-		slog.Info("repo commands/hooks/agent/model routes loaded from default branch, not pushed branch", "run_id", run.ID, "branch", branch, "default_branch", repo.DefaultBranch)
-	}
-	cfg := config.Merge(globalCfg, effectiveRepoCfg)
-	if err := m.db.UpdateRunConfigSources(run.ID, configSources); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_config_sources")
-		return "", err
-	}
-	run.ConfigSources = configSources
-	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
-	if err := m.db.UpdateRunRefreshSelection(run.ID, resolvedRefreshStrategy, stackedOn); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_refresh_selection")
-		return "", err
-	}
-	run.RefreshStrategy = resolvedRefreshStrategy
-	run.StackedOn = stackedOn
 
-	agents, err := newPipelineAgents(ctx, cfg, exec.LookPath)
-	if err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("resolve_agent")
-		return "", err
-	}
-	resolvedRouting, err := marshalResolvedAgentRouting(cfg, steps.IsDemoMode())
-	if err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("resolve_agent_routing")
-		return "", err
-	}
-	if err := m.db.UpdateRunResolvedAgentRouting(run.ID, resolvedRouting); err != nil {
-		_ = agents.Close()
-		m.db.UpdateRunError(run.ID, err.Error())
-		trackStartFailure("persist_agent_routing")
-		return "", err
-	}
-	run.ResolvedAgentRouting = &resolvedRouting
-
-	execSteps := m.steps()
 	telemetry.Track("run", telemetry.Fields{
 		"action":      "started",
 		"trigger":     trigger,
@@ -1057,7 +1290,14 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutorWithAgentRoutes(m.db, m.paths, cfg, agents.routes, execSteps, m.broadcast)
-	executor.SetSkippedSteps(skipSteps)
+	executor.SetStepSkips(resolved.Skips)
+	executor.SetOnPRMerged(func(_ context.Context, runID string) {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relabelEvalRun(context.Background(), cfg, runID)
+		}()
+	})
 
 	// Track executor.
 	done := make(chan struct{})
@@ -1069,6 +1309,7 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 
 	// Background goroutine now owns worktree cleanup.
 	bgOwnsWorktree = true
+	policyRefOwnedByRun = true
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1103,12 +1344,15 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 			}
 			cancel(nil)
 			_ = agents.Close()
+			resolved.releaseTrustedRef(context.Background())
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
+			m.sweepRunWorktreeProcesses(wtDir)
 			// Clean up worktree.
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
 			}
+			m.cleanupRunEvidence(cfg, run.ID)
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1155,9 +1399,126 @@ func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, br
 			telemetry.Track("run", fields)
 			slog.Info("pipeline completed", "run_id", run.ID)
 		}
+		// Collection runs here, on the finished run, because a case is only
+		// honest once the human gate decision it labels is recorded - which is
+		// exactly what reaching this point means. It is last on purpose: the
+		// pipeline's own outcome is already decided and reported above, so
+		// nothing below can change it.
+		m.autoCaptureEvalCase(runCtx, cfg, run.ID)
 	}()
 
 	return run.ID, nil
+}
+
+func newRunOptions(intent, source, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) db.RunOptions {
+	storedIntent := intent
+	if source != db.RunIntentSourceRerun {
+		storedIntent = strings.TrimSpace(storedIntent)
+	}
+	var runIntent *db.RunIntent
+	if strings.TrimSpace(storedIntent) != "" {
+		if source == "" {
+			source = db.RunIntentSourceAgent
+		}
+		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
+	}
+	return db.RunOptions{
+		PRNote:          strings.TrimSpace(prNote),
+		Metadata:        metadata,
+		RefreshStrategy: refreshStrategy,
+		StackedOn:       stackedOn,
+		Intent:          runIntent,
+	}
+}
+
+// evalAutoCaptureTimeout bounds one automatic collection pass. Collection is
+// local Git and SQLite work whose slowest step is seeding a repository's object
+// pool the first time it is seen, so this is generous rather than tight; the
+// pass also stops early with the run context, which Shutdown cancels.
+const evalAutoCaptureTimeout = 3 * time.Minute
+
+// autoCaptureEvalCase freezes a finished run's review passes into the local
+// eval corpus.
+//
+// Everything here is subordinate to the run: collection can be slow, can fail,
+// can find nothing, and none of that may reach the pipeline. So it swallows its
+// own panic rather than letting the run goroutine's recover mark a completed
+// run as failed, it bounds its own time, and it reports failure only to the
+// log. Runs are serialized against each other because they share one object
+// pool and one registry file; the wait is harmless, since every run holding
+// this lock has already finished its pipeline.
+//
+// A run with nothing to collect is the common case (no review step, a skipped
+// gate, rounds recorded before provenance was on), so that outcome is DEBUG.
+// Only a genuine capture fault is worth a warning.
+func (m *RunManager) autoCaptureEvalCase(ctx context.Context, cfg *config.Config, runID string) {
+	if cfg == nil || !cfg.Eval.AutoCapture || !cfg.Eval.CaptureProvenance {
+		return
+	}
+	// A cancelled or aborted run has nothing worth freezing and every Git call
+	// below would fail on the dead context anyway. Leaving early keeps that
+	// ordinary outcome out of the warning log.
+	if ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic while collecting eval case", "run_id", runID, "panic", r)
+		}
+	}()
+	m.evalCaptureMu.Lock()
+	defer m.evalCaptureMu.Unlock()
+
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, evalAutoCaptureTimeout)
+	defer cancel()
+
+	result, err := eval.AutoCapture(ctx, m.paths, m.db, runID, cfg.Eval.MaxCases)
+	switch {
+	case err != nil:
+		slog.Warn("failed to collect eval case", "run_id", runID, "error", err)
+	case result.Skipped:
+		slog.Debug("run has no eval case to collect", "run_id", runID, "reason", result.Reason)
+	default:
+		slog.Info("collected eval case", "run_id", runID, "cases", result.Captured, "pruned", result.Pruned)
+	}
+}
+
+func (m *RunManager) relabelEvalRun(ctx context.Context, cfg *config.Config, runID string) {
+	// Best-effort and off the CI step's call stack: a merge must not stall
+	// the pipeline for eval I/O. The caller holds m.wg for daemon drain.
+	if m == nil || m.paths == nil || m.db == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic while relabeling eval case", "run_id", runID, "panic", r)
+		}
+	}()
+	m.evalCaptureMu.Lock()
+	defer m.evalCaptureMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, evalAutoCaptureTimeout)
+	defer cancel()
+	store, err := eval.Open(m.paths.EvalDir())
+	if err != nil {
+		slog.Warn("failed to open eval store for relabel", "run_id", runID, "error", err)
+		return
+	}
+	defer store.Close()
+	if cfg != nil {
+		store.SetDiversifiedSize(cfg.Eval.DiversifiedSize)
+	}
+	if _, err := eval.RelabelRun(ctx, store, m.paths, m.db, runID); err != nil {
+		slog.Warn("failed to relabel eval case after merge", "run_id", runID, "error", err)
+	}
 }
 
 // addRunPerformanceSummary attaches the bounded per-run performance rollup

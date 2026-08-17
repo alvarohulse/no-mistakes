@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -56,6 +57,36 @@ func TestUpdateRunResolvedAgentRoutingPersistsPrivateSnapshot(t *testing.T) {
 	}
 	if err := d.UpdateRunResolvedAgentRouting(run.ID, ""); err == nil {
 		t.Fatal("empty resolved routing snapshot was accepted")
+	}
+}
+
+func TestUpdateRunResolvedPolicyPersistsSnapshotAndDigest(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/resolved-policy", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ResolvedPolicy == nil || *run.ResolvedPolicy != "" || run.ResolvedPolicyDigest == nil || *run.ResolvedPolicyDigest != "" {
+		t.Fatalf("new run policy marker = policy %v digest %v, want explicit empty markers", run.ResolvedPolicy, run.ResolvedPolicyDigest)
+	}
+	const snapshot = `{"version":1}`
+	const digest = "resolved-policy-digest"
+	if err := d.UpdateRunResolvedPolicy(run.ID, snapshot, digest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ResolvedPolicy == nil || *got.ResolvedPolicy != snapshot || got.ResolvedPolicyDigest == nil || *got.ResolvedPolicyDigest != digest {
+		t.Fatalf("resolved policy = policy %v digest %v", got.ResolvedPolicy, got.ResolvedPolicyDigest)
+	}
+	if err := d.UpdateRunResolvedPolicy(run.ID, "", digest); err == nil {
+		t.Fatal("empty resolved policy snapshot was accepted")
+	}
+	if err := d.UpdateRunResolvedPolicy(run.ID, snapshot, ""); err == nil {
+		t.Fatal("empty resolved policy digest was accepted")
 	}
 }
 
@@ -178,6 +209,95 @@ func TestInsertRunWithOptions_PersistsRefreshSelection(t *testing.T) {
 	}
 }
 
+func TestRunInsertAndUpdatePreserveBuildIdentity(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("update run: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.NoMistakesVersion == nil || *got.NoMistakesVersion != buildinfo.CurrentVersion() {
+		t.Fatalf("no-mistakes version = %v, want %q", got.NoMistakesVersion, buildinfo.CurrentVersion())
+	}
+	if got.NoMistakesBuildSHA == nil || *got.NoMistakesBuildSHA != buildinfo.Commit {
+		t.Fatalf("no-mistakes build SHA = %v, want %q", got.NoMistakesBuildSHA, buildinfo.Commit)
+	}
+}
+
+func TestInsertRunWithIntent(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	intent := RunIntent{Summary: "  exact requirements\n", Source: RunIntentSourceRerun, Score: 1}
+
+	run, err := d.InsertRunWithIntent(repo.ID, "feature", "abc123", "def456", &intent)
+	if err != nil {
+		t.Fatalf("insert run with intent: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.Intent == nil || *got.Intent != intent.Summary {
+		t.Fatalf("intent = %v, want %q", got.Intent, intent.Summary)
+	}
+	if got.IntentSource == nil || *got.IntentSource != intent.Source {
+		t.Fatalf("intent source = %v, want %q", got.IntentSource, intent.Source)
+	}
+}
+
+func TestRunCIReadinessStoresNoCIDeclaration(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := d.SetRunCIReadyWithReason(run.ID, true, true); err != nil {
+		t.Fatalf("set declared no-CI readiness: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if got.CIReadyAt == nil || !got.CIReadyNoCI {
+		t.Fatalf("declared no-CI readiness = at %v, no_ci %v", got.CIReadyAt, got.CIReadyNoCI)
+	}
+
+	if err := d.SetRunCIReadyWithReason(run.ID, true, false); err != nil {
+		t.Fatalf("set all-green readiness: %v", err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run after all-green readiness: %v", err)
+	}
+	if got.CIReadyAt == nil || got.CIReadyNoCI {
+		t.Fatalf("all-green readiness = at %v, no_ci %v", got.CIReadyAt, got.CIReadyNoCI)
+	}
+
+	if err := d.SetRunCIReady(run.ID, false); err != nil {
+		t.Fatalf("clear readiness: %v", err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run after clear: %v", err)
+	}
+	if got.CIReadyAt != nil || got.CIReadyNoCI {
+		t.Fatalf("cleared readiness = at %v, no_ci %v", got.CIReadyAt, got.CIReadyNoCI)
+	}
+}
+
 func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -217,6 +337,32 @@ func TestRunAwaitingAgentSetAndClear(t *testing.T) {
 	}
 	if got.AwaitingAgentSince != nil {
 		t.Errorf("AwaitingAgentSince = %d after clear, want nil", *got.AwaitingAgentSince)
+	}
+}
+
+func TestRunParkedDurationAuditPreservesUnknownAndKnownZero(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/parked-audit", "git@github.com:user/parked-audit.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parkedMS, err := d.GetRunParkedMS(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parkedMS == nil || *parkedMS != 0 {
+		t.Fatalf("new run parked_ms = %v, want known zero", parkedMS)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET parked_ms = NULL WHERE id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	parkedMS, err = d.GetRunParkedMS(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parkedMS != nil {
+		t.Fatalf("legacy parked_ms = %v, want unknown", parkedMS)
 	}
 }
 
@@ -475,6 +621,39 @@ func TestUpdateRunStatus(t *testing.T) {
 	got, _ := d.GetRun(run.ID)
 	if got.Status != types.RunRunning {
 		t.Errorf("status = %q, want %q", got.Status, types.RunRunning)
+	}
+}
+
+func TestVerifiedHeadAndTerminalStatusPersistAtomically(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/atomic-head", "https://github.com/test/atomic-head", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`CREATE TRIGGER reject_verified_terminal
+		BEFORE UPDATE OF terminal_head_verified_at ON runs
+		WHEN NEW.terminal_head_verified_at IS NOT NULL
+		BEGIN
+			SELECT RAISE(FAIL, 'injected verified terminal failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunErrorStatusWithVerifiedHead(run.ID, "cancelled", types.RunCancelled, "pipeline-head"); err == nil {
+		t.Fatal("verified terminal update unexpectedly succeeded")
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunRunning || got.HeadSHA != "submitted" || got.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("failed atomic update changed run = status %s head %s verified %#v", got.Status, got.HeadSHA, got.TerminalHeadVerifiedAt)
 	}
 }
 

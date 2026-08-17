@@ -24,11 +24,17 @@ type sessionMockAgent struct {
 	mu     sync.Mutex
 	calls  []agent.RunOpts
 	nextID int
+	name   string
 	// respond picks the reply for one invocation (called under the lock).
 	respond func(opts agent.RunOpts) *agent.Result
 }
 
-func (m *sessionMockAgent) Name() string { return "session-mock" }
+func (m *sessionMockAgent) Name() string {
+	if m.name != "" {
+		return m.name
+	}
+	return "session-mock"
+}
 
 func (m *sessionMockAgent) SupportsSessionResume() bool { return true }
 
@@ -108,13 +114,19 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 	return out
 }
 
-// TestReviewLoop_OneReviewerSessionOneFixerSession drives the real review
+// TestReviewLoop_IndependentReviewTurnsOneFixerSession drives the real review
 // step through the executor's auto-fix loop for multiple rounds and proves:
-// N review rounds share ONE reviewer session (started once, resumed after),
-// N fix rounds share ONE separate fixer session, the two roles never
-// exchange identities, and every review round still asks for a full review
-// pass of the branch.
-func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
+// every review turn (the initial review and every post-fix rereview) runs
+// session-free, N fix rounds share ONE durable fixer session, the review
+// turns never receive the fixer's identity, and every review round still asks
+// for a full review pass of the branch.
+//
+// Review turns are deliberately session-free: round N's fixes implement round
+// N-1's review findings, so resuming any prior review turn's session would
+// seat the prescriber of those fixes as their certifier. The cross-round
+// context a rereview legitimately needs travels in the explicit sanitized
+// round-history prompt section instead.
+func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}
 	mock.respond = func(opts agent.RunOpts) *agent.Result {
@@ -151,38 +163,21 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 		t.Fatalf("expected 2 fix rounds, got %d", len(fixes))
 	}
 
-	// One reviewer session: started on round 1, resumed on rounds 2 and 3.
-	if reviews[0].Session == nil || reviews[0].Session.ID != "" {
-		t.Fatalf("round 1 review must start the reviewer session, got %+v", reviews[0].Session)
-	}
-	reviewerID := "sess-1"
-	for i, call := range reviews[1:] {
-		if call.Session == nil || call.Session.ID != reviewerID {
-			t.Fatalf("review round %d must resume %s, got %+v", i+2, reviewerID, call.Session)
+	// Every review turn is session-free: no identity to start, none resumed.
+	for i, call := range reviews {
+		if call.Session != nil {
+			t.Fatalf("review round %d must run session-free, got session %+v", i+1, call.Session)
 		}
 	}
 
-	// One fixer session, distinct from the reviewer's: started on the first
-	// fix turn, resumed on the second.
+	// One durable fixer session: started on the first fix turn, resumed on
+	// the second.
 	if fixes[0].Session == nil || fixes[0].Session.ID != "" {
 		t.Fatalf("first fix must start the fixer session, got %+v", fixes[0].Session)
 	}
-	fixerID := "sess-2"
+	fixerID := "sess-1"
 	if fixes[1].Session == nil || fixes[1].Session.ID != fixerID {
 		t.Fatalf("second fix must resume %s, got %+v", fixerID, fixes[1].Session)
-	}
-	if fixerID == reviewerID {
-		t.Fatal("fixer and reviewer must have distinct sessions")
-	}
-	for i, call := range reviews {
-		if call.Session != nil && call.Session.ID == fixerID {
-			t.Fatalf("review round %d received the fixer's session identity", i+1)
-		}
-	}
-	for i, call := range fixes {
-		if call.Session != nil && call.Session.ID == reviewerID {
-			t.Fatalf("fix round %d received the reviewer's session identity", i+1)
-		}
 	}
 
 	// Every review round, including rereviews inside the resumed session,
@@ -194,26 +189,169 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 		if !strings.Contains(call.Prompt, "Review the code changes") {
 			t.Fatalf("review round %d prompt is not a full review prompt:\n%s", i+1, call.Prompt)
 		}
+		if !strings.Contains(call.Prompt, "/review-changes") {
+			t.Fatalf("review round %d prompt lost the review-changes contract:\n%s", i+1, call.Prompt)
+		}
 	}
 
-	// The persisted resume metadata is the minimum: run, role, agent, id.
+	// The persisted resume metadata is the minimum, and only the fixer role
+	// has any: review turns never mint a durable identity.
 	sessions, err := database.GetRunAgentSessions(run.ID)
 	if err != nil {
 		t.Fatalf("get sessions: %v", err)
 	}
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 persisted role sessions, got %d", len(sessions))
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 persisted role session (fixer), got %d", len(sessions))
 	}
-	for _, s := range sessions {
-		if s.SessionID == "" || s.Agent != "session-mock" {
-			t.Fatalf("unexpected persisted session: %+v", s)
+	if sessions[0].Role != string(pipeline.SessionRoleFixer) || sessions[0].SessionID == "" || sessions[0].Agent != "session-mock" {
+		t.Fatalf("unexpected persisted session: %+v", sessions[0])
+	}
+}
+
+func TestReviewLoop_SelectsFromPoolForEveryColdReviewAndKeepsFixerStable(t *testing.T) {
+	workDir, baseSHA, headSHA := setupGitRepo(t)
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(workDir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reviewRound := 0
+	reviewerResponse := func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review" {
+			t.Fatalf("review candidate received purpose %q", opts.Purpose)
 		}
+		reviewRound++
+		if reviewRound == 1 {
+			return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","description":"bug","action":"auto-fix"}],"summary":"issue","risk_level":"medium","risk_rationale":"bug"}`)}
+		}
+		return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
+	}
+	claude := &sessionMockAgent{name: "claude", respond: reviewerResponse}
+	codex := &sessionMockAgent{name: "codex", respond: reviewerResponse}
+	fixer := &sessionMockAgent{name: "cursor", respond: func(opts agent.RunOpts) *agent.Result {
+		if opts.Purpose != "review-fix" {
+			t.Fatalf("fixer received purpose %q", opts.Purpose)
+		}
+		return &agent.Result{Output: []byte(`{"summary":"fix bug"}`)}
+	}}
+	candidates := []config.ReviewCandidate{
+		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+	}
+	cfg := &config.Config{Agent: types.AgentCursor, AutoFix: config.AutoFix{Review: 3}, SessionReuse: true, ReviewCandidates: candidates}
+	exec := pipeline.NewExecutorWithAgentRoutes(
+		database,
+		paths.WithRoot(t.TempDir()),
+		cfg,
+		pipeline.AgentRoutes{
+			Default:          fixer,
+			ByStep:           map[types.StepName]agent.Agent{types.StepReview: fixer},
+			ReviewCandidates: []agent.Agent{claude, codex},
+		},
+		[]pipeline.Step{&ReviewStep{}},
+		nil,
+	)
+	exec.SetReviewCandidateSeed(7)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	reviewerCalls := append(claude.snapshot(), codex.snapshot()...)
+	if len(reviewerCalls) != 2 {
+		t.Fatalf("reviewer calls = %d, want initial review and rereview", len(reviewerCalls))
+	}
+	for _, call := range reviewerCalls {
+		if call.Session != nil {
+			t.Fatalf("full review carried a session: %+v", call.Session)
+		}
+	}
+	fixerCalls := fixer.snapshot()
+	if len(fixerCalls) != 1 || fixerCalls[0].Purpose != "review-fix" || fixerCalls[0].Session == nil || fixerCalls[0].Session.ID != "" {
+		t.Fatalf("fixer calls = %+v, want one stable fixer-session start", fixerCalls)
+	}
+
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewReceipts := 0
+	fixReceipts := 0
+	for _, invocation := range invocations {
+		switch invocation.Purpose {
+		case "review":
+			reviewReceipts++
+			if len(invocation.ReviewCandidatePool) != 2 || invocation.SessionMode != db.InvocationModeCold {
+				t.Fatalf("review receipt = %+v", invocation)
+			}
+		case "review-fix":
+			fixReceipts++
+			if invocation.Agent != "cursor" || invocation.ReviewCandidatePool != nil {
+				t.Fatalf("fix receipt = %+v", invocation)
+			}
+		}
+	}
+	if reviewReceipts != 2 || fixReceipts != 1 {
+		t.Fatalf("review/fix receipts = %d/%d, want 2/1", reviewReceipts, fixReceipts)
+	}
+}
+
+// TestReviewLoop_RereviewNeverResumesTheSessionThatPrescribedItsFixes is the
+// class regression for the pipeline certifying its own fixes: an auto-fix
+// round implements the findings the previous review turn prescribed, so the
+// rereview that certifies the pipeline-authored result must not resume the
+// session holding the prescriber's reasoning. Under the retired
+// one-durable-reviewer-session design the rereview resumed exactly that
+// session and degenerated into verifying that its own prescription had been
+// implemented, letting a defect the pipeline itself introduced pass with zero
+// findings.
+func TestReviewLoop_RereviewNeverResumesTheSessionThatPrescribedItsFixes(t *testing.T) {
+	reviewRound := 0
+	mock := &sessionMockAgent{}
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewRound++
+			if reviewRound == 1 {
+				return &agent.Result{Output: []byte(
+					`{"findings":[{"id":"f-1","severity":"error","description":"prescribed design","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug"}`,
+				)}
+			}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean"}`)}
+		case "review-fix":
+			return &agent.Result{Output: []byte(`{"summary":"implement the prescription"}`)}
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+
+	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 2 {
+		t.Fatalf("expected initial review + rereview, got %d review calls", len(reviews))
+	}
+	if reviews[1].Session != nil {
+		t.Fatalf("the rereview certifying the fix round must not carry any review-session identity, got %+v", reviews[1].Session)
 	}
 }
 
 // TestReviewLoop_ParkRespondFixKeepsRoleSessions parks the review step at an
 // ask-user gate, responds with a fix action, and proves the user-driven fix
-// turn and the follow-up full rereview keep their role sessions.
+// turn uses the durable fixer session while the follow-up full rereview stays
+// session-free.
 func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}
@@ -258,8 +396,8 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	if len(reviews) != 2 || len(fixes) != 1 {
 		t.Fatalf("expected 2 reviews + 1 fix, got %d + %d", len(reviews), len(fixes))
 	}
-	if reviews[1].Session == nil || reviews[1].Session.ID != "sess-1" {
-		t.Fatalf("post-park rereview must resume the reviewer session, got %+v", reviews[1].Session)
+	if reviews[1].Session != nil {
+		t.Fatalf("post-park rereview must run session-free, got %+v", reviews[1].Session)
 	}
 	if fixes[0].Session == nil || fixes[0].Session.ID != "" {
 		t.Fatalf("user-driven fix must start the fixer session, got %+v", fixes[0].Session)

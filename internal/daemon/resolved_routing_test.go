@@ -45,8 +45,8 @@ func TestResolvedAgentRoutingSnapshotRestoresConcreteLaunchIdentity(t *testing.T
 	if !reflect.DeepEqual(changed.Agents, launch.Agents) || !reflect.DeepEqual(changed.StepAgents, launch.StepAgents) {
 		t.Fatalf("restored agents = %v/%v, want %v/%v", changed.Agents, changed.StepAgents, launch.Agents, launch.StepAgents)
 	}
-	if !reflect.DeepEqual(changed.StepModels, launch.StepModels) || !reflect.DeepEqual(changed.ReviewAdversaryAgents, launch.ReviewAdversaryAgents) || changed.ReviewAdversaryModel != launch.ReviewAdversaryModel {
-		t.Fatalf("restored model/adversary routing = models %v adversary %v/%+v", changed.StepModels, changed.ReviewAdversaryAgents, changed.ReviewAdversaryModel)
+	if !reflect.DeepEqual(changed.StepModels, launch.StepModels) || !reflect.DeepEqual(changed.ReviewCandidates, launch.ReviewCandidates) {
+		t.Fatalf("restored model/review routing = models %v candidates %v", changed.StepModels, changed.ReviewCandidates)
 	}
 }
 
@@ -131,6 +131,27 @@ func TestRestoreResolvedAgentRoutingAcceptsParameterizedModelIdentity(t *testing
 	}
 }
 
+func TestRestoreResolvedAgentRoutingFailsClosedForLegacyAdversary(t *testing.T) {
+	persisted := `{"version":1,"default_agents":["codex"],"step_routes":{"review":{"agents":["codex"],"model":{"name":"gpt-5.6-sol","vendor":"openai"}}},"review_adversary":{"agents":["claude"],"model":{"name":"claude-opus-5","vendor":"anthropic"}}}`
+	_, err := restoreResolvedAgentRouting(&config.Config{}, &persisted, false)
+	if err == nil || !strings.Contains(err.Error(), "removed native review adversary") {
+		t.Fatalf("restore error = %v, want explicit legacy-adversary refusal", err)
+	}
+}
+
+func TestRestoreResolvedAgentRoutingRejectsInvalidReviewCandidatePool(t *testing.T) {
+	tests := []string{
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"","model":{"name":"gpt-5.6-sol","vendor":"openai"}}]}`,
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"codex","model":{"name":"","vendor":""}}]}`,
+		`{"version":2,"default_agents":["pi"],"step_routes":{},"review_candidates":[{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"}},{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"},"optional":true}]}`,
+	}
+	for _, persisted := range tests {
+		if _, err := restoreResolvedAgentRouting(&config.Config{}, &persisted, false); err == nil {
+			t.Fatalf("restore accepted invalid review candidate pool: %s", persisted)
+		}
+	}
+}
+
 func TestValidateResolvedAgentRoutingRejectsChangedConcreteFallback(t *testing.T) {
 	cfg := resolvedRoutingTestConfig()
 	encoded, err := marshalResolvedAgentRouting(cfg, false)
@@ -152,8 +173,9 @@ func TestLoadRecoveredConfigRestoresLaunchRoutesAfterGlobalAndDefaultAdvance(t *
 review:
   agent: codex
   model: {name: gpt-5.6-sol, vendor: openai}
-  adversary_agent: claude
-  adversary_model: {name: claude-opus-5, vendor: anthropic}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
 `
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(launchRepoConfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -175,7 +197,7 @@ review:
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRun(repo.ID, "main", launchHead, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", launchHead, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +220,9 @@ review:
 review:
   agent: claude
   model: {name: claude-opus-6, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.7, vendor: openai}
+  candidates:
+    - agent: codex
+      model: {name: gpt-5.7, vendor: openai}
 `
 	if err := os.WriteFile(filepath.Join(changer, ".no-mistakes.yaml"), []byte(advanced), 0o644); err != nil {
 		t.Fatal(err)
@@ -217,8 +240,8 @@ review:
 	if !reflect.DeepEqual(recovered.Agents, launchConfig.Agents) || !reflect.DeepEqual(recovered.StepAgents, launchConfig.StepAgents) || !reflect.DeepEqual(recovered.StepModels, launchConfig.StepModels) {
 		t.Fatalf("recovered primary routing = %v/%v/%v, want launch %v/%v/%v", recovered.Agents, recovered.StepAgents, recovered.StepModels, launchConfig.Agents, launchConfig.StepAgents, launchConfig.StepModels)
 	}
-	if !reflect.DeepEqual(recovered.ReviewAdversaryAgents, launchConfig.ReviewAdversaryAgents) || recovered.ReviewAdversaryModel != launchConfig.ReviewAdversaryModel {
-		t.Fatalf("recovered adversary = %v/%+v, want %v/%+v", recovered.ReviewAdversaryAgents, recovered.ReviewAdversaryModel, launchConfig.ReviewAdversaryAgents, launchConfig.ReviewAdversaryModel)
+	if !reflect.DeepEqual(recovered.ReviewCandidates, launchConfig.ReviewCandidates) {
+		t.Fatalf("recovered review candidates = %v, want %v", recovered.ReviewCandidates, launchConfig.ReviewCandidates)
 	}
 	if got := configSourceKinds(run.ConfigSources); got != "" {
 		t.Fatalf("ordinary recovered run exposed config provenance %q", got)
@@ -228,7 +251,7 @@ review:
 	}
 }
 
-func TestStartRunPersistsResolvedRoutingWithoutPublicConfigProvenance(t *testing.T) {
+func TestStartRunPersistsResolvedPolicyAndContributingSources(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
 	agentDir := t.TempDir()
 	codexBin := writeRunnableMockAgent(t, agentDir, "codex")
@@ -242,8 +265,9 @@ func TestStartRunPersistsResolvedRoutingWithoutPublicConfigProvenance(t *testing
 review:
   agent: codex
   model: {name: gpt-5.6-sol, vendor: openai}
-  adversary_agent: claude
-  adversary_model: {name: claude-opus-5, vendor: anthropic}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
 `
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(repoConfig), 0o644); err != nil {
 		t.Fatal(err)
@@ -270,8 +294,17 @@ review:
 	if run.ResolvedAgentRouting == nil || strings.TrimSpace(*run.ResolvedAgentRouting) == "" {
 		t.Fatal("run did not persist resolved agent routing")
 	}
-	if len(run.ConfigSources) != 0 {
-		t.Fatalf("ordinary run config sources = %#v, want unchanged empty public provenance", run.ConfigSources)
+	if run.ResolvedPolicy == nil || strings.TrimSpace(*run.ResolvedPolicy) == "" || run.ResolvedPolicyDigest == nil || strings.TrimSpace(*run.ResolvedPolicyDigest) == "" {
+		t.Fatal("run did not persist resolved policy and digest")
+	}
+	if _, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest); err != nil || legacy {
+		t.Fatalf("persisted resolved policy = legacy %v error %v", legacy, err)
+	}
+	if got := configSourceKinds(run.ConfigSources); got != "global,default" {
+		t.Fatalf("ordinary run config sources = %q, want global,default", got)
+	}
+	if strings.Contains(*run.ResolvedPolicy, codexBin) || strings.Contains(*run.ResolvedPolicy, claudeBin) {
+		t.Fatalf("resolved policy leaked private agent paths: %s", *run.ResolvedPolicy)
 	}
 }
 
@@ -287,8 +320,10 @@ func resolvedRoutingTestConfig() *config.Config {
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepTest:   {Name: "google/gemini-3.5-pro", Vendor: "google"},
 		},
-		ReviewAdversaryAgents: []types.AgentName{types.AgentClaude},
-		ReviewAdversaryModel:  config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"},
+		ReviewCandidates: []config.ReviewCandidate{
+			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+		},
 	}
 }
 

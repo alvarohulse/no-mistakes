@@ -1067,8 +1067,12 @@ func TestPRStep_AppendsDeterministicValidationSections(t *testing.T) {
 	if !strings.Contains(ghLog, wantOrder) {
 		t.Fatalf("expected validation sections before the pipeline, got:\n%s", ghLog)
 	}
+	// Regression guard (#605/firstmate #1577, #1609): the Pipeline section
+	// must carry the rich per-step fix detail (BuildPipelineSummary), not the
+	// compact status-only variant (BuildPipelineStatusSummary) whose
+	// <details> body is always empty and would never show this finding line.
 	if !strings.Contains(ghLog, "expected 429 got 200") {
-		t.Fatalf("expected populated Test pipeline details, got:\n%s", ghLog)
+		t.Fatalf("expected rich per-step Pipeline detail with the Test step's finding, got:\n%s", ghLog)
 	}
 }
 
@@ -1379,6 +1383,30 @@ func TestRedactOutboundPRContent_KeepsRedactedBodyWithinHostCap(t *testing.T) {
 	}
 }
 
+func TestAssemblePRBody_RetainsAttestationWhenCoreExceedsAzureCap(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("intent 😀 ", 1000)}
+	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
+	steps := []*db.StepResult{
+		{StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{StepName: types.StepTest, Status: types.StepStatusFailed},
+	}
+	attestation := buildPipelineAttestation(steps, testPipelineHeadSHA)
+	pipelineMD := pipelineMarkdownForTest(strings.Repeat("review detail 😀 ", 1000))
+	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n", 1)
+
+	got := assemblePRBody(sctx, "## What Changed\n\n"+strings.Repeat("change 😀 ", 1000), strings.Repeat("risk 😀 ", 1000), "", pipelineMD, limit)
+
+	if scm.PRBodyLen(got) > limit {
+		t.Fatalf("assembled body = %d units, want <= %d", scm.PRBodyLen(got), limit)
+	}
+	for _, want := range []string{"## Pipeline", noMistakesPRSignature, attestation} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("budgeted body dropped required pipeline content %q:\n%s", want, got)
+		}
+	}
+}
+
 func prTruncationTail() string {
 	// Mirror of scm's truncation marker for assertions; kept here so the test
 	// reads naturally without exporting the constant.
@@ -1462,6 +1490,52 @@ func TestAppendGeneratedSections_TruncatesPipelineUpdatesBeforeGitHubLimit(t *te
 	assertNoPartialRoundLinesForTest(t, got, rounds)
 	if strings.Count(got, "<details>") != strings.Count(got, "</details>") {
 		t.Fatalf("expected details tags to remain balanced, got:\n%s", got)
+	}
+}
+
+func TestAppendGeneratedSections_RetainsPipelineAttestationWhenTruncated(t *testing.T) {
+	steps := []*db.StepResult{
+		{StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{StepName: types.StepTest, Status: types.StepStatusSkipped},
+	}
+	attestation := buildPipelineAttestation(steps, testPipelineHeadSHA)
+	telemetry := agentTelemetryTable([]db.AgentInvocation{{
+		StepName:       string(types.StepReview),
+		Agent:          "codex",
+		InvocationMode: types.AgentInvocationModeHarnessCLI,
+	}}, types.RefreshStrategyRebase)
+	pipelineMD := pipelineMarkdownForTest(strings.Repeat("review round - "+strings.Repeat("x", 1000), 100))
+	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n"+telemetry, 1)
+
+	got := appendGeneratedSections("## What Changed\n\n- summary", "", "", pipelineMD)
+
+	assertGitHubBodyLimitForTest(t, got)
+	if !strings.Contains(got, attestation) {
+		t.Fatalf("expected truncated PR body to retain the pipeline attestation, got:\n%s", got)
+	}
+}
+
+func TestAppendGeneratedSections_RetainsAttestationWhenEssentialSectionsOverflow(t *testing.T) {
+	steps := []*db.StepResult{
+		{StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{StepName: types.StepTest, Status: types.StepStatusFailed},
+	}
+	attestation := buildPipelineAttestation(steps, testPipelineHeadSHA)
+	pipelineMD := pipelineMarkdownForTest("review round 001")
+	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n", 1)
+
+	got := appendGeneratedSections(
+		"## What Changed\n\n"+strings.Repeat("change detail\n", 5000),
+		strings.Repeat("risk detail ", 5000),
+		"## Testing\n\n"+strings.Repeat("test detail\n", 5000),
+		pipelineMD,
+	)
+
+	assertGitHubBodyLimitForTest(t, got)
+	for _, want := range []string{"## Pipeline", noMistakesPRSignature, attestation} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("budgeted body dropped required pipeline content %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -1798,12 +1872,19 @@ func TestPRStep_CreateKeepsGeneratedSectionsWithoutRenderingIntent(t *testing.T)
 
 	body := readFakeGHBodyArg(t, logFile)
 	assertGitHubBodyLimitForTest(t, body)
+	attestation := parsePipelineAttestationForTest(t, body)
+	if attestation.HeadSHA != headSHA {
+		t.Fatalf("attested head = %q, want created PR head %q", attestation.HeadSHA, headSHA)
+	}
 	for _, want := range []string{
 		"## What Changed",
 		"essential summary survives",
 		"## Risk Assessment",
 		"validates generated PR body length handling",
 		"## Testing",
+		"Validated generated PR body length handling.",
+		"## Pipeline",
+		"<summary>✅ **Test** - passed</summary>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected created PR body to contain %q, got:\n%s", want, body)
@@ -1988,6 +2069,24 @@ func pipelineMarkdownForTest(rounds ...string) string {
 	}
 	b.WriteString("</details>\n")
 	return b.String()
+}
+
+func parsePipelineAttestationForTest(t *testing.T, body string) pipelineAttestation {
+	t.Helper()
+	start := strings.Index(body, pipelineAttestationCommentPrefix)
+	if start < 0 {
+		t.Fatalf("PR body missing pipeline attestation:\n%s", body)
+	}
+	start += len(pipelineAttestationCommentPrefix)
+	end := strings.Index(body[start:], pipelineAttestationCommentClosingToken)
+	if end < 0 {
+		t.Fatalf("PR body contains unclosed pipeline attestation:\n%s", body)
+	}
+	var attestation pipelineAttestation
+	if err := json.Unmarshal([]byte(body[start:start+end]), &attestation); err != nil {
+		t.Fatalf("parse pipeline attestation: %v", err)
+	}
+	return attestation
 }
 
 func readFakeGHBodyArg(t *testing.T, logFile string) string {

@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -13,11 +15,14 @@ import (
 
 type routedTestAgent struct {
 	name     string
+	model    agent.ModelIdentity
 	calls    int
 	lastOpts agent.RunOpts
 }
 
 func (a *routedTestAgent) Name() string { return a.name }
+
+func (a *routedTestAgent) ConfiguredModel() agent.ModelIdentity { return a.model }
 
 func (a *routedTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	a.calls++
@@ -132,6 +137,92 @@ func TestExecutor_RoutesEachStepAndAttributesActualAgent(t *testing.T) {
 	}
 }
 
+func TestExecutor_ReviewPoolSelectsPerColdReviewAndPersistsReceipts(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	fixer := &routedTestAgent{name: "cursor", model: agent.ModelIdentity{Name: "gpt-5.6-luna-medium", Vendor: "openai"}}
+	claude := &routedTestAgent{name: "claude", model: agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}}
+	codex := &routedTestAgent{name: "codex", model: agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}}
+	const reviewCount = 6
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if sctx.Reviewer == nil {
+				t.Fatal("review candidate pool was not attached")
+			}
+			for i := 0; i < reviewCount; i++ {
+				if _, err := sctx.Reviewer.Run(sctx.Ctx, agent.RunOpts{Purpose: "review"}); err != nil {
+					return nil, err
+				}
+			}
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Purpose: "review-fix"}); err != nil {
+				return nil, err
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+	candidates := []config.ReviewCandidate{
+		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+	}
+	exec := NewExecutorWithAgentRoutes(
+		database,
+		p,
+		&config.Config{ReviewCandidates: candidates},
+		AgentRoutes{
+			Default:          fixer,
+			ByStep:           map[types.StepName]agent.Agent{types.StepReview: fixer},
+			ReviewCandidates: []agent.Agent{claude, codex},
+		},
+		[]Step{step},
+		nil,
+	)
+	const seed = int64(42)
+	exec.SetReviewCandidateSeed(seed)
+
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	expected := [2]int{}
+	random := rand.New(rand.NewSource(seed))
+	for i := 0; i < reviewCount; i++ {
+		expected[random.Intn(2)]++
+	}
+	if claude.calls != expected[0] || codex.calls != expected[1] || fixer.calls != 1 {
+		t.Fatalf("calls claude/codex/fixer = %d/%d/%d, want %d/%d/1", claude.calls, codex.calls, fixer.calls, expected[0], expected[1])
+	}
+
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPool := []db.ReviewCandidateReceipt{
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
+		{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+	}
+	reviews := 0
+	fixes := 0
+	for _, invocation := range invocations {
+		switch invocation.Purpose {
+		case "review":
+			reviews++
+			if invocation.SessionMode != db.InvocationModeCold || !reflect.DeepEqual(invocation.ReviewCandidatePool, wantPool) {
+				t.Fatalf("review invocation = %+v, want cold invocation with complete pool", invocation)
+			}
+			if invocation.Agent != "claude" && invocation.Agent != "codex" {
+				t.Fatalf("selected review agent = %q", invocation.Agent)
+			}
+		case "review-fix":
+			fixes++
+			if invocation.Agent != "cursor" || invocation.ReviewCandidatePool != nil {
+				t.Fatalf("fix invocation = %+v, want stable cursor route without review pool", invocation)
+			}
+		}
+	}
+	if reviews != reviewCount || fixes != 1 {
+		t.Fatalf("review/fix receipts = %d/%d, want %d/1", reviews, fixes, reviewCount)
+	}
+}
+
 func TestExecutor_ReviewRouteOwnsDurableSessionReuse(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	defaultAgent := &routedTestAgent{name: "claude"}
@@ -169,59 +260,6 @@ func TestExecutor_ReviewRouteOwnsDurableSessionReuse(t *testing.T) {
 	}
 	if got := reviewAgent.calls[1].session; got == nil || got.ID != "sess-1" || got.Agent != "codex" {
 		t.Fatalf("second review session = %+v, want resumed codex sess-1", got)
-	}
-}
-
-func TestExecutor_ReviewAdversaryIsInstrumentedAndSessionIsolated(t *testing.T) {
-	database, p, run, repo := setupTest(t)
-	primary := newFakeSessionAgent()
-	primary.name = "codex"
-	adversary := &routedTestAgent{name: "claude"}
-	step := &adaptiveCallStep{
-		name: types.StepReview,
-		fn: func(sctx *StepContext) (*StepOutcome, error) {
-			if _, err := sctx.RunAgentSession(SessionRoleReviewer, agent.RunOpts{Purpose: "review"}); err != nil {
-				return nil, err
-			}
-			if sctx.ReviewAdversary == nil {
-				t.Fatal("review adversary route was not attached to the step context")
-			}
-			if _, err := sctx.ReviewAdversary.Run(sctx.Ctx, agent.RunOpts{Purpose: "review-adversary"}); err != nil {
-				return nil, err
-			}
-			return &StepOutcome{}, nil
-		},
-	}
-	exec := NewExecutorWithAgentRoutes(
-		database,
-		p,
-		&config.Config{SessionReuse: true},
-		AgentRoutes{Default: primary, ByStep: map[types.StepName]agent.Agent{types.StepReview: primary}, ReviewAdversary: adversary},
-		[]Step{step},
-		nil,
-	)
-
-	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if len(primary.calls) != 1 || primary.calls[0].session == nil {
-		t.Fatalf("primary session calls = %+v, want one managed reviewer session", primary.calls)
-	}
-	if adversary.calls != 1 {
-		t.Fatalf("adversary calls = %d, want 1", adversary.calls)
-	}
-	invocations, err := database.GetAgentInvocationsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(invocations) != 2 {
-		t.Fatalf("invocations = %+v, want primary and adversary", invocations)
-	}
-	if invocations[0].Agent != "codex" || invocations[0].Purpose != "review" {
-		t.Fatalf("primary invocation = %+v", invocations[0])
-	}
-	if invocations[1].Agent != "claude" || invocations[1].Purpose != "review-adversary" || invocations[1].SessionMode != db.InvocationModeCold {
-		t.Fatalf("adversary invocation = %+v", invocations[1])
 	}
 }
 

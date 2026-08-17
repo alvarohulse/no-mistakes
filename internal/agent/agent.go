@@ -44,9 +44,11 @@ func ConfiguredModel(a Agent) ModelIdentity {
 
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
-	Prompt      string
+	Prompt string
+	// Env appends invocation-scoped environment entries to the agent process.
+	// Entries later in the slice override inherited values.
+	Env         []string
 	CWD         string
-	Env         []string             // extra subprocess environment entries (optional)
 	JSONSchema  json.RawMessage      // structured output schema (optional)
 	OnChunk     func(text string)    // streaming text callback (optional)
 	OnLifecycle func(LifecycleEvent) // native agent lifecycle callback (optional)

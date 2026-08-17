@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -160,6 +163,9 @@ func TestPerfRecording_FailedInvocationRetainsConfiguredModelIdentity(t *testing
 		runID:    run.ID,
 		stepName: types.StepReview,
 		round:    func() int { return 1 },
+		reviewCandidatePool: []db.ReviewCandidateReceipt{
+			{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+		},
 	}
 
 	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err == nil {
@@ -174,6 +180,90 @@ func TestPerfRecording_FailedInvocationRetainsConfiguredModelIdentity(t *testing
 	}
 	if invs[0].Model != "gpt-5.6-sol" || invs[0].ModelProvider == nil || *invs[0].ModelProvider != "openai" {
 		t.Fatalf("failed invocation model/provider = %q/%v", invs[0].Model, invs[0].ModelProvider)
+	}
+	if len(invs[0].ReviewCandidatePool) != 1 || invs[0].ReviewCandidatePool[0].Agent != "codex" {
+		t.Fatalf("failed invocation review pool = %#v", invs[0].ReviewCandidatePool)
+	}
+}
+
+type receiptObservingAgent struct {
+	database *db.DB
+	runID    string
+	calls    int
+}
+
+func (a *receiptObservingAgent) Name() string { return "codex" }
+func (a *receiptObservingAgent) Close() error { return nil }
+func (a *receiptObservingAgent) ConfiguredModel() agent.ModelIdentity {
+	return agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}
+}
+func (a *receiptObservingAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	invocations, err := a.database.GetAgentInvocationsByRun(a.runID)
+	if err != nil {
+		return nil, err
+	}
+	if len(invocations) != 1 {
+		return nil, fmt.Errorf("pre-launch receipts = %d, want 1", len(invocations))
+	}
+	receipt := invocations[0]
+	if receipt.ExitStatus != "started" || receipt.Agent != "codex" || len(receipt.ReviewCandidatePool) != 1 {
+		return nil, fmt.Errorf("pre-launch receipt = %+v", receipt)
+	}
+	result := &agent.Result{Model: "gpt-5.6-sol", ModelProvider: "openai"}
+	if opts.OnAttempt != nil {
+		now := time.Now()
+		opts.OnAttempt(agent.Attempt{Agent: a.Name(), Result: result, StartedAt: now, CompletedAt: now})
+	}
+	return result, nil
+}
+
+func TestPerfRecording_ReviewSelectionReceiptExistsBeforeLaunchAndIsFinalized(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	inner := &receiptObservingAgent{database: database, runID: run.ID}
+	wrapped := &perfRecordingAgent{
+		inner:    inner,
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepReview,
+		round:    func() int { return 1 },
+		reviewCandidatePool: []db.ReviewCandidateReceipt{
+			{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+		},
+	}
+
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 1 || len(invocations) != 1 || invocations[0].ExitStatus != "ok" {
+		t.Fatalf("calls/receipts = %d/%+v, want one finalized receipt", inner.calls, invocations)
+	}
+}
+
+func TestPerfRecording_ReviewReceiptFailurePreventsHarnessLaunch(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	inner := &routedTestAgent{name: "codex", model: agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}}
+	wrapped := &perfRecordingAgent{
+		inner:    inner,
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepReview,
+		round:    func() int { return 1 },
+		reviewCandidatePool: []db.ReviewCandidateReceipt{
+			{Agent: "codex", Model: "unsafe\nmodel", Vendor: "openai"},
+		},
+	}
+
+	_, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review"})
+	if err == nil || !strings.Contains(err.Error(), "persist review selection receipt") {
+		t.Fatalf("Run() error = %v, want mandatory receipt failure", err)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("harness calls = %d, want zero", inner.calls)
 	}
 }
 

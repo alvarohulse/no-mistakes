@@ -21,6 +21,7 @@ When set, everything else moves under this root:
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
 - Managed agent server PID records: `$NM_HOME/servers/`
+- Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
@@ -78,6 +79,28 @@ Alternatively, authenticate the Azure DevOps extension with `az devops login`.
 | Default | (none)                                             |
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/#azure-devops).
+
+## `GITHUB_TOKEN`
+
+GitHub token used to authenticate updater release requests.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+When set, the updater sends the token as a Bearer authorization header for release metadata requests, including background update checks, and release asset downloads. `GITHUB_TOKEN` takes precedence over `GH_TOKEN`; when neither variable is set, these requests remain anonymous. The token is not printed, logged, or persisted.
+
+## `GH_TOKEN`
+
+Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset or empty.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
@@ -190,12 +213,12 @@ The generated PR body deliberately exposes one bounded subset of this local run 
 PR body contract v3 offers a configured formatter a wider subset: one row per invocation and round with step, agent, model, provider, start time, duration, nullable total/uncached/cache-read/cache-write/output token meters, nested-agent observations, and nullable CLI-reported USD cost. It still contains no session identity, prompts, outputs, diffs, credentials, or paths. The formatter decides whether to publish those rows and may calculate a separate API-price estimate; no-mistakes never treats an estimate as a reported charge. When a machine-local config override from the global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map is active, the contract also supplies generic source kinds and digest prefixes; full digests, the matched key, and the global config path stay local.
 
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per agent invocation, plus each run's accumulated parked-at-gate time.
-Each row records run and step identity, purpose (such as review, review-fix, or lint-plan), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below.
+Each row records run and step identity, purpose (such as review, review-fix, or lint-plan), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below. A full Review row also stores the final content-free candidate pool (`agent`, model name/vendor, and optional flag) so the selected route remains auditable; fixer and non-Review rows leave that field null.
 It also records how the top-level agent was invoked and any nested agent identities that the adapter's event stream exposed.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
 
 The additive session-fidelity fields are nullable and read back as unknown (rendered `-`) rather than a fabricated zero when the adapter did not report them, so rows written before a field existed, and adapters that do not surface a datum, stay honest.
-The raw counters remain available locally; use the nullable per-round and canonical fields to determine whether the adapter reported comparable usage:
+The raw counters remain available locally; use the nullable per-round and canonical fields to determine whether the adapter reported comparable usage. The canonical run audit emits legacy raw input/output/cache-read counters only when the matching per-round meter proves that the adapter reported usage:
 
 - Token detail: `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_creation_tokens` are raw CLI counters and may be cumulative across a resumed session. `delta_input_tokens`, `delta_output_tokens`, `delta_cache_read_tokens`, and `delta_cache_creation_tokens` are the per-round amounts. `fresh_input_tokens` is the canonical uncached-input meter only when the adapter's cache relationship is verified; ambiguous cache splits stay unknown. `reported_cost_usd` stores a CLI-reported charge when available, independently of formatter estimates.
 - Activity: `model_roundtrips` (a proxy for productive model turns), `tool_calls`, and a bounded tool-category histogram (`tool_wait_calls`, `tool_test_lint_calls`, `tool_edit_calls`, `tool_read_calls`, `tool_git_calls`, `tool_other_calls`); a compound command counts once per sub-command, so the histogram can sum higher than `tool_calls`.
@@ -206,7 +229,7 @@ The raw counters remain available locally; use the nullable per-round and canoni
 Nested attribution is intentionally limited to native wire evidence. Claude exposes configured `Agent`/legacy `Task` types, and OpenCode exposes `task` subagent types. Codex exposes completed `spawn_agent` calls but its `exec --json` stream omits nicknames and roles, so no-mistakes stores a truncated hash of the child thread ID such as `thread:0123456789abcdef`, never the raw ID. ACP, Copilot, Pi, and Rovo streams currently provide no reliable nested identity to this integration and remain unknown. Harness-SDK internals are not inferred.
 
 The count and timing definitions live in one authoritative place (`internal/agent/invocationmetrics.go`).
-Inspect the evidence with `no-mistakes stats --agents` (per-purpose aggregates, including a `METRICS` coverage count so a real zero is distinguishable from missing instrumentation) or `no-mistakes stats --run <id>` (one run's per-step invocations, invocation modes and nested identities, the per-round-vs-cumulative token split, and parked time).
+Inspect the evidence with `no-mistakes stats --agents` (per-purpose aggregates, including a `METRICS` coverage count so a real zero is distinguishable from missing instrumentation) or `no-mistakes stats --run <id>` (one run's steps, skip and Review-route receipts, per-step invocations, invocation modes and nested identities, the per-round-vs-cumulative token split, and parked time). Add `--format json` to the run audit for the normative local machine contract. It contains content-free identities, source digests, nullable meters, coverage, and integrity errors; it excludes config paths and refs, repository paths, prompts, outputs, diffs, raw errors, and raw session IDs.
 
 ## `NO_MISTAKES_TELEMETRY`
 

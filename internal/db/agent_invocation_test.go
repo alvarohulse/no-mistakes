@@ -75,6 +75,50 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 }
 
+func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
+	d, _, run := openSessionTestDB(t)
+	pool := []ReviewCandidateReceipt{
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
+		{Agent: "cursor", Model: "grok-4.6", Vendor: "xai", Optional: true},
+	}
+	inv := AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "claude",
+		Model: "claude-opus-5", ModelProvider: strPtr("anthropic"), ReviewCandidatePool: pool,
+		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	}
+	if _, err := d.InsertAgentInvocation(inv); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	got, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got) != 1 || !reflect.DeepEqual(got[0].ReviewCandidatePool, pool) {
+		t.Fatalf("review candidate pool = %#v, want %#v", got, pool)
+	}
+	var encoded *string
+	if err := d.sql.QueryRow(`SELECT review_candidate_pool_json FROM agent_invocations WHERE run_id = ?`, run.ID).Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `[{"agent":"claude","model":"claude-opus-5","vendor":"anthropic"},{"agent":"cursor","model":"grok-4.6","vendor":"xai","optional":true}]`
+	if encoded == nil || *encoded != wantJSON {
+		t.Fatalf("candidate pool JSON = %v, want %s", encoded, wantJSON)
+	}
+}
+
+func TestAgentInvocations_RejectsUnsafeReviewCandidateReceipt(t *testing.T) {
+	d, _, run := openSessionTestDB(t)
+	_, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "claude",
+		ReviewCandidatePool: []ReviewCandidateReceipt{{Agent: "claude", Model: "prompt\ncontents", Vendor: "anthropic"}},
+		SessionMode:         InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	})
+	if err == nil || !strings.Contains(err.Error(), "candidate") {
+		t.Fatalf("InsertAgentInvocation() error = %v, want unsafe candidate refusal", err)
+	}
+}
+
 func TestLatestSessionCumulativePreservesUnknownImmediatePrior(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	usage := AgentInvocation{
@@ -460,7 +504,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	// Simulate a pre-fidelity table by dropping the new columns, then insert a
 	// legacy row that has no fidelity data.
 	for _, col := range []string{"model_provider", "fallback_reason", "subprocess_wait_ms",
-		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count"} {
+		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count", "review_candidate_pool_json"} {
 		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + col); err != nil {
 			t.Fatalf("drop %s: %v", col, err)
 		}
@@ -492,7 +536,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
 	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
-		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil {
+		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}
 	// The migrated table now accepts the new fields.

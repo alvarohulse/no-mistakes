@@ -28,6 +28,10 @@ const processGroupTerminationPollInterval = 10 * time.Millisecond
 // grandchildren (a test runner's worker processes, an agent-spawned
 // git/build/editor) running and holding the worktree locked.
 //
+// A process group only contains descendants that stayed in it. Processes that
+// call setsid(2) or setpgid(2) are handled by the identity-based procreap
+// backstop instead.
+//
 // Cancellation is only half the lifecycle: cmd.Cancel never fires when the
 // command exits on its own (success or failure). Use RunShellCommand,
 // OutputShellCommand, or CombinedOutputShellCommand for one-shot commands, or

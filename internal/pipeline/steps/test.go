@@ -1,17 +1,14 @@
 package steps
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -19,15 +16,6 @@ import (
 type TestStep struct{}
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
-
-func gitIgnoresPath(ctx context.Context, workDir, target string) bool {
-	rel, err := filepath.Rel(workDir, target)
-	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return false
-	}
-	_, err = git.Run(ctx, workDir, "check-ignore", "--quiet", "--", filepath.ToSlash(rel))
-	return err == nil
-}
 
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
@@ -71,7 +59,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	var newTestsFromFix []string
 	var fixSummary string
 	if sctx.Fixing {
-		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
+		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + testguidance.Rule + configuredPromptSection(sctx, s.Name())
 		fixPrompt := fmt.Sprintf(
 			`Fix the failing tests in this repository. Reproduce the specific failure, identify the root cause, and fix either the tests or the code so that failure passes.
 
@@ -155,11 +143,9 @@ Previous test findings to address:
 
 	useEvidenceAgent := plannedTest || cleanedUserIntent(sctx) != ""
 	if useEvidenceAgent {
-		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
-		evidenceDir := evidenceLocation.Dir
-		if evidenceLocation.StoreInRepo && gitIgnoresPath(ctx, sctx.WorkDir, evidenceDir) {
-			evidenceLocation = testEvidenceLocation{Dir: testEvidenceDir(sctx.Run.ID)}
-			evidenceDir = evidenceLocation.Dir
+		evidenceDir := testEvidenceDir(sctx)
+		if evidenceDir == "" {
+			return nil, fmt.Errorf("test evidence dir is not configured for this run")
 		}
 		if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create test evidence dir: %w", err)
@@ -169,10 +155,10 @@ Previous test findings to address:
 		} else {
 			sctx.Log("user intent available, asking agent to gather test evidence...")
 		}
-		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + configuredPromptSection(sctx, s.Name())
-		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this temporary evidence directory: %s", evidenceDir)
-		if evidenceLocation.StoreInRepo {
-			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this in-repo evidence directory; it is committed and pushed automatically, so artifacts render directly on the PR: %s", evidenceDir)
+		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + testguidance.Rule + configuredPromptSection(sctx, s.Name())
+		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
+		if sctx.Config.Test.Evidence.StoreInRepo {
+			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
 		}
 		configuredTestCommand := ""
 		if testCmd != "" {

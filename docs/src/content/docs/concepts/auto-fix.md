@@ -34,6 +34,23 @@ The document step applies fixes during its initial pass instead of relying on a 
 When Build, Test, or Lint has no configured command, the step first asks its routed agent to select one exact command without running or editing anything. The pipeline executes and records that plan; after a failure, the repair agent fixes the cause and the pipeline reruns the same command.
 Unresolved documentation findings and command plans that cannot be established pause for approval.
 
+## Before the agent: deterministic CI reruns
+
+The CI step has one cheaper option than a fix round, and it tries it first.
+
+A check the provider reports as `cancelled` is the provider telling you about itself, not about your commit. Handing that to the fix agent spends an agent round reading a run that never tested anything, and the fix it invents edits code that was never broken. So when every terminally failed check on the pull request is cancelled and the configured budget authorizes a rerun, the CI step asks the provider to run those checks again for the same commit and keeps polling.
+
+That deterministic rerun sits strictly before the agent rounds described above:
+
+1. Every check finishes and at least one has failed.
+2. If all of those failures are cancelled checks, the pull request has no merge conflict, and the configured budget authorizes it, each one is re-run and the monitor keeps polling. No `auto_fix.ci` attempt is consumed.
+3. When cancellation is the only remaining issue, a check with no authorized or outstanding rerun pauses for a decision without consuming an `auto_fix.ci` attempt.
+4. Every other failure escalates into the `auto_fix.ci` loop on its first observation.
+
+[`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) owns the budget, the exact classification, and every case that skips the rerun.
+
+Nothing that survives a rerun falls into the agent loop either. A check the provider cancels again is still not a verdict on the code, so it pauses for a decision instead of spending a fix round on a run that never tested anything. A cancellation no rerun is going to replace - the default budget is `0` - reaches that same decision directly: the provider has published its conclusion and will not replace it, so waiting on it would never end. A rerun costs another CI run of that job, so the budget is deliberately small and is spent when the rerun is requested, which bounds the loop by construction. Each rerun is announced in the step log, so a run that is waiting on one says so instead of looking stalled. Reruns never cross a head change: if the published branch head no longer matches the commit the run delivered, the step pauses with the expected and observed commits rather than re-running checks against a revision it never produced.
+
 ## Configuration
 
 Per-step attempt limits come from the `auto_fix` config object; the [`auto_fix` field reference](/no-mistakes/reference/global-config/#auto_fix) owns the defaults, per-step meanings, and the legacy alias.

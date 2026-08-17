@@ -3,6 +3,7 @@ package ipc
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -189,6 +190,7 @@ func TestRerunParams(t *testing.T) {
 	params := RerunParams{
 		RepoID:          "repo456",
 		Branch:          "feature",
+		PreviousRunID:   "run123",
 		SkipSteps:       []types.StepName{types.StepReview},
 		RefreshStrategy: types.RefreshStrategyMerge,
 		StackedOn:       "feature/dependency",
@@ -203,6 +205,9 @@ func TestRerunParams(t *testing.T) {
 	}
 	if got.Branch != "feature" {
 		t.Errorf("branch = %q, want %q", got.Branch, "feature")
+	}
+	if got.PreviousRunID != "run123" {
+		t.Errorf("previous_run_id = %q, want %q", got.PreviousRunID, "run123")
 	}
 	if len(got.SkipSteps) != 1 || got.SkipSteps[0] != types.StepReview {
 		t.Errorf("skip_steps = %#v, want review", got.SkipSteps)
@@ -321,6 +326,24 @@ func TestStepResultInfoLegacyRebaseNormalizesToRefresh(t *testing.T) {
 	}
 }
 
+func TestRerunParamsPreserveExplicitEmptySkipList(t *testing.T) {
+	params := RerunParams{RepoID: "repo-1", Branch: "feature", SkipSteps: []types.StepName{}}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"skip_steps":[]`) {
+		t.Fatalf("encoded params = %s", data)
+	}
+	var got RerunParams
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SkipSteps == nil || len(got.SkipSteps) != 0 {
+		t.Fatalf("decoded skip steps = %#v, want non-nil empty", got.SkipSteps)
+	}
+}
+
 func TestEventTypes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -347,11 +370,12 @@ func TestEventTypes(t *testing.T) {
 		{
 			name: "step_completed",
 			event: Event{
-				Type:     EventStepCompleted,
-				RunID:    "run001",
-				RepoID:   "repo001",
-				StepName: ptrStepName(types.StepLint),
-				Status:   ptrStr(string(types.StepStatusCompleted)),
+				Type:       EventStepCompleted,
+				RunID:      "run001",
+				RepoID:     "repo001",
+				StepName:   ptrStepName(types.StepLint),
+				Status:     ptrStr(string(types.StepStatusSkipped)),
+				SkipSource: ptrStr(string(types.SkipSourceGlobalOverride)),
 			},
 		},
 		{
@@ -427,6 +451,7 @@ func TestMethodConstants(t *testing.T) {
 	methods := []string{
 		MethodPushReceived,
 		MethodGetRun,
+		MethodGetStepDiff,
 		MethodGetRuns,
 		MethodGetRunsForHead,
 		MethodGetActiveRun,
@@ -449,8 +474,8 @@ func TestMethodConstants(t *testing.T) {
 		}
 		seen[m] = true
 	}
-	if len(methods) != 13 {
-		t.Errorf("expected 13 methods, got %d", len(methods))
+	if len(methods) != 14 {
+		t.Errorf("expected 14 methods, got %d", len(methods))
 	}
 }
 

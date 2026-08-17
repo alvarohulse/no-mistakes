@@ -6,14 +6,14 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review adversary route select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` and `hooks.{post_worktree,pr_body}` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and the run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review adversary route, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `refresh.strategy`, `document.instructions`, and `disable_project_settings` only from that trusted copy.
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and `test.evidence`) are still read from the pushed branch. `refresh.strategy` is the exception because it controls branch-history mutation.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and repository-scoped `test.evidence` fields) are still read from the pushed branch, except `test.evidence.branch`, which names a Git ref the daemon pushes to. `refresh.strategy` is also trusted-only because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
@@ -24,16 +24,29 @@ The global config's [`overrides`](/no-mistakes/reference/global-config/#override
 
 Repo-specific values that cannot be committed to the default branch (for example canonical commands in a repository whose default branch you do not control) live in the global config's `overrides` map, keyed by the repository's `<owner>/<repo>` identity. Each entry uses this page's repo-config shape and overlays only the fields present in it, after the committed pushed/default trust resolution. The [Global Config Reference](/no-mistakes/reference/global-config/#overrides) owns the key syntax, identity matching, precedence, trust model, and recovery semantics.
 
+`pipeline.skip_steps` is the exception to the shared shape: it is machine-owner policy accepted only inside a matching global override. A committed repository config that declares it is rejected. See the global [`overrides`](/no-mistakes/reference/global-config/#overrides) reference.
+
 ```yaml
 # .no-mistakes.yaml
 
 agent: codex
 
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
+  # Optional trusted guidance scoped to changed paths.
+  path_instructions:
+    - path: "internal/scm/**"
+      instructions: |
+        Any URL or error string that can carry credentials must go through internal/safeurl.
+    - path: "docs/**"
+      instructions: |
+        Prose changes only. Do not request test coverage.
 
 refresh:
   strategy: merge
@@ -62,6 +75,10 @@ document:
 # Read only from the trusted default branch. Defaults to false.
 disable_project_settings: true
 
+# Positive declaration that this repository intentionally has no CI.
+# Read only from the trusted default branch. Defaults to false (CI expected).
+# no_ci: true
+
 auto_fix:
   refresh: 3
   review: 3
@@ -70,6 +87,10 @@ auto_fix:
   document: 3
   lint: 5
   ci: 3
+
+# Read only from the trusted default branch: each rerun is another workflow run.
+ci:
+  rerun_transient: 0
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -85,6 +106,7 @@ test:
   evidence:
     store_in_repo: true
     dir: .no-mistakes/evidence
+    branch: no-mistakes/evidence
 
 # Optional prompt additions, read only from the trusted default branch.
 # Built-in prompts stay authoritative.
@@ -139,7 +161,7 @@ ci:
   agent: codex
 ```
 
-Unconfigured steps inherit the run-wide route. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review's durable reviewer/fixer sessions use only the Review route, and invocation telemetry records the concrete provider used after fallback.
+Unconfigured steps inherit the run-wide route unless global `managed: true` requires an explicit one. A step route is resolved once at run startup and applies to every agent invocation in that step, including fixes. Review candidates run cold; only the stable fixer route may keep a durable session. Invocation telemetry records the concrete selected provider.
 
 Set `<step>.model` to a typed model identity with both an exact backend model name and an explicit vendor:
 
@@ -157,17 +179,25 @@ Each supported backend receives the model through its verified interface, with t
 
 ACP targets, including `acp:cursor`, accept bracket-free model families. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native Cursor continues accepting its parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
 
-For a controller-run second opinion on high-risk changes, configure a distinct Review adversary:
+To distribute fresh full reviews independently from the stable fixer route, configure a Review candidate pool:
 
 ```yaml
 review:
-  agent: claude
-  model: {name: claude-opus-5, vendor: anthropic}
-  adversary_agent: codex
-  adversary_model: {name: gpt-5.6-sol, vendor: openai}
+  agent: cursor
+  model: {name: gpt-5.6-luna-medium, vendor: openai}
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+    - agent: codex
+      model: {name: gpt-5.6-sol, vendor: openai}
+    - agent: cursor
+      model: {name: grok-4.6, vendor: xai}
+      optional: true
 ```
 
-`review.adversary_agent` accepts the same scalar or ordered availability-fallback form as `agent`, but it is not part of `review.agent`'s invocation fallback list. Both model objects are required, and their declared vendors must differ. The controller runs the adversary only after the primary Review returns `risk_level: high`, in a cold session isolated from the primary reviewer/fixer sessions, then merges and namespaces its findings into the same Review gate. Low- and medium-risk reviews do not invoke it.
+`review.candidates` is a closed quality-routing pool, not an ordered availability fallback. Every candidate names exactly one concrete harness and complete model identity. Unavailable required candidates fail policy resolution; unavailable optional candidates are removed, including native Cursor models absent from its reported catalog. Catalog probe errors fail closed, and an empty usable pool is rejected. Every full Review and rereview selects uniformly from the final pool and runs cold under `/review-changes`; `review.agent` and `review.model` remain the stable fixer route. Each review invocation records both the final pool and selected harness/model.
+
+The removed `review.adversary_agent` and `review.adversary_model` fields are rejected with a migration hint.
 
 When `commands.build`, `commands.test`, or `commands.lint` is empty, that step's route plans one exact command in a read-only agent pass. The pipeline executes and records the plan, and the same route owns any repair before the pipeline reruns the command.
 
@@ -193,14 +223,14 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review adversary route, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### hooks.post_worktree
 
@@ -267,18 +297,85 @@ This field is honored **only from the trusted default-branch copy** of `.no-mist
 A pushed branch cannot enable it or disable a trusted opt-in.
 If the trusted commit or its present config file cannot be read and parsed, the run aborts rather than guessing that the option is disabled.
 
+### Structured command form
+
+Every `commands.*` value keeps accepting its legacy scalar string. It can also use the shared structured shape:
+
+```yaml
+commands:
+  build:
+    run: make build
+    runner: {executable: zsh, args: [-lc]}
+    linux:
+      run: make build-linux
+    macos:
+      runner: {executable: zsh, args: [-lc]}
+    windows:
+      run: npm run build:windows
+      runner:
+        executable: pwsh
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+```
+
+Platform fields override `run` and `runner` independently. Resolution precedence is the matching `linux`/`macos`/`windows` field, the command's inline `runner`, the global default runner, then the portable product default. Scalar machine overrides still replace or clear the entire command; mapping overrides merge only explicitly present nested fields.
+
+Runner identities use the same secret-free contract as the global default: `sh`, `bash`, or `zsh` with `[-c]` or `[-lc]`, and `pwsh` or `powershell` with `[-NoLogo, -NoProfile, -NonInteractive, -Command]`. Executable paths and extra arguments are rejected, including in inactive platform overrides, because the full structured definition is persisted in the resolved policy.
+
+This schema is active for trusted preflight commands. Build, Test, Lint, and Format retain their existing `sh -c` / `cmd.exe /c` execution path until their dedicated migration; for those four fields, structured runner/platform metadata is preserved and explained but the compatibility `run` value remains the executed command.
+
+Runner selectors are code-executing trusted configuration under the same default-branch and `allow_repo_commands` boundary as the command string. Resolution is fail-closed and does not try another shell after a missing binary, invalid argv, syntax error, launch error, or timeout.
+
+### preflight
+
+An ordered list of deterministic environment checks. Each entry accepts the same scalar or structured command form shown above.
+
+```yaml
+preflight:
+  - test -n "$HOME"
+  - run: command -v git
+    runner: {executable: zsh, args: [-lc]}
+    windows: Get-Command git | Out-Null
+```
+
+no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Failure diagnostics are secret-redacted, control-sanitized, and bounded, and identify the command index plus resolved command/runner source.
+
+A top-level global `preflight` is rejected. Use a trusted default-branch repo config or a matching machine-owned `overrides.<owner>/<repo>.preflight` list. A machine override replaces the full committed list; an explicit empty list clears it.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `structured command[]` |
+| Default | Empty                  |
+
 ### commands.build
 
 Explicit build or compile command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans the appropriate build command) |
 
 When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding and kept in full in the Build step log.
 When empty, the routed Build agent selects one exact command in a read-only planning pass. The pipeline executes and records it. If it fails, a repair agent fixes the cause and the pipeline reruns the same plan; no usable plan parks instead of silently passing.
 Build is separate from Test: do not put test, lint, or documentation work in `commands.build` unless that work is inseparable from the repository's canonical build command.
+
+### no_ci
+
+Declare that this repository intentionally has no CI.
+
+| | |
+| --- | --- |
+| Type | `bool` |
+| Default | `false` |
+
+When `true` and the forge reports **zero** checks on the PR head, the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green.
+
+Absence of this field means CI is expected. A zero-length check result then stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
+
+If checks still appear on a declared no-CI repository, their actual states are processed normally. The declaration never waives a registered pending or failing check.
+
+This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
+A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot clear a trusted declaration either.
 
 ### commands.test
 
@@ -286,7 +383,7 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans the smallest relevant test command) |
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
@@ -302,7 +399,7 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (agent plans a lint command) |
 
 When set, the lint step runs this exact command and checks the exit code.
@@ -314,7 +411,7 @@ Formatter command run before the push step commits agent fixes.
 
 | | |
 | --- | --- |
-| Type | `string` |
+| Type | `string` or structured command |
 | Default | Empty (no separate push-step formatter) |
 
 This remains separate from the Lint step's planned or configured command.
@@ -334,6 +431,63 @@ It augments or clarifies the built-in policy; it cannot disable documentation in
 
 Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
 
+### review.path_instructions
+
+Extra review guidance, scoped to the paths a change actually touches.
+
+| | |
+|---|---|
+| Type | `object[]` with `path` (`string`) and `instructions` (`string`, multiline) |
+| Default | Empty (built-in review instructions only) |
+
+Use this for house rules that only apply to part of the tree, for example a redaction rule for the code that builds remote URLs, or a note that a documentation directory needs no test coverage:
+
+```yaml
+review:
+  path_instructions:
+    - path: "internal/scm/**"
+      instructions: |
+        Any URL or error string that can carry credentials must go through internal/safeurl.
+    - path: "docs/**"
+      instructions: |
+        Prose changes only. Do not request test coverage.
+```
+
+Each matched rule reaches the reviewer with the scope it was selected for, so a rule scoped to one directory can never read as a repository-wide instruction:
+
+```
+path: docs/**
+matched files: docs/notes.md
+instructions:
+Prose changes only. Do not request test coverage.
+```
+
+#### Matching
+
+`path` uses the same matcher and syntax as [`ignore_patterns`](#ignore_patterns), including the rule that `*` never crosses a `/`, so `**/*.go` covers a single directory level rather than every Go file.
+
+The review step appends only the blocks whose `path` matches at least one changed file, in the order they appear in the file.
+Two entries with the same `path` **and** the same `instructions` are injected once. The same instruction text under two different `path` values is injected once per path, because each block states its own scope. Two entries with the same `path` and different `instructions` are both injected.
+Matching runs against the full changed-file list and is deliberately **not** filtered by `ignore_patterns`: that field is read from the pushed branch, so filtering here would let a contributor drop one of your rules from the review of their own branch.
+
+Blocks augment the built-in review instructions; they cannot disable them, and a finding the reviewer raises from a block goes through the same severity and action model as any other finding.
+With nothing configured, or nothing matching the change, the review prompt is exactly what it would be without this setting.
+The step log names the rules it applied and the rules that matched nothing, so a rule that never fires is visible in `no-mistakes axi logs --step review`.
+
+#### Limits and validation
+
+`instructions` is prompt text, so merge-conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) are removed from it and runs of whitespace are collapsed, exactly as for [`document.instructions`](#documentinstructions). Write rules without those tokens; a value that would be left empty once they are removed is rejected rather than silently dropped.
+
+At most 32 entries are allowed, and the assembled prompt section may not exceed 16,384 bytes, because the injected text shares the review prompt's budget and an oversized prompt fails the agent invocation outright.
+The size is measured on what is actually injected: the heading, and for every entry its labels, its `path`, its `instructions`, and a 192-byte allowance for its matched-file list. A block whose matched-file list would exceed that allowance is truncated with a `+N more` suffix, so the measured limit holds for any diff.
+
+A missing `path` or `instructions` value, an `instructions` value that renders empty, a `path` that is not a valid glob, or a config over either limit fails when the config is parsed, so the run aborts before an agent starts instead of silently dropping guidance.
+These checks run on whichever copy of the file is parsed, including the pushed branch's. A pushed branch's blocks are ignored when the review prompt is built (see [Trust](#trust) below), but an invalid block on that branch still fails its own run, so a broken rule surfaces before it merges and becomes the trusted copy.
+
+#### Trust
+
+Like `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands): a value present only on a pushed branch is ignored, so a contributor cannot inject instructions into the review that gates them.
+
 ### Command process lifetime
 
 All configured `commands.*` entries are scoped to their step.
@@ -349,13 +503,16 @@ Paths to exclude from review and documentation checks.
 | Type | `string[]` |
 | Default | Empty (no ignores) |
 
-Pattern matching rules:
+Pattern matching rules. [`review.path_instructions`](#reviewpath_instructions) uses the same matcher, so there is one path syntax to learn:
 
 | Pattern | Rule |
 | --- | --- |
-| `*.generated.go` | No slash - matches by basename |
-| `vendor/**` | Ends with `/**` - matches entire subtree |
-| `some/path/file.go` | Contains a slash - full path glob |
+| `*.generated.go` | No slash - matches by basename, at any depth |
+| `vendor/**` | Ends with `/**` - matches that directory and everything under it |
+| `some/path/file.go` | Contains a slash - full path glob against the whole path |
+| `**/*.go` | Also a full path glob, so **only one directory level** - `internal/main.go`, not `internal/scm/github/github.go` |
+
+`*` never crosses a `/`, on every platform, so `**/*.go` is not "every Go file"; it behaves as a single-segment wildcard. Use `*.go` to match by extension at any depth, or `internal/**` to cover a subtree.
 
 ### auto_fix
 
@@ -382,6 +539,53 @@ Unconfigured Build, Test, and Lint still use their own repair loops after the pi
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
 Legacy aliases: `auto_fix.rebase` for `auto_fix.refresh`, and `auto_fix.babysit` for `auto_fix.ci`. Setting a canonical key together with its legacy alias is rejected as ambiguous.
+
+### ci.rerun_transient
+
+How many times the CI step may re-run a single check the provider reported as cancelled before that check reaches an approval gate.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `0` |
+| Range | `0` to `5`; values outside it are clamped |
+| Trust | Read only from the trusted default branch |
+
+Every rerun this budget authorizes is another provider-side workflow run billed to the repository, so the value is read only from the trusted default-branch copy of this file, exactly like `document.instructions` and `disable_project_settings`.
+A pushed branch cannot raise its own rerun budget.
+The default is `0` because a cancelled conclusion does not identify its cause: the same value covers the provider aborting its own infrastructure, a maintainer stopping a runaway or unsafe job, and repository concurrency with `cancel-in-progress`.
+Rerunning on that ambiguity can restart work someone deliberately stopped, so raise this only for a repository whose cancellations are known to be provider-side.
+
+With no trusted copy of this file, the operator's own [`ci.rerun_transient`](/no-mistakes/reference/global-config/#cirerun_transient) applies, then the built-in default.
+A value set here always wins over the global one, so the maintainer of the repository has the last word on how many workflow runs their project is billed for.
+
+A rerun is requested only when the provider itself reported the outcome as `cancelled`, which is the one terminal outcome it attributes to itself rather than to the job:
+
+- `failure`, `error`, `action_required`, and `startup_failure` are the job's own verdict on the commit, so they escalate on the first failure with no added latency.
+- `timed_out` means the job exceeded its own `timeout-minutes`, which is usually the branch's own code hanging. Re-running it burns another full timeout window reproducing the same failure, so it is treated as a genuine failure and is not opt-in.
+- `stale` is already treated as skipped rather than failed, so it never reaches this decision.
+- An outcome no-mistakes recognizes as none of the above never earns a rerun either.
+
+A single non-cancelled failure, or a merge conflict, suppresses the rerun for that poll: the fix agent is needed regardless, and no rerun can clear a merge conflict.
+
+The budget is per check per run and is spent when the rerun is requested, so a provider that refuses the request cannot be retried in a loop.
+Check names are not unique on a pull request, so same-named checks share one budget.
+
+A rerun request returns as soon as the provider accepts it, while the new attempt replaces the cancelled check in the status rollup a moment later.
+A poll that still reads the exact completion the rerun was requested for has observed nothing new, so the monitor waits for a bounded couple of polls rather than escalating a check it never actually re-ran.
+A provider that accepts a rerun and never publishes it cannot stall the run past that.
+Once the provider publishes a conclusive replacement, no-mistakes durably stops treating that rerun as outstanding while preserving the spent budget; if the exact watched head is then green, the monitor reports `checks-passed` normally.
+
+A cancelled check that no rerun is going to replace pauses the step for user approval when cancellation is the only remaining issue, so the pull request never looks green.
+That is a check that came back cancelled after its rerun, and - at the default budget of `0`, once the budget is spent, or on a provider with no rerun API - the cancellation itself: the provider has already published its conclusion for that check and will not publish another one on its own, so there is nothing left for the monitor to wait for.
+It does not enter the `auto_fix.ci` loop and never consumes an auto-fix attempt: a cancellation is the provider reporting itself, so there is nothing for the fix agent to repair and no reason to let it edit code the provider never tested.
+Answering that gate with `fix` is still honored, and the fix round you asked for is told about the cancelled check alongside any other issue.
+
+Reruns are skipped when:
+
+- The provider has no rerun API (only GitHub implements one today; GitLab, Bitbucket Cloud, and Azure DevOps reach the approval gate without a rerun).
+- The check's details link names nothing the provider can re-run, for example a third-party status pointing at an external dashboard, or a link under a workflow run that names no job the API accepts. A link naming one job re-runs that job; a link naming only the workflow run re-runs that run's failed jobs; an unrecognized link is widened into neither.
+- The published branch head no longer equals the commit the run delivered. That case terminates with the expected and observed commits instead: re-running checks against a different head would certify a revision this run never produced. See [pipeline steps: CI](/no-mistakes/reference/pipeline-steps/#ci).
 
 ### commit.fix_message
 
@@ -414,18 +618,19 @@ Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `p
 
 ### test.evidence
 
-Override where evidence artifacts from the test step are stored.
+Configure repository publication of evidence artifacts from the test step.
 Fields not set here inherit from global config and then the built-in defaults.
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `test.evidence.store_in_repo` | `bool` | Inherits from global (default `false`) |
 | `test.evidence.dir` | `string` | Inherits from global (default `.no-mistakes/evidence`) |
+| `test.evidence.branch` | `string` | Inherits from global (default `no-mistakes/evidence`) |
 
-By default, test evidence stays in a temporary directory keyed by run ID and is referenced by local path.
-Set `store_in_repo: true` to write evidence under `<dir>/<branch-slug>` inside the worktree so push can commit and publish it with the branch.
-Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
-If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
+By default, test evidence is written to `<NM_HOME>/evidence/<run-id>` and referenced by local path. Where it is stored locally and how long it is kept are global-only settings; see [`test.evidence`](/no-mistakes/reference/global-config/#testevidence).
+For GitHub repositories, set `store_in_repo: true` to publish it to an orphan evidence branch in the code branch's push-target repository and link the artifacts from the PR body; evidence is never committed to the pushed branch, so it never reaches the default branch.
+`test.evidence.branch` is read ONLY from the trusted default-branch copy of this file, because it names a Git ref the daemon pushes to; a pushed branch cannot redirect evidence commits.
+See [global config](/no-mistakes/reference/global-config/#testevidence) for provider support, limits, validation, and fail-closed behavior.
 
 ### prompts
 
@@ -453,7 +658,7 @@ Global prompt config and repo prompt config combine in this order:
 | `prompts.shared` | Every pipeline model prompt |
 | `prompts.intent` | Intent summarization and disambiguation |
 | `prompts.refresh` | Refresh (rebase or merge) conflict resolution |
-| `prompts.review` | Review, adversarial review, and review-fix prompts |
+| `prompts.review` | Full Review/rereview and review-fix prompts |
 | `prompts.build` | Build verification and build-fix prompts |
 | `prompts.test` | Test evidence and test-fix prompts |
 | `prompts.document` | Documentation update prompt |

@@ -3,9 +3,26 @@ package db
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const (
+	maxReviewCandidateAgentBytes  = 128
+	maxReviewCandidateModelBytes  = 256
+	maxReviewCandidateVendorBytes = 128
+)
+
+// ReviewCandidateReceipt is the content-free route identity persisted with a
+// cold full-review invocation. It contains no prompt, output, path, or command.
+type ReviewCandidateReceipt struct {
+	Agent    string `json:"agent"`
+	Model    string `json:"model"`
+	Vendor   string `json:"vendor"`
+	Optional bool   `json:"optional,omitempty"`
+}
 
 // Agent invocation session modes recorded for local performance telemetry.
 const (
@@ -44,7 +61,7 @@ type AgentInvocation struct {
 	StepName string
 	Round    int
 	// Purpose is the pipeline duty served: review, review-fix,
-	// review-adversary, test-evidence, document, pr, intent, a
+	// test-evidence, document, pr, intent, a
 	// `<step>-plan` read-only command plan, or a step-derived default.
 	Purpose string
 	Agent   string
@@ -65,6 +82,9 @@ type AgentInvocation struct {
 	// ModelProvider is the provider that served the model (openai, anthropic,
 	// ...). Nil when the adapter cannot report it.
 	ModelProvider *string
+	// ReviewCandidatePool is the final usable pool considered for this full
+	// review. Nil for non-review invocations and legacy rows.
+	ReviewCandidatePool []ReviewCandidateReceipt
 	// SessionMode is one of the InvocationMode constants.
 	SessionMode string
 	// SessionKey is a privacy-safe fingerprint (truncated SHA-256) of the
@@ -77,7 +97,7 @@ type AgentInvocation struct {
 	StartedAt       int64
 	CompletedAt     int64
 	DurationMS      int64
-	ExitStatus      string // ok | error | cancelled
+	ExitStatus      string // started | ok | error | cancelled
 	FailureCategory string // parse | exit | spawn | cancelled | other ("" when ok)
 	InputTokens     int
 	OutputTokens    int
@@ -133,7 +153,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider,
+const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider, review_candidate_pool_json,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -144,7 +164,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, in
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -154,8 +174,10 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?`
 
-// InsertAgentInvocation records one completed agent invocation. Nil pointer
-// fields are stored as SQL NULL (database/sql dereferences non-nil pointers).
+// InsertAgentInvocation records an agent invocation. Review routing may insert
+// a started row before launching the selected harness, then finalize it with
+// UpdateAgentInvocation. Nil pointer fields are stored as SQL NULL
+// (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
 	if inv.InvocationMode == "" {
 		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
@@ -164,11 +186,15 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err != nil {
 		return nil, fmt.Errorf("encode agent observations: %w", err)
 	}
+	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
+	if err != nil {
+		return nil, fmt.Errorf("encode review candidate pool: %w", err)
+	}
 	inv.ID = newID()
 	_, err = d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -180,6 +206,58 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert agent invocation: %w", err)
+	}
+	return &inv, nil
+}
+
+// UpdateAgentInvocation finalizes a previously inserted invocation while
+// retaining its stable receipt identity.
+func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
+	if strings.TrimSpace(inv.ID) == "" {
+		return nil, fmt.Errorf("update agent invocation: id is required")
+	}
+	if inv.InvocationMode == "" {
+		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
+	}
+	observationsJSON, err := encodeAgentObservations(inv)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent observations: %w", err)
+	}
+	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
+	if err != nil {
+		return nil, fmt.Errorf("encode review candidate pool: %w", err)
+	}
+	result, err := d.sql.Exec(`UPDATE agent_invocations SET
+		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, invocation_mode = ?, agent_observations_json = ?, nested_agent_count = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		session_mode = ?, session_key = ?, fallback_reason = ?,
+		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
+		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
+		fresh_input_tokens = ?, reasoning_tokens = ?,
+		delta_input_tokens = ?, delta_output_tokens = ?, delta_cache_read_tokens = ?, delta_cache_creation_tokens = ?, reported_cost_usd = ?,
+		model_roundtrips = ?, tool_calls = ?,
+		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
+		workload_files = ?, workload_lines = ?, finding_count = ?
+		WHERE id = ?`,
+		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
+		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
+		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
+		inv.FreshInputTokens, inv.ReasoningTokens,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
+		inv.ModelRoundtrips, inv.ToolCalls,
+		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
+		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
+		inv.ID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update agent invocation: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update agent invocation rows affected: %w", err)
+	}
+	if updated != 1 {
+		return nil, fmt.Errorf("update agent invocation: expected 1 row, updated %d", updated)
 	}
 	return &inv, nil
 }
@@ -206,6 +284,49 @@ func (d *DB) GetAgentInvocationsByRun(runID string) ([]AgentInvocation, error) {
 	return invocations, rows.Err()
 }
 
+// AgentInvocationAuditTotals is an independent SQL aggregate used to verify
+// that a run audit's emitted invocation rows and totals agree.
+type AgentInvocationAuditTotals struct {
+	Rows                       int
+	DeltaInputReported         int
+	DeltaInputSum              *int64
+	DeltaOutputReported        int
+	DeltaOutputSum             *int64
+	DeltaCacheReadReported     int
+	DeltaCacheReadSum          *int64
+	DeltaCacheCreationReported int
+	DeltaCacheCreationSum      *int64
+	ReportedCostReported       int
+	ReportedCostSum            *float64
+}
+
+// GetAgentInvocationAuditTotals returns nullable per-round-meter aggregates.
+// SUM remains nullable: no reported rows is unknown, not zero.
+func (d *DB) GetAgentInvocationAuditTotals(runID string) (AgentInvocationAuditTotals, error) {
+	var totals AgentInvocationAuditTotals
+	err := d.sql.QueryRow(`
+		SELECT COUNT(*),
+		       COUNT(delta_input_tokens), SUM(delta_input_tokens),
+		       COUNT(delta_output_tokens), SUM(delta_output_tokens),
+		       COUNT(delta_cache_read_tokens), SUM(delta_cache_read_tokens),
+		       COUNT(delta_cache_creation_tokens), SUM(delta_cache_creation_tokens),
+		       COUNT(reported_cost_usd), SUM(reported_cost_usd)
+		FROM agent_invocations
+		WHERE run_id = ?`, runID,
+	).Scan(
+		&totals.Rows,
+		&totals.DeltaInputReported, &totals.DeltaInputSum,
+		&totals.DeltaOutputReported, &totals.DeltaOutputSum,
+		&totals.DeltaCacheReadReported, &totals.DeltaCacheReadSum,
+		&totals.DeltaCacheCreationReported, &totals.DeltaCacheCreationSum,
+		&totals.ReportedCostReported, &totals.ReportedCostSum,
+	)
+	if err != nil {
+		return AgentInvocationAuditTotals{}, fmt.Errorf("get agent invocation audit totals: %w", err)
+	}
+	return totals, nil
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -213,8 +334,9 @@ type scanner interface {
 func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
 	var observationsJSON *string
+	var reviewCandidatePoolJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -232,7 +354,64 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 			return AgentInvocation{}, fmt.Errorf("decode agent observations: %w", err)
 		}
 	}
+	if reviewCandidatePoolJSON != nil {
+		if err := json.Unmarshal([]byte(*reviewCandidatePoolJSON), &inv.ReviewCandidatePool); err != nil {
+			return AgentInvocation{}, fmt.Errorf("decode review candidate pool: %w", err)
+		}
+		if err := validateReviewCandidatePool(inv.ReviewCandidatePool); err != nil {
+			return AgentInvocation{}, fmt.Errorf("decode review candidate pool: %w", err)
+		}
+	}
 	return inv, nil
+}
+
+func encodeReviewCandidatePool(pool []ReviewCandidateReceipt) (*string, error) {
+	if pool == nil {
+		return nil, nil
+	}
+	if err := validateReviewCandidatePool(pool); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(pool)
+	if err != nil {
+		return nil, err
+	}
+	value := string(encoded)
+	return &value, nil
+}
+
+func validateReviewCandidatePool(pool []ReviewCandidateReceipt) error {
+	if len(pool) == 0 {
+		return fmt.Errorf("review candidate pool must not be empty")
+	}
+	seen := make(map[string]bool, len(pool))
+	for i, candidate := range pool {
+		if err := validateReviewCandidateIdentity("agent", candidate.Agent, maxReviewCandidateAgentBytes); err != nil {
+			return fmt.Errorf("review candidate %d: %w", i+1, err)
+		}
+		if err := validateReviewCandidateIdentity("model", candidate.Model, maxReviewCandidateModelBytes); err != nil {
+			return fmt.Errorf("review candidate %d: %w", i+1, err)
+		}
+		if err := validateReviewCandidateIdentity("vendor", candidate.Vendor, maxReviewCandidateVendorBytes); err != nil {
+			return fmt.Errorf("review candidate %d: %w", i+1, err)
+		}
+		key := candidate.Agent + "\x00" + candidate.Model + "\x00" + candidate.Vendor
+		if seen[key] {
+			return fmt.Errorf("review candidate %d duplicates %s/%s", i+1, candidate.Agent, candidate.Model)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func validateReviewCandidateIdentity(field, value string, maxBytes int) error {
+	if value == "" || value != strings.TrimSpace(value) {
+		return fmt.Errorf("candidate %s must be a non-empty trimmed identity", field)
+	}
+	if len(value) > maxBytes || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return fmt.Errorf("candidate %s is not a bounded printable identity", field)
+	}
+	return nil
 }
 
 func encodeAgentObservations(inv AgentInvocation) (*string, error) {

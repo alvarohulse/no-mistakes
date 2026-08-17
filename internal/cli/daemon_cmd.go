@@ -177,6 +177,8 @@ func normalizeNotifyGatePath(gate string) (string, error) {
 
 func parseSkipPushOptions(options []string) ([]types.StepName, error) {
 	var steps []types.StepName
+	found := false
+	explicitNone := false
 	for _, option := range options {
 		value, ok := strings.CutPrefix(option, "no-mistakes.skip=")
 		if !ok {
@@ -186,7 +188,25 @@ func parseSkipPushOptions(options []string) ([]types.StepName, error) {
 		if err != nil {
 			return nil, err
 		}
+		if parsed != nil && len(parsed) == 0 {
+			if found {
+				return nil, fmt.Errorf("skip value none cannot be combined with other skip options")
+			}
+			found = true
+			explicitNone = true
+			continue
+		}
+		if explicitNone {
+			return nil, fmt.Errorf("skip value none cannot be combined with other skip options")
+		}
+		found = true
 		steps = append(steps, parsed...)
+	}
+	if explicitNone {
+		return []types.StepName{}, nil
+	}
+	if !found {
+		return nil, nil
 	}
 	return dedupeSteps(steps), nil
 }
@@ -235,8 +255,17 @@ func parseSkipSteps(value string) ([]types.StepName, error) {
 	if strings.TrimSpace(value) == "" {
 		return nil, nil
 	}
+	parts := strings.Split(value, ",")
+	for _, part := range parts {
+		if strings.EqualFold(strings.TrimSpace(part), "none") {
+			if len(parts) != 1 {
+				return nil, fmt.Errorf("skip value none cannot be combined with pipeline steps")
+			}
+			return []types.StepName{}, nil
+		}
+	}
 	var steps []types.StepName
-	for _, part := range strings.Split(value, ",") {
+	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
 		step := types.StepName(trimmed).Canonical()
 		if !validStep(step) {
@@ -334,8 +363,11 @@ func parseMetadataPushOptions(options []string) (*string, error) {
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
-	if len(steps) == 0 {
+	if steps == nil {
 		return nil
+	}
+	if len(steps) == 0 {
+		return []string{"no-mistakes.skip=none"}
 	}
 	parts := make([]string, 0, len(steps))
 	for _, step := range dedupeSteps(steps) {

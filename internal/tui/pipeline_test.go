@@ -295,7 +295,7 @@ func TestRenderPipelineView_FixingStatusOmitsAgentFixingLabel(t *testing.T) {
 }
 
 func TestRenderApprovalActions_FormatWithSeparator(t *testing.T) {
-	out := stripANSI(renderApprovalActions(true, true, false, 5, 5, false, true))
+	out := stripANSI(renderApprovalActions(true, true, false, 5, 5, false, true, true, false))
 	// Keys should not be bracket-wrapped - design uses "a approve" not "[a] approve".
 	if strings.Contains(out, "[a]") {
 		t.Error("expected bare key format 'a approve', not '[a] approve'")
@@ -311,7 +311,7 @@ func TestRenderApprovalActions_FormatWithSeparator(t *testing.T) {
 }
 
 func TestRenderApprovalActions_NoSelectionActions(t *testing.T) {
-	out := stripANSI(renderApprovalActions(false, true, false, 5, 5, false, true))
+	out := stripANSI(renderApprovalActions(false, true, false, 5, 5, false, true, true, false))
 	// Without selection actions, no │ separator should appear.
 	if strings.Contains(out, "│") {
 		t.Error("expected no │ separator when no selection actions")
@@ -326,7 +326,7 @@ func TestRenderPipelineView_HidesFixActionWhenDisabled(t *testing.T) {
 	run.Steps[0].Status = types.StepStatusAwaitingApproval
 
 	// Action bar is now rendered outside the pipeline box per DESIGN.md.
-	out := stripANSI(renderActionBar(run.Steps, run.RefreshStrategy, true, false, false, 0, 5, false, true))
+	out := stripANSI(renderActionBar(run.Steps, run.RefreshStrategy, true, false, false, 0, 5, false, true, true, false))
 	if strings.Contains(out, "f fix") {
 		t.Fatal("expected fix action to be hidden when disabled")
 	}
@@ -449,6 +449,35 @@ func TestModel_ApplyEvent_StepCompleted_FailedStoresError(t *testing.T) {
 	out := stripANSI(renderPipelineView(m.run, m.steps, 80, 0, 40))
 	if !strings.Contains(out, errMsg) {
 		t.Fatalf("expected pipeline view to contain step error, got:\n%s", out)
+	}
+}
+
+func TestRenderPipelineViewShowsConfiguredSkipSource(t *testing.T) {
+	source := string(types.SkipSourceGlobalOverride)
+	run := testRun()
+	run.Status = types.RunCompleted
+	steps := []ipc.StepResultInfo{{
+		StepName: types.StepCI, Status: types.StepStatusSkipped, SkipSource: &source,
+	}}
+	out := stripANSI(renderPipelineView(run, steps, 80, 0, 40))
+	if !strings.Contains(out, "CI") || !strings.Contains(out, "global-override") {
+		t.Fatalf("configured skip source missing from pipeline view:\n%s", out)
+	}
+}
+
+func TestStepCompletedEventCarriesConfiguredSkipSourceIntoPipelineView(t *testing.T) {
+	run := testRun()
+	run.Steps = append(run.Steps, ipc.StepResultInfo{RunID: run.ID, StepName: types.StepCI, Status: types.StepStatusPending})
+	model := NewModel("/tmp/sock", nil, run)
+	source := string(types.SkipSourceGlobalOverride)
+	status := string(types.StepStatusSkipped)
+	step := types.StepCI
+	model.applyEvent(ipc.Event{
+		Type: ipc.EventStepCompleted, RunID: run.ID, StepName: &step, Status: &status, SkipSource: &source,
+	})
+	out := stripANSI(renderPipelineView(model.run, model.steps, 80, 0, 40))
+	if !strings.Contains(out, "CI") || !strings.Contains(out, "global-override") {
+		t.Fatalf("configured skip source missing after event:\n%s", out)
 	}
 }
 

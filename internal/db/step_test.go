@@ -291,6 +291,32 @@ func TestCompleteStepWithStatus(t *testing.T) {
 	}
 }
 
+func TestCompleteStepAsSkippedPersistsTypedSource(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/skip-source", "git@github.com:user/skip-source.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepAsSkipped(step.ID, types.SkipSourceGlobalOverride); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.StepStatusSkipped || got.SkipSource == nil || *got.SkipSource != string(types.SkipSourceGlobalOverride) {
+		t.Fatalf("skipped step = %+v", got)
+	}
+}
+
 func TestUpdateStepStatusWithDuration(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -307,6 +333,41 @@ func TestUpdateStepStatusWithDuration(t *testing.T) {
 	}
 	if got.DurationMS == nil || *got.DurationMS != 1200 {
 		t.Fatalf("duration_ms = %v, want 1200", got.DurationMS)
+	}
+}
+
+func TestParkStepForApproval_FindingsFailureRollsBackGate(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/findings-atomic", "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if _, err := d.sql.Exec(`
+		CREATE TRIGGER fail_findings_update
+		BEFORE UPDATE OF findings_json ON step_results
+		BEGIN
+			SELECT RAISE(FAIL, 'findings write failed');
+		END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"items":[{"id":"review-1"}]}`
+
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 100, &findings); err == nil {
+		t.Fatal("expected findings persistence failure")
+	}
+	gotStep, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRun, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Status != types.StepStatusPending || gotStep.FindingsJSON != nil {
+		t.Fatalf("step was partially parked: %#v", gotStep)
+	}
+	if gotRun.AwaitingAgentSince != nil {
+		t.Fatal("run was marked awaiting agent after findings persistence failed")
 	}
 }
 

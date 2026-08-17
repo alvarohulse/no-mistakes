@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,6 +100,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "leave the same class of bug likely elsewhere") {
 		t.Error("expected review fix prompt to avoid narrow fixes that leave systemic bugs")
 	}
+	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	if len(ag.calls[0].JSONSchema) == 0 {
 		t.Error("expected fix call to request structured JSON output")
 	}
@@ -120,6 +122,8 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[1].Prompt, "GitHub-flavored Markdown") || !strings.Contains(ag.calls[1].Prompt, "`AlertMessage.close`") {
 		t.Error("expected risk rationale prompt to require Markdown formatting for identifiers")
 	}
+	assertTestQualityRulePrompt(t, ag.calls[1].Prompt)
+	assertTestQualityReviewerAction(t, ag.calls[1].Prompt)
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after fix commit, got %q", status)
 	}
@@ -131,6 +135,71 @@ func TestReviewStep_FixMode(t *testing.T) {
 	}
 	if outcome.ReviewApprovedHeadSHA != sctx.Run.HeadSHA {
 		t.Fatalf("rereview captured approved head %s, want %s", outcome.ReviewApprovedHeadSHA, sctx.Run.HeadSHA)
+	}
+}
+
+// A deterministic fake finding exercises the ordinary review gate, repair,
+// and rereview flow without claiming that the fake agent can judge tests.
+func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			calls++
+			switch calls {
+			case 1:
+				assertTestQualityRulePrompt(t, opts.Prompt)
+				assertTestQualityReviewerAction(t, opts.Prompt)
+				output, _ := json.Marshal(Findings{Items: []Finding{{
+					ID:          "source-content-only-test",
+					Severity:    "warning",
+					Action:      types.ActionAutoFix,
+					File:        "app_test.go",
+					Description: "new test only greps implementation source for a required token",
+				}}})
+				return &agent.Result{Output: output}, nil
+			case 2:
+				assertTestQualityRulePrompt(t, opts.Prompt)
+				if err := os.WriteFile(filepath.Join(dir, "semantic_test.go"), []byte("package app\n"), 0o644); err != nil {
+					return nil, err
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"replace source test"}`)}, nil
+			case 3:
+				assertTestQualityRulePrompt(t, opts.Prompt)
+				assertTestQualityReviewerAction(t, opts.Prompt)
+				output, _ := json.Marshal(Findings{Summary: "clean"})
+				return &agent.Result{Output: output}, nil
+			default:
+				return nil, fmt.Errorf("unexpected agent call %d", calls)
+			}
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step := &ReviewStep{}
+
+	initial, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !initial.NeedsApproval || !initial.AutoFixable {
+		t.Fatalf("initial source-content finding should use the normal repair gate, got %+v", initial)
+	}
+
+	sctx.Fixing = true
+	sctx.PreviousFindings = initial.Findings
+	fixed, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixed.NeedsApproval {
+		t.Fatalf("clean rereview after repair should not remain gated, got %+v", fixed)
+	}
+	if calls != 3 {
+		t.Fatalf("agent calls = %d, want review, fix, rereview", calls)
 	}
 }
 
@@ -265,6 +334,251 @@ func TestReviewStep_DurableFixAdequacyContract(t *testing.T) {
 	}
 }
 
+// Counterexample construction is a general review principle for any new or
+// changed logic, not a bug-fix-only reconstruction. Silently wrong values,
+// labels, and sets are named as risks. The principle stays short and general:
+// it must not become a checklist of incident-specific probes.
+func TestReviewStep_CounterexampleConstructionIsUnconditional(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+
+	for _, want := range []string{
+		"For any new or changed logic, construct at least one concrete input or state and trace it",
+		"wrong result without erroring",
+		"wrong value, label, or set without failing",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("review prompt missing general correctness principle %q:\n%s", want, prompt)
+		}
+	}
+
+	// Durable-fix reconstruction remains a paired, still-gated discipline.
+	if !strings.Contains(prompt, "For a claimed durable fix, reconstruct the concrete failing sequence") {
+		t.Errorf("review prompt dropped the durable-fix reconstruction pairing:\n%s", prompt)
+	}
+
+	for _, overfit := range []string{
+		"each read path and each write/refresh path",
+		"configured bound is changed after state already exists",
+		"greedy or order-dependent loop",
+	} {
+		if strings.Contains(prompt, overfit) {
+			t.Errorf("review prompt overfit an incident-specific probe %q:\n%s", overfit, prompt)
+		}
+	}
+}
+
+// The rereview that certifies a fix round examines code the pipeline itself
+// authored, moments earlier, to the previous review turn's prescription. The
+// prompt must reframe that code as unreviewed new work under the same
+// adversarial standard as the author's changes - prior findings and fix
+// summaries are claims, and a same-round test is part of the claim, not
+// independent proof. This pins the contract wording; the initial review must
+// stay unchanged. Class regression for a pipeline-authored defect (code plus
+// blessing test written by one fix round) certified with zero findings.
+func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) {
+	t.Parallel()
+	provenanceContract := []string{
+		"Fix-round provenance:",
+		"was authored by the pipeline's own fixer agent, not by the change author",
+		"same adversarial standard as the author's original changes",
+		"unreviewed new code, not a settled resolution of the findings that prompted it",
+		"Prior findings and fix summaries are claims, not evidence",
+		"not merely whether it implements what was prescribed",
+		"part of that round's claim, not independent proof",
+		"whether it could still pass with the code wrong",
+	}
+
+	t.Run("rereview_carries_the_provenance_contract", func(t *testing.T) {
+		t.Parallel()
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+		callCount := 0
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				callCount++
+				if callCount == 1 {
+					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
+					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				}
+				j, _ := json.Marshal(Findings{Summary: "clean"})
+				return &agent.Result{Output: j}, nil
+			},
+		}
+
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		sctx.Fixing = true
+		sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"possible nil deref"}],"summary":"1 issue"}`
+
+		if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(ag.calls) != 2 {
+			t.Fatalf("expected fix + rereview calls, got %d", len(ag.calls))
+		}
+		rereviewPrompt := ag.calls[1].Prompt
+		for _, want := range provenanceContract {
+			if !strings.Contains(rereviewPrompt, want) {
+				t.Errorf("rereview prompt missing provenance contract %q:\n%s", want, rereviewPrompt)
+			}
+		}
+		if strings.Contains(ag.calls[0].Prompt, "Fix-round provenance:") {
+			t.Error("fixer prompt must not carry the reviewer's provenance contract")
+		}
+	})
+
+	t.Run("initial_review_stays_unchanged", func(t *testing.T) {
+		t.Parallel()
+		dir, baseSHA, headSHA := setupGitRepo(t)
+
+		findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: findingsJSON}, nil
+			},
+		}
+
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+			t.Fatal(err)
+		}
+		if len(ag.calls) != 1 {
+			t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+		}
+		if strings.Contains(ag.calls[0].Prompt, "Fix-round provenance:") {
+			t.Errorf("initial review prompt must not carry the fix-round provenance contract:\n%s", ag.calls[0].Prompt)
+		}
+	})
+}
+
+func TestFixRoundProvenanceClause_EmitsForUncertifiedRangeWhenNotFixing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.UncertifiedFromSHA = "from-sha"
+	sctx.UncertifiedToSHA = "to-sha"
+	sctx.UncertifiedSourceRunID = "prior-run"
+	priorFindings := `{"findings":[{"id":"review-1","severity":"error","file":"main.go","line":4,"description":"reachable bug","action":"auto-fix"}]}`
+	sctx.UncertifiedPriorRounds = []*db.StepRound{{
+		Round:        1,
+		Trigger:      "initial",
+		FindingsJSON: &priorFindings,
+	}}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+	}
+	prompt := ag.calls[0].Prompt
+	for _, want := range []string{
+		"Fix-round provenance:",
+		"Commits after from-sha through to-sha on this branch were authored by a previous run's fixer and were never certified",
+		"same adversarial standard",
+		"Prior findings and fix summaries are claims, not evidence",
+		"Previous run (uncertified fixer commits)",
+		"reachable bug",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("initial review missing uncertified provenance %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "This is a re-review after this run's automated fix round(s)") {
+		t.Errorf("uncertified initial review must not use the current-run fixer framing:\n%s", prompt)
+	}
+}
+
+func TestUncertifiedRange_PersistsThenFeedsNextInitialReview(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	fixAgent := &mockAgent{name: "test"}
+	fixCtx := newTestContextWithDBRecords(t, fixAgent, dir, baseSHA, headSHA, config.Commands{})
+	fixCtx.ReviewStartingHeadSHA = headSHA
+	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAgentFixes(fixCtx, types.StepReview, "apply fix", "fallback"); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := fixCtx.DB.GetUncertifiedPipelineRange(fixCtx.Repo.ID, fixCtx.Run.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted == nil || persisted.FromSHA != headSHA || persisted.ToSHA != fixCtx.Run.HeadSHA {
+		t.Fatalf("fixer commit did not persist range: %#v", persisted)
+	}
+
+	findingsJSON, _ := json.Marshal(Findings{Summary: "clean"})
+	reviewAgent := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: findingsJSON}, nil
+		},
+	}
+	nextRun, err := fixCtx.DB.InsertRun(fixCtx.Repo.ID, fixCtx.Run.Branch, fixCtx.Run.HeadSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, reviewAgent, dir, baseSHA, fixCtx.Run.HeadSHA, config.Commands{})
+	sctx.DB = fixCtx.DB
+	sctx.Repo = fixCtx.Repo
+	sctx.Run = nextRun
+	sctx.Fixing = false
+	pipeline.BindUncertifiedPipelineRange(sctx)
+	if sctx.UncertifiedFromSHA != persisted.FromSHA || sctx.UncertifiedToSHA != persisted.ToSHA {
+		t.Fatalf("next initial review bound from=%q to=%q, want from=%q to=%q", sctx.UncertifiedFromSHA, sctx.UncertifiedToSHA, persisted.FromSHA, persisted.ToSHA)
+	}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewAgent.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(reviewAgent.calls))
+	}
+	prompt := reviewAgent.calls[0].Prompt
+	want := fmt.Sprintf("Commits after %s through %s on this branch were authored by a previous run's fixer and were never certified", persisted.FromSHA, persisted.ToSHA)
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("next initial review missing persisted provenance %q:\n%s", want, prompt)
+	}
+	if sctx.Fixing {
+		t.Fatal("next initial review ran in fix mode")
+	}
+	if strings.Contains(prompt, "This is a re-review after this run's automated fix round(s)") {
+		t.Fatalf("next initial review used current-run fixer framing:\n%s", prompt)
+	}
+}
+
 func TestReviewStep_FixMode_RequiresPreviousFindings(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -358,6 +672,7 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 		wantAuthority   bool
 	}{
 		{"agent source is authoritative", db.RunIntentSourceAgent, true, true},
+		{"inherited source is authoritative", db.RunIntentSourceRerun, true, true},
 		{"inferred source stays a hint", "claude", false, false},
 	}
 	for _, tc := range cases {
@@ -397,6 +712,11 @@ func TestReviewStep_ConformanceObligationTracksIntentProvenance(t *testing.T) {
 				if !strings.Contains(prompt, `you MUST emit an "ask-user" finding`) {
 					t.Errorf("conformance clause missing the ask-user obligation:\n%s", prompt)
 				}
+				if !strings.Contains(prompt, "Conformance does not replace correctness review") {
+					t.Errorf("conformance clause missing the correctness-is-not-conformance note:\n%s", prompt)
+				}
+			} else if strings.Contains(prompt, "Conformance does not replace correctness review") {
+				t.Errorf("inferred intent must not carry the conformance-vs-correctness note:\n%s", prompt)
 			}
 		})
 	}
@@ -465,6 +785,130 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 	}
 }
 
+// reviewPromptFor runs one clean review turn against a fresh copy of the
+// template repo with the given path instructions and returns the review prompt
+// the agent received.
+func reviewPromptFor(t *testing.T, rules []config.PathInstruction) string {
+	t.Helper()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			j, _ := json.Marshal(Findings{Summary: "clean"})
+			return &agent.Result{Output: j}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review = config.Review{PathInstructions: rules}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+	}
+	return ag.calls[0].Prompt
+}
+
+// A repository with no review.path_instructions must get the review prompt it
+// got before the setting existed. The matched-rule prompt is asserted to be the
+// unconfigured prompt plus the appended section and nothing else, which proves
+// the feature only ever appends.
+func TestReviewStep_PathInstructionsLeaveUnconfiguredPromptUnchanged(t *testing.T) {
+	t.Parallel()
+
+	unconfigured := reviewPromptFor(t, nil)
+	if strings.Contains(unconfigured, config.ReviewPathInstructionsHeading) {
+		t.Fatalf("unconfigured review prompt carries the path-instructions heading:\n%s", unconfigured)
+	}
+
+	// Configured but matching nothing in this diff: still unchanged.
+	unmatched := reviewPromptFor(t, []config.PathInstruction{
+		{Path: "internal/scm/**", Instructions: "Credential-carrying URLs must go through internal/safeurl."},
+	})
+	if unmatched != unconfigured {
+		t.Fatalf("a non-matching rule changed the review prompt:\n%q", unmatched)
+	}
+
+	matched := reviewPromptFor(t, []config.PathInstruction{
+		{Path: "*.txt", Instructions: "Fixture files carry no product behavior."},
+	})
+	want := unconfigured + wantSection(wantBlock("*.txt", "feature.txt", "Fixture files carry no product behavior."))
+	if matched != want {
+		t.Fatalf("matched review prompt = %q, want the unconfigured prompt plus the appended section", matched)
+	}
+}
+
+// Only the blocks whose glob matches a changed path reach the reviewer, in
+// config order, each labelled with the scope it was selected for.
+func TestReviewStep_AppendsMatchedPathInstructionsOnly(t *testing.T) {
+	t.Parallel()
+
+	unconfigured := reviewPromptFor(t, nil)
+	prompt := reviewPromptFor(t, []config.PathInstruction{
+		{Path: "docs/**", Instructions: "Prose changes only. Do not request test coverage."},
+		{Path: "feature.txt", Instructions: "Fixture files carry no product behavior."},
+		{Path: "feature.txt", Instructions: "Fixture files carry no product behavior."},
+		{Path: "*.txt", Instructions: "Every fixture edit needs a reason."},
+		{Path: "base.txt", Instructions: "Base fixtures are shared; flag every edit."},
+	})
+
+	want := unconfigured + wantSection(
+		wantBlock("feature.txt", "feature.txt", "Fixture files carry no product behavior."),
+		wantBlock("*.txt", "feature.txt", "Every fixture edit needs a reason."),
+	)
+	if prompt != want {
+		t.Fatalf("review prompt =\n%q\nwant\n%q", prompt, want)
+	}
+	if strings.Contains(prompt, "Prose changes only.") {
+		t.Errorf("docs/** block was appended for a diff that touches no docs")
+	}
+	if strings.Contains(prompt, "Base fixtures are shared") {
+		t.Errorf("base.txt block was appended although the diff does not change it")
+	}
+	if got := strings.Count(prompt, "Fixture files carry no product behavior."); got != 1 {
+		t.Errorf("the exact duplicate entry was appended %d times, want 1", got)
+	}
+}
+
+// ignore_patterns comes from the pushed branch, so it must not decide which
+// trusted rules steer the review. A contributor who ignores the very path a
+// maintainer's rule covers still gets that rule.
+func TestReviewStep_PushedIgnorePatternsCannotSuppressPathInstructions(t *testing.T) {
+	t.Parallel()
+
+	rules := []config.PathInstruction{{Path: "*.txt", Instructions: "Fixture files carry no product behavior."}}
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			j, _ := json.Marshal(Findings{Summary: "clean"})
+			return &agent.Result{Output: j}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review = config.Review{PathInstructions: rules}
+	// The branch adds a source file so the run still has something to review,
+	// and ignores the fixture the trusted rule is scoped to.
+	os.WriteFile(filepath.Join(dir, "app.go"), []byte("package main\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "add source file")
+	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx.Config.IgnorePatterns = []string{"*.txt"}
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected 1 review call, got %d", len(ag.calls))
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "Fixture files carry no product behavior.") {
+		t.Fatalf("a pushed ignore_patterns entry suppressed the trusted rule:\n%s", ag.calls[0].Prompt)
+	}
+}
+
 func hasAskUserFindings(t *testing.T, raw string) bool {
 	t.Helper()
 	findings, err := types.ParseFindingsJSON(raw)
@@ -484,74 +928,4 @@ func mustLatestRoundID(t *testing.T, sctx *pipeline.StepContext) string {
 		t.Fatal("expected at least one round in DB")
 	}
 	return rounds[len(rounds)-1].ID
-}
-
-func TestReviewStep_AdversaryRunsOnlyForHighRiskAndMergesFindings(t *testing.T) {
-	t.Run("low risk does not trigger", func(t *testing.T) {
-		dir, baseSHA, headSHA := setupGitRepo(t)
-		primary := &mockAgent{name: "primary", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"bounded","risk_scope":"source-or-external"}`)}, nil
-		}}
-		adversary := &mockAgent{name: "adversary", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			t.Fatal("adversary must not run for low risk")
-			return nil, nil
-		}}
-		sctx := newTestContextWithDBRecords(t, primary, dir, baseSHA, headSHA, config.Commands{})
-		sctx.ReviewAdversary = adversary
-
-		if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
-			t.Fatal(err)
-		}
-		if len(adversary.calls) != 0 {
-			t.Fatalf("adversary calls = %d, want 0", len(adversary.calls))
-		}
-	})
-
-	t.Run("high risk triggers independent review", func(t *testing.T) {
-		dir, baseSHA, headSHA := setupGitRepo(t)
-		primary := &mockAgent{name: "primary", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"review-adversary-1","severity":"error","file":"feature.txt","line":1,"description":"primary bug","action":"auto-fix","review_scope":"source"}],"summary":"primary found a bug","risk_level":"high","risk_rationale":"fundamental change","risk_scope":"source-or-external"}`)}, nil
-		}}
-		adversary := &mockAgent{name: "adversary", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			if opts.Session != nil {
-				t.Fatalf("adversary inherited primary session: %+v", opts.Session)
-			}
-			if opts.Purpose != "review-adversary" {
-				t.Fatalf("adversary purpose = %q", opts.Purpose)
-			}
-			if !strings.Contains(opts.Prompt, "independent adversarial review") {
-				t.Fatalf("adversary prompt did not declare independent role:\n%s", opts.Prompt)
-			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"same-id","severity":"warning","file":"feature.txt","line":1,"description":"adversary concern","action":"ask-user","review_scope":"source"}],"summary":"adversary found a concern","risk_level":"medium","risk_rationale":"additional ambiguity","risk_scope":"source-or-external"}`)}, nil
-		}}
-		sctx := newTestContextWithDBRecords(t, primary, dir, baseSHA, headSHA, config.Commands{})
-		sctx.ReviewAdversary = adversary
-
-		outcome, err := (&ReviewStep{}).Execute(sctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(adversary.calls) != 1 {
-			t.Fatalf("adversary calls = %d, want 1", len(adversary.calls))
-		}
-		findings, err := types.ParseFindingsJSON(outcome.Findings)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(findings.Items) != 2 {
-			t.Fatalf("merged findings = %+v, want primary and adversary", findings.Items)
-		}
-		if findings.Items[0].Description != "primary bug" || findings.Items[1].Description != "adversary concern" {
-			t.Fatalf("merged findings = %+v", findings.Items)
-		}
-		if !strings.HasPrefix(findings.Items[1].ID, "review-adversary-") {
-			t.Fatalf("adversary finding ID = %q, want namespaced identity", findings.Items[1].ID)
-		}
-		if findings.Items[0].ID == findings.Items[1].ID {
-			t.Fatalf("merged finding IDs collide: %q", findings.Items[0].ID)
-		}
-		if findings.RiskLevel != "high" || !outcome.NeedsApproval || !outcome.AutoFixable {
-			t.Fatalf("outcome = %+v, findings = %+v", outcome, findings)
-		}
-	})
 }

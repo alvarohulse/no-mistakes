@@ -129,7 +129,7 @@ prompts:
 	}
 }
 
-func TestRunStartRecordsMalformedOverridesAsFailedRun(t *testing.T) {
+func TestRunStartRejectsMalformedOverridesBeforeCreatingRun(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database := newRefreshRunFixture(t)
 	repo, head := setupTestGitRepo(t, p, database, "override-config-malformed")
@@ -143,24 +143,19 @@ func TestRunStartRecordsMalformedOverridesAsFailedRun(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "overrides key") {
 		t.Fatalf("error = %v, want malformed-key refusal", err)
 	}
-	// A malformed overrides section fails like any other malformed global
-	// config: the run row carries the reason (the only feedback a
-	// push-triggered pipeline has) and the setup worktree is cleaned up.
+	// Policy resolution is a pre-run operation. An invalid machine-local
+	// override must not create durable run state or carve a worktree.
 	runs, queryErr := database.GetRunsByRepo(repo.ID)
 	if queryErr != nil {
 		t.Fatal(queryErr)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("runs = %d, want the failed run to be recorded", len(runs))
+	if len(runs) != 0 {
+		t.Fatalf("runs = %d, want no run row", len(runs))
 	}
-	if runs[0].Status != types.RunFailed {
-		t.Fatalf("run status = %s, want failed", runs[0].Status)
-	}
-	if runs[0].Error == nil || !strings.Contains(*runs[0].Error, "overrides key") {
-		t.Fatalf("run error = %v, want the malformed-key reason", runs[0].Error)
-	}
-	if _, statErr := os.Stat(p.WorktreeDir(repo.ID, runs[0].ID)); !os.IsNotExist(statErr) {
-		t.Fatalf("setup-failure worktree still present, stat err = %v", statErr)
+	if entries, readErr := os.ReadDir(filepath.Join(p.WorktreesDir(), repo.ID)); readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	} else if len(entries) != 0 {
+		t.Fatalf("worktrees = %d, want none", len(entries))
 	}
 }
 
@@ -280,6 +275,33 @@ func TestEffectiveRepoConfigSourcesIncludeOnlyContributingCommittedInputs(t *tes
 	}
 }
 
+func TestEffectiveRepoConfigSourcesPersistOrdinaryContributingInputs(t *testing.T) {
+	globalConfig := config.DefaultGlobalConfig()
+	globalConfig.Agent = types.AgentClaude
+	global := &globalConfigInput{
+		Config: globalConfig,
+		Source: &db.ConfigSource{Kind: db.ConfigSourceGlobal, Digest: "global", Path: "/private/global.yaml"},
+	}
+	pushedConfig, err := config.LoadRepoFromBytes([]byte("ignore_patterns: [vendor/**]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedConfig, err := config.LoadRepoFromBytes([]byte("commands:\n  test: trusted-test\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := repoConfigInputFromBytes(pushedConfig, []byte("pushed"), db.ConfigSourceBranch, "head")
+	trusted := repoConfigInputFromBytes(trustedConfig, []byte("trusted"), db.ConfigSourceDefault, "main")
+
+	effective, sources := effectiveRepoConfigAndSources(global, pushed, trusted, nil)
+	if effective.Commands.Test != "trusted-test" || !reflect.DeepEqual(effective.IgnorePatterns, []string{"vendor/**"}) {
+		t.Fatalf("effective config = %#v", effective)
+	}
+	if kinds := configSourceKinds(sources); kinds != "global,branch,default" {
+		t.Fatalf("config source kinds = %q, want global,branch,default", kinds)
+	}
+}
+
 func TestEffectiveRepoConfigSourcesDoNotInventDigestForBuiltInGlobalDefaults(t *testing.T) {
 	overrideConfig, err := config.LoadRepoFromBytes([]byte("commands:\n  test: machine-test\n"))
 	if err != nil {
@@ -334,7 +356,7 @@ func TestRecoveredGlobalOverrideRefusesChangedMissingOrNewSource(t *testing.T) {
 func TestLoadRecoveredConfigRefusesRetiredMachineLocalSource(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
 	repo, head := setupTestGitRepo(t, p, database, "machine-source-recovery")
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +389,7 @@ func TestLoadRecoveredConfigRefusesGlobalOverrideDigestDrift(t *testing.T) {
 	if override == nil {
 		t.Fatal("override did not resolve at launch")
 	}
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +432,7 @@ func TestLoadRecoveredConfigRefusesGlobalConfigDigestDrift(t *testing.T) {
 	if override == nil {
 		t.Fatal("override did not resolve at launch")
 	}
-	run, err := database.InsertRun(repo.ID, "main", head, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +489,7 @@ func TestLoadRecoveredConfigUsesLaunchRefsAfterCommittedConfigAdvances(t *testin
 	pushed := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceBranch, launchHead)
 	trusted := repoConfigInputFromBytes(parsed, launchBytes, db.ConfigSourceDefault, launchHead)
 	_, sources := effectiveRepoConfigAndSources(globalInput, pushed, trusted, override)
-	run, err := database.InsertRun(repo.ID, "main", launchHead, refreshTestZeroSHA)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", launchHead, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
 	if err != nil {
 		t.Fatal(err)
 	}

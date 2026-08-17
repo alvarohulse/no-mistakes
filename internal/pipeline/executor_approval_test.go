@@ -169,7 +169,9 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 			if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"}); err != nil {
 				return nil, err
 			}
-			if _, err := sctx.RunAgentSession(SessionRoleReviewer, agent.RunOpts{Prompt: "rereview"}); err != nil {
+			// The rereview is deliberately session-free (see ReviewStep): it
+			// must never resume the session that prescribed the fixes.
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "rereview"}); err != nil {
 				return nil, err
 			}
 			return &StepOutcome{ReviewApprovedHeadSHA: "2222222222222222222222222222222222222222"}, nil
@@ -207,8 +209,10 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if fake.calls[0].session == nil || fake.calls[0].session.ID != "fixer-session" {
 		t.Fatalf("fixer session = %+v, want fixer-session", fake.calls[0].session)
 	}
-	if fake.calls[1].session == nil || fake.calls[1].session.ID != "reviewer-session" {
-		t.Fatalf("reviewer session = %+v, want reviewer-session", fake.calls[1].session)
+	// The legacy persisted reviewer row must not break recovery, and the
+	// rereview must not resume it.
+	if fake.calls[1].session != nil {
+		t.Fatalf("rereview session = %+v, want session-free", fake.calls[1].session)
 	}
 	resumed, err := database.GetRun(run.ID)
 	if err != nil {
@@ -219,6 +223,82 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 	if resumed.ReviewApprovedHeadSHA == nil || *resumed.ReviewApprovedHeadSHA != "2222222222222222222222222222222222222222" {
 		t.Fatalf("recovered rereview approval = %#v", resumed.ReviewApprovedHeadSHA)
+	}
+}
+
+func TestExecutor_ResumeAppliesPendingConfiguredSkipReceipt(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	lintResult, err := database.InsertStepResult(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciResult, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepAsSkipped(ciResult.ID, types.SkipSourceGlobalOverride); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(lintResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"lint-1","severity":"warning","description":"decision","action":"ask-user"}]}`
+	if err := database.SetStepFindings(lintResult.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(lintResult.ID, 1, "initial", &findings, nil, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(lintResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lint := &adaptiveCallStep{name: types.StepLint, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, fmt.Errorf("recovered gate must not rerun")
+	}}
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, fmt.Errorf("configured skipped CI must not run")
+	}}
+	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{lint, ci}, nil)
+	executor.SetStepSkips([]types.StepSkip{{Step: types.StepCI, Source: types.SkipSourceGlobalOverride}})
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(context.Background(), run, repo, t.TempDir()) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepLint, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered lint gate never accepted approval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered executor timed out")
+	}
+
+	got, err := database.GetStepResult(ciResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.StepStatusSkipped || got.SkipSource == nil || *got.SkipSource != string(types.SkipSourceGlobalOverride) {
+		t.Fatalf("recovered CI result = %+v", got)
 	}
 }
 

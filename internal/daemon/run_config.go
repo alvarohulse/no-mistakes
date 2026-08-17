@@ -9,15 +9,26 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const gitSHA1Size = 20
+
+var policyResolutionRefCounter atomic.Uint64
 
 // globalOverrideInput is the global config's machine-local override matched
 // to one run's registered repository, pinned to the exact global-config bytes
@@ -39,6 +50,362 @@ type repoConfigInput struct {
 type globalConfigInput struct {
 	Config *config.GlobalConfig
 	Source *db.ConfigSource
+}
+
+// runPolicyResolution is the complete pre-run result shared by launch and
+// config explain. Every field is resolved before a run row, worktree, hook, or
+// agent exists, so persistence and execution consume one immutable decision.
+type runPolicyResolution struct {
+	Config               *config.Config
+	Sources              []db.ConfigSource
+	ResolvedRouting      string
+	ResolvedPolicy       string
+	ResolvedPolicyDigest string
+	Policy               *resolvedPolicy
+	RefreshStrategy      types.RefreshStrategy
+	Steps                []pipeline.Step
+	Skips                []types.StepSkip
+	PreparedPreflight    []runner.Prepared
+	HeadSHA              string
+	TrustedSHA           string
+	GateDir              string
+	TrustedRef           string
+}
+
+type agentRouteResolutionError struct {
+	err error
+}
+
+func (e *agentRouteResolutionError) Error() string { return e.err.Error() }
+func (e *agentRouteResolutionError) Unwrap() error { return e.err }
+
+// ResolvePolicy resolves the current launch policy without creating a run or
+// worktree. Callers must supply a commit object ID already selected from the
+// registered gate; the resolver still verifies that exact object in the gate.
+func (m *RunManager) ResolvePolicy(ctx context.Context, repo *db.Repo, headSHA string, skipped []types.StepName, refreshStrategy types.RefreshStrategy) (*PolicyExplanation, error) {
+	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipped, refreshStrategy)
+	if err != nil {
+		return nil, err
+	}
+	defer resolved.releaseTrustedRef(context.Background())
+	return newPolicyExplanation(resolved)
+}
+
+func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.Repo, headSHA string, skipped []types.StepName, refreshStrategy types.RefreshStrategy) (*runPolicyResolution, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("resolve run policy: repository is nil")
+	}
+	gateDir := m.paths.RepoDir(repo.ID)
+	if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+		return nil, fmt.Errorf("resolve run policy gate: %w", err)
+	}
+	candidateSHA, err := resolveBareCandidateCommit(ctx, gateDir, headSHA)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(repo.DefaultBranch) == "" {
+		return nil, fmt.Errorf("resolve trusted default branch: repository has no known default branch")
+	}
+	trustedRef := nextPolicyResolutionRef()
+	keepTrustedRef := false
+	defer func() {
+		if !keepTrustedRef {
+			deletePolicyTrustedRef(context.Background(), gateDir, trustedRef)
+		}
+	}()
+	if err := fetchRunDefaultBranchToPrivateRef(ctx, gateDir, repo, trustedRef); err != nil {
+		return nil, fmt.Errorf("resolve trusted default branch %q: %w", repo.DefaultBranch, err)
+	}
+	trustedSHA, err := git.ResolveRef(ctx, gateDir, trustedRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolve trusted default branch %q: %w", repo.DefaultBranch, err)
+	}
+
+	globalInput, err := loadGlobalConfigInput(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
+	pushedInput, err := loadBareRepoConfigInput(ctx, gateDir, candidateSHA, db.ConfigSourceBranch, true)
+	if err != nil {
+		return nil, err
+	}
+	trustedInput, err := loadBareRepoConfigInput(ctx, gateDir, trustedSHA, db.ConfigSourceDefault, false)
+	if err != nil {
+		return nil, err
+	}
+	override := resolveGlobalOverride(globalInput, repo)
+	effectiveRepoConfig, sources := effectiveRepoConfigAndSources(globalInput, pushedInput, trustedInput, override)
+	if override != nil {
+		slog.Warn("global config override is active: honoring machine-local repository configuration", "repo_id", repo.ID, "override", override.Key)
+	}
+	allowRepoCommands := trustedInput != nil && trustedInput.Config.AllowRepoCommands
+	if allowRepoCommands {
+		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "repo_id", repo.ID)
+	} else if pushedConfigUsesDifferentTrustedControls(pushedInput.Config, effectiveRepoConfig) {
+		slog.Info("repo commands/hooks/agent/model routes loaded from default branch, not pushed branch", "repo_id", repo.ID, "default_branch", repo.DefaultBranch)
+	}
+
+	cfg := config.Merge(globalInput.Config, effectiveRepoConfig)
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		return nil, err
+	}
+	cfg.TrustedConfigSHA = trustedSHA
+	if globalInput.Config.Eval.CaptureProvenance {
+		if err := cfg.EnableEvalProvenance(globalInput.Config, effectiveRepoConfig); err != nil {
+			return nil, err
+		}
+	}
+	demo := steps.IsDemoMode()
+	execSteps := m.steps()
+	stepNames := make([]types.StepName, 0, len(execSteps))
+	for _, step := range execSteps {
+		if step == nil {
+			return nil, fmt.Errorf("resolve managed step plan: pipeline contains a nil step")
+		}
+		stepNames = append(stepNames, step.Name().Canonical())
+	}
+	if err := cfg.ValidateManagedStepPlan(stepNames); err != nil {
+		return nil, fmt.Errorf("resolve managed step plan: %w", err)
+	}
+	resolvedSkips := resolveRunStepSkips(skipped, cfg.ConfiguredSkipSteps)
+	if err := validateRunStepSkips(resolvedSkips, execSteps); err != nil {
+		return nil, err
+	}
+	resolvedRunner, err := runner.ResolveDefault(ctx, cfg.Runner)
+	if err != nil {
+		return nil, fmt.Errorf("resolve default runner: %w", err)
+	}
+	cfg.ResolvedRunner = &resolvedRunner
+	if !demo {
+		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
+			return nil, &agentRouteResolutionError{err: fmt.Errorf("resolve agent routes: %w", err)}
+		}
+	}
+	preparedPreflight, err := m.prepareResolvedPreflight(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	resolvedRouting, err := marshalResolvedAgentRouting(cfg, demo)
+	if err != nil {
+		return nil, err
+	}
+	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
+	policy, err := resolvedPolicyFromConfigWithSkips(cfg, sources, execSteps, resolvedSkips, resolvedRefreshStrategy, demo)
+	if err != nil {
+		return nil, err
+	}
+	resolvedPolicy, resolvedPolicyDigest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		return nil, err
+	}
+	resolved := &runPolicyResolution{
+		Config:               cfg,
+		Sources:              sources,
+		ResolvedRouting:      resolvedRouting,
+		ResolvedPolicy:       resolvedPolicy,
+		ResolvedPolicyDigest: resolvedPolicyDigest,
+		Policy:               policy,
+		RefreshStrategy:      resolvedRefreshStrategy,
+		Steps:                execSteps,
+		Skips:                resolvedSkips,
+		PreparedPreflight:    preparedPreflight,
+		HeadSHA:              candidateSHA,
+		TrustedSHA:           trustedSHA,
+		GateDir:              gateDir,
+		TrustedRef:           trustedRef,
+	}
+	keepTrustedRef = true
+	return resolved, nil
+}
+
+func resolveRunStepSkips(requested, configured []types.StepName) []types.StepSkip {
+	steps := configured
+	source := types.SkipSourceGlobalOverride
+	if requested != nil {
+		steps = requested
+		source = types.SkipSourceRunRequest
+	}
+	seen := make(map[types.StepName]bool, len(steps))
+	resolved := make([]types.StepSkip, 0, len(steps))
+	for _, step := range steps {
+		name := step.Canonical()
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		resolved = append(resolved, types.StepSkip{Step: name, Source: source})
+	}
+	return resolved
+}
+
+func validateRunStepSkips(skips []types.StepSkip, steps []pipeline.Step) error {
+	enabled := make(map[types.StepName]bool, len(steps))
+	for _, step := range steps {
+		if step != nil {
+			enabled[step.Name().Canonical()] = true
+		}
+	}
+	skipped := make(map[types.StepName]bool, len(skips))
+	for _, receipt := range skips {
+		if !receipt.Source.Valid() {
+			return fmt.Errorf("pipeline skip %q has unsupported source %q", receipt.Step, receipt.Source)
+		}
+		name := receipt.Step.Canonical()
+		if !enabled[name] {
+			return fmt.Errorf("resolved policy skip list contains a step outside the pipeline")
+		}
+		skipped[name] = true
+	}
+	if skipped[types.StepReview] && enabled[types.StepPush] && !skipped[types.StepPush] {
+		return fmt.Errorf("cannot skip review while push remains enabled")
+	}
+	return nil
+}
+
+func resolveBareCandidateCommit(ctx context.Context, gateDir, headSHA string) (string, error) {
+	headSHA = strings.TrimSpace(headSHA)
+	decoded, err := hex.DecodeString(headSHA)
+	if err != nil || (len(decoded) != gitSHA1Size && len(decoded) != sha256.Size) {
+		return "", fmt.Errorf("candidate head %q is not a full Git object ID", headSHA)
+	}
+	resolved, err := git.ResolveRef(ctx, gateDir, headSHA)
+	if err != nil {
+		return "", fmt.Errorf("resolve candidate head %s: %w", headSHA, err)
+	}
+	if !strings.EqualFold(resolved, headSHA) {
+		return "", fmt.Errorf("candidate head %s resolved to unexpected commit %s", headSHA, resolved)
+	}
+	return resolved, nil
+}
+
+func nextPolicyResolutionRef() string {
+	return fmt.Sprintf("refs/no-mistakes/policy-resolution/%d-%d", os.Getpid(), policyResolutionRefCounter.Add(1))
+}
+
+func (r *runPolicyResolution) bindTrustedRefToRun(ctx context.Context, runID string) error {
+	if r == nil || strings.TrimSpace(r.GateDir) == "" || strings.TrimSpace(r.TrustedRef) == "" || strings.TrimSpace(r.TrustedSHA) == "" {
+		return fmt.Errorf("resolved trusted policy ref is incomplete")
+	}
+	stableRef := policyTrustedRunRef(runID)
+	if _, err := git.RunBare(ctx, r.GateDir, "update-ref", stableRef, r.TrustedSHA); err != nil {
+		return fmt.Errorf("bind trusted policy ref to run: %w", err)
+	}
+	previousRef := r.TrustedRef
+	r.TrustedRef = stableRef
+	deletePolicyTrustedRef(context.Background(), r.GateDir, previousRef)
+	return nil
+}
+
+func (r *runPolicyResolution) releaseTrustedRef(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	deletePolicyTrustedRef(ctx, r.GateDir, r.TrustedRef)
+}
+
+func policyTrustedRunRef(runID string) string {
+	return "refs/no-mistakes/policy-run/" + runID
+}
+
+func deletePolicyTrustedRef(ctx context.Context, gateDir, ref string) {
+	if strings.TrimSpace(gateDir) == "" || strings.TrimSpace(ref) == "" {
+		return
+	}
+	if _, err := git.RunBare(ctx, gateDir, "update-ref", "-d", ref); err != nil {
+		slog.Warn("failed to delete trusted policy ref", "ref", ref, "error", err)
+	}
+}
+
+// reapPolicyTrustedRefs removes temporary resolution refs and run-owned refs
+// whose run is no longer active. It runs only after stale-run recovery while
+// the daemon singleton lock is held, so no live resolver can own a temporary
+// ref and terminal status is authoritative.
+func reapPolicyTrustedRefs(ctx context.Context, database *db.DB, p *paths.Paths) int {
+	repos, err := database.GetRepos()
+	if err != nil {
+		slog.Warn("failed to list repositories for trusted policy ref cleanup", "error", err)
+		return 0
+	}
+	reaped := 0
+	for _, repo := range repos {
+		gateDir := p.RepoDir(repo.ID)
+		if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+			continue
+		}
+		out, err := git.RunBare(ctx, gateDir, "for-each-ref", "--format=%(refname)", "refs/no-mistakes/policy-resolution", "refs/no-mistakes/policy-run")
+		if err != nil {
+			slog.Warn("failed to list trusted policy refs", "repo_id", repo.ID, "error", err)
+			continue
+		}
+		for _, ref := range strings.Fields(out) {
+			if strings.HasPrefix(ref, "refs/no-mistakes/policy-run/") {
+				runID := strings.TrimPrefix(ref, "refs/no-mistakes/policy-run/")
+				run, err := database.GetRun(runID)
+				if err != nil {
+					slog.Warn("failed to inspect trusted policy ref owner", "repo_id", repo.ID, "run_id", runID, "error", err)
+					continue
+				}
+				if run != nil && run.RepoID == repo.ID && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+					continue
+				}
+			}
+			deletePolicyTrustedRef(ctx, gateDir, ref)
+			reaped++
+		}
+	}
+	return reaped
+}
+
+func loadBareRepoConfigInput(ctx context.Context, gateDir, ref, kind string, emptyWhenMissing bool) (*repoConfigInput, error) {
+	label := "trusted"
+	if kind == db.ConfigSourceBranch {
+		label = "pushed"
+	}
+	entry, err := git.RunBare(ctx, gateDir, "ls-tree", ref, "--", ".no-mistakes.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("read %s config tree at %s: %w", label, ref, err)
+	}
+	if strings.TrimSpace(entry) == "" {
+		if emptyWhenMissing {
+			return &repoConfigInput{Config: &config.RepoConfig{}}, nil
+		}
+		return nil, nil
+	}
+	data, err := git.ShowFileBytes(ctx, gateDir, ref, ".no-mistakes.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("%s .no-mistakes.yaml at %s is present but unreadable: %w", label, ref, err)
+	}
+	repoConfig, err := config.LoadRepoFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s .no-mistakes.yaml at %s: %w", label, ref, err)
+	}
+	return repoConfigInputFromBytes(repoConfig, data, kind, ref), nil
+}
+
+func pushedConfigUsesDifferentTrustedControls(pushed, effective *config.RepoConfig) bool {
+	if pushed == nil || effective == nil {
+		return false
+	}
+	return !pushed.Commands.Equal(effective.Commands) ||
+		!runnerCommandListsEqual(pushed.Preflight, effective.Preflight) ||
+		pushed.Hooks != effective.Hooks ||
+		pushed.Agent != effective.Agent ||
+		!agentListsEqual(pushed.Agents, effective.Agents) ||
+		!stepAgentRoutesEqual(pushed.ConfiguredStepAgents(), effective.ConfiguredStepAgents()) ||
+		!stepModelRoutesEqual(pushed.ConfiguredStepModels(), effective.ConfiguredStepModels()) ||
+		!reviewCandidateRoutesEqual(pushed.Review, effective.Review)
+}
+
+func runnerCommandListsEqual(left, right []runner.Command) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !left[i].Equal(right[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveGlobalOverride matches the run's registered repository against the
@@ -69,33 +436,6 @@ func resolveGlobalOverride(global *globalConfigInput, repo *db.Repo) *globalOver
 		input.Path = global.Source.Path
 	}
 	return input
-}
-
-// loadPushedRepoConfigInput reads the branch (pushed) .no-mistakes.yaml from the
-// committed blob at headSHA rather than the worktree filesystem. Recovery
-// revalidates this source via git.ShowFileBytes at the same ref
-// (loadRecordedRepoConfig), so working-tree normalization (core.autocrlf, a
-// smudge/clean filter) must not make the launch-time digest diverge from the
-// blob digest and abort recovery. Presence is still determined from the
-// worktree, which startRun checks out exactly at headSHA: a missing file yields
-// an empty config with no recorded source, matching recovery's
-// emptyWhenMissing branch.
-func loadPushedRepoConfigInput(ctx context.Context, wtDir, headSHA string) (*repoConfigInput, error) {
-	if _, err := os.Stat(filepath.Join(wtDir, ".no-mistakes.yaml")); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &repoConfigInput{Config: &config.RepoConfig{}}, nil
-		}
-		return nil, err
-	}
-	data, err := git.ShowFileBytes(ctx, wtDir, headSHA, ".no-mistakes.yaml")
-	if err != nil {
-		return nil, err
-	}
-	repoConfig, err := config.LoadRepoFromBytes(data)
-	if err != nil {
-		return nil, err
-	}
-	return repoConfigInputFromBytes(repoConfig, data, db.ConfigSourceBranch, headSHA), nil
 }
 
 func loadRepoConfigInput(path, kind, ref string) (*repoConfigInput, error) {
@@ -172,9 +512,6 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 		return effective
 	}
 	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
-	if override == nil {
-		return effective, nil
-	}
 	resolved := config.Merge(global.Config, effective)
 
 	var sources []db.ConfigSource
@@ -193,12 +530,14 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 			sources = append(sources, *trusted.Source)
 		}
 	}
-	sources = append(sources, db.ConfigSource{
-		Kind:   db.ConfigSourceGlobalOverride,
-		Digest: override.Digest,
-		Ref:    override.Key,
-		Path:   override.Path,
-	})
+	if override != nil {
+		sources = append(sources, db.ConfigSource{
+			Kind:   db.ConfigSourceGlobalOverride,
+			Digest: override.Digest,
+			Ref:    override.Key,
+			Path:   override.Path,
+		})
+	}
 	return effective, sources
 }
 

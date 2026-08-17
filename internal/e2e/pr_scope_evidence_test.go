@@ -75,18 +75,10 @@ func writeFinalPRScopeScenario(t *testing.T) string {
 	return path
 }
 
-// TestPRFinalScopeExcludesEarlierStepEvidence guards the PR 1272 failure at the
-// closest supported user-visible boundary: a real gate push executes the full
-// pipeline and a GitHub PR creation receives the final body on stdin.
-//
-// The bug was never that step evidence appears in the PR - the deterministic
-// Risk Assessment, Testing, and Pipeline sections are the point of the body.
-// It was that pre-Document two-file Test evidence read as a claim about the
-// shipped four-file branch. So the invariant this test pins is a section
-// boundary, not a section ban: `## What Changed` is the sole owner of final
-// branch scope and must match the real final diff, while earlier Review and
-// Test output stays inside the evidence sections that name the step it came
-// from. Section ownership is documented in the PR step reference.
+// TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped verifies the
+// final-diff scoping boundary at the closest supported user-visible boundary:
+// a real gate push executes the full pipeline and a GitHub PR creation
+// receives the final body on stdin.
 //
 // Reproduction record, before source-level cause assignment:
 //   - Expected behavior: `## What Changed` describes the actual four-file
@@ -109,7 +101,18 @@ func writeFinalPRScopeScenario(t *testing.T) string {
 //   - Disconfirming evidence: this test proves the final pushed head, final
 //     diff, and PR drafting prompt all contain the two documentation files, so
 //     it is not a dropped mutation, stale push, or branch-sync failure.
-func TestPRFinalScopeExcludesEarlierStepEvidence(t *testing.T) {
+//
+// PR #605 originally made the whole PR body (including the deterministic
+// Risk Assessment, Testing, and Pipeline sections) final-diff scoped, but
+// that silently dropped those three sections everywhere (no-mistakes #605
+// regression, firstmate PR #1577/#1609). The corrected, intentional scope is
+// narrower: only the agent-authored `## What Changed` narrative is bound to
+// the actual final branch delta. The deterministic Risk Assessment, Testing,
+// and Pipeline sections legitimately describe the commit each step itself
+// inspected - that is what "evidence" means - and are restored in their full
+// pre-#605 form under their own clearly labeled headings, so a reviewer is
+// never told the Test step's own target commit is the shipped branch.
+func TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writeFinalPRScopeScenario(t)})
 	ctx := context.Background()
 
@@ -220,7 +223,16 @@ func TestPRFinalScopeExcludesEarlierStepEvidence(t *testing.T) {
 
 	// Evidence stays attributed to the step that produced it, so a reviewer
 	// reads the two-file claim as Test's target rather than the branch's scope.
-	if !strings.Contains(prBodySection(t, body, "## Pipeline"), staleTwoFileEvidence) {
+	riskAssessment := prBodySection(t, body, "## Risk Assessment")
+	if !strings.Contains(riskAssessment, "medium risk because only two source files changed") {
+		t.Fatalf("Review rationale must remain in Risk Assessment:\n%s", riskAssessment)
+	}
+	testing := prBodySection(t, body, "## Testing")
+	if !strings.Contains(testing, "Focused validation passed at the test step target commit.") {
+		t.Fatalf("Test evidence must remain in Testing:\n%s", testing)
+	}
+	pipeline := prBodySection(t, body, "## Pipeline")
+	if !strings.Contains(pipeline, staleTwoFileEvidence) {
 		t.Fatalf("Test evidence must render inside the step-attributed Pipeline section:\n%s", body)
 	}
 }

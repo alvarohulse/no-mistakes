@@ -76,15 +76,17 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"refresh_strategy", "stacked_on", "resolved_agent_routing_json", "submitted_head_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "pr_state", "pr_state_observed_at", "ci_ready_at", "custody_returned_at", "metadata"} {
+	for _, column := range []string{"refresh_strategy", "stacked_on", "config_sources_json", "resolved_agent_routing_json", "resolved_policy_json", "resolved_policy_digest", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "custody_returned_at", "metadata"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
-	if !hasColumn(t, d, "step_rounds", "reviewed_head_sha") {
-		t.Fatal("step_rounds.reviewed_head_sha column missing from fresh schema")
+	for _, column := range []string{"reviewed_head_sha", "replay_config_json"} {
+		if !hasColumn(t, d, "step_rounds", column) {
+			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
+		}
 	}
-	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "evidence_json", "planned_command"} {
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "evidence_json", "planned_command", "skip_source"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
@@ -144,7 +146,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 	for table, columns := range map[string][]string{
 		"runs":              {"metadata"},
-		"step_results":      {"evidence_json", "planned_command"},
+		"step_results":      {"evidence_json", "planned_command", "skip_source"},
 		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd"},
 	} {
 		for _, column := range columns {
@@ -186,8 +188,8 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	if run == nil || run.HeadSHA != "mutable-head" {
 		t.Fatalf("migrated run = %#v", run)
 	}
-	if run.SubmittedHeadSHA != nil || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushTargetFingerprint != nil {
-		t.Fatalf("legacy provenance or review authority was inferred from mutable head: %#v", run)
+	if run.SubmittedHeadSHA != nil || run.NoMistakesVersion != nil || run.NoMistakesBuildSHA != nil || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushTargetFingerprint != nil {
+		t.Fatalf("legacy provenance, build identity, or review authority was inferred from mutable head: %#v", run)
 	}
 	if run.CustodyReturnedAt != nil {
 		t.Fatalf("legacy run gained a custody-return stamp: %#v", run)
@@ -200,6 +202,9 @@ func TestOpenMigratesRunSyncProvenanceWithoutBackfillingMutableHead(t *testing.T
 	}
 	if run.ResolvedAgentRouting != nil {
 		t.Fatalf("legacy run gained resolved routing snapshot: %q", *run.ResolvedAgentRouting)
+	}
+	if run.ResolvedPolicy != nil || run.ResolvedPolicyDigest != nil {
+		t.Fatalf("legacy run gained resolved policy: policy %v digest %v", run.ResolvedPolicy, run.ResolvedPolicyDigest)
 	}
 	if run.Metadata != nil {
 		t.Fatalf("legacy run gained metadata: %q", *run.Metadata)
@@ -268,7 +273,7 @@ func TestOpenMigratesExistingStepRoundsColumns(t *testing.T) {
 		t.Fatalf("iterate table_info: %v", err)
 	}
 
-	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha"} {
+	for _, name := range []string{"selected_finding_ids", "selection_source", "fix_summary", "reviewed_head_sha", "replay_config_json"} {
 		if !columns[name] {
 			t.Fatalf("expected migrated column %q to exist", name)
 		}
