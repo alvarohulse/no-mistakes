@@ -11,7 +11,7 @@ import (
 	"github.com/muesli/termenv"
 )
 
-func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
+func TestStatsCommandRendersSharedReportSummary(t *testing.T) {
 	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	p := paths.WithRoot(nmHome)
@@ -50,28 +50,16 @@ func TestStatsCommandRendersAllRepoDashboard(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"╭─ git push no-mistakes",
-		"_  _ ____    _  _ _ ____ ___ ____ _  _ ____ ____",
-		"Total changes",
-		"Rescued changes",
-		"Rescue rate",
-		"50%",
-		"Mistakes",
-		"Reported",
-		"Fixed",
-		"Fixes by step",
-		"review",
-		"lint",
-		"Top repos",
-		"alpha",
-		"3 fixes",
+		"stats report: 2 run(s), 3 step(s), 2 repair(s), 0 agent invocation(s)",
+		"runs by status: pending=2",
+		"cost total/harness_reported",
+		"data errors: 2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats output missing %q:\n%s", want, out)
 		}
 	}
-	assertOrder(t, out, "Total changes", "Rescued changes", "Rescue rate", "Mistakes", "Reported", "Fixed")
-	for _, notWant := range []string{"Saved", "Rescue runs", "Mistakes fixed", "auto-fix", "caught in review", "╭─ no-mistakes"} {
+	for _, notWant := range []string{"Total changes", "Rescue rate", "Fixes by step", "Top repos", "╭─ git push no-mistakes"} {
 		if strings.Contains(out, notWant) {
 			t.Fatalf("stats output should not contain %q:\n%s", notWant, out)
 		}

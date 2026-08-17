@@ -415,14 +415,14 @@ See [Evaluation toolkit](/no-mistakes/reference/eval/) for the local-only bounda
 Show historical usage stats across all repos.
 
 ```sh
-no-mistakes stats [--repo <id-or-path> | --current-repo] [--since <duration-or-time>] [--until <time>] [--step <step>] [--agent <agent>] [--model <model>] [--purpose <purpose>] [--status <status>] [--format text|json|csv]
+no-mistakes stats [--agents] [--run <id>] [--repo <id-or-path> | --current-repo] [--since <duration-or-time>] [--until <time>] [--step <step>] [--agent <agent>] [--model <model>] [--purpose <purpose>] [--status <status>] [--format text|json|csv]
 ```
 
-Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+The default text view is a bounded summary of the versioned stats report: run status counts, aggregate nullable usage, aggregate costs, and any data-error count.
 
-Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
+Use `--agents` as a compatibility alias for the detailed text projection of the same report. It lists individual local invocation facts, including duration, session mode, nullable per-round and raw token meters, subprocess time, model round-trips, tool activity, workload, and nested-agent observations.
 Use `--run <id>` to inspect one run's binary/build identity, ordered steps and rounds, content-free command/runner and repair-progress receipts, configured skip receipts, policy and config digests, Review candidate pool and selected route, and individual agent invocations. Invocation detail includes the step, purpose, harness invocation mode, provider/model, observed nested agent identities, per-round token deltas next to raw counters, reported cost, tool-category breakdown, workload size, finding count, and fallback reason. It also shows the nullable total time parked at approval gates and implies `--agents`.
-Nullable fields an adapter did not report render as `-` (unknown), which is distinct from a recorded `0`. Reported raw input, output, and cache-read counters remain visible and may be cumulative; when the matching per-round meter is absent, the audit does not reinterpret a legacy database zero as reported usage.
+Nullable fields an adapter did not report render as `—` (unknown), which is distinct from a recorded `0`. Reported raw input, output, and cache-read counters remain visible and may be cumulative; when the matching per-round meter is absent, the audit does not reinterpret a legacy database zero as reported usage.
 
 ```sh
 no-mistakes stats --agents
@@ -433,7 +433,7 @@ no-mistakes stats --current-repo --since 7d --step review --format csv
 
 Repository, time, step, agent, model, purpose, and status selectors combine with AND semantics; repeat one selector to match any of its supplied values. The run-created time window is half-open: `since <= created_at < until`. An ejected repository remains selectable by its exact archived repository ID; its former path is deliberately not retained. `--run` cannot be combined with repository, time, or status selectors, but it can be narrowed to matching steps and invocations.
 
-`--format` accepts `text` (the default), canonical `json`, or long-form `csv`; all three project the same report facts. JSON is the normative, versioned machine contract. Aggregate delta-token and cost metrics include coverage and remain `null` when incomplete or when an independent database aggregate does not match the emitted invocation rows. Costs remain three independent classes: harness-reported, public API-list estimate, and harness-adjusted effective estimate, each with its own completeness and pricing/profile provenance. No composite savings or efficacy estimate is invented.
+`--format` accepts `text` (the default), canonical `json`, or long-form `csv`; every format is derived from the same `Report` envelope. JSON is the normative, versioned machine contract. CSV emits exactly one row for every JSON leaf, including nulls and empty collections, and its `json_path` column identifies that leaf; record, section, entity, coverage, basis, and reason columns keep common queries direct. Aggregate delta-token and cost metrics include coverage and remain `null` when incomplete or when an independent database aggregate does not match the emitted invocation rows. Costs remain three independent classes: harness-reported, public API-list estimate, and harness-adjusted effective estimate, each with its own completeness and pricing/profile provenance. Pricing is captured once with the completed invocation; a legacy or malformed missing receipt remains unknown with a data error instead of being recalculated from the current binary's catalog. No composite savings or efficacy estimate is invented.
 
 Rich run rows, logs, findings, and evidence are retained for active or pinned runs, every run inside 14 days, and at least the newest 50 terminal unpinned runs. Older runs continue to appear through immutable content-free metric receipts; their audit sets `rich_data_retained: false` and omits run branch/head/base, session, nested-identity, config-source, prose, command text, and resolved-path/argv evidence while preserving categorical command/runner and repair-progress facts.
 

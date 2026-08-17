@@ -2,11 +2,15 @@ package stats
 
 import (
 	"encoding/csv"
+	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -35,10 +39,11 @@ func TestTextJSONAndCSVProjectTheSameSelectedFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantHeader := []string{"schema_version", "repo_id", "run_id", "record_type", "entity_id", "section", "group", "metric", "value", "unit", "reported", "eligible", "complete", "basis", "reason"}
+	wantHeader := []string{"schema_version", "repo_id", "run_id", "record_type", "entity_id", "section", "group", "metric", "value", "unit", "reported", "eligible", "complete", "basis", "reason", "json_path"}
 	if strings.Join(rows[0], ",") != strings.Join(wantHeader, ",") {
 		t.Fatalf("CSV header = %v", rows[0])
 	}
+	assertCSVLeafParity(t, jsonOutput, rows)
 }
 
 func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
@@ -123,13 +128,155 @@ func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
 	}
 	firstID := step.ID + ":1:1"
 	secondID := step.ID + ":1:2"
-	if commandFacts[firstID]["outcome"][8] != db.CommandOutcomePassed || commandFacts[firstID]["command_source"][8] != runner.SourceLinux || commandFacts[firstID]["runner_executable"][8] != "zsh" || commandFacts[firstID]["runner_args"][8] != `["-lc"]` {
+	if commandFacts[firstID]["outcome"][8] != db.CommandOutcomePassed || commandFacts[firstID]["command_source"][8] != runner.SourceLinux || commandFacts[firstID]["runner.executable"][8] != "zsh" || commandFacts[firstID]["runner.args.0"][8] != "-lc" {
 		t.Fatalf("first command CSV facts = %+v", commandFacts[firstID])
 	}
-	if commandFacts[secondID]["outcome"][8] != db.CommandOutcomeError || commandFacts[secondID]["runner_executable"][10] != "0" || commandFacts[secondID]["runner_executable"][12] != "false" || commandFacts[secondID]["runner_executable"][14] != "not_reported" {
+	if commandFacts[secondID]["outcome"][8] != db.CommandOutcomeError || commandFacts[secondID]["runner"][10] != "0" || commandFacts[secondID]["runner"][12] != "false" || commandFacts[secondID]["runner"][14] != "not_reported" {
 		t.Fatalf("runner-less command CSV facts = %+v", commandFacts[secondID])
 	}
-	if repairFacts["failure_fingerprint"] != "sha256:repair-fingerprint" || repairFacts["result"] != "resolved" {
+	if repairFacts["repair_failure_fingerprint"] != "sha256:repair-fingerprint" || repairFacts["repair_result"] != "resolved" {
 		t.Fatalf("repair CSV facts = %+v", repairFacts)
 	}
+}
+
+func TestProjectionsCarryPopulatedCostProvenanceCoverageAndIntegrityErrors(t *testing.T) {
+	database, run := newAuditRun(t)
+	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
+	input64, output64, cacheRead64, cacheWrite64 := int64(input), int64(output), int64(cacheRead), int64(cacheWrite)
+	reported := 9.25
+	provider := "anthropic"
+	receipt, err := pricing.NewReceipt(pricing.Observation{
+		Harness: "cursor", ProfileID: "cursor-token-rate", Provider: provider, Model: "claude-opus-5",
+		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), ReportedCostUSD: &reported,
+		Meters: pricing.TokenMeters{UncachedInputTokens: &input64, OutputTokens: &output64, CacheReadTokens: &cacheRead64, CacheWriteTokens: &cacheWrite64},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor", Model: "claude-opus-5", ModelProvider: &provider,
+		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(), CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
+		DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cacheRead, DeltaCacheCreationTokens: &cacheWrite,
+		ReportedCostUSD: &reported, PricingReceiptJSON: &receipt,
+	})
+
+	report, err := BuildReport(database, Query{RunID: run.ID}, time.Unix(run.CreatedAt+1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonOutput, err := report.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	textOutput := RenderText(report)
+	csvOutput, err := RenderCSV(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(csvOutput)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCSVLeafParity(t, jsonOutput, rows)
+	byPath := map[string][]string{}
+	for _, row := range rows[1:] {
+		byPath[row[15]] = row
+	}
+	valueRow := byPath["/agents/0/invocation/costs/api_list_estimate/value_usd"]
+	if valueRow[8] != "36.75" || valueRow[10] != "4" || valueRow[11] != "4" || valueRow[12] != "true" || valueRow[13] != "canonical_delta_token_meters_x_public_list_rate" {
+		t.Fatalf("API list CSV fact = %v", valueRow)
+	}
+	provenanceRow := byPath["/costs/items/0/classes/api_list_estimate/provenance/catalog_sha256"]
+	if provenanceRow[8] == "" {
+		t.Fatalf("catalog provenance CSV fact = %v", provenanceRow)
+	}
+	if errorRow := byPath["/data_errors/0/detail"]; errorRow[8] == "" {
+		t.Fatalf("integrity error CSV fact = %v", errorRow)
+	}
+	for _, want := range []string{"coverage=4/4", "catalog=v1@", "data_error run="} {
+		if !strings.Contains(textOutput, want) {
+			t.Fatalf("text projection omitted %q:\n%s", want, textOutput)
+		}
+	}
+}
+
+type projectedLeaf struct {
+	value   string
+	present bool
+}
+
+func assertCSVLeafParity(t *testing.T, canonicalJSON string, rows [][]string) {
+	t.Helper()
+	expected := canonicalLeaves(t, canonicalJSON)
+	if len(rows)-1 != len(expected) {
+		t.Fatalf("CSV facts = %d, JSON leaves = %d", len(rows)-1, len(expected))
+	}
+	seen := make(map[string]bool, len(expected))
+	for _, row := range rows[1:] {
+		path := row[15]
+		leaf, ok := expected[path]
+		if !ok {
+			t.Fatalf("CSV contains non-JSON fact path %q", path)
+		}
+		if seen[path] {
+			t.Fatalf("CSV repeats JSON fact path %q", path)
+		}
+		seen[path] = true
+		if leaf.present && row[8] != leaf.value {
+			t.Fatalf("CSV %s value = %q, want %q", path, row[8], leaf.value)
+		}
+		if !leaf.present && (row[8] != "" || row[10] != "0" || row[12] != "false") {
+			t.Fatalf("CSV null %s = %v", path, row)
+		}
+	}
+}
+
+func canonicalLeaves(t *testing.T, encoded string) map[string]projectedLeaf {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(encoded))
+	decoder.UseNumber()
+	var envelope any
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]projectedLeaf{}
+	var walk func([]string, any)
+	walk = func(path []string, value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			if len(typed) == 0 {
+				result[testJSONPointer(path)] = projectedLeaf{value: "{}", present: true}
+			}
+			for key, item := range typed {
+				walk(append(append([]string(nil), path...), key), item)
+			}
+		case []any:
+			if len(typed) == 0 {
+				result[testJSONPointer(path)] = projectedLeaf{value: "[]", present: true}
+			}
+			for index, item := range typed {
+				walk(append(append([]string(nil), path...), strconv.Itoa(index)), item)
+			}
+		case nil:
+			result[testJSONPointer(path)] = projectedLeaf{}
+		case string:
+			result[testJSONPointer(path)] = projectedLeaf{value: typed, present: true}
+		case json.Number:
+			result[testJSONPointer(path)] = projectedLeaf{value: typed.String(), present: true}
+		case bool:
+			result[testJSONPointer(path)] = projectedLeaf{value: strconv.FormatBool(typed), present: true}
+		default:
+			t.Fatalf("unexpected canonical JSON leaf %T at %v", typed, path)
+		}
+	}
+	walk(nil, envelope)
+	return result
+}
+
+func testJSONPointer(path []string) string {
+	escaped := make([]string, len(path))
+	for index, segment := range path {
+		escaped[index] = strings.ReplaceAll(strings.ReplaceAll(segment, "~", "~0"), "/", "~1")
+	}
+	return fmt.Sprintf("/%s", strings.Join(escaped, "/"))
 }

@@ -12,7 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 3
+const ReportSchemaVersion = 4
 
 type Query struct {
 	RunID    string
@@ -31,9 +31,11 @@ type Report struct {
 	GeneratedAt   string        `json:"generated_at"`
 	Scope         ReportScope   `json:"scope"`
 	Runs          ReportRuns    `json:"runs"`
+	Skips         []ReportSkip  `json:"skip_receipts"`
 	Repairs       []Repair      `json:"repairs"`
 	Steps         []ReportStep  `json:"steps"`
 	Agents        []ReportAgent `json:"agents"`
+	Metrics       ReportMetrics `json:"metrics"`
 	Costs         ReportCosts   `json:"costs"`
 	DataErrors    []DataError   `json:"data_errors"`
 }
@@ -62,6 +64,11 @@ type ReportStep struct {
 	Step  Step   `json:"step"`
 }
 
+type ReportSkip struct {
+	RunID   string      `json:"run_id"`
+	Receipt SkipReceipt `json:"receipt"`
+}
+
 type Repair struct {
 	RunID                    string         `json:"run_id"`
 	StepID                   string         `json:"step_id"`
@@ -78,6 +85,16 @@ type Repair struct {
 type ReportAgent struct {
 	RunID      string     `json:"run_id"`
 	Invocation Invocation `json:"invocation"`
+}
+
+type ReportMetrics struct {
+	Totals Metrics        `json:"totals"`
+	Items  []MetricRecord `json:"items"`
+}
+
+type MetricRecord struct {
+	RunID   string  `json:"run_id"`
+	Metrics Metrics `json:"metrics"`
 }
 
 type ReportCosts struct {
@@ -117,8 +134,8 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		GeneratedAt:   generatedAt.UTC().Format(time.RFC3339),
 		Scope:         query.scope(),
 		Runs:          ReportRuns{ByStatus: map[types.RunStatus]int{}, Items: []RunIdentity{}},
-		Repairs:       []Repair{}, Steps: []ReportStep{}, Agents: []ReportAgent{},
-		Costs: ReportCosts{Items: []CostRecord{}}, DataErrors: []DataError{},
+		Skips:         []ReportSkip{}, Repairs: []Repair{}, Steps: []ReportStep{}, Agents: []ReportAgent{},
+		Metrics: ReportMetrics{Items: []MetricRecord{}}, Costs: ReportCosts{Items: []CostRecord{}}, DataErrors: []DataError{},
 	}
 
 	repos, err := database.GetRepos()
@@ -196,6 +213,21 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		}
 		report.Runs.Items = append(report.Runs.Items, audit.Run)
 		report.Runs.ByStatus[audit.Run.Status]++
+		selectedStepNames := make(map[types.StepName]bool, len(steps))
+		for _, step := range steps {
+			selectedStepNames[step.Name.Canonical()] = true
+		}
+		for _, receipt := range audit.SkipReceipts {
+			if childFilter && !selectedStepNames[receipt.Step.Canonical()] {
+				continue
+			}
+			report.Skips = append(report.Skips, ReportSkip{RunID: audit.Run.ID, Receipt: receipt})
+		}
+		metrics := audit.Metrics
+		if childFilter {
+			metrics = projectedMetrics(invocations)
+		}
+		report.Metrics.Items = append(report.Metrics.Items, MetricRecord{RunID: audit.Run.ID, Metrics: metrics})
 		for _, step := range steps {
 			report.Steps = append(report.Steps, ReportStep{RunID: audit.Run.ID, Step: step})
 			for _, round := range step.Rounds {
@@ -224,8 +256,37 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		return nil, fmt.Errorf("run %q not found in selected scope", query.RunID)
 	}
 	report.Runs.Count = len(report.Runs.Items)
+	report.Metrics.Totals = projectedMetrics(selectedInvocations)
 	report.Costs.Totals = buildCostTotals(selectedInvocations)
 	return report, nil
+}
+
+func projectedMetrics(invocations []Invocation) Metrics {
+	observed := observedTotals(invocations)
+	expected := db.AgentInvocationAuditTotals{
+		Rows:               len(invocations),
+		DeltaInputReported: observed.inputReported, DeltaInputSum: optionalInt64Sum(observed.inputReported, observed.inputSum),
+		DeltaOutputReported: observed.outputReported, DeltaOutputSum: optionalInt64Sum(observed.outputReported, observed.outputSum),
+		DeltaCacheReadReported: observed.cacheReadReported, DeltaCacheReadSum: optionalInt64Sum(observed.cacheReadReported, observed.cacheReadSum),
+		DeltaCacheCreationReported: observed.cacheWriteReported, DeltaCacheCreationSum: optionalInt64Sum(observed.cacheWriteReported, observed.cacheWriteSum),
+		ReportedCostReported: observed.costReported, ReportedCostSum: optionalFloat64Sum(observed.costReported, observed.costSum),
+	}
+	metrics, _ := buildMetrics(invocations, expected)
+	return metrics
+}
+
+func optionalInt64Sum(reported int, value int64) *int64 {
+	if reported == 0 {
+		return nil
+	}
+	return &value
+}
+
+func optionalFloat64Sum(reported int, value float64) *float64 {
+	if reported == 0 {
+		return nil
+	}
+	return &value
 }
 
 func (q Query) validate() error {

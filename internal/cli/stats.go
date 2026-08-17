@@ -86,61 +86,35 @@ func newStatsCmd() *cobra.Command {
 					RunID: runID, RepoIDs: repoIDs, Since: since, Until: until, Steps: steps,
 					Agents: agentValues, Models: modelValues, Purposes: purposeValues, Statuses: statuses,
 				}
-				reportSelected := format == "csv" || (format == "json" && runID == "") || len(repoIDs) > 0 || since != nil || until != nil || len(steps) > 0 || len(agentValues) > 0 || len(modelValues) > 0 || len(purposeValues) > 0 || len(statuses) > 0
-				if reportSelected {
-					report, err := runstats.BuildReport(database, query, now)
+				report, err := runstats.BuildReport(database, query, now)
+				if err != nil {
+					return err
+				}
+				switch format {
+				case "json":
+					encoded, err := report.CanonicalJSON()
 					if err != nil {
 						return err
 					}
-					switch format {
-					case "json":
-						encoded, err := report.CanonicalJSON()
-						if err != nil {
-							return err
-						}
-						fmt.Fprintln(cmd.OutOrStdout(), encoded)
-					case "csv":
-						encoded, err := runstats.RenderCSV(report)
-						if err != nil {
-							return err
-						}
-						fmt.Fprint(cmd.OutOrStdout(), encoded)
-					default:
+					fmt.Fprintln(cmd.OutOrStdout(), encoded)
+				case "csv":
+					encoded, err := runstats.RenderCSV(report)
+					if err != nil {
+						return err
+					}
+					fmt.Fprint(cmd.OutOrStdout(), encoded)
+				default:
+					if agents {
+						fmt.Fprint(cmd.OutOrStdout(), runstats.RenderDetailedText(report))
+					} else {
 						fmt.Fprint(cmd.OutOrStdout(), runstats.RenderText(report))
 					}
-					return nil
 				}
-
-				if runID != "" {
-					audit, err := runstats.BuildRunAudit(database, runID)
-					if err != nil {
-						return err
-					}
-					if format == "json" {
-						encoded, err := audit.CanonicalJSON()
-						if err != nil {
-							return err
-						}
-						fmt.Fprintln(cmd.OutOrStdout(), encoded)
-						return nil
-					}
-					return renderRunAudit(cmd.OutOrStdout(), audit)
-				}
-				if agents {
-					return renderAgentPerfReport(cmd.OutOrStdout(), database, runID)
-				}
-
-				stats, err := database.GetStats()
-				if err != nil {
-					return fmt.Errorf("get stats: %w", err)
-				}
-
-				fmt.Fprintln(cmd.OutOrStdout(), renderStatsDashboard(stats))
 				return nil
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&agents, "agents", false, "show local agent performance telemetry (per-purpose invocation aggregates)")
+	cmd.Flags().BoolVar(&agents, "agents", false, "compatibility alias; stats reports always include agent invocation facts")
 	cmd.Flags().StringVar(&runID, "run", "", "show one run's steps, agent receipts, and parked time (implies --agents)")
 	cmd.Flags().StringArrayVar(&repoSelectors, "repo", nil, "select an exact repository ID or registered path (repeatable)")
 	cmd.Flags().BoolVar(&currentRepo, "current-repo", false, "select the registered repository containing the current directory")

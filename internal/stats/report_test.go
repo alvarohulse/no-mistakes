@@ -67,8 +67,8 @@ func TestBuildReportCombinesAllDirectFiltersAndSections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Runs.Items) != 1 || len(report.Steps) != 1 || len(report.Agents) != 1 || len(report.Repairs) != 1 || len(report.Costs.Items) != 1 {
-		t.Fatalf("report sections = runs %d steps %d agents %d repairs %d costs %d", len(report.Runs.Items), len(report.Steps), len(report.Agents), len(report.Repairs), len(report.Costs.Items))
+	if len(report.Runs.Items) != 1 || len(report.Steps) != 1 || len(report.Agents) != 1 || len(report.Repairs) != 1 || len(report.Metrics.Items) != 1 || len(report.Costs.Items) != 1 {
+		t.Fatalf("report sections = runs %d steps %d agents %d repairs %d metrics %d costs %d", len(report.Runs.Items), len(report.Steps), len(report.Agents), len(report.Repairs), len(report.Metrics.Items), len(report.Costs.Items))
 	}
 	if report.Steps[0].Step.Name != types.StepReview || report.Agents[0].Invocation.Agent != "codex" || report.Costs.Items[0].InvocationID != report.Agents[0].Invocation.ID {
 		t.Fatalf("filtered report = %+v", report)
