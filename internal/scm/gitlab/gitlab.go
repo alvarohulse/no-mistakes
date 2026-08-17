@@ -115,7 +115,7 @@ func (h *Host) pipelineJobsArgs(pipelineID int) []string {
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitLab }
 
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, PRBodyReadRevision: true}
 }
 
 func (h *Host) Available(ctx context.Context) error {
@@ -147,6 +147,7 @@ type mrPayload struct {
 	DetailedMergeStatus string `json:"detailed_merge_status"`
 	MergeStatus         string `json:"merge_status"`
 	TargetBranch        string `json:"target_branch"`
+	Description         string `json:"description"`
 }
 
 func (p mrPayload) toPR() *scm.PR {
@@ -240,6 +241,26 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		pr.Base = strings.TrimSpace(content.Base)
 	}
 	return pr, nil
+}
+
+func (h *Host) ReadPRBody(ctx context.Context, pr *scm.PR) (scm.PRBodySnapshot, error) {
+	id := ""
+	if pr != nil {
+		id = strings.TrimSpace(pr.Number)
+		if id == "" {
+			if number, err := scm.ExtractPRNumber(pr.URL); err == nil {
+				id = number
+			}
+		}
+	}
+	if id == "" {
+		return scm.PRBodySnapshot{}, errors.New("glab mr view: missing MR id")
+	}
+	mr, err := h.viewMR(ctx, id)
+	if err != nil {
+		return scm.PRBodySnapshot{}, err
+	}
+	return scm.NewPRBodySnapshot(mr.Description), nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

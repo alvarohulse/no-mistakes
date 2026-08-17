@@ -15,6 +15,7 @@ type azPR struct {
 	SourceRefName string `json:"sourceRefName"`
 	TargetRefName string `json:"targetRefName"`
 	URL           string `json:"url"` // _apis/... endpoint - NOT browsable
+	Description   string `json:"description"`
 	Repository    struct {
 		Name    string `json:"name"`
 		WebURL  string `json:"webUrl"` // .../_git/{repo} - browsable base

@@ -27,7 +27,7 @@ func (h *Host) Provider() scm.Provider { return scm.ProviderBitbucket }
 // Capabilities reports Bitbucket's feature matrix. Bitbucket's REST API
 // does not expose a reliable merge-conflict probe, so MergeableState is off.
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: false, FailedCheckLogs: true}
+	return scm.Capabilities{MergeableState: false, FailedCheckLogs: true, PRBodyReadRevision: true}
 }
 
 func (h *Host) Available(_ context.Context) error {
@@ -78,6 +78,24 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		}
 	}
 	return result, nil
+}
+
+func (h *Host) ReadPRBody(ctx context.Context, pr *scm.PR) (scm.PRBodySnapshot, error) {
+	if pr == nil {
+		return scm.PRBodySnapshot{}, errors.New("invalid Bitbucket PR: missing identity")
+	}
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return scm.PRBodySnapshot{}, fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
+	if err != nil {
+		return scm.PRBodySnapshot{}, err
+	}
+	if got == nil {
+		return scm.PRBodySnapshot{}, errors.New("Bitbucket PR body response was empty")
+	}
+	return scm.NewPRBodySnapshot(got.Body), nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

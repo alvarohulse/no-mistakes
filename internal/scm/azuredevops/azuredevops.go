@@ -75,7 +75,7 @@ func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
 // yet wired up - the az CLI has no first-class build-log command, so callers
 // gate on FailedCheckLogs and skip it.
 func (h *Host) Capabilities() scm.Capabilities {
-	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false}
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: false, PRBodyReadRevision: true}
 }
 
 // orgArgs scopes a command to the organization. The show/update/policy-list
@@ -235,6 +235,14 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		pr.Base = strings.TrimSpace(content.Base)
 	}
 	return pr, nil
+}
+
+func (h *Host) ReadPRBody(ctx context.Context, pr *scm.PR) (scm.PRBodySnapshot, error) {
+	got, err := h.showPR(ctx, pr)
+	if err != nil {
+		return scm.PRBodySnapshot{}, err
+	}
+	return scm.NewPRBodySnapshot(got.Description), nil
 }
 
 func (h *Host) retargetPR(ctx context.Context, id, base string) error {

@@ -100,6 +100,24 @@ func TestErrUnsupportedIsMatched(t *testing.T) {
 	}
 }
 
+func TestNewPRBodySnapshotUsesExactBodyBytesAsRevision(t *testing.T) {
+	t.Parallel()
+
+	first := NewPRBodySnapshot("human\r\nbody\n")
+	repeat := NewPRBodySnapshot("human\r\nbody\n")
+	changed := NewPRBodySnapshot("human\nbody\n")
+
+	if first.Body != "human\r\nbody\n" {
+		t.Fatalf("body = %q", first.Body)
+	}
+	if first.Revision == "" || first.Revision != repeat.Revision {
+		t.Fatalf("revision is not stable: %q vs %q", first.Revision, repeat.Revision)
+	}
+	if first.Revision == changed.Revision {
+		t.Fatalf("revision ignored byte drift: %q", first.Revision)
+	}
+}
+
 // fakeHost asserts Host interface compliance at compile time.
 type fakeHost struct{}
 
@@ -117,6 +135,9 @@ func (fakeHost) CreatePR(context.Context, string, string, PRContent) (*PR, error
 }
 func (fakeHost) UpdatePR(context.Context, *PR, PRContent) (*PR, error) {
 	return nil, nil
+}
+func (fakeHost) ReadPRBody(context.Context, *PR) (PRBodySnapshot, error) {
+	return NewPRBodySnapshot(""), nil
 }
 func (fakeHost) GetPRState(context.Context, *PR) (PRState, error) {
 	return "", nil
