@@ -110,7 +110,7 @@ func structuredPlatformCommandConfig(t *testing.T, name, marker string) (*config
     run: %q
     %s:
       run: %q
-      runner: {executable: zsh, args: [-lc]}
+      runner: {executable: bash, args: [-lc]}
 `, name, baseScript, platform, platformScript)))
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +143,7 @@ func assertFirstCommandRunnerReceipt(t *testing.T, sctx *pipeline.StepContext, s
 		t.Fatal("missing command receipt")
 	}
 	receipt := evidence.Commands[0]
-	if receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "zsh" || receipt.Runner.Version == nil {
+	if receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "bash" || receipt.Runner.Version == nil {
 		t.Fatalf("command receipt = %+v", receipt)
 	}
 }

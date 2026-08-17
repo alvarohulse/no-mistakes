@@ -491,14 +491,14 @@ func cleanReviewScenario(t *testing.T) string {
       summary: "found 1 issue"
       risk_level: medium
       risk_rationale: "warning requires human review"
-  - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: agent-edits"
-    text: "agent edited a file"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: agent-edits"
+    text: "agent updated documentation"
     edits:
-      - path: "agent-edit.txt"
+      - path: "agent-edit.md"
         new: "agent edited\n"
     structured:
       findings: []
-      summary: "no issues found"
+      summary: "add agent edit fixture"
       risk_level: low
       risk_rationale: "agent edit is deterministic"
       risk_scope: source-or-external
@@ -1172,19 +1172,19 @@ func assertAgentEditCommitRun(t *testing.T, h *Harness) {
 	if strings.TrimSpace(string(gateBranchSHA)) != run.HeadSHA {
 		t.Fatalf("agent-edits gate branch SHA = %s, want run head %s", strings.TrimSpace(string(gateBranchSHA)), run.HeadSHA)
 	}
-	message, err := h.runGit(ctx, h.UpstreamDir, "log", "-1", "--format=%s", "refs/heads/agent-edits")
+	message, err := h.runGit(ctx, h.UpstreamDir, "log", "-1", "--format=%s", "refs/heads/agent-edits", "--", "agent-edit.md")
 	if err != nil {
 		t.Fatalf("read agent-edits upstream commit message: %v\n%s", err, message)
 	}
-	if strings.TrimSpace(string(message)) != "no-mistakes: apply agent fixes" {
+	if strings.TrimSpace(string(message)) != "fix(document): add agent edit fixture" {
 		t.Fatalf("agent-edits upstream commit message = %q", strings.TrimSpace(string(message)))
 	}
-	contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:agent-edit.txt")
+	contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:agent-edit.md")
 	if err != nil {
 		t.Fatalf("read committed agent edit from upstream: %v\n%s", err, contents)
 	}
 	if string(contents) != "agent edited\n" {
-		t.Fatalf("agent-edit.txt contents = %q", string(contents))
+		t.Fatalf("agent-edit.md contents = %q", string(contents))
 	}
 	formatted, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:formatted-by-push.txt")
 	if err != nil {

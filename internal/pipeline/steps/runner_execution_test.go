@@ -21,8 +21,8 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	marker := filepath.Join(dir, "runner-selection")
 	baseScript := "printf base > " + marker
 	platformScript := "printf platform > " + marker
-	zsh := &runner.Spec{Executable: "zsh", Args: []string{"-lc"}}
-	override := &runner.Override{Run: &platformScript, Runner: zsh}
+	bash := &runner.Spec{Executable: "bash", Args: []string{"-lc"}}
+	override := &runner.Override{Run: &platformScript, Runner: bash}
 	command := runner.Command{Run: baseScript}
 	wantSource := runner.SourceLinux
 	if runtime.GOOS == "darwin" {
@@ -63,7 +63,7 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 		t.Fatalf("commands = %+v", evidence.Commands)
 	}
 	receipt := evidence.Commands[0]
-	if receipt.Command != platformScript || receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "zsh" || receipt.Runner.Version == nil {
+	if receipt.Command != platformScript || receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "bash" || receipt.Runner.Version == nil {
 		t.Fatalf("runner receipt = %+v", receipt)
 	}
 }
@@ -76,7 +76,7 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	marker := filepath.Join(dir, "must-not-run")
 	command := runner.Command{Run: "printf ran > " + marker + "; if true; then"}
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Runner = runner.Spec{Executable: "zsh", Args: []string{"-lc"}}
+	sctx.Config.Runner = runner.Spec{Executable: "bash", Args: []string{"-lc"}}
 	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepBuild)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evidence.Commands) != 1 || evidence.Commands[0].Outcome != "error" || evidence.Commands[0].Runner == nil || evidence.Commands[0].Runner.Executable != "zsh" || !strings.Contains(evidence.Commands[0].Command, "if true; then") {
+	if len(evidence.Commands) != 1 || evidence.Commands[0].Outcome != "error" || evidence.Commands[0].Runner == nil || evidence.Commands[0].Runner.Executable != "bash" || !strings.Contains(evidence.Commands[0].Command, "if true; then") {
 		t.Fatalf("syntax-error receipt = %+v", evidence.Commands)
 	}
 }
