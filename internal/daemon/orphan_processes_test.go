@@ -167,10 +167,10 @@ func processIsRunning(pid int) bool {
 func pidGoneWithin(pid int, window time.Duration) bool {
 	deadline := time.Now().Add(window)
 	for time.Now().Before(deadline) {
-		if !processIsAlive(pid) {
+		if !processIsRunning(pid) {
 			return true
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return !processIsAlive(pid)
+	return !processIsRunning(pid)
 }

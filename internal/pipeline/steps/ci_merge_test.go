@@ -269,7 +269,7 @@ func TestCIStep_MergeConflictAutoFixPromptUsesBaseBranchTip(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.CWD, "conflict-fix.txt"), []byte("resolved\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			return &agent.Result{}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve merge conflict"}`)}, nil
 		},
 	}
 
@@ -331,7 +331,7 @@ func TestCIStep_MergeConflictAutoFixPromptUsesStackedBaseTip(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.CWD, "conflict-fix.txt"), []byte("resolved\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			return &agent.Result{}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve stacked merge conflict"}`)}, nil
 		},
 	}
 
