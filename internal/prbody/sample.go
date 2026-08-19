@@ -1,6 +1,6 @@
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/pricing"
+import "github.com/kunchenguid/no-mistakes/internal/legacycost"
 
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
@@ -136,21 +136,21 @@ func sampleWithLegacyCosts() *Contract {
 	ms := func(v int64) *int64 { return &v }
 	integer := func(v int) *int { return &v }
 	usd := func(v float64) *float64 { return &v }
-	costs := func(reported, list, adjusted float64) *pricing.CostClasses {
-		return &pricing.CostClasses{
-			HarnessReported: pricing.CostEstimate{
-				ValueUSD: usd(reported), Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true,
+	costs := func(reported, list, adjusted float64) *legacycost.CostClasses {
+		return &legacycost.CostClasses{
+			HarnessReported: legacycost.CostEstimate{
+				ValueUSD: usd(reported), Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true,
 				Basis: "agent_invocations.reported_cost_usd",
 			},
-			APIListEstimate: pricing.CostEstimate{
-				ValueUSD: usd(list), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+			APIListEstimate: legacycost.CostEstimate{
+				ValueUSD: usd(list), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
 				Basis:      "canonical_delta_token_meters_x_public_list_rate",
-				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
+				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
 			},
-			HarnessAdjustedEstimate: pricing.CostEstimate{
-				ValueUSD: usd(adjusted), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+			HarnessAdjustedEstimate: legacycost.CostEstimate{
+				ValueUSD: usd(adjusted), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
 				Basis:      "public_list_estimate_plus_harness_profile",
-				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
+				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
 			},
 		}
 	}

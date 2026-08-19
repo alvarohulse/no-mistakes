@@ -3,7 +3,7 @@ package stats
 import (
 	"encoding/json"
 
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 )
 
 type CostTotals struct {
@@ -13,24 +13,30 @@ type CostTotals struct {
 }
 
 type CostTotal struct {
-	ValueUSD   *float64             `json:"value_usd"`
-	Coverage   pricing.Coverage     `json:"coverage"`
-	Complete   bool                 `json:"complete"`
-	Basis      string               `json:"basis"`
-	Reasons    []string             `json:"reasons"`
-	Provenance []pricing.Provenance `json:"provenance"`
+	ValueUSD   *float64                `json:"value_usd"`
+	Coverage   legacycost.Coverage     `json:"coverage"`
+	Complete   bool                    `json:"complete"`
+	Basis      string                  `json:"basis"`
+	Reasons    []string                `json:"reasons"`
+	Provenance []legacycost.Provenance `json:"provenance"`
 }
 
 func buildCostTotals(invocations []Invocation) CostTotals {
 	return CostTotals{
-		HarnessReported:         aggregateCost(invocations, func(costs pricing.CostClasses) pricing.CostEstimate { return costs.HarnessReported }),
-		APIListEstimate:         aggregateCost(invocations, func(costs pricing.CostClasses) pricing.CostEstimate { return costs.APIListEstimate }),
-		HarnessAdjustedEstimate: aggregateCost(invocations, func(costs pricing.CostClasses) pricing.CostEstimate { return costs.HarnessAdjustedEstimate }),
+		HarnessReported: aggregateCost(invocations, func(costs legacycost.CostClasses) legacycost.CostEstimate {
+			return costs.HarnessReported
+		}),
+		APIListEstimate: aggregateCost(invocations, func(costs legacycost.CostClasses) legacycost.CostEstimate {
+			return costs.APIListEstimate
+		}),
+		HarnessAdjustedEstimate: aggregateCost(invocations, func(costs legacycost.CostClasses) legacycost.CostEstimate {
+			return costs.HarnessAdjustedEstimate
+		}),
 	}
 }
 
-func aggregateCost(invocations []Invocation, selectCost func(pricing.CostClasses) pricing.CostEstimate) CostTotal {
-	result := CostTotal{Complete: len(invocations) > 0, Reasons: []string{}, Provenance: []pricing.Provenance{}}
+func aggregateCost(invocations []Invocation, selectCost func(legacycost.CostClasses) legacycost.CostEstimate) CostTotal {
+	result := CostTotal{Complete: len(invocations) > 0, Reasons: []string{}, Provenance: []legacycost.Provenance{}}
 	known := 0
 	var sum float64
 	seenReasons := make(map[string]bool)

@@ -16,13 +16,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	resolvedPolicyVersion     = 6
+	resolvedPolicyVersion     = 7
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -49,7 +48,7 @@ type resolvedPolicy struct {
 	Intent                 resolvedPolicyIntent   `json:"intent"`
 	Eval                   resolvedPolicyEval     `json:"eval"`
 	TestEvidence           resolvedPolicyEvidence `json:"test_evidence"`
-	Pricing                resolvedPolicyPricing  `json:"pricing"`
+	LegacyPricing          *resolvedPolicyPricing `json:"pricing,omitempty"`
 }
 
 type resolvedPolicyBinary struct {
@@ -254,9 +253,8 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 }
 
 // Older versions predate managed routing, resolved runner provenance, trusted
-// preflight, source-aware skip receipts, or explicit pricing profiles. Their
-// missing fields decode to legacy zero values and are normalized before
-// semantic comparison.
+// preflight, source-aware skip receipts, or removal of pricing profiles. Their
+// missing or retired fields are normalized before semantic comparison.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	if policy.Version == 1 {
 		if policy.Routing.Version == 1 {
@@ -273,8 +271,8 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 			}
 		}
 	}
-	if policy.Version >= 1 && policy.Version <= 5 {
-		policy.Pricing.Profiles = map[string]string{}
+	if policy.Version >= 1 && policy.Version <= 6 {
+		policy.LegacyPricing = nil
 		policy.Version = resolvedPolicyVersion
 	}
 }
@@ -362,16 +360,12 @@ func resolvedPolicyFromConfigWithSkips(cfg *config.Config, sources []db.ConfigSo
 			RetentionNS: int64(cfg.Test.Evidence.Retention),
 			MaxRuns:     cfg.Test.Evidence.MaxRuns,
 		},
-		Pricing: resolvedPolicyPricing{Profiles: copyResolvedPolicyStrings(cfg.PricingProfiles)},
 	}
 	if policy.Sources == nil {
 		policy.Sources = []db.ConfigSource{}
 	}
 	if policy.IgnorePatterns == nil {
 		policy.IgnorePatterns = []string{}
-	}
-	if policy.Pricing.Profiles == nil {
-		policy.Pricing.Profiles = map[string]string{}
 	}
 	if err := policy.validate(); err != nil {
 		return nil, err
@@ -462,15 +456,13 @@ func (p *resolvedPolicy) validate() error {
 	if p.Budgets.CITimeoutNS < 0 || p.Budgets.StepQuietWarningNS < 0 || p.Budgets.ProcessTerminationGraceNS < 0 || p.Budgets.CIRerunTransient < 0 || p.TestEvidence.RetentionNS < 0 || p.TestEvidence.MaxRuns < 0 || p.Intent.SlackDays < 0 || p.Eval.MaxCases < 0 || p.Eval.DiversifiedSize < 0 {
 		return fmt.Errorf("resolved policy contains a negative budget")
 	}
-	if p.Version >= 6 {
-		if p.Pricing.Profiles == nil {
+	if p.Version == 6 {
+		if p.LegacyPricing == nil || p.LegacyPricing.Profiles == nil {
 			return fmt.Errorf("resolved policy pricing profiles are missing")
 		}
-		for harness, profileID := range p.Pricing.Profiles {
-			if err := pricing.ValidateProfileSelection(harness, profileID); err != nil {
-				return fmt.Errorf("resolved policy pricing: %w", err)
-			}
-		}
+	}
+	if p.Version >= 7 && p.LegacyPricing != nil {
+		return fmt.Errorf("resolved policy contains retired pricing profiles")
 	}
 	for _, limit := range []int{p.Budgets.AutoFix.Lint, p.Budgets.AutoFix.Build, p.Budgets.AutoFix.Test, p.Budgets.AutoFix.Review, p.Budgets.AutoFix.Document, p.Budgets.AutoFix.CI, p.Budgets.AutoFix.Refresh} {
 		if limit < 0 {

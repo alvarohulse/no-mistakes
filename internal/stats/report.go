@@ -10,7 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -154,9 +154,9 @@ type ReportCosts struct {
 }
 
 type CostRecord struct {
-	RunID        string              `json:"run_id"`
-	InvocationID string              `json:"invocation_id"`
-	Classes      pricing.CostClasses `json:"classes"`
+	RunID        string                 `json:"run_id"`
+	InvocationID string                 `json:"invocation_id"`
+	Classes      legacycost.CostClasses `json:"classes"`
 }
 
 type DataError struct {

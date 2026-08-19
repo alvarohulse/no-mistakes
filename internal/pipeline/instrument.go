@@ -13,7 +13,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -28,7 +27,6 @@ type perfRecordingAgent struct {
 	runID               string
 	stepName            types.StepName
 	reviewCandidatePool []db.ReviewCandidateReceipt
-	pricingProfiles     map[string]string
 	// round returns the 1-based round the current invocation belongs to.
 	round func() int
 }
@@ -82,9 +80,6 @@ func (a *perfRecordingAgent) runWithRequiredReviewReceipt(ctx context.Context, o
 	startedAt := time.Now()
 	pending := a.newInvocation(ctx, opts, a.inner.Name(), nil, nil, startedAt, startedAt)
 	pending.ExitStatus = "started"
-	// A pre-launch review-selection row is not a completed pricing
-	// observation. Finalization fills the receipt exactly once.
-	pending.PricingReceiptJSON = nil
 	persisted, err := a.db.InsertAgentInvocation(pending)
 	if err != nil {
 		return nil, fmt.Errorf("persist review selection receipt: %w", err)
@@ -186,43 +181,7 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 			inv.FailureCategory = classifyInvocationFailure(runErr)
 		}
 	}
-	a.capturePricingReceipt(&inv)
-
 	return inv
-}
-
-func (a *perfRecordingAgent) capturePricingReceipt(inv *db.AgentInvocation) {
-	if inv == nil {
-		return
-	}
-	_, uncachedInput := agent.CanonicalInputMeters(inv.Agent, inv.DeltaInputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens)
-	provider := ""
-	if inv.ModelProvider != nil {
-		provider = *inv.ModelProvider
-	}
-	receipt, err := pricing.NewReceipt(pricing.Observation{
-		Harness: inv.Agent, ProfileID: a.pricingProfiles[inv.Agent], Provider: provider, Model: inv.Model,
-		StartedAt: time.Unix(inv.StartedAt, 0).UTC(), ReportedCostUSD: inv.ReportedCostUSD,
-		Meters: pricing.TokenMeters{
-			UncachedInputTokens: invocationInt64(uncachedInput),
-			CacheReadTokens:     invocationInt64(inv.DeltaCacheReadTokens),
-			CacheWriteTokens:    invocationInt64(inv.DeltaCacheCreationTokens),
-			OutputTokens:        invocationInt64(inv.DeltaOutputTokens),
-		},
-	})
-	if err != nil {
-		slog.Warn("failed to capture immutable pricing receipt", "step", a.stepName, "error", err)
-		return
-	}
-	inv.PricingReceiptJSON = &receipt
-}
-
-func invocationInt64(value *int) *int64 {
-	if value == nil {
-		return nil
-	}
-	converted := int64(*value)
-	return &converted
 }
 
 // recordResult folds a successful (or partially successful) result's identity,

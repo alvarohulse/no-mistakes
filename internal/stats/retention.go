@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -81,7 +81,7 @@ type MetricInvocation struct {
 	RawUsage             TokenMeters               `json:"raw_usage"`
 	DeltaUsage           TokenMeters               `json:"delta_usage"`
 	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
-	Costs                pricing.CostClasses       `json:"costs"`
+	Costs                legacycost.CostClasses    `json:"costs"`
 	Activity             Activity                  `json:"activity"`
 }
 

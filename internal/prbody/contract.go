@@ -8,7 +8,7 @@
 // tests, review evidence, and user-testing instructions remain distinct.
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/pricing"
+import "github.com/kunchenguid/no-mistakes/internal/legacycost"
 
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
@@ -268,7 +268,7 @@ type AgentRun struct {
 	ReportedCostUSD     *float64 `json:"reported_cost_usd,omitempty"`
 	// Costs is retained only to decode legacy version 4 contracts. Version 5
 	// producers emit raw meters and optional reported cost, never estimates.
-	Costs *pricing.CostClasses `json:"costs,omitempty"`
+	Costs *legacycost.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
 	Vendor         string `json:"vendor,omitempty"`

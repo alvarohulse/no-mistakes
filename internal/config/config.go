@@ -18,7 +18,6 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -98,7 +97,6 @@ type GlobalConfig struct {
 	ACPRegistryOverrides    map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
-	PricingProfiles         map[string]string   `yaml:"-"`
 	Runner                  runner.Spec         `yaml:"runner"`
 	CITimeout               time.Duration       `yaml:"-"`
 	StepQuietWarning        time.Duration       `yaml:"-"`
@@ -152,7 +150,7 @@ type globalConfigRaw struct {
 	ACPRegistryOverrides    map[string]string      `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string      `yaml:"agent_path_override"`
 	AgentArgsOverride       map[string][]string    `yaml:"agent_args_override"`
-	Pricing                 PricingRaw             `yaml:"pricing"`
+	LegacyPricing           legacyPricingRaw       `yaml:"pricing"`
 	Runner                  runner.Spec            `yaml:"runner"`
 	CITimeout               string                 `yaml:"ci_timeout"`
 	DaemonConnectTimeout    string                 `yaml:"daemon_connect_timeout"`
@@ -179,7 +177,10 @@ type globalConfigRaw struct {
 	Eval                    EvalRaw                `yaml:"eval"`
 }
 
-type PricingRaw struct {
+// legacyPricingRaw keeps old global config files loadable after pricing
+// ownership moved to the external formatter. Its contents are intentionally
+// ignored and never enter effective run policy.
+type legacyPricingRaw struct {
 	Profiles map[string]string `yaml:"profiles"`
 }
 
@@ -1473,7 +1474,6 @@ type Config struct {
 	ACPRegistryOverrides    map[string]string
 	AgentPathOverride       map[string]string
 	AgentArgsOverride       map[string][]string
-	PricingProfiles         map[string]string
 	CITimeout               time.Duration
 	StepQuietWarning        time.Duration
 	ProcessTerminationGrace time.Duration
@@ -3111,7 +3111,6 @@ func DefaultGlobalConfig() *GlobalConfig {
 		ProcessTerminationGrace: DefaultProcessTerminationGrace,
 		LogLevel:                "info",
 		SessionReuse:            true,
-		PricingProfiles:         map[string]string{},
 		Eval:                    evalDefaults(),
 	}
 }
@@ -3183,11 +3182,6 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
-	profiles, err := normalizePricingProfiles(raw.Pricing.Profiles)
-	if err != nil {
-		return nil, fmt.Errorf("parse global config: %w", err)
-	}
-	cfg.PricingProfiles = profiles
 	cfg.Runner = raw.Runner.Clone()
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
@@ -3278,33 +3272,6 @@ func parseCITimeout(value string) (time.Duration, error) {
 		return CITimeoutUnlimited, nil
 	}
 	return d, nil
-}
-
-func normalizePricingProfiles(values map[string]string) (map[string]string, error) {
-	result := make(map[string]string, len(values))
-	for harness, profileID := range values {
-		normalizedHarness := strings.ToLower(strings.TrimSpace(harness))
-		normalizedProfile := strings.TrimSpace(profileID)
-		if normalizedHarness == "" || normalizedProfile == "" {
-			return nil, fmt.Errorf("pricing.profiles keys and values must be non-empty")
-		}
-		if err := pricing.ValidateProfileSelection(normalizedHarness, normalizedProfile); err != nil {
-			return nil, err
-		}
-		if _, exists := result[normalizedHarness]; exists {
-			return nil, fmt.Errorf("duplicate pricing profile for harness %q", normalizedHarness)
-		}
-		result[normalizedHarness] = normalizedProfile
-	}
-	return result, nil
-}
-
-func copyPricingProfiles(values map[string]string) map[string]string {
-	result := make(map[string]string, len(values))
-	for harness, profileID := range values {
-		result[harness] = profileID
-	}
-	return result
 }
 
 func parsePositiveDuration(name, value string) (time.Duration, error) {
@@ -3924,7 +3891,6 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ACPRegistryOverrides:    global.ACPRegistryOverrides,
 		AgentPathOverride:       global.AgentPathOverride,
 		AgentArgsOverride:       global.AgentArgsOverride,
-		PricingProfiles:         copyPricingProfiles(global.PricingProfiles),
 		CITimeout:               global.CITimeout,
 		StepQuietWarning:        global.StepQuietWarning,
 		ProcessTerminationGrace: global.ProcessTerminationGrace,

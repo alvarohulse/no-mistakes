@@ -11,7 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 )
 
 var csvHeader = []string{
@@ -182,14 +182,14 @@ func renderText(report *Report, forceDetails bool) string {
 
 type namedCostEstimate struct {
 	name     string
-	estimate pricing.CostEstimate
+	estimate legacycost.CostEstimate
 }
 
-func namedCostEstimates(costs pricing.CostClasses) []namedCostEstimate {
+func namedCostEstimates(costs legacycost.CostClasses) []namedCostEstimate {
 	return []namedCostEstimate{
 		{name: "harness_reported", estimate: costs.HarnessReported},
-		{name: "api_list_estimate", estimate: costs.APIListEstimate},
-		{name: "harness_adjusted_estimate", estimate: costs.HarnessAdjustedEstimate},
+		{name: "historical_api_list_receipt", estimate: costs.APIListEstimate},
+		{name: "historical_harness_adjusted_receipt", estimate: costs.HarnessAdjustedEstimate},
 	}
 }
 
@@ -201,8 +201,8 @@ type namedCostTotal struct {
 func namedCostTotals(costs CostTotals) []namedCostTotal {
 	return []namedCostTotal{
 		{name: "harness_reported", total: costs.HarnessReported},
-		{name: "api_list_estimate", total: costs.APIListEstimate},
-		{name: "harness_adjusted_estimate", total: costs.HarnessAdjustedEstimate},
+		{name: "historical_api_list_receipt", total: costs.APIListEstimate},
+		{name: "historical_harness_adjusted_receipt", total: costs.HarnessAdjustedEstimate},
 	}
 }
 
@@ -241,14 +241,14 @@ func textFloat(value *float64) string {
 	return strconv.FormatFloat(*value, 'f', -1, 64)
 }
 
-func provenanceCatalog(value pricing.Provenance) string {
+func provenanceCatalog(value legacycost.Provenance) string {
 	if value.CatalogVersion == 0 && value.CatalogSHA256 == "" {
 		return "—"
 	}
 	return fmt.Sprintf("v%d@%s", value.CatalogVersion, value.CatalogSHA256)
 }
 
-func provenanceProfile(value pricing.Provenance) string {
+func provenanceProfile(value legacycost.Provenance) string {
 	if value.ProfileID == "" {
 		return "—"
 	}
@@ -750,7 +750,7 @@ func applyCostMetadata(report *Report, path []string, fact *reportFact) {
 	}
 }
 
-func costEstimateAt(report *Report, path []string) (pricing.CostEstimate, bool) {
+func costEstimateAt(report *Report, path []string) (legacycost.CostEstimate, bool) {
 	if len(path) == 6 && path[0] == "agents" && path[2] == "invocation" && path[3] == "costs" {
 		if index, valid := pathIndex(path, 1, len(report.Agents)); valid {
 			return costEstimate(report.Agents[index].Invocation.Costs, path[4])
@@ -761,10 +761,10 @@ func costEstimateAt(report *Report, path []string) (pricing.CostEstimate, bool) 
 			return costEstimate(report.Costs.Items[index].Classes, path[4])
 		}
 	}
-	return pricing.CostEstimate{}, false
+	return legacycost.CostEstimate{}, false
 }
 
-func costEstimate(classes pricing.CostClasses, name string) (pricing.CostEstimate, bool) {
+func costEstimate(classes legacycost.CostClasses, name string) (legacycost.CostEstimate, bool) {
 	switch name {
 	case "harness_reported":
 		return classes.HarnessReported, true
@@ -773,7 +773,7 @@ func costEstimate(classes pricing.CostClasses, name string) (pricing.CostEstimat
 	case "harness_adjusted_estimate":
 		return classes.HarnessAdjustedEstimate, true
 	default:
-		return pricing.CostEstimate{}, false
+		return legacycost.CostEstimate{}, false
 	}
 }
 
