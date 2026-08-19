@@ -9,7 +9,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/prbody"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -350,14 +349,6 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 		if invocation.ModelProvider != nil {
 			agentRun.Provider = *invocation.ModelProvider
 			agentRun.Vendor = *invocation.ModelProvider
-		}
-		if invocation.PricingReceiptJSON != nil {
-			costs, err := pricing.DecodeReceipt(*invocation.PricingReceiptJSON)
-			if err != nil {
-				slog.Warn("failed to decode PR contract pricing receipt", "invocation", invocation.ID, "error", err)
-			} else {
-				agentRun.Costs = &costs
-			}
 		}
 		for _, observation := range invocation.AgentObservations {
 			agentRun.Nested = append(agentRun.Nested, prbody.NestedAgent{

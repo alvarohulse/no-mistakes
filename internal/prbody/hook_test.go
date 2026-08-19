@@ -130,7 +130,7 @@ func TestRunHookReceivesContractOnStdin(t *testing.T) {
 	// The formatter's only input is stdin; if the contract is not piped, the
 	// grep finds nothing and the command exits non-zero.
 	result, err := RunHook(context.Background(), HookOptions{
-		Command:  `payload=$(cat); printf '%s' "$payload" | grep -q '"version":4' && printf '%s' "$payload" | grep -q '"costs"' && printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"ok"}]}'`,
+		Command:  `payload=$(cat); printf '%s' "$payload" | grep -q '"version":5' && printf '%s' "$payload" | grep -q '"reported_cost_usd"' && ! printf '%s' "$payload" | grep -q '"costs"' && printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"ok"}]}'`,
 		Contract: Sample(),
 	})
 	if err != nil {
