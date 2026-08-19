@@ -26,6 +26,7 @@ agent: codex
 commands:
   prepare: "go mod download"
   lint: "golangci-lint run ./..."
+  build: "go build ./..."
   # Targeted local validation only - not a full-repo CI-parity suite.
   test: "go test ./internal/cli -run '^TestDoctor' -count=1"
   format: "gofmt -w ."
@@ -70,6 +71,7 @@ pr:
 auto_fix:
   rebase: 3
   review: 3
+  build: 3
   test: 3
   document: 3
   lint: 5
@@ -143,7 +145,7 @@ This per-repo `agent` value, including every fallback entry, is still read from 
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing selection fields (`commands.{prepare,test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing selection fields (`commands.{prepare,build,test,lint,format}` and `agent`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
@@ -322,6 +324,19 @@ When set, no-mistakes runs this command before the first configured `commands.te
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
 
 Like every `commands.*` value, `commands.prepare` comes from the trusted default-branch configuration unless that trusted copy explicitly enables `allow_repo_commands: true`. no-mistakes never auto-detects an install command from the pushed branch.
+
+### commands.build
+
+Explicit build or compile command. Run once in the managed worktree via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (the agent may select a restricted full-module `go build ./...` command) |
+
+When set, the Build step runs this exact command and completes without invoking an agent when it succeeds. A non-zero exit records bounded compiler output and enters the normal fix/approval loop.
+Build verification must leave `HEAD` and all tracked or unignored worktree content unchanged; write generated output only to ignored paths or clean it before the command exits. A side effect fails the Build step even when the command also exits non-zero.
+When empty, the configured run-wide agent may select `go build ./...`, optionally with compile-safe flags, and the pipeline validates the command before executing it in the normal worktree and step environment. Other targets and build systems must be configured here on the trusted default branch. If the agent cannot identify the accepted command, Build pauses for a decision instead of passing.
 
 ### commands.test
 
@@ -583,6 +598,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 | --- | --- | --- |
 | `auto_fix.rebase` | `int` | Inherits from global (default `3`) |
 | `auto_fix.review` | `int` | Inherits from global (default `0`) |
+| `auto_fix.build` | `int` | Inherits from global (default `3`) |
 | `auto_fix.test` | `int` | Inherits from global (default `3`) |
 | `auto_fix.document` | `int` | Inherits from global (default `3`) |
 | `auto_fix.lint` | `int` | Inherits from global (default `3`) |
@@ -761,7 +777,7 @@ Override the auto-fix commit subject template for this repository.
 
 The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
 That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
-The setting applies to the Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs. It does not apply to commits created by the Rebase or Push steps.
+The setting applies to the Build, Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs. It does not apply to commits created by the Rebase or Push steps.
 
 This non-executing field is read from the pushed branch, so a branch can adopt its own commit-subject convention without enabling `allow_repo_commands`.
 To apply a machine-local convention without adding it to the repository, see global [`repository_overrides`](/no-mistakes/reference/global-config/#repository_overrides).

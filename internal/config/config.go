@@ -291,7 +291,7 @@ type RepoConfig struct {
 	// remove the maintainer's protection from its own fixes.
 	ProtectedPaths []string `yaml:"protected_paths"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
-	// fields (commands.{prepare,test,lint,format} and agent) from a contributor's
+	// fields (commands.{prepare,build,test,lint,format} and agent) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
 	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (never
 	// the pushed SHA), so a contributor cannot self-enable. Default false:
@@ -573,6 +573,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 // Commands holds optional per-repo command overrides.
 type Commands struct {
 	Prepare string `yaml:"prepare"`
+	Build   string `yaml:"build"`
 	Lint    string `yaml:"lint"`
 	Test    string `yaml:"test"`
 	Format  string `yaml:"format"`
@@ -582,6 +583,7 @@ type Commands struct {
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type AutoFixRaw struct {
 	Lint     *int `yaml:"lint"`
+	Build    *int `yaml:"build"`
 	Test     *int `yaml:"test"`
 	Review   *int `yaml:"review"`
 	Document *int `yaml:"document"`
@@ -673,6 +675,7 @@ type Rebase struct {
 // A value of 0 means auto-fix is disabled (requires manual approval).
 type AutoFix struct {
 	Lint     int
+	Build    int
 	Test     int
 	Review   int
 	Document int
@@ -1236,6 +1239,7 @@ log_level: info
 auto_fix:
   rebase: 3
   lint: 3
+  build: 3
   test: 3
   review: 0
   document: 3
@@ -1279,7 +1283,7 @@ ci:
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
-# intent, and feed it to review, test, document, lint, and PR agents so they
+# intent, and feed it to build, review, test, document, lint, and PR agents so they
 # understand what you were trying to do - not just the diff.
 intent:
   enabled: true
@@ -2943,6 +2947,7 @@ func applyProvidersOverrides(dst *Providers, src *ProvidersRaw) {
 func autoFixDefaults() AutoFix {
 	return AutoFix{
 		Lint:     3,
+		Build:    3,
 		Test:     3,
 		Review:   0,
 		Document: 3,
@@ -3014,6 +3019,9 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 	if src.Lint != nil {
 		dst.Lint = *src.Lint
 	}
+	if src.Build != nil {
+		dst.Build = *src.Build
+	}
 	if src.Test != nil {
 		dst.Test = *src.Test
 	}
@@ -3037,6 +3045,8 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 	switch step {
 	case types.StepLint:
 		return c.AutoFix.Lint
+	case types.StepBuild:
+		return c.AutoFix.Build
 	case types.StepTest:
 		return c.AutoFix.Test
 	case types.StepReview:
