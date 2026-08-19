@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -226,17 +226,28 @@ func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
 func TestProjectionsCarryPopulatedCostProvenanceCoverageAndIntegrityErrors(t *testing.T) {
 	database, run := newAuditRun(t)
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
-	input64, output64, cacheRead64, cacheWrite64 := int64(input), int64(output), int64(cacheRead), int64(cacheWrite)
 	reported := 9.25
+	listValue, effectiveValue := 36.75, 40.75
 	provider := "anthropic"
-	receipt, err := pricing.NewReceipt(pricing.Observation{
-		Harness: "cursor", ProfileID: "cursor-token-rate", Provider: provider, Model: "claude-opus-5",
-		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), ReportedCostUSD: &reported,
-		Meters: pricing.TokenMeters{UncachedInputTokens: &input64, OutputTokens: &output64, CacheReadTokens: &cacheRead64, CacheWriteTokens: &cacheWrite64},
+	receiptBytes, err := json.Marshal(legacycost.CostClasses{
+		HarnessReported: legacycost.CostEstimate{
+			ValueUSD: &reported, Coverage: legacycost.Coverage{Reported: 1, Eligible: 1},
+			Complete: true, Basis: "agent_invocations.reported_cost_usd",
+		},
+		APIListEstimate: legacycost.CostEstimate{
+			ValueUSD: &listValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4},
+			Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
+			Provenance: legacycost.Provenance{CatalogVersion: 2, CatalogSHA256: "historical-catalog"},
+		},
+		HarnessAdjustedEstimate: legacycost.CostEstimate{
+			ValueUSD: &effectiveValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4},
+			Complete: true, Basis: "public_list_estimate_plus_harness_profile",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	receipt := string(receiptBytes)
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor", Model: "claude-opus-5", ModelProvider: &provider,
 		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(), CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
@@ -277,7 +288,7 @@ func TestProjectionsCarryPopulatedCostProvenanceCoverageAndIntegrityErrors(t *te
 	if errorRow := byPath["/data_errors/0/detail"]; errorRow[8] == "" {
 		t.Fatalf("integrity error CSV fact = %v", errorRow)
 	}
-	for _, want := range []string{"coverage=4/4", "catalog=v1@", "data_error run="} {
+	for _, want := range []string{"coverage=4/4", "catalog=v2@", "data_error run="} {
 		if !strings.Contains(textOutput, want) {
 			t.Fatalf("text projection omitted %q:\n%s", want, textOutput)
 		}

@@ -30,7 +30,6 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	cfg.Review = config.Review{PathInstructions: []config.PathInstruction{{Path: "private/**", Instructions: "private review steering"}}}
 	cfg.DisableProjectSettings = true
 	cfg.NoCI = true
-	cfg.PricingProfiles = map[string]string{"cursor": "cursor-token-rate"}
 
 	policySteps := []pipeline.Step{policyTestStep{name: types.StepReview}, policyTestStep{name: types.StepBuild}, policyTestStep{name: types.StepPush}}
 	sources := []db.ConfigSource{{Kind: db.ConfigSourceGlobal, Digest: strings.Repeat("a", 64), Path: "/private/config.yaml"}, {Kind: db.ConfigSourceDefault, Digest: strings.Repeat("b", 64), Ref: "abc123"}}
@@ -45,10 +44,13 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if encoded != encodedAgain || digest != digestAgain {
 		t.Fatalf("resolved policy is not canonical:\n%s\n%s\n%s\n%s", encoded, encodedAgain, digest, digestAgain)
 	}
-	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`, `"pricing":{"profiles":{"cursor":"cursor-token-rate"}}`} {
+	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`} {
 		if !strings.Contains(encoded, required) {
 			t.Errorf("resolved policy omitted %q:\n%s", required, encoded)
 		}
+	}
+	if strings.Contains(encoded, `"pricing"`) {
+		t.Errorf("resolved policy retained pricing selection:\n%s", encoded)
 	}
 	for _, forbidden := range []string{"/private/codex", "token-value", "/private/acp", "private prompt", "/private/evidence", "/private/repo-evidence", "private-evidence-branch", "private document steering", "private review steering"} {
 		if strings.Contains(encoded, forbidden) {
@@ -65,8 +67,40 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if decoded.Steps[1].SkipSource != types.SkipSourceRunRequest {
 		t.Fatalf("decoded skip source = %q", decoded.Steps[1].SkipSource)
 	}
-	if decoded.Pricing.Profiles["cursor"] != "cursor-token-rate" {
-		t.Fatalf("decoded pricing profiles = %#v", decoded.Pricing.Profiles)
+}
+
+func TestDecodeResolvedPolicyAcceptsAndDropsVersionSixPricingSelection(t *testing.T) {
+	policy, err := resolvedPolicyFromConfig(
+		resolvedRoutingTestConfig(),
+		nil,
+		[]pipeline.Step{policyTestStep{name: types.StepReview}},
+		nil,
+		types.RefreshStrategyRebase,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 6
+	policy.LegacyPricing = &resolvedPolicyPricing{Profiles: map[string]string{"cursor": "retired-profile"}}
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, legacy, err := decodeResolvedPolicy(&encoded, &digest)
+	if err != nil || legacy {
+		t.Fatalf("decodeResolvedPolicy = policy %#v legacy %v error %v", policy, legacy, err)
+	}
+	normalizeResolvedPolicyForComparison(policy)
+	if policy.Version != resolvedPolicyVersion {
+		t.Fatalf("normalized version = %d, want %d", policy.Version, resolvedPolicyVersion)
+	}
+	normalized, _, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(normalized, `"pricing"`) {
+		t.Fatalf("normalized policy retained legacy pricing: %s", normalized)
 	}
 }
 

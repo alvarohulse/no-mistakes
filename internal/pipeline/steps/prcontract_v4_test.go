@@ -5,26 +5,16 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestContractV5ProjectsRawMetersAndOmitsLegacyCostClasses(t *testing.T) {
-	policy := `{"version":6,"pricing":{"profiles":{"cursor":"cursor-token-rate"}}}`
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
 	reported := 9.25
 	provider := "anthropic"
-	input64, output64, cacheRead64, cacheWrite64 := int64(input), int64(output), int64(cacheRead), int64(cacheWrite)
-	receipt, err := pricing.NewReceipt(pricing.Observation{
-		Harness: "cursor", ProfileID: "cursor-token-rate", Provider: provider, Model: "claude-opus-5",
-		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), ReportedCostUSD: &reported,
-		Meters: pricing.TokenMeters{UncachedInputTokens: &input64, OutputTokens: &output64, CacheReadTokens: &cacheRead64, CacheWriteTokens: &cacheWrite64},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	receipt := `{"harness_reported":{"value_usd":9.25}}`
 	contract := BuildContract(ContractInput{
-		Run:   &db.Run{ID: "run-1", ResolvedPolicy: &policy},
+		Run:   &db.Run{ID: "run-1"},
 		Steps: []*db.StepResult{{ID: "review", StepName: types.StepReview, StepOrder: 3, Status: types.StepStatusCompleted}},
 		Invocations: []db.AgentInvocation{{
 			ID: "inv-1", StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "cursor",

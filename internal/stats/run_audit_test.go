@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -181,15 +181,15 @@ func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing
 	reported := 9.25
 	listValue, effectiveValue := 12.5, 13.5
 	provider := "anthropic"
-	receiptBytes, err := json.Marshal(pricing.CostClasses{
-		HarnessReported: pricing.CostEstimate{ValueUSD: &reported, Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
-		APIListEstimate: pricing.CostEstimate{
-			ValueUSD: &listValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
-			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
+	receiptBytes, err := json.Marshal(legacycost.CostClasses{
+		HarnessReported: legacycost.CostEstimate{ValueUSD: &reported, Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
+		APIListEstimate: legacycost.CostEstimate{
+			ValueUSD: &listValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
+			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
 		},
-		HarnessAdjustedEstimate: pricing.CostEstimate{
-			ValueUSD: &effectiveValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
-			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
+		HarnessAdjustedEstimate: legacycost.CostEstimate{
+			ValueUSD: &effectiveValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
+			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
 		},
 	})
 	if err != nil {
@@ -233,7 +233,7 @@ func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing
 	}
 }
 
-func TestBuildRunAuditLeavesLegacyCatalogEstimatesUnknown(t *testing.T) {
+func TestBuildRunAuditLeavesNewRawOnlyEstimatesUnknownWithoutIntegrityError(t *testing.T) {
 	database, run := newAuditRun(t)
 	input, output := 100, 20
 	seedInvocation(t, database, db.AgentInvocation{
@@ -247,11 +247,11 @@ func TestBuildRunAuditLeavesLegacyCatalogEstimatesUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	costs := audit.Invocations[0].Costs
-	if costs.APIListEstimate.ValueUSD != nil || costs.APIListEstimate.Reason != "missing_pricing_receipt" {
-		t.Fatalf("legacy API-list estimate = %+v, want immutable unknown", costs.APIListEstimate)
+	if costs.APIListEstimate.ValueUSD != nil || costs.APIListEstimate.Reason != "not_persisted" {
+		t.Fatalf("raw-only API-list estimate = %+v, want immutable unknown", costs.APIListEstimate)
 	}
-	if !strings.Contains(strings.Join(audit.IntegrityErrors, "\n"), "no immutable pricing receipt") {
-		t.Fatalf("integrity errors = %v", audit.IntegrityErrors)
+	if joined := strings.Join(audit.IntegrityErrors, "\n"); strings.Contains(joined, "pricing receipt") || strings.Contains(joined, "historical pricing") {
+		t.Fatalf("raw-only invocation produced a pricing integrity error: %v", audit.IntegrityErrors)
 	}
 }
 

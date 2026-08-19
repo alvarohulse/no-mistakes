@@ -11,7 +11,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -143,15 +142,8 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	if r2.ReportedCostUSD == nil || *r2.ReportedCostUSD != 2.5 {
 		t.Fatalf("r2 reported cost = %v, want 2.5", r2.ReportedCostUSD)
 	}
-	if r2.PricingReceiptJSON == nil {
-		t.Fatal("r2 immutable pricing receipt is absent")
-	}
-	receipt, err := pricing.DecodeReceipt(*r2.PricingReceiptJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if receipt.HarnessReported.ValueUSD == nil || *receipt.HarnessReported.ValueUSD != 2.5 {
-		t.Fatalf("r2 receipt = %+v", receipt)
+	if r2.PricingReceiptJSON != nil {
+		t.Fatalf("new invocation carries legacy pricing receipt: %s", *r2.PricingReceiptJSON)
 	}
 }
 
