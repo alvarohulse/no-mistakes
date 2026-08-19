@@ -445,13 +445,13 @@ The field definitions and their local/remote split are owned by [the environment
 Render a pull request body through the [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter and print it.
 
 ```sh
-no-mistakes pr-body [--sample [--sample-version <2|3|4>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
+no-mistakes pr-body [--sample [--sample-version <2|3|4|5>] | --run <id> | --contract-file <path>] [--print-contract] [--hook <command>]
 ```
 
 | Flag               | Type     | Default    | Description                                                     |
 | ------------------ | -------- | ---------- | --------------------------------------------------------------- |
 | `--sample`         | `bool`   | `false`    | Use the built-in contract that exercises every section           |
-| `--sample-version` | `int`    | `4`        | Contract version `--sample` emits (`2`, `3`, or `4`)              |
+| `--sample-version` | `int`    | `5`        | Contract version `--sample` emits (`2`, `3`, `4`, or `5`)          |
 | `--run`            | `string` | Latest run | Rebuild a stored run's contract from the database                |
 | `--contract-file`  | `string` | —          | Read the contract from a JSON file (`-` for stdin)               |
 | `--print-contract` | `bool`   | `false`    | Print the contract JSON instead of running the formatter         |

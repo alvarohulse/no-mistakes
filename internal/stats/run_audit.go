@@ -5,10 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -120,6 +118,7 @@ type Invocation struct {
 	DeltaUsage           TokenMeters               `json:"delta_usage"`
 	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
 	Costs                legacycost.CostClasses    `json:"costs"`
+	HistoricalCosts      bool                      `json:"historical_costs"`
 	Activity             Activity                  `json:"activity"`
 }
 
@@ -421,6 +420,7 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	result.RawUsage.ReasoningTokens = cloneInt(row.ReasoningTokens)
 	var integrityErrors []string
 	result.Costs, integrityErrors = invocationHistoricalCosts(row)
+	result.HistoricalCosts = row.PricingReceiptJSON != nil
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
@@ -437,38 +437,13 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 
 func invocationHistoricalCosts(row db.AgentInvocation) (legacycost.CostClasses, []string) {
 	if row.PricingReceiptJSON == nil {
-		return unavailableHistoricalCosts(row, "not_persisted"), nil
+		return legacycost.CostClasses{}, nil
 	}
 	receipt, err := legacycost.DecodeReceipt(*row.PricingReceiptJSON)
 	if err != nil {
-		return unavailableHistoricalCosts(row, "invalid_historical_receipt"), []string{fmt.Sprintf("agent invocation %s historical pricing receipt could not be read: %v", row.ID, err)}
+		return legacycost.CostClasses{}, []string{fmt.Sprintf("agent invocation %s historical pricing receipt could not be read: %v", row.ID, err)}
 	}
 	return receipt, nil
-}
-
-func unavailableHistoricalCosts(row db.AgentInvocation, reason string) legacycost.CostClasses {
-	reported := legacycost.CostEstimate{
-		Coverage: legacycost.Coverage{Eligible: 1}, Basis: "agent_invocations.reported_cost_usd", Reason: "not_reported",
-	}
-	if row.ReportedCostUSD != nil && !math.IsNaN(*row.ReportedCostUSD) && !math.IsInf(*row.ReportedCostUSD, 0) && *row.ReportedCostUSD >= 0 {
-		value := *row.ReportedCostUSD
-		reported.ValueUSD = &value
-		reported.Coverage.Reported = 1
-		reported.Complete = true
-		reported.Reason = ""
-	} else if row.ReportedCostUSD != nil {
-		reported.Reason = "invalid_reported_cost"
-	}
-	coverage := legacycost.Coverage{Eligible: 4}
-	_, uncachedInput := agent.CanonicalInputMeters(row.Agent, row.DeltaInputTokens, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens)
-	for _, meter := range []*int{uncachedInput, row.DeltaCacheReadTokens, row.DeltaCacheCreationTokens, row.DeltaOutputTokens} {
-		if meter != nil && *meter >= 0 {
-			coverage.Reported++
-		}
-	}
-	list := legacycost.CostEstimate{Coverage: coverage, Basis: "historical_api_list_estimate", Reason: reason}
-	effective := legacycost.CostEstimate{Coverage: coverage, Basis: "historical_harness_adjusted_estimate", Reason: reason}
-	return legacycost.CostClasses{HarnessReported: reported, APIListEstimate: list, HarnessAdjustedEstimate: effective}
 }
 
 func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) []string {

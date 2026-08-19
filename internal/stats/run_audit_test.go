@@ -247,8 +247,8 @@ func TestBuildRunAuditLeavesNewRawOnlyEstimatesUnknownWithoutIntegrityError(t *t
 		t.Fatal(err)
 	}
 	costs := audit.Invocations[0].Costs
-	if costs.APIListEstimate.ValueUSD != nil || costs.APIListEstimate.Reason != "not_persisted" {
-		t.Fatalf("raw-only API-list estimate = %+v, want immutable unknown", costs.APIListEstimate)
+	if costs != (legacycost.CostClasses{}) || audit.Invocations[0].HistoricalCosts {
+		t.Fatalf("raw-only costs = %+v, want absent historical costs", costs)
 	}
 	if joined := strings.Join(audit.IntegrityErrors, "\n"); strings.Contains(joined, "pricing receipt") || strings.Contains(joined, "historical pricing") {
 		t.Fatalf("raw-only invocation produced a pricing integrity error: %v", audit.IntegrityErrors)

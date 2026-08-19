@@ -135,7 +135,7 @@ With no source, the latest run for the current repository is used.
 	}
 
 	cmd.Flags().BoolVar(&sample, "sample", false, "use the built-in sample contract")
-	cmd.Flags().IntVar(&sampleVersion, "sample-version", prbody.Version, "contract version --sample emits (2, 3, or 4)")
+	cmd.Flags().IntVar(&sampleVersion, "sample-version", prbody.Version, "contract version --sample emits (2, 3, 4, or 5)")
 	cmd.Flags().StringVar(&runID, "run", "", "use a stored run's contract")
 	cmd.Flags().StringVar(&contractIn, "contract-file", "", "read the contract from a JSON file ('-' for stdin)")
 	cmd.Flags().BoolVar(&contractOut, "print-contract", false, "print the contract JSON instead of running the formatter")

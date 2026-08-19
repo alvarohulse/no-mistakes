@@ -156,6 +156,7 @@ type ReportCosts struct {
 type CostRecord struct {
 	RunID        string                 `json:"run_id"`
 	InvocationID string                 `json:"invocation_id"`
+	Historical   bool                   `json:"historical"`
 	Classes      legacycost.CostClasses `json:"classes"`
 }
 
@@ -336,7 +337,7 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		}
 		for _, invocation := range invocations {
 			report.Agents = append(report.Agents, ReportAgent{RunID: audit.Run.ID, Invocation: invocation})
-			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Classes: invocation.Costs})
+			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Historical: invocation.HistoricalCosts, Classes: invocation.Costs})
 			selectedInvocations = append(selectedInvocations, invocation)
 		}
 		for _, integrityError := range audit.IntegrityErrors {
