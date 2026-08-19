@@ -50,10 +50,6 @@ agent_args_override:
     - -c
     - model_reasoning_effort="low"
 
-pricing:
-  profiles:
-    cursor: cursor-token-rate
-
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -315,17 +311,9 @@ agent_args_override:
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
 
-### pricing.profiles
+### Legacy `pricing.profiles`
 
-Explicit harness billing profiles used for the harness-adjusted cost class. Keys are normalized harness names and values must identify an embedded profile valid for that harness. Profiles are global-only and are persisted in the resolved run policy; no harness identity activates an adjustment implicitly.
-
-```yaml
-pricing:
-  profiles:
-    cursor: cursor-token-rate
-```
-
-`cursor-token-rate` applies Cursor's documented third-party-model token surcharge during its effective window and records its source, catalog/profile versions, hashes, exclusions, and adjustment kind in each estimate. Embedded Claude Code and Codex/Azure profiles remain inactive because no authoritative exact private adjustment is configured. Reported harness cost, public API-list estimate, and harness-adjusted estimate remain independent nullable facts.
+Pricing catalogs, harness profiles, and estimation are formatter-owned and are not configurable in no-mistakes. Existing global config files may retain a `pricing.profiles` block during upgrade; no-mistakes accepts but ignores it. New resolved policies never persist pricing selection.
 
 ### ci_timeout
 

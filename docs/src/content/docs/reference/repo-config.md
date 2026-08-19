@@ -256,7 +256,7 @@ External pull request section formatter. Receives the PR body contract as JSON o
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v4 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, pipeline telemetry, and distinct `static_tests`, `review_evidence`, and `user_testing` records. User Testing is an instruction unless `attested` is explicitly true. It also supplies harness-reported, public API-list, and harness-adjusted cost receipts with completeness and provenance. no-mistakes owns those calculations; the formatter only presents supplied facts. Formatters should accept v2, v3, and v4 while a producer rollout is in progress.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v5 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, raw per-invocation meters and optional CLI-reported cost, plus distinct `static_tests`, `review_evidence`, and `user_testing` records. User Testing is an instruction unless `attested` is explicitly true. The formatter owns public pricing data, harness profiles, and estimation; no-mistakes never synthesizes reported cost. Formatters should accept v2 through v5 during rollout, including immutable v4 producer-calculated receipts.
 
 Successful stdout is strict JSON. It has no full-body field:
 
