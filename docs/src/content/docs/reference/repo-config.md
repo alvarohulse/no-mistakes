@@ -206,11 +206,11 @@ Explicit build or compile command. Run once in the managed worktree via the plat
 | | |
 | --- | --- |
 | Type | `string` |
-| Default | Empty (the agent may select a restricted full-module `go build ./...` command) |
+| Default | Empty (the agent discovers and runs the relevant build) |
 
 When set, the Build step runs this exact command and completes without invoking an agent when it succeeds. A non-zero exit records bounded compiler output and enters the normal fix/approval loop.
 Build verification must leave `HEAD` and all tracked or unignored worktree content unchanged; write generated output only to ignored paths or clean it before the command exits. A side effect fails the Build step even when the command also exits non-zero.
-When empty, the configured run-wide agent may select `go build ./...`, optionally with compile-safe flags, and the pipeline validates the command before executing it in the normal worktree and step environment. Other targets and build systems, along with Go layouts the restricted root-module `go build ./...` cannot cover - a Go workspace (`go.work`), a nested module, or a repository with no root `go.mod` - must be configured here on the trusted default branch. If the agent cannot identify the accepted command, Build pauses for a decision instead of passing.
+When empty, the configured run-wide agent inspects the repository and runs the smallest relevant build or compile commands directly. It must report the exact commands it ran; if it cannot identify or execute a meaningful build, Build pauses for a decision instead of passing. Configure this field on the trusted default branch when the repository needs a deterministic baseline command.
 
 ### commands.test
 

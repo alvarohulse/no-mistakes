@@ -3,7 +3,6 @@ package steps
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,36 +13,24 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func setupAgentGoBuildRepo(t *testing.T) (string, string, string) {
-	t.Helper()
-	dir, baseSHA, _ := setupGitRepo(t)
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/buildprobe\n\ngo 1.25\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "buildprobe.go"), []byte("package buildprobe\n\nfunc Build() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "go.mod", "buildprobe.go")
-	gitCmd(t, dir, "commit", "-m", "add build probe")
-	return dir, baseSHA, gitCmd(t, dir, "rev-parse", "HEAD")
-}
-
-func TestBuildStepRunsAgentSelectedCommand(t *testing.T) {
-	dir, baseSHA, headSHA := setupAgentGoBuildRepo(t)
+func TestBuildStepRunsUnconfiguredBuildThroughAgent(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	marker := filepath.Join(dir, ".git", "agent-build-ran")
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			for _, required := range []string{"Do NOT execute commands", "go build [safe flags] ./...", "trusted commands.build"} {
+			for _, required := range []string{"run the smallest relevant build commands yourself", `non-empty "tested" array`, "Do not run tests"} {
 				if !strings.Contains(opts.Prompt, required) {
-					t.Fatalf("selection prompt missing %q:\n%s", required, opts.Prompt)
+					t.Fatalf("build prompt missing %q:\n%s", required, opts.Prompt)
 				}
 			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go compile probe","build_command":"go build -v ./..."}`)}, nil
+			if err := os.WriteFile(marker, []byte("ran\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"frontend build passed","tested":["npm run build"]}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	var logs []string
-	sctx.Log = func(message string) { logs = append(logs, message) }
 
 	outcome, err := (&BuildStep{}).Execute(sctx)
 	if err != nil {
@@ -52,42 +39,24 @@ func TestBuildStepRunsAgentSelectedCommand(t *testing.T) {
 	if outcome.NeedsApproval || outcome.ExitCode != 0 {
 		t.Fatalf("outcome = %#v, want successful build", outcome)
 	}
-	got := strings.Join(logs, "\n")
-	if !strings.Contains(got, "agent selected build command: go build -v ./...") || !strings.Contains(got, "example.com/buildprobe") {
-		t.Fatalf("build logs = %q, want selected command and its real output", got)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("agent did not run build probe: %v", err)
 	}
-}
-
-func TestBuildStepExecutesValidatedTokensNotRawAgentText(t *testing.T) {
-	dir, baseSHA, headSHA := setupAgentGoBuildRepo(t)
-	ag := &mockAgent{
-		name: "builder",
-		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"probe","build_command":"go  build\t-v   ./..."}`)}, nil
-		},
-	}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	var logs []string
-	sctx.Log = func(message string) { logs = append(logs, message) }
-
-	outcome, err := (&BuildStep{}).Execute(sctx)
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.NeedsApproval || outcome.ExitCode != 0 {
-		t.Fatalf("outcome = %#v, want successful build", outcome)
-	}
-	if got := strings.Join(logs, "\n"); !strings.Contains(got, "running build: go build -v ./...") {
-		t.Fatalf("build logs = %q, want canonical validated command", got)
+	if len(findings.Tested) != 1 || findings.Tested[0] != "npm run build" {
+		t.Fatalf("tested = %#v, want agent build evidence", findings.Tested)
 	}
 }
 
-func TestBuildStepWithoutCommandParksWhenAgentCannotSelectOne(t *testing.T) {
+func TestBuildStepWithoutCommandParksWhenAgentCannotRunBuild(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"no build metadata exists","action":"ask-user"}],"summary":"no build command","build_command":""}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"no build metadata exists","action":"ask-user"}],"summary":"no build command","tested":[]}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -108,20 +77,12 @@ func TestBuildStepWithoutCommandParksWhenAgentCannotSelectOne(t *testing.T) {
 	}
 }
 
-func TestBuildStepRefusesAgentSelectedShellExecution(t *testing.T) {
+func TestBuildStepAgentReportedFailureIsAutoFixable(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	marker := filepath.Join(dir, "shell-command-ran")
-	payload, err := json.Marshal(buildPlan{
-		Summary:      "selected shell",
-		BuildCommand: fmt.Sprintf("sh -c touch$IFS%s", marker),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: payload}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"error","description":"TypeScript compilation failed","action":"auto-fix"}],"summary":"frontend does not compile","tested":["npm run build"]}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -130,188 +91,24 @@ func TestBuildStepRefusesAgentSelectedShellExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !outcome.NeedsApproval || outcome.AutoFixable {
-		t.Fatalf("outcome = %#v, want rejected command to require approval", outcome)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("agent-selected shell command executed: %v", err)
-	}
-}
-
-func TestBuildStepParksWhenAutomaticGoBuildCannotCoverWorktree(t *testing.T) {
-	tests := []struct {
-		name       string
-		path       string
-		content    string
-		wantReason string
-	}{
-		{name: "workspace", path: "go.work", content: "go 1.25\n\nuse .\n", wantReason: "go.work"},
-		{name: "nested module", path: "svc/go.mod", content: "module example.com/buildprobe/svc\n\ngo 1.25\n", wantReason: "svc/go.mod"},
-		{name: "quoted nested module", path: "sérvice/go.mod", content: "module example.com/buildprobe/svc\n\ngo 1.25\n", wantReason: "sérvice/go.mod"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir, baseSHA, _ := setupAgentGoBuildRepo(t)
-			path := filepath.Join(dir, tt.path)
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, dir, "add", tt.path)
-			gitCmd(t, dir, "commit", "-m", "add module layout")
-			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-			ag := &mockAgent{
-				name: "builder",
-				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
-				},
-			}
-			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-
-			outcome, err := (&BuildStep{}).Execute(sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !outcome.NeedsApproval || outcome.AutoFixable {
-				t.Fatalf("outcome = %#v, want ask-user park", outcome)
-			}
-			findings, err := types.ParseFindingsJSON(outcome.Findings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !types.HasAskUserFindings(findings) || !strings.Contains(findings.Summary, tt.wantReason) {
-				t.Fatalf("findings = %#v, want reason %q", findings, tt.wantReason)
-			}
-		})
-	}
-}
-
-func TestBuildStepSingleMainModuleBinarySideEffect(t *testing.T) {
-	selectGoBuild := func() *mockAgent {
-		return &mockAgent{
-			name: "builder",
-			runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
-			},
-		}
-	}
-	tests := []struct {
-		name     string
-		files    map[string]string
-		wantPark bool
-	}{
-		{
-			name: "single root main package parks",
-			files: map[string]string{
-				"go.mod":  "module example.com/app\n\ngo 1.25\n",
-				"main.go": "package main\n\nfunc main() {}\n",
-			},
-			wantPark: true,
-		},
-		{
-			name: "single main package in a subdirectory parks",
-			files: map[string]string{
-				"go.mod":          "module example.com/app\n\ngo 1.25\n",
-				"cmd/app/main.go": "package main\n\nfunc main() {}\n",
-			},
-			wantPark: true,
-		},
-		{
-			name: "main package with a supporting library is covered",
-			files: map[string]string{
-				"go.mod":     "module example.com/app\n\ngo 1.25\n",
-				"main.go":    "package main\n\nfunc main() {}\n",
-				"lib/lib.go": "package lib\n\nfunc F() {}\n",
-			},
-			wantPark: false,
-		},
-		{
-			name: "library only module is covered",
-			files: map[string]string{
-				"go.mod": "module example.com/app\n\ngo 1.25\n",
-				"lib.go": "package app\n\nfunc F() {}\n",
-			},
-			wantPark: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir, baseSHA, _ := setupGitRepo(t)
-			for rel, content := range tt.files {
-				path := filepath.Join(dir, rel)
-				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			gitCmd(t, dir, "add", "-A")
-			gitCmd(t, dir, "commit", "-m", "add module layout")
-			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-			sctx := newTestContext(t, selectGoBuild(), dir, baseSHA, headSHA, config.Commands{})
-
-			outcome, err := (&BuildStep{}).Execute(sctx)
-			if err != nil {
-				t.Fatalf("Execute() error = %v (a single-main worktree must never abort the run)", err)
-			}
-			if !tt.wantPark {
-				if outcome.NeedsApproval || outcome.ExitCode != 0 {
-					t.Fatalf("outcome = %#v, want covered successful build", outcome)
-				}
-				return
-			}
-			if !outcome.NeedsApproval || outcome.AutoFixable {
-				t.Fatalf("outcome = %#v, want non-auto-fixable ask-user park", outcome)
-			}
-			findings, err := types.ParseFindingsJSON(outcome.Findings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !types.HasAskUserFindings(findings) || !strings.Contains(findings.Summary, `single "main" package`) {
-				t.Fatalf("findings = %#v, want single-main park reason", findings)
-			}
-			if _, statErr := os.Stat(filepath.Join(dir, "app")); !os.IsNotExist(statErr) {
-				t.Fatalf("parked layout still produced a worktree binary: %v", statErr)
-			}
-		})
-	}
-}
-
-func TestBuildStepParksNonGoRepoForTrustedCommandsBuild(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	ag := &mockAgent{
-		name: "builder",
-		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
-		},
-	}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-
-	outcome, err := (&BuildStep{}).Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !outcome.NeedsApproval || outcome.AutoFixable {
-		t.Fatalf("outcome = %#v, want ask-user park for a non-Go repo", outcome)
+	if !outcome.NeedsApproval || !outcome.AutoFixable {
+		t.Fatalf("outcome = %#v, want auto-fixable build failure", outcome)
 	}
 	findings, err := types.ParseFindingsJSON(outcome.Findings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !types.HasAskUserFindings(findings) || !strings.Contains(findings.Summary, "no root Go module") {
-		t.Fatalf("findings = %#v, want no-root-Go-module park reason", findings)
+	if len(types.AutoFixableFindings(findings).Items) != 1 {
+		t.Fatalf("findings = %#v, want one auto-fixable failure", findings.Items)
 	}
 }
 
-func TestBuildStepNonConformingAutoFixReportStillParksNotAutoFixable(t *testing.T) {
+func TestBuildStepMissingExecutionEvidenceIsNotAutoFixable(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"error","description":"compile error somewhere","action":"auto-fix"}],"summary":"cannot select","build_command":""}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"error","description":"compile failed","action":"auto-fix"}],"summary":"compile failed","tested":[]}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -321,42 +118,18 @@ func TestBuildStepNonConformingAutoFixReportStillParksNotAutoFixable(t *testing.
 		t.Fatal(err)
 	}
 	if !outcome.NeedsApproval || outcome.AutoFixable {
-		t.Fatalf("outcome = %#v, want a non-auto-fixable ask-user park", outcome)
+		t.Fatalf("outcome = %#v, want non-auto-fixable missing-evidence gate", outcome)
 	}
 	findings, err := types.ParseFindingsJSON(outcome.Findings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !types.HasAskUserFindings(findings) {
-		t.Fatalf("findings = %#v, want ask-user finding despite agent auto-fix item", findings.Items)
-	}
-	if fixable := types.AutoFixableFindings(findings); len(fixable.Items) != 0 {
-		t.Fatalf("AutoFixableFindings = %#v, want none: a non-auto-fixable park must not carry an auto-fix finding", fixable.Items)
+	if !types.HasAskUserFindings(findings) || len(types.AutoFixableFindings(findings).Items) != 0 {
+		t.Fatalf("findings = %#v, want only ask-user actions", findings.Items)
 	}
 }
 
-func TestParseAgentBuildCommandRejectsUnsafeOrPartialCommands(t *testing.T) {
-	tests := []struct {
-		name    string
-		command string
-		want    string
-	}{
-		{name: "project runner", command: "make build", want: "restricted automatic form"},
-		{name: "execution hook", command: "go build -toolexec=helper ./...", want: "not compile-safe"},
-		{name: "partial target", command: "go build ./cmd/example", want: "cover the full module"},
-		{name: "shell syntax", command: "go build ./... && touch marker", want: "target"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseAgentBuildCommand(tt.command)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("parseAgentBuildCommand(%q) error = %v, want %q", tt.command, err, tt.want)
-			}
-		})
-	}
-}
-
-func TestBuildStepRefusesAgentSelectionSideEffects(t *testing.T) {
+func TestBuildStepRefusesAgentBuildSideEffects(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -364,7 +137,7 @@ func TestBuildStepRefusesAgentSelectionSideEffects(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(opts.CWD, "agent-output.txt"), []byte("unexpected\n"), 0o644); err != nil {
 				return nil, err
 			}
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected command","build_command":"go build ./..."}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"build passed","tested":["make build"]}`)}, nil
 		},
 	}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -372,31 +145,6 @@ func TestBuildStepRefusesAgentSelectionSideEffects(t *testing.T) {
 	_, err := (&BuildStep{}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "side-effect free") || !strings.Contains(err.Error(), "agent-output.txt") {
 		t.Fatalf("Execute() error = %v, want agent-side-effect refusal", err)
-	}
-}
-
-func TestBuildStepRunsAgentSelectedCommandInStepEnvironment(t *testing.T) {
-	dir, baseSHA, headSHA := setupAgentGoBuildRepo(t)
-	binDir := fakeCLIBinDir(t)
-	linkTestBinary(t, binDir, "go")
-	ag := &mockAgent{
-		name: "builder",
-		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
-		},
-	}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = fakeCLIEnv(binDir, map[string]string{
-		"BUILD_STEP_ENV": "present",
-		"FAKE_CLI_MODE":  "build-env",
-	})
-
-	outcome, err := (&BuildStep{}).Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.NeedsApproval || outcome.ExitCode != 0 {
-		t.Fatalf("outcome = %#v, want successful build with step environment", outcome)
 	}
 }
 

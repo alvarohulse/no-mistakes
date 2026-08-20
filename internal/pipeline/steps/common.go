@@ -63,9 +63,12 @@ var buildFindingsSchema = json.RawMessage(`{
 			}
 		},
 		"summary": {"type": "string"},
-		"build_command": {"type": "string"}
+		"tested": {
+			"type": "array",
+			"items": {"type": "string"}
+		}
 	},
-	"required": ["findings", "summary", "build_command"]
+	"required": ["findings", "summary", "tested"]
 }`)
 
 var testFindingsSchema = json.RawMessage(`{

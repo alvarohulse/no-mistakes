@@ -50,7 +50,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
 | 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
-| 3 | **Build** | Run the configured build command or a restricted full-module `go build ./...` command selected by the agent | `3` |
+| 3 | **Build** | Run the configured build command or have the agent discover and run the relevant build | `3` |
 | 4 | **Review** | AI code review of your diff | `0` (requires approval) |
 | 5 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
 | 6 | **Document** | Update docs when needed and report unresolved gaps | initial pass |

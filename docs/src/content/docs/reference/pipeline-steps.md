@@ -78,10 +78,10 @@ Verifies that the changed production code builds or compiles before review and t
 
 **Behavior:**
 - If `commands.build` is configured, runs it once through the platform shell and completes without invoking an agent when it succeeds
-- Otherwise asks the run-wide agent to select a restricted full-module `go build ./...` command; other targets and build systems, and Go layouts the restricted command cannot cover (workspaces, nested modules, or no root `go.mod`), require trusted `commands.build`
-- Parks for a decision when the agent cannot identify a meaningful command; agent text alone never counts as a successful build
+- Otherwise asks the run-wide agent to discover and run the smallest relevant build or compile commands directly, following the same agent-driven fallback model as Test and Lint
+- Requires the agent to report the exact commands it ran; missing execution evidence parks for a decision instead of passing
 - Requires a clean managed worktree and preserves `HEAD` plus tracked and unignored content; Build-created mutations fail the step, while ignored build artifacts are allowed
-- Records bounded compiler output for any non-zero build command and enters the normal approval or repair loop
+- Records bounded compiler output from configured commands and routes agent-reported build failures through the normal approval or repair loop
 
 **Auto-fix:** the repair agent edits only the build root cause. The outer Build step reruns verification after the fix commit, and the following Review step certifies the repaired code.
 
