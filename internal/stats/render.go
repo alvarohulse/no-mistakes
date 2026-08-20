@@ -11,7 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 )
 
 var csvHeader = []string{
@@ -124,6 +124,9 @@ func renderText(report *Report, forceDetails bool) string {
 		sort.Strings(statuses)
 		fmt.Fprintf(&out, "runs by status: %s\n", textValue(strings.Join(statuses, ", ")))
 		for _, total := range namedCostTotals(report.Costs.Totals) {
+			if !hasCostTotal(total.total) {
+				continue
+			}
 			fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
 				total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
 		}
@@ -156,21 +159,30 @@ func renderText(report *Report, forceDetails bool) string {
 	}
 	for _, agent := range report.Agents {
 		invocation := agent.Invocation
-		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s invoked_via=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s nested_agents=%s\n",
+		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s invoked_via=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s reported_cost_usd=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s nested_agents=%s\n",
 			agent.RunID, invocation.ID, invocation.Step, invocation.Round, invocation.Purpose, invocation.Agent, invocation.InvocationMode, textString(invocation.Model), textString(invocation.Provider), invocation.ExitStatus, invocation.SessionMode, invocation.DurationMS,
-			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines), textNestedAgents(invocation))
+			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textFloat(invocation.ReportedCostUSD), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines), textNestedAgents(invocation))
 	}
 	for _, record := range report.Metrics.Items {
 		renderMetricsText(&out, "metric "+record.RunID, record.Metrics)
 	}
 	for _, item := range report.Costs.Items {
+		if !item.Historical {
+			continue
+		}
 		for _, class := range namedCostEstimates(item.Classes) {
+			if !hasCostEstimate(class.estimate) {
+				continue
+			}
 			fmt.Fprintf(&out, "cost %s/%s/%s value_usd=%s coverage=%d/%d complete=%t reason=%s catalog=%s profile=%s\n",
 				item.RunID, item.InvocationID, class.name, textFloat(class.estimate.ValueUSD), class.estimate.Coverage.Reported, class.estimate.Coverage.Eligible,
 				class.estimate.Complete, textValue(class.estimate.Reason), provenanceCatalog(class.estimate.Provenance), provenanceProfile(class.estimate.Provenance))
 		}
 	}
 	for _, total := range namedCostTotals(report.Costs.Totals) {
+		if !hasCostTotal(total.total) {
+			continue
+		}
 		fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
 			total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
 	}
@@ -180,16 +192,24 @@ func renderText(report *Report, forceDetails bool) string {
 	return out.String()
 }
 
-type namedCostEstimate struct {
-	name     string
-	estimate pricing.CostEstimate
+func hasCostEstimate(estimate legacycost.CostEstimate) bool {
+	return estimate.ValueUSD != nil || estimate.Coverage.Reported > 0 || estimate.Coverage.Eligible > 0 || estimate.Basis != "" || estimate.Reason != ""
 }
 
-func namedCostEstimates(costs pricing.CostClasses) []namedCostEstimate {
+func hasCostTotal(total CostTotal) bool {
+	return total.ValueUSD != nil || total.Coverage.Reported > 0 || total.Coverage.Eligible > 0 || total.Basis != "" || len(total.Reasons) > 0
+}
+
+type namedCostEstimate struct {
+	name     string
+	estimate legacycost.CostEstimate
+}
+
+func namedCostEstimates(costs legacycost.CostClasses) []namedCostEstimate {
 	return []namedCostEstimate{
 		{name: "harness_reported", estimate: costs.HarnessReported},
-		{name: "api_list_estimate", estimate: costs.APIListEstimate},
-		{name: "harness_adjusted_estimate", estimate: costs.HarnessAdjustedEstimate},
+		{name: "historical_api_list_receipt", estimate: costs.APIListEstimate},
+		{name: "historical_harness_adjusted_receipt", estimate: costs.HarnessAdjustedEstimate},
 	}
 }
 
@@ -201,8 +221,8 @@ type namedCostTotal struct {
 func namedCostTotals(costs CostTotals) []namedCostTotal {
 	return []namedCostTotal{
 		{name: "harness_reported", total: costs.HarnessReported},
-		{name: "api_list_estimate", total: costs.APIListEstimate},
-		{name: "harness_adjusted_estimate", total: costs.HarnessAdjustedEstimate},
+		{name: "historical_api_list_receipt", total: costs.APIListEstimate},
+		{name: "historical_harness_adjusted_receipt", total: costs.HarnessAdjustedEstimate},
 	}
 }
 
@@ -241,14 +261,14 @@ func textFloat(value *float64) string {
 	return strconv.FormatFloat(*value, 'f', -1, 64)
 }
 
-func provenanceCatalog(value pricing.Provenance) string {
+func provenanceCatalog(value legacycost.Provenance) string {
 	if value.CatalogVersion == 0 && value.CatalogSHA256 == "" {
 		return "—"
 	}
 	return fmt.Sprintf("v%d@%s", value.CatalogVersion, value.CatalogSHA256)
 }
 
-func provenanceProfile(value pricing.Provenance) string {
+func provenanceProfile(value legacycost.Provenance) string {
 	if value.ProfileID == "" {
 		return "—"
 	}
@@ -750,7 +770,7 @@ func applyCostMetadata(report *Report, path []string, fact *reportFact) {
 	}
 }
 
-func costEstimateAt(report *Report, path []string) (pricing.CostEstimate, bool) {
+func costEstimateAt(report *Report, path []string) (legacycost.CostEstimate, bool) {
 	if len(path) == 6 && path[0] == "agents" && path[2] == "invocation" && path[3] == "costs" {
 		if index, valid := pathIndex(path, 1, len(report.Agents)); valid {
 			return costEstimate(report.Agents[index].Invocation.Costs, path[4])
@@ -761,10 +781,10 @@ func costEstimateAt(report *Report, path []string) (pricing.CostEstimate, bool) 
 			return costEstimate(report.Costs.Items[index].Classes, path[4])
 		}
 	}
-	return pricing.CostEstimate{}, false
+	return legacycost.CostEstimate{}, false
 }
 
-func costEstimate(classes pricing.CostClasses, name string) (pricing.CostEstimate, bool) {
+func costEstimate(classes legacycost.CostClasses, name string) (legacycost.CostEstimate, bool) {
 	switch name {
 	case "harness_reported":
 		return classes.HarnessReported, true
@@ -773,7 +793,7 @@ func costEstimate(classes pricing.CostClasses, name string) (pricing.CostEstimat
 	case "harness_adjusted_estimate":
 		return classes.HarnessAdjustedEstimate, true
 	default:
-		return pricing.CostEstimate{}, false
+		return legacycost.CostEstimate{}, false
 	}
 }
 

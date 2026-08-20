@@ -127,9 +127,8 @@ type AgentInvocation struct {
 	DeltaCacheCreationTokens *int
 	// ReportedCostUSD is the cost emitted by the agent CLI, when available.
 	ReportedCostUSD *float64
-	// PricingReceiptJSON is the content-free immutable three-class cost receipt
-	// captured when this invocation completed. Nil marks an in-flight or legacy
-	// row; readers must not fill it from the current pricing catalog.
+	// PricingReceiptJSON retains immutable three-class cost receipts written by
+	// older producers. New rows leave it nil; readers must never recalculate it.
 	PricingReceiptJSON *string
 	// ModelRoundtrips is the count of model-authored items (messages + tool
 	// calls) - a live-stream proxy for productive model round-trips. Nil when

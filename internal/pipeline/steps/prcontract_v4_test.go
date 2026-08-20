@@ -5,26 +5,16 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestContractV4ProjectsThreeIndependentCostClassesAndProvenance(t *testing.T) {
-	policy := `{"version":6,"pricing":{"profiles":{"cursor":"cursor-token-rate"}}}`
+func TestContractV5ProjectsRawMetersAndOmitsLegacyCostClasses(t *testing.T) {
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
 	reported := 9.25
 	provider := "anthropic"
-	input64, output64, cacheRead64, cacheWrite64 := int64(input), int64(output), int64(cacheRead), int64(cacheWrite)
-	receipt, err := pricing.NewReceipt(pricing.Observation{
-		Harness: "cursor", ProfileID: "cursor-token-rate", Provider: provider, Model: "claude-opus-5",
-		StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), ReportedCostUSD: &reported,
-		Meters: pricing.TokenMeters{UncachedInputTokens: &input64, OutputTokens: &output64, CacheReadTokens: &cacheRead64, CacheWriteTokens: &cacheWrite64},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	receipt := `{"harness_reported":{"value_usd":9.25}}`
 	contract := BuildContract(ContractInput{
-		Run:   &db.Run{ID: "run-1", ResolvedPolicy: &policy},
+		Run:   &db.Run{ID: "run-1"},
 		Steps: []*db.StepResult{{ID: "review", StepName: types.StepReview, StepOrder: 3, Status: types.StepStatusCompleted}},
 		Invocations: []db.AgentInvocation{{
 			ID: "inv-1", StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "cursor",
@@ -35,28 +25,22 @@ func TestContractV4ProjectsThreeIndependentCostClassesAndProvenance(t *testing.T
 		}},
 	})
 
-	if contract.Version != 4 {
-		t.Fatalf("version = %d, want 4", contract.Version)
+	if contract.Version != 5 {
+		t.Fatalf("version = %d, want 5", contract.Version)
 	}
 	run := contract.Sections.Pipeline.Steps[0].Agents[0]
-	if run.Costs == nil {
-		t.Fatal("cost classes are absent")
+	if run.Costs != nil {
+		t.Fatalf("v5 projects legacy cost classes: %+v", run.Costs)
 	}
-	if run.Costs.HarnessReported.ValueUSD == nil || *run.Costs.HarnessReported.ValueUSD != 9.25 {
-		t.Fatalf("harness-reported cost = %+v", run.Costs.HarnessReported)
+	if run.ReportedCostUSD == nil || *run.ReportedCostUSD != reported {
+		t.Fatalf("reported cost = %v, want %v", run.ReportedCostUSD, reported)
 	}
-	if run.Costs.APIListEstimate.ValueUSD == nil || *run.Costs.APIListEstimate.ValueUSD != 36.75 {
-		t.Fatalf("API-list cost = %+v", run.Costs.APIListEstimate)
-	}
-	if run.Costs.HarnessAdjustedEstimate.ValueUSD == nil || *run.Costs.HarnessAdjustedEstimate.ValueUSD != 37.75 {
-		t.Fatalf("harness-adjusted cost = %+v", run.Costs.HarnessAdjustedEstimate)
-	}
-	if run.Costs.HarnessAdjustedEstimate.Provenance.ProfileID != "cursor-token-rate" {
-		t.Fatalf("cost provenance = %+v", run.Costs.HarnessAdjustedEstimate.Provenance)
+	if run.Provider != provider || run.UncachedInputTokens == nil || *run.UncachedInputTokens != input {
+		t.Fatalf("raw invocation facts = %+v", run)
 	}
 }
 
-func TestContractV4DoesNotRepriceInvocationWithoutPersistedReceipt(t *testing.T) {
+func TestContractV5DoesNotProjectCostsWithoutPersistedReceipt(t *testing.T) {
 	input, output := 1_000_000, 1_000_000
 	provider := "anthropic"
 	contract := BuildContract(ContractInput{
@@ -71,7 +55,7 @@ func TestContractV4DoesNotRepriceInvocationWithoutPersistedReceipt(t *testing.T)
 	}
 }
 
-func TestContractV4SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T) {
+func TestContractV5SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T) {
 	t.Parallel()
 
 	testFindings := `{"findings":[],"summary":"","testing_summary":"go tests passed","tested":["go test ./..."]}`
@@ -99,8 +83,8 @@ func TestContractV4SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T
 		UserTestingInstructions: []string{"Open Settings and confirm the saved value."},
 	})
 
-	if contract.Version != 4 {
-		t.Fatalf("version = %d, want 4", contract.Version)
+	if contract.Version != 5 {
+		t.Fatalf("version = %d, want 5", contract.Version)
 	}
 	if contract.Sections.Testing != nil {
 		t.Fatalf("legacy testing field is populated: %+v", contract.Sections.Testing)
@@ -116,7 +100,7 @@ func TestContractV4SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T
 	}
 }
 
-func TestContractV4UserTestingCompletionRequiresExplicitAttestation(t *testing.T) {
+func TestContractV5UserTestingCompletionRequiresExplicitAttestation(t *testing.T) {
 	t.Parallel()
 
 	contract := BuildContract(ContractInput{

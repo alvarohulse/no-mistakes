@@ -51,7 +51,7 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 
 	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
-	var completeTelemetry, completeCosts, supportedNested, unsupportedNested bool
+	var completeTelemetry, supportedNested, unsupportedNested bool
 	for _, step := range s.Pipeline.Steps {
 		if _, ok := commandSteps[step.Name]; ok {
 			commandSteps[step.Name] = len(step.Commands) > 0
@@ -83,8 +83,8 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
 				completeTelemetry = true
 			}
-			if run.Costs != nil && run.Costs.HarnessReported.ValueUSD != nil && run.Costs.APIListEstimate.ValueUSD != nil && run.Costs.HarnessAdjustedEstimate.ValueUSD != nil {
-				completeCosts = true
+			if run.Costs != nil {
+				t.Errorf("v5 sample carries legacy cost receipt: %+v", run.Costs)
 			}
 			if !run.NestedReported {
 				unsupportedNested = true
@@ -98,9 +98,6 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if !completeTelemetry {
 		t.Error("sample has no fully populated telemetry row")
-	}
-	if !completeCosts {
-		t.Error("sample has no fully populated cost receipt")
 	}
 	if !supportedNested {
 		t.Error("sample does not exercise supported nested-agent telemetry")
@@ -233,13 +230,13 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 		}
 	}
 
-	if SampleForVersion(2) == nil || SampleForVersion(3) == nil || SampleForVersion(Version) == nil {
+	if SampleForVersion(2) == nil || SampleForVersion(3) == nil || SampleForVersion(4) == nil || SampleForVersion(Version) == nil {
 		t.Error("SampleForVersion does not cover every supported version")
 	}
 	if SampleForVersion(1) != nil {
 		t.Error("SampleForVersion returned a contract for an unsupported version")
 	}
-	if !IsSupportedVersion(2) || !IsSupportedVersion(3) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
+	if !IsSupportedVersion(2) || !IsSupportedVersion(3) || !IsSupportedVersion(4) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
 		t.Error("IsSupportedVersion disagrees with SupportedVersions")
 	}
 	// Sample must stay unaffected by the downgrade.
@@ -256,6 +253,22 @@ func TestSampleV3OmitsVersion4CostReceipts(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestSampleV4RetainsLegacyCostReceipts(t *testing.T) {
+	t.Parallel()
+	sample := SampleV4()
+	if sample.Version != 4 {
+		t.Fatalf("SampleV4 version = %d, want 4", sample.Version)
+	}
+	for _, step := range sample.Sections.Pipeline.Steps {
+		for _, run := range step.Agents {
+			if run.Costs != nil {
+				return
+			}
+		}
+	}
+	t.Fatal("v4 sample has no legacy cost receipt")
 }
 
 func TestOlderSamplesOmitVersion4SectionsFromJSON(t *testing.T) {

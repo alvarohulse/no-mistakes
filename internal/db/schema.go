@@ -306,9 +306,8 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_read_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_creation_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN reported_cost_usd REAL`,
-	// Pricing receipts are content-free immutable calculations captured when
-	// an invocation completes. Historical rows remain NULL rather than being
-	// repriced by a newer binary.
+	// Retained for immutable receipts written by older producers. New rows
+	// remain NULL; readers never reprice them.
 	`ALTER TABLE agent_invocations ADD COLUMN pricing_receipt_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN model_roundtrips INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_calls INTEGER`,

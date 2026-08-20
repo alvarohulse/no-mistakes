@@ -10,11 +10,11 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 4
+const ReportSchemaVersion = 5
 
 type Query struct {
 	RunID    string
@@ -154,9 +154,10 @@ type ReportCosts struct {
 }
 
 type CostRecord struct {
-	RunID        string              `json:"run_id"`
-	InvocationID string              `json:"invocation_id"`
-	Classes      pricing.CostClasses `json:"classes"`
+	RunID        string                 `json:"run_id"`
+	InvocationID string                 `json:"invocation_id"`
+	Historical   bool                   `json:"historical"`
+	Classes      legacycost.CostClasses `json:"classes"`
 }
 
 type DataError struct {
@@ -336,7 +337,7 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		}
 		for _, invocation := range invocations {
 			report.Agents = append(report.Agents, ReportAgent{RunID: audit.Run.ID, Invocation: invocation})
-			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Classes: invocation.Costs})
+			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Historical: invocation.HistoricalCosts, Classes: invocation.Costs})
 			selectedInvocations = append(selectedInvocations, invocation)
 		}
 		for _, integrityError := range audit.IntegrityErrors {

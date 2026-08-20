@@ -101,11 +101,13 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	provider := "openai"
 	fallback := db.FallbackReasonOther
 	tokens := 10
+	historicalReceipt := `{"api_list_estimate":{"value_usd":1,"coverage":{"reported":2,"eligible":2},"complete":true,"basis":"historical"}}`
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: oldest.ID, StepName: string(types.StepReview), Round: 2, Purpose: "review-fix", Agent: "codex",
 		Model: "gpt-5.6-sol", ModelProvider: &provider, SessionMode: db.InvocationModeFallback,
 		SessionKey: privateMarker, FallbackReason: &fallback, StartedAt: oldest.CreatedAt, CompletedAt: oldest.CreatedAt + 1,
 		DurationMS: 1000, ExitStatus: "ok", DeltaInputTokens: &tokens, DeltaOutputTokens: &tokens,
+		PricingReceiptJSON:        &historicalReceipt,
 		AgentObservationsReported: true,
 		AgentObservations:         []types.AgentObservation{{Identity: privateMarker, InvocationMode: types.AgentInvocationModeSubagentTool}},
 	})
@@ -179,6 +181,9 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	}
 	if !reflect.DeepEqual(audit.Steps, beforeAudit.Steps) {
 		t.Fatalf("content-free step audit changed after pruning:\n before: %+v\n  after: %+v", beforeAudit.Steps, audit.Steps)
+	}
+	if !beforeAudit.Invocations[0].HistoricalCosts || !audit.Invocations[0].HistoricalCosts {
+		t.Fatalf("historical cost label was lost during pruning: before=%t after=%t", beforeAudit.Invocations[0].HistoricalCosts, audit.Invocations[0].HistoricalCosts)
 	}
 	if got := audit.Steps[0].Commands; len(got) != 2 || got[0].Runner == nil || got[0].Runner.Executable != "zsh" || got[1].Runner != nil {
 		t.Fatalf("archived command receipts = %+v", got)

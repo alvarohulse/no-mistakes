@@ -1,10 +1,10 @@
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/pricing"
+import "github.com/kunchenguid/no-mistakes/internal/legacycost"
 
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
-// v2, v3, and v4 during a producer rollout, so every shape has to be
+// v2 through v5 during a producer rollout, so every shape has to be
 // reachable from a single command rather than only the newest one.
 func SampleForVersion(version int) *Contract {
 	switch version {
@@ -12,6 +12,8 @@ func SampleForVersion(version int) *Contract {
 		return SampleV2()
 	case 3:
 		return SampleV3()
+	case 4:
+		return SampleV4()
 	case Version:
 		return Sample()
 	default:
@@ -21,7 +23,7 @@ func SampleForVersion(version int) *Contract {
 
 // SupportedVersions lists the contract versions this build can emit and read,
 // newest first.
-func SupportedVersions() []int { return []int{Version, 3, 2} }
+func SupportedVersions() []int { return []int{Version, 4, 3, 2} }
 
 // IsSupportedVersion reports whether a decoded contract's version is one this
 // build understands.
@@ -80,7 +82,7 @@ func SampleV2() *Contract {
 // back into the legacy testing field, and v4-only review, user-testing, and cost
 // receipt fields are absent.
 func SampleV3() *Contract {
-	contract := Sample()
+	contract := SampleV4()
 	contract.Version = 3
 	if static := contract.Sections.StaticTests; static != nil {
 		contract.Sections.Testing = &TestingSection{
@@ -102,7 +104,7 @@ func SampleV3() *Contract {
 	return contract
 }
 
-// Sample returns a contract that exercises every section.
+// Sample returns a raw-only version 5 contract that exercises every section.
 //
 // This is deliberately not a transcript of a real run. A sample built to be
 // faithful to one run is faithful to that run's gaps too - the run that
@@ -111,26 +113,44 @@ func SampleV3() *Contract {
 // for reviewing the shape. Fidelity to a run and coverage of a contract are
 // different jobs. This one covers the contract.
 func Sample() *Contract {
+	contract := sampleWithLegacyCosts()
+	for i := range contract.Sections.Pipeline.Steps {
+		for j := range contract.Sections.Pipeline.Steps[i].Agents {
+			contract.Sections.Pipeline.Steps[i].Agents[j].Costs = nil
+		}
+	}
+	return contract
+}
+
+// SampleV4 returns the last producer-owned-pricing shape for formatter
+// compatibility tests. Its receipts are immutable sample data, never repriced.
+func SampleV4() *Contract {
+	contract := sampleWithLegacyCosts()
+	contract.Version = 4
+	return contract
+}
+
+func sampleWithLegacyCosts() *Contract {
 	exit := 0
 	failExit := 1
 	ms := func(v int64) *int64 { return &v }
 	integer := func(v int) *int { return &v }
 	usd := func(v float64) *float64 { return &v }
-	costs := func(reported, list, adjusted float64) *pricing.CostClasses {
-		return &pricing.CostClasses{
-			HarnessReported: pricing.CostEstimate{
-				ValueUSD: usd(reported), Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true,
+	costs := func(reported, list, adjusted float64) *legacycost.CostClasses {
+		return &legacycost.CostClasses{
+			HarnessReported: legacycost.CostEstimate{
+				ValueUSD: usd(reported), Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true,
 				Basis: "agent_invocations.reported_cost_usd",
 			},
-			APIListEstimate: pricing.CostEstimate{
-				ValueUSD: usd(list), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+			APIListEstimate: legacycost.CostEstimate{
+				ValueUSD: usd(list), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
 				Basis:      "canonical_delta_token_meters_x_public_list_rate",
-				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
+				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
 			},
-			HarnessAdjustedEstimate: pricing.CostEstimate{
-				ValueUSD: usd(adjusted), Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true,
+			HarnessAdjustedEstimate: legacycost.CostEstimate{
+				ValueUSD: usd(adjusted), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
 				Basis:      "public_list_estimate_plus_harness_profile",
-				Provenance: pricing.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
+				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
 			},
 		}
 	}

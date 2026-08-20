@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/pricing"
+	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -35,7 +35,7 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":4,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
+	want := `{"schema_version":5,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -181,15 +181,15 @@ func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing
 	reported := 9.25
 	listValue, effectiveValue := 12.5, 13.5
 	provider := "anthropic"
-	receiptBytes, err := json.Marshal(pricing.CostClasses{
-		HarnessReported: pricing.CostEstimate{ValueUSD: &reported, Coverage: pricing.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
-		APIListEstimate: pricing.CostEstimate{
-			ValueUSD: &listValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
-			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
+	receiptBytes, err := json.Marshal(legacycost.CostClasses{
+		HarnessReported: legacycost.CostEstimate{ValueUSD: &reported, Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
+		APIListEstimate: legacycost.CostEstimate{
+			ValueUSD: &listValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
+			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
 		},
-		HarnessAdjustedEstimate: pricing.CostEstimate{
-			ValueUSD: &effectiveValue, Coverage: pricing.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
-			Provenance: pricing.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
+		HarnessAdjustedEstimate: legacycost.CostEstimate{
+			ValueUSD: &effectiveValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
+			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
 		},
 	})
 	if err != nil {
@@ -233,7 +233,7 @@ func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing
 	}
 }
 
-func TestBuildRunAuditLeavesLegacyCatalogEstimatesUnknown(t *testing.T) {
+func TestBuildRunAuditLeavesNewRawOnlyEstimatesUnknownWithoutIntegrityError(t *testing.T) {
 	database, run := newAuditRun(t)
 	input, output := 100, 20
 	seedInvocation(t, database, db.AgentInvocation{
@@ -247,11 +247,11 @@ func TestBuildRunAuditLeavesLegacyCatalogEstimatesUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	costs := audit.Invocations[0].Costs
-	if costs.APIListEstimate.ValueUSD != nil || costs.APIListEstimate.Reason != "missing_pricing_receipt" {
-		t.Fatalf("legacy API-list estimate = %+v, want immutable unknown", costs.APIListEstimate)
+	if costs != (legacycost.CostClasses{}) || audit.Invocations[0].HistoricalCosts {
+		t.Fatalf("raw-only costs = %+v, want absent historical costs", costs)
 	}
-	if !strings.Contains(strings.Join(audit.IntegrityErrors, "\n"), "no immutable pricing receipt") {
-		t.Fatalf("integrity errors = %v", audit.IntegrityErrors)
+	if joined := strings.Join(audit.IntegrityErrors, "\n"); strings.Contains(joined, "pricing receipt") || strings.Contains(joined, "historical pricing") {
+		t.Fatalf("raw-only invocation produced a pricing integrity error: %v", audit.IntegrityErrors)
 	}
 }
 

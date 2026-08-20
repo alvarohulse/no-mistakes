@@ -8,13 +8,13 @@
 // tests, review evidence, and user-testing instructions remain distinct.
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/pricing"
+import "github.com/kunchenguid/no-mistakes/internal/legacycost"
 
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
 // pipeline reports that failure and may fall back to built-in section content,
 // subject to the same marker and publication validation as formatter output.
-const Version = 4
+const Version = 5
 
 // Contract is the complete payload written to the formatter's stdin.
 //
@@ -25,7 +25,7 @@ const Version = 4
 //     anything was actually reported or supplied. Their absence is itself
 //     information a reader needs ("no risk assessment ran", "the author left
 //     no note"), so it is stated rather than implied.
-//   - Version 4 producers always emit UserTesting so its attestation state is
+//   - Version 4 and 5 producers always emit UserTesting so its attestation state is
 //     explicit; version 2 and 3 contracts omit that unsupported field.
 //   - Every other optional section is absent when there is nothing to say.
 type Contract struct {
@@ -74,14 +74,14 @@ type Commit struct {
 // Sections holds the body's raw material.
 type Sections struct {
 	// Intent is retained only so callers can decode a version 2 contract.
-	// Versions 3 and 4 report intent on the Intent pipeline step instead.
+	// Versions 3 through 5 report intent on the Intent pipeline step instead.
 	Intent      *IntentSection `json:"intent,omitempty"`
 	Summary     *TextSection   `json:"summary,omitempty"`
 	Notes       NotesSection   `json:"notes"`
 	WhatChanged *TextSection   `json:"what_changed,omitempty"`
 	Risk        RiskSection    `json:"risk"`
 	// Testing is retained only so callers can decode version 2 and 3
-	// contracts. Version 4 producers use the three distinct fields below.
+	// contracts. Version 4 and 5 producers use the three distinct fields below.
 	Testing        *TestingSection        `json:"testing,omitempty"`
 	StaticTests    *StaticTestsSection    `json:"static_tests,omitempty"`
 	ReviewEvidence *ReviewEvidenceSection `json:"review_evidence,omitempty"`
@@ -253,20 +253,22 @@ type StepFindings struct {
 
 // AgentRun is one agent invocation within a step.
 type AgentRun struct {
-	Round               int                  `json:"round"`
-	Purpose             string               `json:"purpose,omitempty"`
-	Agent               string               `json:"agent,omitempty"`
-	Model               string               `json:"model,omitempty"`
-	Provider            string               `json:"provider,omitempty"`
-	StartedAt           int64                `json:"started_at,omitempty"`
-	DurationMS          int64                `json:"duration_ms,omitempty"`
-	InputTokens         *int                 `json:"input_tokens,omitempty"`
-	OutputTokens        *int                 `json:"output_tokens,omitempty"`
-	UncachedInputTokens *int                 `json:"uncached_input_tokens,omitempty"`
-	CacheReadTokens     *int                 `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens    *int                 `json:"cache_write_tokens,omitempty"`
-	ReportedCostUSD     *float64             `json:"reported_cost_usd,omitempty"`
-	Costs               *pricing.CostClasses `json:"costs,omitempty"`
+	Round               int      `json:"round"`
+	Purpose             string   `json:"purpose,omitempty"`
+	Agent               string   `json:"agent,omitempty"`
+	Model               string   `json:"model,omitempty"`
+	Provider            string   `json:"provider,omitempty"`
+	StartedAt           int64    `json:"started_at,omitempty"`
+	DurationMS          int64    `json:"duration_ms,omitempty"`
+	InputTokens         *int     `json:"input_tokens,omitempty"`
+	OutputTokens        *int     `json:"output_tokens,omitempty"`
+	UncachedInputTokens *int     `json:"uncached_input_tokens,omitempty"`
+	CacheReadTokens     *int     `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens    *int     `json:"cache_write_tokens,omitempty"`
+	ReportedCostUSD     *float64 `json:"reported_cost_usd,omitempty"`
+	// Costs is retained only to decode legacy version 4 contracts. Version 5
+	// producers emit raw meters and optional reported cost, never estimates.
+	Costs *legacycost.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
 	Vendor         string `json:"vendor,omitempty"`
