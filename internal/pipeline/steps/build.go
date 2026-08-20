@@ -289,9 +289,7 @@ func automaticGoBuildCoversWorktree(ctx context.Context, workDir string) (bool, 
 	} else if err != nil {
 		return false, "", fmt.Errorf("probe go.mod: %w", err)
 	}
-	// Parse NUL-separated output so a nested go.mod whose path Git would
-	// C-style quote in newline mode is still matched literally; a quoted path
-	// would fail the "/go.mod" suffix check and let root-only coverage pass.
+	// NUL separation preserves paths that Git would quote in newline output.
 	tracked, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--", "*go.mod")
 	if err != nil {
 		return false, "", fmt.Errorf("list tracked go.mod files: %w", err)
