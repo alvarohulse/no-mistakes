@@ -306,21 +306,15 @@ func buildNotEstablishedOutcome(description string, reports ...buildPlan) *pipel
 		}},
 		Summary: description,
 	}
-	autoFixable := false
 	if len(reports) > 0 {
 		report := reports[0]
 		if summary := strings.TrimSpace(report.Summary); summary != "" {
 			findings.Summary += "; agent report: " + summary
 		}
-		for _, item := range report.Items {
-			if item.Action == types.ActionAutoFix {
-				autoFixable = true
-			}
-			findings.Items = append(findings.Items, item)
-		}
+		findings.Items = append(findings.Items, report.Items...)
 	}
 	findingsJSON, _ := json.Marshal(findings)
-	return &pipeline.StepOutcome{NeedsApproval: true, AutoFixable: autoFixable, Findings: string(findingsJSON)}
+	return &pipeline.StepOutcome{NeedsApproval: true, AutoFixable: false, Findings: string(findingsJSON)}
 }
 
 func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {

@@ -214,6 +214,32 @@ func TestBuildStepParksNonGoRepoForTrustedCommandsBuild(t *testing.T) {
 	}
 }
 
+func TestBuildStepNonConformingAutoFixReportStillParksNotAutoFixable(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"error","description":"compile error somewhere","action":"auto-fix"}],"summary":"cannot select","build_command":""}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&BuildStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || outcome.AutoFixable {
+		t.Fatalf("outcome = %#v, want a non-auto-fixable ask-user park", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !types.HasAskUserFindings(findings) {
+		t.Fatalf("findings = %#v, want ask-user finding despite agent auto-fix item", findings.Items)
+	}
+}
+
 func TestParseAgentBuildCommandRejectsUnsafeOrPartialCommands(t *testing.T) {
 	tests := []struct {
 		name    string
