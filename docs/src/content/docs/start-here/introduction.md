@@ -66,7 +66,7 @@ When a branch passes the gate, it means:
 
 - it was checked against fresh upstream and the pushed-branch target
 - the fixed pipeline ran in order
-- review, tests, user-facing test evidence when available, docs, and lint happened before the branch reached the configured push target
+- build, review, tests, user-facing test evidence when available, docs, and lint happened before the branch reached the configured push target
 - you had a chance to approve, fix, skip, or abort any blocking step
 
 ## What you get

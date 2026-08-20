@@ -15,6 +15,7 @@ CI, and fixing remote-only failures.
 Without any provider setup, `no-mistakes` still gives you the local gate:
 
 - rebase
+- build
 - review
 - test
 - document
