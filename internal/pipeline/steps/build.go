@@ -289,12 +289,14 @@ func automaticGoBuildCoversWorktree(ctx context.Context, workDir string) (bool, 
 	} else if err != nil {
 		return false, "", fmt.Errorf("probe go.mod: %w", err)
 	}
-	tracked, err := git.Run(ctx, workDir, "ls-files", "--", "*go.mod")
+	// Parse NUL-separated output so a nested go.mod whose path Git would
+	// C-style quote in newline mode is still matched literally; a quoted path
+	// would fail the "/go.mod" suffix check and let root-only coverage pass.
+	tracked, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--", "*go.mod")
 	if err != nil {
 		return false, "", fmt.Errorf("list tracked go.mod files: %w", err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(tracked), "\n") {
-		path := strings.TrimSpace(line)
+	for _, path := range strings.Split(string(tracked), "\x00") {
 		if strings.HasSuffix(path, "/go.mod") {
 			return false, fmt.Sprintf("a nested Go module (%s) is present", path), nil
 		}
