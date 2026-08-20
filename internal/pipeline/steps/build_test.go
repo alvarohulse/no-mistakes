@@ -188,6 +188,98 @@ func TestBuildStepParksWhenAutomaticGoBuildCannotCoverWorktree(t *testing.T) {
 	}
 }
 
+func TestBuildStepSingleMainModuleBinarySideEffect(t *testing.T) {
+	selectGoBuild := func() *mockAgent {
+		return &mockAgent{
+			name: "builder",
+			runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
+			},
+		}
+	}
+	tests := []struct {
+		name     string
+		files    map[string]string
+		wantPark bool
+	}{
+		{
+			name: "single root main package parks",
+			files: map[string]string{
+				"go.mod":  "module example.com/app\n\ngo 1.25\n",
+				"main.go": "package main\n\nfunc main() {}\n",
+			},
+			wantPark: true,
+		},
+		{
+			name: "single main package in a subdirectory parks",
+			files: map[string]string{
+				"go.mod":          "module example.com/app\n\ngo 1.25\n",
+				"cmd/app/main.go": "package main\n\nfunc main() {}\n",
+			},
+			wantPark: true,
+		},
+		{
+			name: "main package with a supporting library is covered",
+			files: map[string]string{
+				"go.mod":     "module example.com/app\n\ngo 1.25\n",
+				"main.go":    "package main\n\nfunc main() {}\n",
+				"lib/lib.go": "package lib\n\nfunc F() {}\n",
+			},
+			wantPark: false,
+		},
+		{
+			name: "library only module is covered",
+			files: map[string]string{
+				"go.mod": "module example.com/app\n\ngo 1.25\n",
+				"lib.go": "package app\n\nfunc F() {}\n",
+			},
+			wantPark: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, _ := setupGitRepo(t)
+			for rel, content := range tt.files {
+				path := filepath.Join(dir, rel)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "add module layout")
+			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			sctx := newTestContext(t, selectGoBuild(), dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&BuildStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatalf("Execute() error = %v (a single-main worktree must never abort the run)", err)
+			}
+			if !tt.wantPark {
+				if outcome.NeedsApproval || outcome.ExitCode != 0 {
+					t.Fatalf("outcome = %#v, want covered successful build", outcome)
+				}
+				return
+			}
+			if !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome = %#v, want non-auto-fixable ask-user park", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !types.HasAskUserFindings(findings) || !strings.Contains(findings.Summary, `single "main" package`) {
+				t.Fatalf("findings = %#v, want single-main park reason", findings)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "app")); !os.IsNotExist(statErr) {
+				t.Fatalf("parked layout still produced a worktree binary: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestBuildStepParksNonGoRepoForTrustedCommandsBuild(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{

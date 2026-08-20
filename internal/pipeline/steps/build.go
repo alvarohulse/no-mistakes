@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/build"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,7 +295,57 @@ func automaticGoBuildCoversWorktree(ctx context.Context, workDir string) (bool, 
 			return false, fmt.Sprintf("a nested Go module (%s) is present", path), nil
 		}
 	}
+	if writes, reason, err := automaticGoBuildWritesBinaryIntoWorktree(ctx, workDir); err != nil {
+		return false, "", err
+	} else if writes {
+		return false, reason, nil
+	}
 	return true, "", nil
+}
+
+// automaticGoBuildWritesBinaryIntoWorktree reports whether "go build ./..."
+// would deposit a compiled executable in the worktree. go build discards the
+// object of every package except when the resolved set is a single "main"
+// package, which it writes to the current directory; that untracked binary
+// then trips the side-effect-free worktree guard and aborts the run.
+func automaticGoBuildWritesBinaryIntoWorktree(ctx context.Context, workDir string) (bool, string, error) {
+	tracked, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--", "*.go")
+	if err != nil {
+		return false, "", fmt.Errorf("list tracked Go files: %w", err)
+	}
+	dirs := map[string]struct{}{}
+	for _, path := range strings.Split(string(tracked), "\x00") {
+		if path == "" || strings.HasSuffix(path, "_test.go") || goSourcePathExcludedFromBuild(path) {
+			continue
+		}
+		dirs[filepath.Dir(path)] = struct{}{}
+	}
+	buildablePackages, mainPackages := 0, 0
+	for dir := range dirs {
+		pkg, err := build.ImportDir(filepath.Join(workDir, dir), 0)
+		if err != nil || len(pkg.GoFiles) == 0 {
+			continue
+		}
+		buildablePackages++
+		if pkg.IsCommand() {
+			mainPackages++
+		}
+	}
+	if buildablePackages == 1 && mainPackages == 1 {
+		return true, `it is a single "main" package whose compiled executable "go build ./..." writes into the worktree`, nil
+	}
+	return false, "", nil
+}
+
+// goSourcePathExcludedFromBuild matches the directories "go build ./..." skips:
+// vendor, testdata, and any component beginning with "." or "_".
+func goSourcePathExcludedFromBuild(path string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if part == "vendor" || part == "testdata" || strings.HasPrefix(part, ".") || strings.HasPrefix(part, "_") {
+			return true
+		}
+	}
+	return false
 }
 
 func buildNotEstablishedOutcome(description string, reports ...buildPlan) *pipeline.StepOutcome {
