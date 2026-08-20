@@ -135,6 +135,10 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err != nil {
 		return fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
+	preCommitHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("resolve head before %s commit: %w", stepName, err)
+	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 		return fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
@@ -144,6 +148,20 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return fmt.Errorf("resolve head after %s commit: %w", stepName, err)
+	}
+	// Establish pipeline ownership of the recorded head rather than trusting a
+	// separately read live HEAD: the commit now at HEAD must be the one we just
+	// created directly on preCommitHead. If an out-of-band process moved HEAD
+	// between our commit and this read - a clobber to a rootless/unrelated commit,
+	// or even a clean forward descendant that assertPipelineHeadContinuity would
+	// otherwise accept - HEAD^ will not equal preCommitHead, so we refuse instead
+	// of adopting externally authored code as pipeline-owned and eligible for push.
+	parent, parentErr := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", headSHA+"^")
+	if parentErr != nil || parent != preCommitHead {
+		return fmt.Errorf("refusing to record %s commit: HEAD %s is not the pipeline commit made on %s "+
+			"and is not a descendant of the pipeline's recorded head; the worktree was changed out-of-band "+
+			"during the fix turn and continuing would ship unreviewed code - aborting to protect it",
+			stepName, headSHA, preCommitHead)
 	}
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
