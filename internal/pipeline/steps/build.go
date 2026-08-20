@@ -208,27 +208,13 @@ Rules:
 
 // hasExecutedBuildEvidence reports whether the agent named at least one
 // concretely executed build command. A blank-only "tested" array (e.g. [""] or
-// ["   "]) carries no evidence that a build ran, and neither does a placeholder
-// sentinel like "none" or "n/a"; both are treated the same as an empty array and
-// downgrade the build to "not established". This is a language-agnostic honesty
-// check on the reported evidence, not command parsing.
+// ["   "]) carries no evidence that a build ran, so it is treated the same as an
+// empty array and downgrades the build to "not established".
 func hasExecutedBuildEvidence(tested []string) bool {
 	for _, command := range tested {
-		if !isBlankBuildEvidence(command) {
+		if strings.TrimSpace(command) != "" {
 			return true
 		}
-	}
-	return false
-}
-
-// isBlankBuildEvidence reports whether a reported "tested" entry carries no
-// evidence that a command actually ran: it is empty after trimming, or it is a
-// bare placeholder the agent uses to mean "nothing" rather than a real command.
-func isBlankBuildEvidence(command string) bool {
-	normalized := strings.ToLower(strings.Trim(strings.TrimSpace(command), ".-"))
-	switch normalized {
-	case "", "none", "n/a", "na", "no build", "nobuild", "nothing":
-		return true
 	}
 	return false
 }
