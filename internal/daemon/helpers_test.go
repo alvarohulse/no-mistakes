@@ -406,12 +406,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 	t.Helper()
 
-	// A run spawns git subprocesses (fetch, worktree add) plus every pipeline
-	// step, so its completion budget has to absorb process-spawn latency. That
-	// latency is roughly 10x higher and far more contended on the git-heavy
-	// Windows CI shard, where 5s intermittently expired mid-flight; use a wide
-	// budget so only a genuinely stuck run fails here.
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		run, err := d.GetRun(runID)
 		if err != nil {
