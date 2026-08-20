@@ -184,7 +184,7 @@ Rules:
 	if err := json.Unmarshal(result.Output, &findings); err != nil {
 		return buildEvidenceMissingOutcome("build agent returned an invalid structured result"), nil
 	}
-	if len(findings.Tested) == 0 {
+	if !hasExecutedBuildEvidence(findings.Tested) {
 		for i := range findings.Items {
 			findings.Items[i].Action = types.ActionAskUser
 		}
@@ -204,6 +204,19 @@ Rules:
 		AutoFixable:   len(types.AutoFixableFindings(findings).Items) > 0,
 		Findings:      string(findingsJSON),
 	}, nil
+}
+
+// hasExecutedBuildEvidence reports whether the agent named at least one
+// concretely executed build command. A blank-only "tested" array (e.g. [""] or
+// ["   "]) carries no evidence that a build ran, so it is treated the same as an
+// empty array and downgrades the build to "not established".
+func hasExecutedBuildEvidence(tested []string) bool {
+	for _, command := range tested {
+		if strings.TrimSpace(command) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func buildEvidenceMissingOutcome(description string) *pipeline.StepOutcome {
