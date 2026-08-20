@@ -171,15 +171,10 @@ Context:
 - target commit: %s
 
 Rules:
-- Inspect repository build metadata and the changed production files.
-- For a Go module, return "go build ./..." in "build_command" so every package is covered.
-- Do NOT execute the command. The pipeline executes it and records the actual result.
-- Automatic execution accepts only "go build" with compile-safe flags followed by the full-module target "./...". Other build systems require a trusted commands.build configuration; when one is required, leave "build_command" empty and explain that finding.
-- Do NOT run tests, linters, formatters, or static analysis unless inseparable from the canonical build command.
-- Do NOT modify any files or Git state.
-- Return an empty findings array when a meaningful command exists.
-- If no meaningful build or compile command exists, leave "build_command" empty and return one ask-user finding explaining what you inspected.
-- Never report a successful build; command execution happens after this turn.%s`,
+- Inspect build metadata and changed production files. Do NOT execute commands or modify files or Git state.
+- Automatic execution supports only "go build [safe flags] ./..." for a root Go module; return it in "build_command" with no findings.
+- Otherwise leave "build_command" empty and return one ask-user finding explaining why trusted commands.build is required.
+- Do not select tests, linters, formatters, or static analysis, and do not claim the build passed. The pipeline validates and runs the selected command.%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
@@ -335,7 +330,7 @@ func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {
 	if configuredCommand == "" {
 		configuredCommand = "not configured; the Build step will select a focused command after the repair"
 	}
-	prompt := fmt.Sprintf(`Fix the unresolved build or compile failure in this repository.
+	prompt := fmt.Sprintf(`Fix the unresolved build or compile failure with the smallest root-cause change.
 
 Context:
 - branch: %s
@@ -344,12 +339,8 @@ Context:
 - build command: %s
 
 Rules:
-- Make the smallest build root-cause fix.
-- Do not refactor beyond what is needed for that root-cause fix.
-- Do NOT run build or compile commands in this fix turn. The Build step reruns verification after committing the repair.
-- Do NOT run tests.
-- Do NOT run linters, formatters, or static analysis tools.
-- Do NOT update documentation.
+- Avoid unrelated refactors.
+- Do NOT run build, test, lint, format, or static-analysis commands, and do NOT update documentation. The pipeline reruns Build after the repair.
 - Remove transient build outputs or caches before finishing.
 - Return JSON with one concise "summary" field suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,

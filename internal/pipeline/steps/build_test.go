@@ -33,8 +33,10 @@ func TestBuildStepRunsAgentSelectedCommand(t *testing.T) {
 	ag := &mockAgent{
 		name: "builder",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			if !strings.Contains(opts.Prompt, "Do NOT execute the command") {
-				t.Fatalf("selection prompt did not reserve execution for the pipeline:\n%s", opts.Prompt)
+			for _, required := range []string{"Do NOT execute commands", "go build [safe flags] ./...", "trusted commands.build"} {
+				if !strings.Contains(opts.Prompt, required) {
+					t.Fatalf("selection prompt missing %q:\n%s", required, opts.Prompt)
+				}
 			}
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go compile probe","build_command":"go build -v ./..."}`)}, nil
 		},
