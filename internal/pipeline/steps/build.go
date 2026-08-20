@@ -275,14 +275,19 @@ func parseAgentBuildCommand(command string) ([]string, error) {
 }
 
 // automaticGoBuildCoversWorktree reports whether root-level "go build ./..."
-// covers every module in the worktree. Workspaces and nested modules require a
-// trusted commands.build because the restricted automatic form cannot name all
-// of their build targets safely.
+// covers every module in the worktree. A repository without a root Go module,
+// workspaces, and nested modules all require a trusted commands.build because
+// the restricted automatic form cannot name all of their build targets safely.
 func automaticGoBuildCoversWorktree(ctx context.Context, workDir string) (bool, string, error) {
 	if _, err := os.Stat(filepath.Join(workDir, "go.work")); err == nil {
 		return false, "a Go workspace file (go.work) is present", nil
 	} else if !os.IsNotExist(err) {
 		return false, "", fmt.Errorf("probe go.work: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); os.IsNotExist(err) {
+		return false, "no root Go module (go.mod) is present", nil
+	} else if err != nil {
+		return false, "", fmt.Errorf("probe go.mod: %w", err)
 	}
 	tracked, err := git.Run(ctx, workDir, "ls-files", "--", "*go.mod")
 	if err != nil {

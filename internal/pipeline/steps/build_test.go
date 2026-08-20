@@ -185,6 +185,32 @@ func TestBuildStepParksWhenAutomaticGoBuildCannotCoverWorktree(t *testing.T) {
 	}
 }
 
+func TestBuildStepParksNonGoRepoForTrustedCommandsBuild(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"selected Go build","build_command":"go build ./..."}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&BuildStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || outcome.AutoFixable {
+		t.Fatalf("outcome = %#v, want ask-user park for a non-Go repo", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !types.HasAskUserFindings(findings) || !strings.Contains(findings.Summary, "no root Go module") {
+		t.Fatalf("findings = %#v, want no-root-Go-module park reason", findings)
+	}
+}
+
 func TestParseAgentBuildCommandRejectsUnsafeOrPartialCommands(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -226,7 +252,7 @@ func TestBuildStepRefusesAgentSelectionSideEffects(t *testing.T) {
 }
 
 func TestBuildStepRunsAgentSelectedCommandInStepEnvironment(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
+	dir, baseSHA, headSHA := setupAgentGoBuildRepo(t)
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "go")
 	ag := &mockAgent{
