@@ -389,12 +389,13 @@ func cleanReviewScenario(t *testing.T) string {
         new: "fixed"
     structured:
       summary: "fix build input"
-  - match: "Select one focused command that establishes this repository's changed production code builds or compiles."
-    text: "selected focused build command"
+  - match: "Build or compile this repository's changed production code. Discover and run the smallest relevant build commands yourself."
+    text: "ran focused build command"
     structured:
       findings: []
-      summary: "selected full-module Go build"
-      build_command: "go build ./..."
+      summary: "production build passed"
+      tested:
+        - "go build ./..."
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:
