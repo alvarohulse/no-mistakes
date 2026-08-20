@@ -103,6 +103,32 @@ func TestBuildStepBlankOnlyEvidenceParksInsteadOfPassing(t *testing.T) {
 	}
 }
 
+func TestBuildStepPlaceholderEvidenceParksInsteadOfPassing(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["none"]}`)}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&BuildStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || outcome.AutoFixable {
+		t.Fatalf("outcome = %#v, want ask-user gate for placeholder evidence", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !types.HasAskUserFindings(findings) || len(types.AutoFixableFindings(findings).Items) != 0 {
+		t.Fatalf("findings = %#v, want only ask-user actions", findings.Items)
+	}
+}
+
 func TestBuildStepAgentReportedFailureIsAutoFixable(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
