@@ -124,6 +124,9 @@ func renderText(report *Report, forceDetails bool) string {
 		sort.Strings(statuses)
 		fmt.Fprintf(&out, "runs by status: %s\n", textValue(strings.Join(statuses, ", ")))
 		for _, total := range namedCostTotals(report.Costs.Totals) {
+			if !hasCostTotal(total.total) {
+				continue
+			}
 			fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
 				total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
 		}
@@ -156,21 +159,30 @@ func renderText(report *Report, forceDetails bool) string {
 	}
 	for _, agent := range report.Agents {
 		invocation := agent.Invocation
-		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s invoked_via=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s nested_agents=%s\n",
+		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s invoked_via=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s reported_cost_usd=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s nested_agents=%s\n",
 			agent.RunID, invocation.ID, invocation.Step, invocation.Round, invocation.Purpose, invocation.Agent, invocation.InvocationMode, textString(invocation.Model), textString(invocation.Provider), invocation.ExitStatus, invocation.SessionMode, invocation.DurationMS,
-			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines), textNestedAgents(invocation))
+			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textFloat(invocation.ReportedCostUSD), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines), textNestedAgents(invocation))
 	}
 	for _, record := range report.Metrics.Items {
 		renderMetricsText(&out, "metric "+record.RunID, record.Metrics)
 	}
 	for _, item := range report.Costs.Items {
+		if !item.Historical {
+			continue
+		}
 		for _, class := range namedCostEstimates(item.Classes) {
+			if !hasCostEstimate(class.estimate) {
+				continue
+			}
 			fmt.Fprintf(&out, "cost %s/%s/%s value_usd=%s coverage=%d/%d complete=%t reason=%s catalog=%s profile=%s\n",
 				item.RunID, item.InvocationID, class.name, textFloat(class.estimate.ValueUSD), class.estimate.Coverage.Reported, class.estimate.Coverage.Eligible,
 				class.estimate.Complete, textValue(class.estimate.Reason), provenanceCatalog(class.estimate.Provenance), provenanceProfile(class.estimate.Provenance))
 		}
 	}
 	for _, total := range namedCostTotals(report.Costs.Totals) {
+		if !hasCostTotal(total.total) {
+			continue
+		}
 		fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
 			total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
 	}
@@ -178,6 +190,14 @@ func renderText(report *Report, forceDetails bool) string {
 		fmt.Fprintf(&out, "data_error run=%s code=%s detail=%s\n", dataError.RunID, dataError.Code, strconv.Quote(dataError.Detail))
 	}
 	return out.String()
+}
+
+func hasCostEstimate(estimate legacycost.CostEstimate) bool {
+	return estimate.ValueUSD != nil || estimate.Coverage.Reported > 0 || estimate.Coverage.Eligible > 0 || estimate.Basis != "" || estimate.Reason != ""
+}
+
+func hasCostTotal(total CostTotal) bool {
+	return total.ValueUSD != nil || total.Coverage.Reported > 0 || total.Coverage.Eligible > 0 || total.Basis != "" || len(total.Reasons) > 0
 }
 
 type namedCostEstimate struct {
