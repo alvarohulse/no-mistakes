@@ -72,8 +72,8 @@ func TestUnconfiguredBuildSelectsAndExecutesAgentCommand(t *testing.T) {
 	if !ok || buildStep.Status != types.StepStatusCompleted {
 		t.Fatalf("unconfigured Build step = %+v, want completed", buildStep)
 	}
-	if invs := h.AgentInvocations(); !sawPromptContainingAll(invs, "Select one focused command", "branch: "+branch) {
-		t.Fatalf("unconfigured Build did not invoke command selection agent:\n%s", summarisePrompts(invs))
+	if invs := h.AgentInvocations(); !sawPromptContainingAll(invs, "smallest relevant build commands yourself", "branch: "+branch) {
+		t.Fatalf("unconfigured Build did not invoke the agent-driven build:\n%s", summarisePrompts(invs))
 	}
 }
 
