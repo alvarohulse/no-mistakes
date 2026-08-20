@@ -330,6 +330,9 @@ func TestBuildStepNonConformingAutoFixReportStillParksNotAutoFixable(t *testing.
 	if !types.HasAskUserFindings(findings) {
 		t.Fatalf("findings = %#v, want ask-user finding despite agent auto-fix item", findings.Items)
 	}
+	if fixable := types.AutoFixableFindings(findings); len(fixable.Items) != 0 {
+		t.Fatalf("AutoFixableFindings = %#v, want none: a non-auto-fixable park must not carry an auto-fix finding", fixable.Items)
+	}
 }
 
 func TestParseAgentBuildCommandRejectsUnsafeOrPartialCommands(t *testing.T) {

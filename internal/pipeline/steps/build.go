@@ -362,7 +362,14 @@ func buildNotEstablishedOutcome(description string, reports ...buildPlan) *pipel
 		if summary := strings.TrimSpace(report.Summary); summary != "" {
 			findings.Summary += "; agent report: " + summary
 		}
-		findings.Items = append(findings.Items, report.Items...)
+		// Build-not-established parks are never auto-fixable, so fold the agent's
+		// reported items in as ask-user too: a self-reported auto-fix action here
+		// would otherwise leave AutoFixableFindings disagreeing with the outcome's
+		// AutoFixable=false, without ever having established a build to repair.
+		for _, item := range report.Items {
+			item.Action = types.ActionAskUser
+			findings.Items = append(findings.Items, item)
+		}
 	}
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{NeedsApproval: true, AutoFixable: false, Findings: string(findingsJSON)}
