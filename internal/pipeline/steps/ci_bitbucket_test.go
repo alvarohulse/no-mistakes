@@ -38,10 +38,6 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	sctx.Ctx = ctx
 
 	step := &CIStep{
-		// Pin the base-branch tip so the idle-timeout re-arm probe never does a
-		// real network fetch to the unreachable bitbucket.org upstream, whose
-		// nondeterministic latency could otherwise consume the whole CITimeout.
-		baseBranchTip: func(context.Context) (string, bool) { return "base-tip-sha", true },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			cancel()
 			return ctx.Err()
@@ -90,10 +86,6 @@ func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 	sctx.Ctx = ctx
 
 	step := &CIStep{
-		// Pin the base-branch tip so the idle-timeout re-arm probe never does a
-		// real network fetch to the unreachable bitbucket.org upstream, whose
-		// nondeterministic latency could otherwise consume the whole CITimeout.
-		baseBranchTip: func(context.Context) (string, bool) { return "base-tip-sha", true },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			cancel()
 			return ctx.Err()
@@ -122,12 +114,7 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 0}
 
-	step := &CIStep{
-		// Pin the base-branch tip so the idle-timeout re-arm probe never does a
-		// real network fetch to the unreachable bitbucket.org upstream, whose
-		// nondeterministic latency could otherwise consume the whole CITimeout.
-		baseBranchTip: func(context.Context) (string, bool) { return "base-tip-sha", true },
-	}
+	step := &CIStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -172,10 +159,6 @@ func TestCIStep_BitbucketStoppedCheckParksForADecision(t *testing.T) {
 
 	polls := 0
 	step := &CIStep{
-		// Pin the base-branch tip so the idle-timeout re-arm probe never does a
-		// real network fetch to the unreachable bitbucket.org upstream, whose
-		// nondeterministic latency could otherwise consume the whole CITimeout.
-		baseBranchTip: func(context.Context) (string, bool) { return "base-tip-sha", true },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			polls++
 			if polls >= 5 {

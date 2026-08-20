@@ -145,9 +145,6 @@ func TestBuildStepParksWhenAutomaticGoBuildCannotCoverWorktree(t *testing.T) {
 	}{
 		{name: "workspace", path: "go.work", content: "go 1.25\n\nuse .\n", wantReason: "go.work"},
 		{name: "nested module", path: "svc/go.mod", content: "module example.com/buildprobe/svc\n\ngo 1.25\n", wantReason: "svc/go.mod"},
-		// A nested module whose path Git C-style quotes in newline porcelain output
-		// (default core.quotepath) must still be discovered; NUL parsing keeps the
-		// path literal so the "/go.mod" suffix check matches and the run parks.
 		{name: "quoted nested module", path: "sérvice/go.mod", content: "module example.com/buildprobe/svc\n\ngo 1.25\n", wantReason: "sérvice/go.mod"},
 	}
 	for _, tt := range tests {

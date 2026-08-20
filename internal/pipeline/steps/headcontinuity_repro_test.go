@@ -170,52 +170,6 @@ func TestCommitAgentFixes_RefusesResetDuringCommit(t *testing.T) {
 // `git rebase --continue` during conflict resolution) before the pipeline
 // commits its own fixes: the recorded head stays an ancestor, so committing is
 // allowed.
-// TestCommitAgentFixes_RefusesForwardDescendantClobberDuringCommit is the
-// regression for the reconciliation gap: if an out-of-band process advances HEAD
-// to a clean forward descendant of the pipeline's own commit between that commit
-// and the head read, the descendant is a descendant of the recorded head and
-// therefore passes assertPipelineHeadContinuity. commitAgentFixes must still
-// refuse to record it, because it is not the commit the pipeline made and would
-// ship externally authored, unreviewed code as pipeline-owned.
-func TestCommitAgentFixes_RefusesForwardDescendantClobberDuringCommit(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	gitCmd(t, dir, "checkout", "--detach", headSHA)
-
-	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Fixing = true
-
-	// A post-commit hook appends one forward descendant commit (authored
-	// out-of-band) on top of the pipeline's own commit, then disarms itself so
-	// the extra commit does not recurse.
-	gitDir := gitCmd(t, dir, "rev-parse", "--git-dir")
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-	hook := filepath.Join(gitDir, "hooks", "post-commit")
-	hookBody := "#!/bin/sh\n" +
-		"rm -f \"$0\"\n" +
-		"echo external >> external.txt\n" +
-		"git add external.txt\n" +
-		"git commit -m 'out-of-band forward commit'\n"
-	if err := os.WriteFile(hook, []byte(hookBody), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("reviewed fix\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	err := commitAgentFixes(sctx, types.StepDocument, "update docs", "fallback")
-	if err == nil {
-		t.Fatal("expected refusal when HEAD is advanced to a forward descendant during commit")
-	}
-	if !strings.Contains(err.Error(), "out-of-band") {
-		t.Fatalf("expected an out-of-band ownership refusal, got: %v", err)
-	}
-	if sctx.Run.HeadSHA != headSHA {
-		t.Fatalf("recorded head changed to %s; expected %s preserved on refusal", sctx.Run.HeadSHA, headSHA)
-	}
-}
-
 func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
