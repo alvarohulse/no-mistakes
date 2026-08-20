@@ -381,7 +381,7 @@ func cleanReviewScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scenario.yaml")
 	content := `actions:
-  - match: "Fix the unresolved build or compile failure in this repository.\n\nContext:\n- branch: build-command-autofix"
+  - match: "Fix the unresolved build or compile failure with the smallest root-cause change.\n\nContext:\n- branch: build-command-autofix"
     text: "fixed build input"
     edits:
       - path: "build-input.txt"
