@@ -27,7 +27,9 @@ document:
     docs/src/content/docs/reference/environment.md.
     The daemon lifecycle model (singleton lock, lifecycle guard, crash recovery)
     is owned by docs/src/content/docs/concepts/daemon.md.
-    Internal, unpublished architecture decisions are owned by docs/adr/.
+    Internal, unpublished architecture decisions and their rejected alternatives
+    are owned by docs/adr/; shipped behavior remains owned by the invariant
+    sections in AGENTS.md and docs/src/content/docs/.
     ADR status must distinguish accepted decisions from implemented behavior.
     Agent-driving guidance is owned by the skill body in internal/skill/skill.go
     and the live axi output strings; docs/src/content/docs/guides/agents.md keeps
