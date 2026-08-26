@@ -38,6 +38,7 @@ Safest local verification sequence after non-trivial changes:
 
 - Keep `README.md` concise and high-level; the bar needs to be extremely high for what shows up there.
 - Most documentation lives in `docs/`, the published docs site.
+- `docs/adr/` contains internal, unpublished architecture decision records; keep implementation status explicit and treat these ADRs as the owners of their recorded architecture decisions.
 - One owner per fact: `docs/src/content/docs/reference/global-config.md` and `docs/src/content/docs/reference/repo-config.md` own configuration keys, `docs/src/content/docs/reference/environment.md` owns environment variables and the telemetry local/remote split, `docs/src/content/docs/concepts/daemon.md` owns the daemon lifecycle model, and guides pages explain purpose and link to those owners instead of restating tables and examples.
 - The `document.instructions` block in `.no-mistakes.yaml` states this ownership map for the pipeline's document step; update it when ownership moves.
 

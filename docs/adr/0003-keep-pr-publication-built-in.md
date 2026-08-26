@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (not yet implemented)
 ---
 
 # Keep PR publication built in

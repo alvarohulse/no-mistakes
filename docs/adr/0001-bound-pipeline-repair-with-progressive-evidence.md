@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: accepted (not yet implemented)
 ---
 
 # Bound pipeline repair with progressive evidence
