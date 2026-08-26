@@ -6,7 +6,7 @@ status: accepted (not yet implemented)
 
 Provider adapters retain ownership of PR discovery, fork routing, immutable-head push binding, exact PR targeting, create/update, owned-body verification, and recovery. Customization is layered around that boundary: a trusted typed policy command supplies supported draft/ready, label, assignee, and reviewer preferences, while durable lifecycle events drive warning-only post-publication commands.
 
-Normal PRs default Ready for Review and diagnostic PRs default Draft; policy may override either. Policy is reevaluated for publication and CI readiness. Lifecycle delivery uses a SQLite outbox with stable event IDs derived from Run ID, ordered at-least-once delivery, three attempts, downstream deduplication, and durable bounded/redacted receipts. External side effects are never claimed to be exactly once.
+Normal PRs default Ready for Review and diagnostic PRs default Draft; policy may override either. Policy is reevaluated for publication and CI readiness. Lifecycle delivery uses a SQLite outbox with stable event IDs derived from Run ID, ordered delivery with up to three automatic attempts per replay generation, downstream deduplication, and durable bounded/redacted receipts. Exhausted events remain visible for manual replay with the same event ID; external side effects are never claimed to be exactly once.
 
 ## Considered options
 
