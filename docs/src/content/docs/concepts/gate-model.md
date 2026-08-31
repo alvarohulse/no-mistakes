@@ -219,6 +219,7 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 | `repos/<id>.git`                 | Bare gate repos                                                                                                         |
 | `repos/<id>.git/notify-push.log` | Persistent hook notification failure log                                                                                |
 | `worktrees/<repoID>/<runID>/`    | Disposable worktrees (cleaned up after each run)                                                                        |
+| `runs/<runID>/`                  | Owner-only immutable launch configuration and integrity metadata                                                       |
 | `logs/<runID>/<step>.log`        | Per-step log files                                                                                                      |
 | `logs/daemon.log`                | Bounded daemon lifecycle log                                                                                            |
 | `logs/daemon-bootstrap.log`      | Bounded pre-logger bootstrap and direct crash output                                                                    |

@@ -66,7 +66,8 @@ Safest local verification sequence after non-trivial changes:
 
 **Filesystem and Paths**
 
-- Use `filepath.Join`; respect `NM_HOME` for app state; directories are `0o755` and files `0o644` by convention.
+- Use `filepath.Join`; respect `NM_HOME` for app state; directories are `0o755` and files `0o644` by convention, except private per-run effective-config artifacts, which are `0o600`.
+- Every newly launched run must have complete, immutable effective-config YAML and integrity metadata before cancellation, run insertion, or worktree creation; failures leave no partial run artifact. `internal/daemon/effective_config.go` and `effective_config_test.go` own the mechanism and regressions; user-facing behavior is in the daemon concept guide.
 - On macOS, path comparisons may need symlink resolution (`/var` vs `/private/var`).
 
 **Git on Bare Gate Repos (`safe.bareRepository`)**

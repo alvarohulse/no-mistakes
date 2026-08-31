@@ -400,9 +400,9 @@ Resolve the policy that the current branch would use without creating a run or w
 no-mistakes config explain [--format text|json]
 ```
 
-The command asks the daemon to read the current branch head from the registered bare gate, freshly pin the trusted default branch, apply the global config and matching override, resolve available agent routes in the daemon's environment, and emit the same canonical policy contract persisted when a run starts. It starts the daemon when needed, but does not create a run or worktree, run hooks, or construct agents. Because resolution fetches trusted policy and refreshes registered routing, recursive gate-execution containment refuses this command from an active validation step.
+The command asks the daemon to read the current branch head from the registered bare gate, freshly pin the trusted default branch, apply the global config and matching override, resolve available agent routes in the daemon's environment, and emit the canonical policy contract persisted for a run. It starts the daemon when needed, but does not run preflight, create a run or worktree, write run launch artifacts, run hooks, or construct agents. Because resolution fetches trusted policy and refreshes registered routing, recursive gate-execution containment refuses this command from an active validation step.
 
-Text is the default. `--format json` emits a compact envelope containing `policy_digest` and the exact canonical `policy` object. The policy includes ordered enabled/skipped steps, effective commands, routes, runner identity, budgets, settings, the trusted commit, and contributing config sources with their kind, ref, and SHA-256 digest.
+Text is the default. `--format json` emits a compact envelope containing `policy_digest` and the exact canonical `policy` object. The policy includes ordered enabled/skipped steps, effective commands, routes, runner identity, budgets, settings, the trusted commit, and contributing config sources with their kind, ref, and SHA-256 digest. It does not include the per-field YAML provenance annotations recorded only for a successfully started run.
 
 ## no-mistakes eval
 

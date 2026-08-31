@@ -554,7 +554,7 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 - Pending, running, and explicitly pinned runs are never touched.
 - Every run created inside the configured `retention` window or the mandatory 14-day floor is retained.
 - At least the newest 50 terminal unpinned runs, or the configured larger `max_runs` set, are retained regardless of age.
-- Older unpinned evidence and run logs are removed before their rich database rows are pruned.
+- Older unpinned evidence, run launch artifacts, and run logs are removed before their rich database rows are pruned.
 
 Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt so historical stats survive. The [local/remote data boundary](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns that receipt's content-free fields and privacy exclusions. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 

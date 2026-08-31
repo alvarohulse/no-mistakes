@@ -17,6 +17,7 @@ When set, everything else moves under this root:
 - Global config: `$NM_HOME/config.yaml`
 - Gate repos: `$NM_HOME/repos/<id>.git`
 - Worktrees: `$NM_HOME/worktrees/<repoID>/<runID>/`
+- Run launch artifacts: `$NM_HOME/runs/<runID>/`
 - Logs: `$NM_HOME/logs/`
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
@@ -216,6 +217,13 @@ Detailed performance evidence stays on the machine in the local state database (
 Each row records run and step identity, purpose (such as review, review-fix, or lint-plan), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, and failure category, alongside the session-fidelity metrics below. A full Review row also stores the final content-free candidate pool (`agent`, model name/vendor, and optional flag) so the selected route remains auditable; fixer and non-Review rows leave that field null.
 It also records how the top-level agent was invoked and any nested agent identities that the adapter's event stream exposed.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
+
+Each started run also retains its full resolved configuration locally in
+`<NM_HOME>/runs/<runID>/effective-config.yaml`, including commands, hooks,
+prompts, and other policy values, with source annotations. Its value-free
+integrity sidecar is stored alongside it. These files are never sent through
+telemetry or rendered into the PR body and are pruned with the run's rich local
+data.
 
 The additive session-fidelity fields are nullable and read back as unknown rather than a fabricated zero when the adapter did not report them, so rows written before a field existed, and adapters that do not surface a datum, stay honest.
 The raw counters remain available locally; use the nullable per-round and canonical fields to determine whether the adapter reported comparable usage. The canonical run audit emits legacy raw input/output/cache-read counters only when the matching per-round meter proves that the adapter reported usage:

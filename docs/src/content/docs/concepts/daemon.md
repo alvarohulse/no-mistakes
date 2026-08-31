@@ -82,13 +82,28 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 
 When a push arrives via the post-receive hook:
 
-1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`
-2. Starts the pipeline executor in that worktree
-3. Streams events to any connected TUI clients and serves request/response state to AXI clients
-4. Cleans up the worktree when the run finishes (success or failure)
+1. Resolves trusted policy and runs preflight
+2. Writes immutable owner-only launch artifacts at `~/.no-mistakes/runs/<runID>/`
+3. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`
+4. Starts the pipeline executor in that worktree
+5. Streams events to any connected TUI clients and serves request/response state to AXI clients
+6. Cleans up the worktree when the run finishes (success or failure)
 
 A run that has to plan a Build, Test, or Lint command also gets a private planning checkout at `~/.no-mistakes/worktrees/<repoID>/<runID>-command-plan/`, cleaned up on the same run boundary.
 It is a clone rather than a linked worktree, and the [Pipeline Steps reference](/no-mistakes/reference/pipeline-steps/) owns what the planning pass does inside it.
+
+The launch artifacts are `effective-config.yaml` and `effective-config.meta.json`.
+The YAML preserves the exact resolved configuration values and marks every YAML
+leaf and list item with its provenance: global, global override, trusted,
+pushed, run-request, runtime, or default, plus clear, append, and merge
+qualifiers where applicable. The value-free JSON sidecar binds the YAML's
+SHA-256 to the run ID, canonical policy digest, and generator binary identity.
+Both files are mode `0600`; the complete YAML is limited to 256 KiB.
+The daemon renders, validates, and atomically writes both artifacts after
+preflight but before replacing an active run, inserting a run row, or creating
+a worktree. A serialization, completeness, integrity, size, or write failure
+leaves no run artifact directory, run row, or worktree. Run retention removes
+these artifacts with the run's other rich local data.
 
 Event delivery is bounded, so a slow or wedged client can never stall a run. Under pressure the daemon may drop ordinary log output, but it never silently loses a state change: it coalesces those into a single gap signal, and the TUI and `axi` respond by re-reading authoritative run state. A live view can therefore skip log lines while it is behind, but it converges on the run's real state. After a dropped connection, the TUI retries with a bounded delay and reconciles when it reattaches; if the daemon remains unavailable, it surfaces the connection error instead of retrying forever.
 
