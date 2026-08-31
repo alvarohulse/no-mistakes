@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -91,7 +92,14 @@ func TestEvalCaptureAndSetsSpeakInFindingGoldTerms(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings := `{"findings":[{"id":"real-bug","severity":"error","file":"main.go","line":3,"description":"bug","action":"ask-user","review_scope":"source"}],"risk_level":"high","risk_rationale":"bug","risk_scope":"source-or-external"}`
-	round, err := database.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &findings, nil, headSHA, headSHA, baseSHA, []byte("{}\n"), []byte("{}\n"), 50)
+	replayConfigJSON, err := config.MarshalEvalReplayConfig(&config.Config{
+		IgnorePatterns: []string{"generated/**"},
+		Prompts:        config.PromptConfig{Review: "review error paths"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.InsertReviewStepRoundWithReplayConfig(step.ID, 1, "initial", &findings, nil, headSHA, headSHA, baseSHA, replayConfigJSON, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +114,17 @@ func TestEvalCaptureAndSetsSpeakInFindingGoldTerms(t *testing.T) {
 	}
 	if !strings.Contains(out, "captured 1 local review case") {
 		t.Fatalf("capture output = %q", out)
+	}
+	replayPath := filepath.Join(p.EvalDir(), "cases", run.ID+"-"+round.ID, "config", "replay.json")
+	if got, err := os.ReadFile(replayPath); err != nil {
+		t.Fatal(err)
+	} else if string(got) != string(replayConfigJSON) {
+		t.Fatalf("captured replay config = %s, want %s", got, replayConfigJSON)
+	}
+	for _, legacy := range []string{"global.yaml", "repo-config.yaml"} {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(replayPath), legacy)); !os.IsNotExist(err) {
+			t.Fatalf("captured case retained legacy %s: %v", legacy, err)
+		}
 	}
 
 	out, err = executeCmd("eval", "sets")
@@ -126,6 +145,29 @@ func TestEvalCaptureAndSetsSpeakInFindingGoldTerms(t *testing.T) {
 	if !strings.Contains(out, "LOCAL-ONLY EVAL REPORT") || !strings.Contains(out, "no candidate replays recorded yet") {
 		t.Fatalf("report output = %q", out)
 	}
+
+	t.Run("repeated commands converge", func(t *testing.T) {
+		for _, command := range [][]string{
+			{"eval", "capture", run.ID},
+			{"eval", "sets"},
+			{"eval", "sets", "--refresh-diversified"},
+			{"eval", "relabel", run.ID},
+			{"eval", "relabel"},
+			{"eval", "report"},
+		} {
+			first, err := executeCmd(command...)
+			if err != nil {
+				t.Fatalf("%v (first): %v\n%s", command, err, first)
+			}
+			second, err := executeCmd(command...)
+			if err != nil {
+				t.Fatalf("%v (second): %v\n%s", command, err, second)
+			}
+			if first != second {
+				t.Fatalf("%v is not idempotent:\nfirst: %s\nsecond: %s", command, first, second)
+			}
+		}
+	})
 }
 
 func TestEvalMissIngestLabelsFalseNegativeGold(t *testing.T) {
