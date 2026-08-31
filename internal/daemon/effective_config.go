@@ -413,9 +413,9 @@ type effectiveTestDocument struct {
 }
 
 type effectiveEvidenceDocument struct {
-	LocalRoot   string `yaml:"local_root"`
-	Retention   string `yaml:"retention"`
-	MaxRuns     int    `yaml:"max_runs"`
+	LocalRoot string `yaml:"local_root"`
+	Retention string `yaml:"retention"`
+	MaxRuns   int    `yaml:"max_runs"`
 }
 
 type effectiveDocumentDocument struct {
