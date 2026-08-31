@@ -174,6 +174,78 @@ func TestStartRunEffectiveConfigPreservesNestedPlatformCommandLeafProvenance(t *
 	}
 }
 
+func TestStartRunEffectiveConfigPreservesExplicitNestedCommandClears(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	tests := []struct {
+		name           string
+		trustedCommand string
+		override       string
+		clearPath      []string
+	}{
+		{
+			name:           "runner",
+			trustedCommand: "  build: trusted-build\n",
+			override:       "        runner: null\n",
+			clearPath:      []string{"commands", "build", "runner"},
+		},
+		{
+			name: "platform",
+			trustedCommand: `  build:
+    run: trusted-build
+    windows: trusted-windows-build
+`,
+			override:  "        windows: null\n",
+			clearPath: []string{"commands", "build", "windows"},
+		},
+		{
+			name: "platform run",
+			trustedCommand: `  build:
+    run: trusted-build
+    windows:
+      run: trusted-windows-build
+      runner:
+        executable: powershell
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+`,
+			override: `        windows:
+          run: null
+`,
+			clearPath: []string{"commands", "build", "windows", "run"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-command-clear-"+strings.ReplaceAll(tt.name, " ", "-"))
+			globalYAML := "overrides:\n  test/repo:\n    commands:\n      build:\n" + tt.override
+			if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			trustedYAML := "auto_fix:\n  review: 0\n" +
+				"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n" +
+				"commands:\n" + tt.trustedCommand
+			writePolicyConfigCommit(t, repo, trustedYAML, "configure command clear", "refs/heads/main")
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			step := &mockPassStep{name: types.StepReview}
+			manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+			t.Cleanup(manager.Shutdown)
+			setSafeBareRepositoryExplicitForDaemonTest(t)
+
+			runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "nested command clear", "", "", "")
+			if err != nil {
+				t.Fatalf("start run: %v", err)
+			}
+			if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+				t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+			}
+
+			yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+			assertEffectiveConfigScalar(t, yamlBytes, []string{"commands", "build", "run"}, "trusted-build", "source=trusted; is_default=false")
+			assertEffectiveConfigNull(t, yamlBytes, tt.clearPath, "source=global-override; is_default=false; qualifier=clear")
+		})
+	}
+}
+
 func TestStartRunEffectiveConfigExplainsRoutingTrustDecision(t *testing.T) {
 	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-routing-provenance")
 	agentDir := t.TempDir()
@@ -597,6 +669,17 @@ func assertEffectiveConfigScalar(t *testing.T, data []byte, path []string, wantV
 	node := effectiveConfigNode(t, data, path...)
 	if node.Kind != yaml.ScalarNode || node.Value != wantValue {
 		t.Fatalf("effective config %s = kind %d value %q, want scalar %q", strings.Join(path, "."), node.Kind, node.Value, wantValue)
+	}
+	if got := effectiveConfigNodeComment(node); got != wantProvenance {
+		t.Fatalf("effective config %s provenance = %q, want %q", strings.Join(path, "."), got, wantProvenance)
+	}
+}
+
+func assertEffectiveConfigNull(t *testing.T, data []byte, path []string, wantProvenance string) {
+	t.Helper()
+	node := effectiveConfigNode(t, data, path...)
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!null" {
+		t.Fatalf("effective config %s = kind %d tag %q value %q, want null", strings.Join(path, "."), node.Kind, node.Tag, node.Value)
 	}
 	if got := effectiveConfigNodeComment(node); got != wantProvenance {
 		t.Fatalf("effective config %s provenance = %q, want %q", strings.Join(path, "."), got, wantProvenance)

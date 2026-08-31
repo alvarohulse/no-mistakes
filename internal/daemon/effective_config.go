@@ -218,6 +218,9 @@ func renderEffectiveConfigArtifacts(runID, stackedOn string, resolved *runPolicy
 	if err := root.Encode(document); err != nil {
 		return nil, fmt.Errorf("serialize effective config: %w", err)
 	}
+	if err := materializeEffectiveConfigCommandClears(&root, resolved.Provenance, document.Commands); err != nil {
+		return nil, fmt.Errorf("serialize effective config command clears: %w", err)
+	}
 	annotations := effectiveConfigAnnotations(resolved, document)
 	annotateEffectiveConfigNode(&root, "", annotations)
 	if err := validateEffectiveConfigAnnotations(&root, ""); err != nil {
@@ -326,6 +329,127 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		DisableProjectSettings: cfg.DisableProjectSettings,
 		NoCI:                   cfg.NoCI,
 	}
+}
+
+func materializeEffectiveConfigCommandClears(root *yaml.Node, ledger *config.EffectiveConfigProvenance, commands effectiveCommandsDocument) error {
+	commandNodes, err := effectiveConfigMappingValue(root, "commands")
+	if err != nil {
+		return err
+	}
+	for _, command := range []struct {
+		name  string
+		value runner.Command
+	}{
+		{name: "build", value: commands.Build},
+		{name: "test", value: commands.Test},
+		{name: "lint", value: commands.Lint},
+		{name: "format", value: commands.Format},
+	} {
+		commandNode, err := effectiveConfigMappingValue(commandNodes, command.name)
+		if err != nil {
+			return err
+		}
+		prefix := "commands." + command.name
+		if command.value.Runner == nil && effectiveConfigHasExactClear(ledger, prefix+".runner") {
+			if err := materializeEffectiveConfigCommandNull(commandNode, []string{"runner"}); err != nil {
+				return fmt.Errorf("%s.runner: %w", prefix, err)
+			}
+		}
+		for _, platform := range []struct {
+			name  string
+			value *runner.Override
+		}{
+			{name: "linux", value: command.value.Linux},
+			{name: "macos", value: command.value.MacOS},
+			{name: "windows", value: command.value.Windows},
+		} {
+			platformPath := prefix + "." + platform.name
+			if platform.value == nil {
+				if effectiveConfigHasExactClear(ledger, platformPath) {
+					if err := materializeEffectiveConfigCommandNull(commandNode, []string{platform.name}); err != nil {
+						return fmt.Errorf("%s: %w", platformPath, err)
+					}
+				}
+				continue
+			}
+			if platform.value.Run == nil && effectiveConfigHasExactClear(ledger, platformPath+".run") {
+				if err := materializeEffectiveConfigCommandNull(commandNode, []string{platform.name, "run"}); err != nil {
+					return fmt.Errorf("%s.run: %w", platformPath, err)
+				}
+			}
+			if platform.value.Runner == nil && effectiveConfigHasExactClear(ledger, platformPath+".runner") {
+				if err := materializeEffectiveConfigCommandNull(commandNode, []string{platform.name, "runner"}); err != nil {
+					return fmt.Errorf("%s.runner: %w", platformPath, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func effectiveConfigHasExactClear(ledger *config.EffectiveConfigProvenance, path string) bool {
+	value, ok := ledger.ExactValue(path)
+	return ok && !value.IsDefault
+}
+
+func materializeEffectiveConfigCommandNull(command *yaml.Node, path []string) error {
+	if command.Kind == yaml.ScalarNode {
+		run := *command
+		*command = yaml.Node{
+			Kind: yaml.MappingNode,
+			Tag:  "!!map",
+			Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "run"},
+				&run,
+			},
+		}
+	}
+	if command.Kind != yaml.MappingNode {
+		return fmt.Errorf("command is YAML node kind %d, want scalar or mapping", command.Kind)
+	}
+	parent := command
+	for _, field := range path[:len(path)-1] {
+		var err error
+		parent, err = effectiveConfigMappingValue(parent, field)
+		if err != nil {
+			return err
+		}
+	}
+	return insertEffectiveConfigNull(parent, path[len(path)-1])
+}
+
+func effectiveConfigMappingValue(node *yaml.Node, key string) (*yaml.Node, error) {
+	if node != nil && node.Kind == yaml.DocumentNode {
+		if len(node.Content) != 1 {
+			return nil, fmt.Errorf("document has %d roots", len(node.Content))
+		}
+		node = node.Content[0]
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("parent of %q is not a mapping", key)
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1], nil
+		}
+	}
+	return nil, fmt.Errorf("mapping is missing %q", key)
+}
+
+func insertEffectiveConfigNull(mapping *yaml.Node, key string) error {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return fmt.Errorf("parent of %q is not a mapping", key)
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return fmt.Errorf("mapping already contains %q", key)
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"},
+	)
+	return nil
 }
 
 func copyStringMap(source map[string]string) map[string]string {

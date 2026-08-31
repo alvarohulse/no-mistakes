@@ -179,6 +179,17 @@ func (p *EffectiveConfigProvenance) Value(path string) EffectiveConfigProvenance
 	return EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceGlobal, IsDefault: true}
 }
 
+// ExactValue returns the receipt recorded directly for path without inheriting
+// from an applied ancestor. Renderers use it when the distinction between an
+// explicitly cleared field and an omitted descendant is part of the output.
+func (p *EffectiveConfigProvenance) ExactValue(path string) (EffectiveConfigProvenanceValue, bool) {
+	if p == nil {
+		return EffectiveConfigProvenanceValue{}, false
+	}
+	value, ok := p.values[path]
+	return cloneEffectiveConfigProvenanceValue(value), ok
+}
+
 // DisabledReaderValue returns the receipt for one normalized disabled reader.
 func (p *EffectiveConfigProvenance) DisabledReaderValue(reader string) (EffectiveConfigProvenanceValue, bool) {
 	if p == nil {
