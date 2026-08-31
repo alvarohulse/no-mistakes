@@ -814,8 +814,8 @@ func effectiveConfigPairAbsent(p *paths.Paths, runID string) bool {
 	if p == nil {
 		return false
 	}
-	_, yamlErr := os.Stat(p.EffectiveConfigYAML(runID))
-	_, metaErr := os.Stat(p.EffectiveConfigMeta(runID))
+	_, yamlErr := os.Lstat(p.EffectiveConfigYAML(runID))
+	_, metaErr := os.Lstat(p.EffectiveConfigMeta(runID))
 	return errors.Is(yamlErr, os.ErrNotExist) && errors.Is(metaErr, os.ErrNotExist)
 }
 

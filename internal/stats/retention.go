@@ -89,13 +89,19 @@ type MetricInvocation struct {
 // required age and newest-run floors. beforeDelete owns filesystem artifacts;
 // cleanup failures remain durably pending on the immutable metric receipt and
 // are retried on the next pass.
-func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration, keepNewestTerminal int, beforeDelete func(string) error) (int, error) {
+func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration, keepNewestTerminal int, beforeDelete func(string) error, targetSelectors ...func(string) []string) (int, error) {
 	if database == nil {
 		return 0, fmt.Errorf("prune rich run data: database is nil")
 	}
 	var failures []error
-	if _, err := database.CleanupPendingRunArtifacts("", beforeDelete); err != nil {
-		failures = append(failures, err)
+	var targets func(string) []string
+	if len(targetSelectors) > 0 {
+		targets = targetSelectors[0]
+	}
+	if beforeDelete != nil {
+		if _, err := database.CleanupPendingRunArtifacts("", beforeDelete); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	if retentionAge <= 0 {
 		return 0, errors.Join(failures...)
@@ -117,7 +123,11 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 			failures = append(failures, fmt.Errorf("archive run %s metrics: %w", runID, err))
 			continue
 		}
-		archived, err := database.ArchiveRunWithMetricReceipt(record, true, func() error {
+		var artifactTargets []string
+		if targets != nil {
+			artifactTargets = targets(runID)
+		}
+		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, true, artifactTargets, func() error {
 			if beforeDelete == nil {
 				return nil
 			}
@@ -137,7 +147,7 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 // ArchiveRepoRuns preserves every terminal run before its repository record is
 // explicitly removed. Active runs fail closed rather than becoming incomplete
 // immutable receipts.
-func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete func(string) error) (int, error) {
+func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete func(string) error, targetSelectors ...func(string) []string) (int, error) {
 	runs, err := database.GetRunsByRepo(repoID)
 	if err != nil {
 		return 0, err
@@ -156,7 +166,11 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete
 		if err != nil {
 			return archivedCount, err
 		}
-		archived, err := database.ArchiveRunWithMetricReceipt(record, false, func() error {
+		var artifactTargets []string
+		if len(targetSelectors) > 0 {
+			artifactTargets = targetSelectors[0](run.ID)
+		}
+		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, false, artifactTargets, func() error {
 			if beforeDelete == nil {
 				return nil
 			}

@@ -192,6 +192,11 @@ CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
 CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_status_created
     ON run_metric_receipts (run_status, run_created_at DESC, run_id DESC);
 
+CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (
+    run_id TEXT PRIMARY KEY,
+    targets_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS intent_cache (
     cache_key   TEXT PRIMARY KEY,
     summary     TEXT NOT NULL,
@@ -220,6 +225,7 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 1`,
+	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE runs ADD COLUMN refresh_strategy TEXT NOT NULL DEFAULT 'rebase'`,
 	`ALTER TABLE runs ADD COLUMN stacked_on TEXT`,
