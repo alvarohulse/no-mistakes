@@ -10,11 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestConfigExplainRendersCanonicalGatePolicyAsTextAndJSON(t *testing.T) {
@@ -187,6 +190,24 @@ func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testi
 		_ = database.Close()
 		t.Fatal(err)
 	}
+	archivedRun, err := database.InsertRunWithOptions(repo.ID, "archived", "archived-head", "archived-base", db.RunOptions{LegacyResolvedPolicy: true})
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(archivedRun.ID, types.RunCompleted); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	_, archivedReceipt, err := runstats.BuildMetricReceipt(database, archivedRun.ID, time.Now())
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if archived, err := database.ArchiveRunWithMetricReceipt(archivedReceipt, false, nil); err != nil || !archived {
+		_ = database.Close()
+		t.Fatalf("archive run = %t, %v", archived, err)
+	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +260,9 @@ func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testi
 	}
 	if _, err := executeCmd("config", "explain", "--run", legacyRun.ID); err == nil || !strings.Contains(err.Error(), "unavailable for legacy run") {
 		t.Fatalf("legacy config explain error = %v", err)
+	}
+	if _, err := executeCmd("config", "explain", "--run", archivedRun.ID); err == nil || !strings.Contains(err.Error(), "unavailable for archived run") {
+		t.Fatalf("archived config explain error = %v", err)
 	}
 	if _, err := executeCmd("config", "explain", "--run", storedRun.ID, "--format", "json"); err == nil || !strings.Contains(err.Error(), "cannot be used with --run") {
 		t.Fatalf("config explain run format error = %v", err)

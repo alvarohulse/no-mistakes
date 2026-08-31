@@ -42,6 +42,13 @@ func newConfigExplainCmd() *cobra.Command {
 						return fmt.Errorf("get run %q: %w", runID, err)
 					}
 					if run == nil {
+						receipt, receiptErr := database.GetRunMetricReceipt(runID)
+						if receiptErr != nil {
+							return fmt.Errorf("get archived run %q: %w", runID, receiptErr)
+						}
+						if receipt != nil {
+							return fmt.Errorf("effective config unavailable for archived run %q", runID)
+						}
 						return fmt.Errorf("run %q not found", runID)
 					}
 					artifact, _, err := daemon.ReadEffectiveConfigForRun(p, run)
