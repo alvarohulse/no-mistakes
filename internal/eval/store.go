@@ -632,11 +632,35 @@ func ensurePrivateDir(path string) error {
 	return os.Chmod(path, 0o700)
 }
 
+// writePrivateFile publishes owner-only data with a same-directory rename so
+// an interrupted rewrite cannot leave a partially written corpus artifact.
 func writePrivateFile(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	tmpName := tmp.Name()
+	keepTemp := true
+	defer func() {
+		if keepTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	keepTemp = false
+	return nil
 }
 
 func caseComposition(c Case) (language, size, severity string) {
