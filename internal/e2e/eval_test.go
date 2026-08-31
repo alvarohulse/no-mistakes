@@ -5,6 +5,7 @@ package e2e
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -177,12 +178,12 @@ func TestEvalAutoCaptureJourney(t *testing.T) {
 		if err != nil {
 			t.Fatalf("eval sets: %v\n%s", err, out)
 		}
-		if strings.Contains(out, "all: 1 cases") || time.Now().After(deadline) {
+		if regexp.MustCompile(`all\s+1 case\(s\)`).MatchString(out) || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if !strings.Contains(out, "all: 1 cases") {
+	if !regexp.MustCompile(`all\s+1 case\(s\)`).MatchString(out) {
 		t.Fatalf("no eval case was collected without an explicit capture; sets output = %q", out)
 	}
 	t.Logf("eval sets output after an ordinary run:\n%s", out)
