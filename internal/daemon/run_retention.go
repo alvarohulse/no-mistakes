@@ -32,6 +32,7 @@ func removeRichRunArtifacts(p *paths.Paths, evidenceRoot, runID string) error {
 	}
 	legacyRoot := filepath.Join(os.TempDir(), legacyEvidenceDirName)
 	pathsToRemove := []string{
+		p.RunDir(runID),
 		p.RunLogDir(runID),
 		filepath.Join(evidenceRoot, runID),
 	}

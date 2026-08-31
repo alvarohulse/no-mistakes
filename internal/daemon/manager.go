@@ -1205,6 +1205,26 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		return "", err
 	}
 
+	// Allocate the run identity and finish its immutable configuration
+	// artifacts before the run row, worktree, or replacement cancellation can
+	// create launch side effects.
+	runID := db.NewRunID()
+	artifacts, err := renderEffectiveConfigArtifacts(runID, stackedOn, resolved)
+	if err != nil {
+		trackStartFailure("render_effective_config")
+		return "", err
+	}
+	if err := persistEffectiveConfigArtifacts(m.paths, runID, artifacts); err != nil {
+		trackStartFailure("persist_effective_config")
+		return "", err
+	}
+	artifactsOwnedByRun := false
+	defer func() {
+		if !artifactsOwnedByRun {
+			removeEffectiveConfigArtifacts(m.paths, runID)
+		}
+	}()
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -1214,11 +1234,12 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// fallback, so writing it in the same insert avoids ever creating a run that
 	// is missing its guaranteed PR-note content.
 	runOptions.RefreshStrategy = resolved.RefreshStrategy
-	run, err := m.db.InsertRunWithOptions(repo.ID, branch, resolved.HeadSHA, baseSHA, runOptions)
+	run, err := m.db.InsertRunWithIDAndOptions(runID, repo.ID, branch, resolved.HeadSHA, baseSHA, runOptions)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	artifactsOwnedByRun = true
 	if err := resolved.bindTrustedRefToRun(ctx, run.ID); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("persist_trusted_ref")

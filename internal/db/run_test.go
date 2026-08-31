@@ -220,6 +220,30 @@ func TestInsertRunWithOptionsPersistsOpaqueMetadataExactly(t *testing.T) {
 	}
 }
 
+func TestInsertRunWithIDAndOptionsPersistsPreallocatedIdentity(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/preallocated-run", "git@github.com:user/preallocated.git", "main")
+	runID := NewRunID()
+
+	run, err := d.InsertRunWithIDAndOptions(runID, repo.ID, "feature", "head", "base", RunOptions{})
+	if err != nil {
+		t.Fatalf("insert run with preallocated ID: %v", err)
+	}
+	if run.ID != runID {
+		t.Fatalf("returned run ID = %q, want %q", run.ID, runID)
+	}
+	got, err := d.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ID != runID {
+		t.Fatalf("persisted run = %+v, want ID %q", got, runID)
+	}
+	if _, err := d.InsertRunWithIDAndOptions("", repo.ID, "other", "head", "base", RunOptions{}); err == nil {
+		t.Fatal("empty preallocated run ID was accepted")
+	}
+}
+
 func TestInsertRunWithOptions_PersistsRefreshSelection(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/repo-refresh-options", "git@example.com:repo.git", "main")

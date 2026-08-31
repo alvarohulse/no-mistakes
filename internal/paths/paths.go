@@ -65,6 +65,22 @@ func (p *Paths) TelemetryGateFile() string {
 // and eval commands so disabling provenance and auto-capture creates no state.
 func (p *Paths) EvalDir() string { return filepath.Join(p.root, "eval") }
 
+// RunsDir holds immutable owner-local artifacts keyed by run ID. It is
+// separate from logs and worktrees so launch-time evidence can outlive either
+// without entering a repository checkout.
+func (p *Paths) RunsDir() string { return filepath.Join(p.root, "runs") }
+
+// RunDir is the owner-local artifact directory for one run.
+func (p *Paths) RunDir(runID string) string { return filepath.Join(p.RunsDir(), runID) }
+
+func (p *Paths) EffectiveConfigYAML(runID string) string {
+	return filepath.Join(p.RunDir(runID), "effective-config.yaml")
+}
+
+func (p *Paths) EffectiveConfigMeta(runID string) string {
+	return filepath.Join(p.RunDir(runID), "effective-config.meta.json")
+}
+
 // EvidenceDir is the default root for test-evidence artifacts, keyed by run ID
 // underneath it.
 //
@@ -162,6 +178,7 @@ func (p *Paths) EnsureDirs() error {
 		p.root,
 		p.ReposDir(),
 		p.WorktreesDir(),
+		p.RunsDir(),
 		p.LogsDir(),
 		p.ServerPIDsDir(),
 	}

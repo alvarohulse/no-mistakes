@@ -70,6 +70,9 @@ type runPolicyResolution struct {
 	TrustedSHA           string
 	GateDir              string
 	TrustedRef           string
+	Provenance           *effectiveConfigProvenance
+	RefreshProvenance    effectiveConfigProvenanceValue
+	SkipProvenance       effectiveConfigProvenanceValue
 }
 
 type agentRouteResolutionError struct {
@@ -139,6 +142,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		slog.Warn("global config override is active: honoring machine-local repository configuration", "repo_id", repo.ID, "override", override.Key)
 	}
 	allowRepoCommands := trustedInput != nil && trustedInput.Config.AllowRepoCommands
+	provenance := captureEffectiveConfigProvenance(globalInput, pushedInput, trustedInput, override, effectiveRepoConfig, allowRepoCommands)
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "repo_id", repo.ID)
 	} else if pushedConfigUsesDifferentTrustedControls(pushedInput.Config, effectiveRepoConfig) {
@@ -168,6 +172,10 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, fmt.Errorf("resolve managed step plan: %w", err)
 	}
 	resolvedSkips := resolveRunStepSkips(skipped, cfg.ConfiguredSkipSteps)
+	skipProvenance := provenance.value("pipeline.skip_steps")
+	if skipped != nil {
+		skipProvenance = effectiveConfigProvenanceValue{Source: effectiveConfigSourceRunRequest}
+	}
 	if err := validateRunStepSkips(resolvedSkips, execSteps); err != nil {
 		return nil, err
 	}
@@ -190,6 +198,10 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, err
 	}
 	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
+	refreshProvenance := provenance.value("refresh.strategy")
+	if refreshStrategy != "" {
+		refreshProvenance = effectiveConfigProvenanceValue{Source: effectiveConfigSourceRunRequest}
+	}
 	policy, err := resolvedPolicyFromConfigWithSkips(cfg, sources, execSteps, resolvedSkips, resolvedRefreshStrategy, demo)
 	if err != nil {
 		return nil, err
@@ -213,6 +225,9 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		TrustedSHA:           trustedSHA,
 		GateDir:              gateDir,
 		TrustedRef:           trustedRef,
+		Provenance:           provenance,
+		RefreshProvenance:    refreshProvenance,
+		SkipProvenance:       skipProvenance,
 	}
 	keepTrustedRef = true
 	return resolved, nil
