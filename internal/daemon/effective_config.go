@@ -489,7 +489,7 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 			set(fmt.Sprintf("agent.default[%d]", i), fmt.Sprintf("resolved.agent.default[%d]", i))
 		}
 		annotations["agent.step_routes"] = runtimeValue
-		annotations["agent.review_candidates"] = runtimeValue
+		annotations["agent.review_candidates"] = effectiveConfigProvenanceFromConfig(ledger.Value("resolved.agent.review_candidates"))
 		for step := range document.Agent.StepRoutes {
 			prefix := "agent.step_routes." + string(step)
 			resolvedPrefix := "resolved." + prefix
@@ -833,7 +833,7 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	} else if !os.IsNotExist(statErr) {
 		return fmt.Errorf("persist effective config: inspect run artifact directory: %w", statErr)
 	}
-	if err := os.Rename(tempDir, p.RunDir(runID)); err != nil {
+	if err := publishEffectiveConfigDirectory(tempDir, p.RunDir(runID)); err != nil {
 		return fmt.Errorf("persist effective config atomically: %w", err)
 	}
 	renamed = true

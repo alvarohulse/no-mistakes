@@ -635,7 +635,25 @@ func (p *EffectiveConfigProvenance) replaceRepoLayer(cfg *RepoConfig, source str
 			}
 			p.setSubtree(path, value)
 		}
+		for _, platform := range []string{"linux", "macos", "windows"} {
+			path := root + "." + platform
+			if declared[path] && !hasEffectiveConfigPath(p, path) {
+				p.setSubtree(path, value)
+			}
+		}
 	}
+}
+
+func hasEffectiveConfigPath(p *EffectiveConfigProvenance, path string) bool {
+	if p == nil {
+		return false
+	}
+	for candidate := range p.values {
+		if candidate == path || strings.HasPrefix(candidate, path+".") {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesEffectiveConfigPrefix(path string, prefixes []string) bool {
