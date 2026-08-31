@@ -203,20 +203,6 @@ func ownedPatchesForPRContent(content prContent, bodyLimit int) (prbody.PatchSet
 		Version:  prbody.PatchVersion,
 		Sections: []prbody.SectionPatch{{ID: "generated", Content: ""}},
 	})
-	if err == nil && disclosure != "" {
-		disclosureDocument, disclosureErr := prbody.NewOwnedDocument(prbody.PatchSet{
-			Version:  prbody.PatchVersion,
-			Sections: []prbody.SectionPatch{{ID: "generated", Content: disclosure}},
-		})
-		if disclosureErr != nil {
-			return prbody.PatchSet{}, disclosureErr
-		}
-		budget := maxPullRequestBodyBytes - len(disclosureDocument) - len("\n\n")
-		if budget < 0 {
-			budget = 0
-		}
-		body = truncateTextAtLineBoundary(body, budget, essentialPRBodyTruncationMarker())
-	}
 	if err == nil {
 		if bodyLimit > 0 {
 			budget := bodyLimit - scm.PRBodyLen(empty)
