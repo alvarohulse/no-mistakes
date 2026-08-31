@@ -105,7 +105,9 @@ The daemon renders, validates, and atomically writes both artifacts after
 preflight but before replacing an active run, inserting a run row, or creating
 a worktree. A serialization, completeness, integrity, size, or write failure
 leaves no run artifact directory, run row, or worktree. Run retention removes
-these artifacts with the run's other rich local data.
+these artifacts with the run's other rich local data; pinning the run preserves
+both files. The long-lived metric receipt retains neither artifact content nor
+artifact digests.
 
 Event delivery is bounded, so a slow or wedged client can never stall a run. Under pressure the daemon may drop ordinary log output, but it never silently loses a state change: it coalesces those into a single gap signal, and the TUI and `axi` respond by re-reading authoritative run state. A live view can therefore skip log lines while it is behind, but it converges on the run's real state. After a dropped connection, the TUI retries with a bounded delay and reconciles when it reattaches; if the daemon remains unavailable, it surfaces the connection error instead of retrying forever.
 
@@ -137,6 +139,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Requires runs launched with resolved-policy v9 or newer to retain a supported, integrity-matched effective-config YAML and sidecar before any current configuration is read. Missing, corrupt, or mismatched artifacts fail the parked run with the specific recovery reason; the daemon never regenerates them from files that may have changed. Older runs retain legacy recovery behavior.
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard

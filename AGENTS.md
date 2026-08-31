@@ -67,7 +67,7 @@ Safest local verification sequence after non-trivial changes:
 **Filesystem and Paths**
 
 - Use `filepath.Join`; respect `NM_HOME` for app state; directories are `0o755` and files `0o644` by convention, except the effective-config `runs/` container, artifact, and staging directories, which are owner-only (`0o700` on Unix), and their files, which are owner-only (`0o600` on Unix). Windows uses protected owner-only ACLs for both.
-- Every newly launched run must have complete, immutable effective-config YAML and integrity metadata before cancellation, run insertion, or worktree creation; failures leave no partial run artifact. `internal/config/effective_config.go` owns provenance-aware resolution; `internal/daemon/effective_config.go` and their tests own rendering, publication, validation, and cleanup. User-facing behavior is in the daemon concept guide.
+- Every newly launched run must have complete, immutable effective-config YAML and integrity metadata before cancellation, run insertion, or worktree creation; failures leave no partial run artifact. Resolved-policy v9 and newer requires those artifacts for restart recovery before any driftable config read; older runs are never backfilled. `internal/config/effective_config.go` owns provenance-aware resolution, `internal/effectiveconfig` owns stored-artifact validation, and `internal/daemon/effective_config.go` owns rendering, publication, and cleanup. User-facing behavior is in the daemon concept guide.
 - On macOS, path comparisons may need symlink resolution (`/var` vs `/private/var`).
 
 **Git on Bare Gate Repos (`safe.bareRepository`)**

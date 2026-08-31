@@ -181,6 +181,7 @@ For older active runs with no recorded activity timestamp, AXI falls back to the
 Gate summaries and finding descriptions are bounded in this default status view; truncated values disclose their original length, and the gate help points to `no-mistakes axi logs --step <step> --full` for the complete step log.
 Relevant current-branch states also include a cached `branch_sync` object with full SHAs, the run's status, the persisted pipeline push binding, target kind and ref, relation, safety result, PR lifecycle, and a structured next action.
 Cached home and status rendering performs no network read and labels the remote observation `pipeline_push`; only explicit sync check or apply reports `live` freshness.
+The run object also reports `effective_config`: an absolute owner-local path when a validated stored artifact exists, `unavailable (legacy run)` when an older run has no required artifact, or a specific unavailable state when a required or optional stored artifact is invalid. Status never reconstructs the snapshot from current configuration.
 
 ## no-mistakes axi sync
 
@@ -398,11 +399,14 @@ Resolve the policy that the current branch would use without creating a run or w
 
 ```sh
 no-mistakes config explain [--format text|json]
+no-mistakes config explain --run <id>
 ```
 
 The command asks the daemon to read the current branch head from the registered bare gate, freshly pin the trusted default branch, apply the global config and matching override, resolve available agent routes in the daemon's environment, and emit the canonical policy contract persisted for a run. It starts the daemon when needed, but does not run preflight, create a run or worktree, write run launch artifacts, run hooks, or construct agents. Because resolution fetches trusted policy and refreshes registered routing, recursive gate-execution containment refuses this command from an active validation step.
 
 Text is the default. `--format json` emits a compact envelope containing `policy_digest` and the exact canonical `policy` object. The policy includes ordered enabled/skipped steps, effective commands, routes, runner identity, budgets, settings, the trusted commit, and contributing config sources with their kind, ref, and SHA-256 digest. It does not include the per-field YAML provenance annotations recorded only for a successfully started run.
+
+`--run <id>` instead reads and validates that run's immutable `effective-config.yaml` and sidecar, then writes the exact stored YAML bytes. It does not start the daemon, inspect the checkout, fetch a ref, or re-resolve current global, repository, runner, or agent inputs. `--format` cannot be combined with `--run`. Runs created before effective-config artifacts became a recovery requirement report the snapshot unavailable when no intact stored artifact exists; archived runs no longer retain it.
 
 ## no-mistakes eval
 

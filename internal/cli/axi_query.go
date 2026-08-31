@@ -12,6 +12,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -127,6 +128,19 @@ func runStateFingerprint(rv runView) string {
 func annotateRunView(env *axiEnv, rv *runView) {
 	if env == nil || rv == nil {
 		return
+	}
+	if run, err := env.d.GetRun(rv.ID); err == nil && run != nil {
+		artifact, required, artifactErr := daemon.ReadEffectiveConfigForRun(env.p, run)
+		switch {
+		case artifact != nil:
+			rv.EffectiveConfig = env.p.EffectiveConfigYAML(run.ID)
+		case artifactErr != nil && required:
+			rv.EffectiveConfig = "unavailable (required artifact invalid: " + artifactErr.Error() + ")"
+		case artifactErr != nil:
+			rv.EffectiveConfig = "unavailable (legacy artifact invalid: " + artifactErr.Error() + ")"
+		default:
+			rv.EffectiveConfig = "unavailable (legacy run)"
+		}
 	}
 	quietWarning := configQuietWarning(env)
 	for i := range rv.Steps {

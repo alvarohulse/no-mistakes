@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -125,6 +126,125 @@ func TestConfigExplainRejectsUnknownFormat(t *testing.T) {
 	}
 }
 
+func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	repoDir := setupTestRepo(t)
+	configYAML := "commands:\n  build: echo launch-value\n"
+	if err := os.WriteFile(filepath.Join(repoDir, ".no-mistakes.yaml"), []byte(configYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repoDir, "git", "add", ".no-mistakes.yaml")
+	run(t, repoDir, "git", "commit", "-m", "configure launch policy")
+	branch := commandOutput(t, repoDir, "git", "branch", "--show-current")
+	run(t, repoDir, "git", "push", "origin", "HEAD:refs/heads/"+branch)
+
+	p := paths.WithRoot(os.Getenv("NM_HOME"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _, err := gate.Init(context.Background(), database, p, repoDir)
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run(t, "", "git", "--git-dir="+p.RepoDir(repo.ID), "fetch", repoDir, "+HEAD:refs/heads/"+branch)
+	setSafeBareRepositoryExplicitForCLITest(t)
+
+	policyOutput, err := executeCmd("config", "explain", "--format", "json")
+	if err != nil {
+		t.Fatalf("resolve launch policy: %v", err)
+	}
+	var envelope struct {
+		PolicyDigest string          `json:"policy_digest"`
+		Policy       json.RawMessage `json:"policy"`
+	}
+	if err := json.Unmarshal([]byte(policyOutput), &envelope); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedRun, err := database.InsertRun(repo.ID, branch, "head", "base")
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunResolvedPolicy(storedRun.ID, string(envelope.Policy), envelope.PolicyDigest); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	legacyRun, err := database.InsertRunWithOptions(repo.ID, "legacy", "legacy-head", "legacy-base", db.RunOptions{LegacyResolvedPolicy: true})
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	storedYAML := []byte("build: echo launch-value # source=trusted; is_default=false\n")
+	writeStoredEffectiveConfigForCLITest(t, p, storedRun.ID, envelope.PolicyDigest, storedYAML)
+	if err := os.WriteFile(filepath.Join(repoDir, ".no-mistakes.yaml"), []byte("commands:\n  build: echo drifted-value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repoDir, "git", "add", ".no-mistakes.yaml")
+	run(t, repoDir, "git", "commit", "-m", "change current policy")
+	run(t, repoDir, "git", "push", "origin", "HEAD:refs/heads/"+branch)
+	run(t, "", "git", "--git-dir="+p.RepoDir(repo.ID), "fetch", repoDir, "+HEAD:refs/heads/"+branch)
+
+	output, err := executeCmd("config", "explain", "--run", storedRun.ID)
+	if err != nil {
+		t.Fatalf("config explain --run: %v", err)
+	}
+	if output != string(storedYAML) {
+		t.Fatalf("stored explain output = %q, want exact stored YAML %q", output, storedYAML)
+	}
+
+	statusOutput, err := executeCmd("axi", "status", "--run", storedRun.ID)
+	if err != nil {
+		t.Fatalf("axi status stored run: %v\n%s", err, statusOutput)
+	}
+	if !strings.Contains(statusOutput, "effective_config: "+p.EffectiveConfigYAML(storedRun.ID)) {
+		t.Fatalf("axi status omitted effective config path:\n%s", statusOutput)
+	}
+	if err := os.WriteFile(p.EffectiveConfigYAML(storedRun.ID), append(storedYAML, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeCmd("config", "explain", "--run", storedRun.ID); err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("corrupt config explain error = %v", err)
+	}
+	corruptStatus, err := executeCmd("axi", "status", "--run", storedRun.ID)
+	if err != nil {
+		t.Fatalf("axi status corrupt stored run: %v\n%s", err, corruptStatus)
+	}
+	if !strings.Contains(corruptStatus, "effective_config: \"unavailable (required artifact invalid:") || !strings.Contains(corruptStatus, "integrity") {
+		t.Fatalf("axi status omitted required corrupt state:\n%s", corruptStatus)
+	}
+
+	legacyStatus, err := executeCmd("axi", "status", "--run", legacyRun.ID)
+	if err != nil {
+		t.Fatalf("axi status legacy run: %v\n%s", err, legacyStatus)
+	}
+	if !strings.Contains(legacyStatus, "effective_config: unavailable (legacy run)") {
+		t.Fatalf("axi status omitted legacy unavailability:\n%s", legacyStatus)
+	}
+	if _, err := executeCmd("config", "explain", "--run", legacyRun.ID); err == nil || !strings.Contains(err.Error(), "unavailable for legacy run") {
+		t.Fatalf("legacy config explain error = %v", err)
+	}
+	if _, err := executeCmd("config", "explain", "--run", storedRun.ID, "--format", "json"); err == nil || !strings.Contains(err.Error(), "cannot be used with --run") {
+		t.Fatalf("config explain run format error = %v", err)
+	}
+}
+
 func commandOutput(t *testing.T, dir, name string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -149,4 +269,26 @@ func setSafeBareRepositoryExplicitForCLITest(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
 	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+}
+
+func writeStoredEffectiveConfigForCLITest(t *testing.T, p *paths.Paths, runID, policyDigest string, yamlBytes []byte) {
+	t.Helper()
+	if err := os.MkdirAll(p.RunDir(runID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(yamlBytes)
+	metaBytes, err := json.Marshal(effectiveconfig.Metadata{
+		SchemaVersion: effectiveconfig.SchemaVersion, RunID: runID, PolicyDigest: policyDigest,
+		YAMLSHA256: hex.EncodeToString(digest[:]), BinaryVersion: "test", BinaryBuildSHA: "test",
+		Generator: effectiveconfig.Generator, GeneratorSchema: effectiveconfig.SchemaVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.EffectiveConfigYAML(runID), yamlBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.EffectiveConfigMeta(runID), metaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

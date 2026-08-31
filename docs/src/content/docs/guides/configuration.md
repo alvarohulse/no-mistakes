@@ -65,6 +65,10 @@ The rest of this page covers only the cross-cutting rules that involve both file
 
 Machine-local overrides bind by `<owner>/<repo>` key against the registered upstream repository's normalized identity. Runs with a matching entry record the contributing global, branch, trusted-default, and global-override sources by digest. Full digests, the matched key, and the config path remain local; the PR Pipeline section publishes only generic labels and short digest prefixes so reviewers can see that inputs changed without exposing machine paths.
 
+## Inspect current and stored configuration
+
+Use `no-mistakes config explain` to resolve what the current gate branch would use now. Use `no-mistakes config explain --run <id>` when investigating a run: it prints that run's validated owner-local YAML snapshot exactly and never substitutes current files for missing history. `no-mistakes axi status --run <id>` reports the snapshot path or an explicit unavailable state. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-config-explain) owns command details; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does) owns storage, integrity, recovery, and retention.
+
 ## House rules for part of the tree
 
 Most review guidance belongs in the repository's own agent instructions, which every gate agent already reads. Use `review.path_instructions` for the rules that apply to only part of the tree: each entry pairs a path glob with guidance, and the review step appends only the entries whose glob matches a file the change actually touched, each labelled with the path and files it was selected for. A branch that matches nothing, or a repo with nothing configured, gets the review prompt it would get without the setting.
