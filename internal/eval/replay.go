@@ -494,7 +494,11 @@ func replayConfig(c Case) (*config.Config, error) {
 		return nil, fmt.Errorf("read captured replay config: %w", err)
 	}
 
-	global, err := config.LoadGlobal(filepath.Join(c.Dir, "config", "global.yaml"))
+	globalBytes, err := os.ReadFile(filepath.Join(c.Dir, "config", "global.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("load captured global config: %w", err)
+	}
+	global, err := config.LoadPersistedGlobalFromBytes(globalBytes)
 	if err != nil {
 		return nil, fmt.Errorf("load captured global config: %w", err)
 	}

@@ -75,8 +75,8 @@ const (
 	DefaultEvalDiversifiedSize = 32
 	// DefaultEvidenceRetention is the minimum run age from creation before
 	// terminal rich data becomes eligible for pruning. It is comfortably longer
-	// than typical PR review latency. A PR body can identify artifacts by local
-	// path while they remain owner-local. This is no-mistakes' own budget: the
+	// than typical PR review latency. PR bodies no longer carry local artifact
+	// locators while those artifacts remain owner-local. This is no-mistakes' own budget: the
 	// point of owning it is that no OS temp
 	// timer decides when a user's screenshots disappear.
 	DefaultEvidenceRetention = 14 * 24 * time.Hour
@@ -3271,6 +3271,46 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	return cfg, nil
 }
 
+// LoadPersistedGlobalFromBytes reads historical global config snapshots after
+// removing evidence publisher settings retired by a later schema.
+func LoadPersistedGlobalFromBytes(data []byte) (*GlobalConfig, error) {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse persisted global config: %w", err)
+	}
+	removeRetiredEvidenceKeys(raw)
+	normalized, err := yaml.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("serialize persisted global config: %w", err)
+	}
+	return LoadGlobalFromBytes(normalized)
+}
+
+func removeRetiredEvidenceKeys(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "store_in_repo" || key == "dir" || key == "branch" {
+				delete(typed, key)
+				continue
+			}
+			removeRetiredEvidenceKeys(child)
+		}
+	case map[any]any:
+		for key, child := range typed {
+			if name, ok := key.(string); ok && (name == "store_in_repo" || name == "dir" || name == "branch") {
+				delete(typed, key)
+				continue
+			}
+			removeRetiredEvidenceKeys(child)
+		}
+	case []any:
+		for _, child := range typed {
+			removeRetiredEvidenceKeys(child)
+		}
+	}
+}
+
 // parseCITimeout interprets the ci_timeout config value. The keyword
 // "unlimited" (also "none"/"off"/"never"), or any non-positive duration,
 // resolves to CITimeoutUnlimited so the monitor never self-terminates;
@@ -3704,7 +3744,7 @@ func validateTestRaw(test TestRaw) error {
 	// gate repository, so a relative path would resolve somewhere the operator
 	// never named - and evidence would silently scatter instead of landing
 	// where they asked. Surface the mistake in the config rather than at run
-	// time. Like branch, this also validates the PUSHED copy even though the
+	// time. This also validates the PUSHED copy even though the
 	// value is honored only from the global config: a branch carrying an
 	// invalid value has to fail before it merges.
 	if test.Evidence.LocalRoot != nil {
