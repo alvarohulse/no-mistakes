@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -254,6 +255,46 @@ func TestPersistEffectiveConfigArtifactsRemovesPartialStagingOnIntegrityFailure(
 		t.Fatalf("persist integrity error = %v", err)
 	}
 	assertNoEffectiveConfigArtifacts(t, p)
+}
+
+func TestReapEffectiveConfigArtifactDirsRemovesCrashOrphans(t *testing.T) {
+	f := newEvidenceFixture(t)
+	if err := os.MkdirAll(f.p.RunsDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := f.db.InsertRun(f.repo.ID, "retained", "head-retained", "base-retained")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	pathsByState := map[string]string{
+		"retained":      f.p.RunDir(retained.ID),
+		"orphan-final":  f.p.RunDir("01M1ORPHANEDFINALARTIFACT00"),
+		"stale-staging": filepath.Join(f.p.RunsDir(), ".01M1STALE-staging"),
+		"new-staging":   filepath.Join(f.p.RunsDir(), ".01M1NEW-staging"),
+	}
+	for state, path := range pathsByState {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("create %s directory: %v", state, err)
+		}
+	}
+	stale := now.Add(-effectiveConfigStagingMaxAge - time.Minute)
+	if err := os.Chtimes(pathsByState["stale-staging"], stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	reapEffectiveConfigArtifactDirs(f.db, f.p, now)
+
+	for _, state := range []string{"retained", "new-staging"} {
+		if _, err := os.Stat(pathsByState[state]); err != nil {
+			t.Fatalf("%s directory was not preserved: %v", state, err)
+		}
+	}
+	for _, state := range []string{"orphan-final", "stale-staging"} {
+		if _, err := os.Stat(pathsByState[state]); !os.IsNotExist(err) {
+			t.Fatalf("%s directory survived crash cleanup: %v", state, err)
+		}
+	}
 }
 
 func readOwnerOnlyArtifact(t *testing.T, path string) []byte {
