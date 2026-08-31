@@ -203,7 +203,7 @@ func effectiveRepoSelectionForPath(path string) effectiveRepoSource {
 	}
 	trustedOnly := []string{
 		"refresh.strategy", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci",
-		"ci.rerun_transient", "test.evidence.branch", "pipeline.skip_steps", "allow_repo_commands",
+		"ci.rerun_transient", "pipeline.skip_steps", "allow_repo_commands",
 	}
 	for _, prefix := range trustedOnly {
 		if path == prefix || strings.HasPrefix(path, prefix+".") {
@@ -228,8 +228,8 @@ func effectiveConfigKnownInputPaths() []string {
 		"managed", "runner.executable", "runner.args", "agent", "preflight", "hooks.post_worktree", "hooks.pr_body",
 		"acpx_path", "acp_registry_overrides", "agent_path_override", "agent_args_override", "ci_timeout", "step_quiet_warning",
 		"process_termination_grace", "log_level", "session_reuse", "ignore_patterns", "ci.rerun_transient", "commit.fix_message",
-		"intent.enabled", "intent.threshold", "intent.slack_days", "intent.disabled_readers", "test.evidence.store_in_repo",
-		"test.evidence.dir", "test.evidence.branch", "test.evidence.local_root", "test.evidence.retention", "test.evidence.max_runs",
+		"intent.enabled", "intent.threshold", "intent.slack_days", "intent.disabled_readers", "test.evidence.local_root",
+		"test.evidence.retention", "test.evidence.max_runs",
 		"document.instructions", "review.path_instructions", "refresh.strategy", "pipeline.skip_steps", "disable_project_settings", "no_ci",
 	}
 	for _, prefix := range []string{"auto_fix", "eval", "prompts"} {
@@ -413,12 +413,9 @@ type effectiveTestDocument struct {
 }
 
 type effectiveEvidenceDocument struct {
-	StoreInRepo bool   `yaml:"store_in_repo"`
-	Dir         string `yaml:"dir"`
-	Branch      string `yaml:"branch"`
-	LocalRoot   string `yaml:"local_root"`
-	Retention   string `yaml:"retention"`
-	MaxRuns     int    `yaml:"max_runs"`
+	LocalRoot string `yaml:"local_root"`
+	Retention string `yaml:"retention"`
+	MaxRuns   int    `yaml:"max_runs"`
 }
 
 type effectiveDocumentDocument struct {
@@ -550,7 +547,7 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		CI:                     effectiveCIDocument{RerunTransient: cfg.CI.RerunTransient},
 		Commit:                 effectiveCommitDocument{FixMessage: cfg.Commit.FixMessage},
 		Intent:                 effectiveIntentDocument{Enabled: cfg.Intent.Enabled, Threshold: cfg.Intent.Threshold, SlackDays: cfg.Intent.SlackDays, DisabledReaders: disabledReaders},
-		Test:                   effectiveTestDocument{Evidence: effectiveEvidenceDocument{StoreInRepo: cfg.Test.Evidence.StoreInRepo, Dir: cfg.Test.Evidence.Dir, Branch: cfg.Test.Evidence.Branch, LocalRoot: cfg.Test.Evidence.LocalRoot, Retention: cfg.Test.Evidence.Retention.String(), MaxRuns: cfg.Test.Evidence.MaxRuns}},
+		Test:                   effectiveTestDocument{Evidence: effectiveEvidenceDocument{LocalRoot: cfg.Test.Evidence.LocalRoot, Retention: cfg.Test.Evidence.Retention.String(), MaxRuns: cfg.Test.Evidence.MaxRuns}},
 		Document:               effectiveDocumentDocument{Instructions: cfg.Document.Instructions},
 		Review:                 effectiveReviewDocument{PathInstructions: append([]config.PathInstruction(nil), cfg.Review.PathInstructions...)},
 		Eval:                   effectiveEvalDocument{CaptureProvenance: cfg.Eval.CaptureProvenance, AutoCapture: cfg.Eval.AutoCapture, MaxCases: cfg.Eval.MaxCases, DiversifiedSize: cfg.Eval.DiversifiedSize},
@@ -628,9 +625,6 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 		set("intent."+field, "intent."+field)
 	}
 	set("intent.disabled_readers", "intent.disabled_readers")
-	set("test.evidence.store_in_repo", "test.evidence.store_in_repo")
-	set("test.evidence.dir", "test.evidence.dir")
-	set("test.evidence.branch", "test.evidence.branch")
 	for _, field := range []string{"local_root", "retention", "max_runs"} {
 		setGlobal("test.evidence." + field)
 	}
