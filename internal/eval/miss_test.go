@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -194,5 +196,46 @@ func TestParsePostPRMissFindingRequiresIDAndDescription(t *testing.T) {
 	raw, _ := json.Marshal(got)
 	if got.Kind != GoldFalseNegative || got.Source != goldSourcePostPRMiss || got.ID != "fn-1" {
 		t.Fatalf("parsed = %s", raw)
+	}
+}
+
+func TestParsePostPRMissFindingValidatesSeverityAndAction(t *testing.T) {
+	for _, severity := range []string{"error", "warning", "info", "  Warning  "} {
+		raw := `{"id":"fn-1","description":"a miss","severity":` + strconv.Quote(severity) + `}`
+		got, err := ParsePostPRMissFinding(raw)
+		if err != nil {
+			t.Fatalf("severity %q: %v", severity, err)
+		}
+		if got.Severity != strings.ToLower(strings.TrimSpace(severity)) {
+			t.Fatalf("severity %q parsed to %q, want normalized review vocabulary", severity, got.Severity)
+		}
+	}
+
+	for _, raw := range []string{
+		`{"id":"fn-1","description":"a miss","severity":"blocking-correctness-defect"}`,
+		`{"id":"fn-1","description":"a miss","severity":"none"}`,
+		`{"id":"fn-1","description":"a miss","severity":"P1"}`,
+	} {
+		if _, err := ParsePostPRMissFinding(raw); err == nil {
+			t.Fatalf("%s: expected an error for severity outside the Review vocabulary", raw)
+		}
+	}
+
+	for _, action := range []string{"auto-fix", "ask-user", "no-op"} {
+		raw := `{"id":"fn-1","description":"a miss","action":` + strconv.Quote(action) + `}`
+		if _, err := ParsePostPRMissFinding(raw); err != nil {
+			t.Fatalf("action %q: %v", action, err)
+		}
+	}
+	if _, err := ParsePostPRMissFinding(`{"id":"fn-1","description":"a miss","action":"requires-human-review"}`); err == nil {
+		t.Fatal("expected an error for action outside the finding vocabulary")
+	}
+
+	got, err := ParsePostPRMissFinding(`{"id":"fn-1","description":"a miss"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Severity != "error" || got.Action != "" {
+		t.Fatalf("parsed = %+v, want default error severity and no action", got)
 	}
 }

@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -12,6 +13,37 @@ const (
 	ActionAutoFix = "auto-fix"
 	ActionAskUser = "ask-user"
 )
+
+const (
+	FindingSeverityError   = "error"
+	FindingSeverityWarning = "warning"
+	FindingSeverityInfo    = "info"
+)
+
+var (
+	knownFindingSeverities = []string{FindingSeverityError, FindingSeverityWarning, FindingSeverityInfo}
+	knownFindingActions    = []string{ActionAutoFix, ActionAskUser, ActionNoOp}
+)
+
+func NormalizeFindingSeverity(severity string) string {
+	return strings.ToLower(strings.TrimSpace(severity))
+}
+
+func NormalizeFindingAction(action string) string {
+	return strings.ToLower(strings.TrimSpace(action))
+}
+
+func IsKnownFindingSeverity(severity string) bool {
+	return slices.Contains(knownFindingSeverities, NormalizeFindingSeverity(severity))
+}
+
+func IsKnownFindingAction(action string) bool {
+	return slices.Contains(knownFindingActions, NormalizeFindingAction(action))
+}
+
+func KnownFindingSeverities() []string { return slices.Clone(knownFindingSeverities) }
+
+func KnownFindingActions() []string { return slices.Clone(knownFindingActions) }
 
 // Finding source constants. An empty Source is treated as agent-produced.
 const (
