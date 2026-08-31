@@ -82,6 +82,24 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 }
 
 func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
+	body, err := a.messageBody(prompt, schema)
+	if err != nil {
+		return nil, err
+	}
+
+	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp opencodeMessageResponse
+	if err := json.Unmarshal(respBytes, &resp); err != nil {
+		return nil, fmt.Errorf("opencode message parse: %w", err)
+	}
+	return &resp, nil
+}
+
+func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) (map[string]any, error) {
 	body := map[string]any{
 		"role":  "user",
 		"parts": []map[string]string{{"type": "text", "text": prompt}},
@@ -96,6 +114,9 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 			"modelID":    modelID,
 		}
 	}
+	if a.effort != "" {
+		body["variant"] = string(a.effort)
+	}
 	if len(schema) > 0 {
 		body["format"] = map[string]any{
 			"type":       "json_schema",
@@ -104,16 +125,7 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 		}
 	}
 
-	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, body)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp opencodeMessageResponse
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return nil, fmt.Errorf("opencode message parse: %w", err)
-	}
-	return &resp, nil
+	return body, nil
 }
 
 func (a *opencodeAgent) abortSession(baseURL, sessionID string) {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +66,54 @@ func stripPort(host string) string {
 		}
 	}
 	return host
+}
+
+// RepoPath extracts a repository path from a git remote or web URL. Nested
+// namespaces are preserved. Azure DevOps remotes use project/repository.
+func RepoPath(remoteURL string) string {
+	raw := strings.TrimSpace(remoteURL)
+	if raw == "" {
+		return ""
+	}
+	host := ExtractHost(raw)
+	switch {
+	case strings.Contains(raw, "://"):
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return ""
+		}
+		raw = u.Path
+	case strings.Contains(raw, ":"):
+		colon := strings.IndexByte(raw, ':')
+		if colon <= 0 || strings.Contains(raw[:colon], "/") {
+			return ""
+		}
+		raw = raw[colon+1:]
+	}
+	parts := strings.Split(strings.Trim(raw, "/"), "/")
+	clean := parts[:0]
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			clean = append(clean, part)
+		}
+	}
+	parts = clean
+	if len(parts) == 0 {
+		return ""
+	}
+	azure := host == "dev.azure.com" || host == "ssh.dev.azure.com" || strings.HasSuffix(host, ".visualstudio.com")
+	if azure {
+		for i, part := range parts {
+			if strings.EqualFold(part, "_git") && i > 0 && i+1 < len(parts) {
+				return parts[i-1] + "/" + strings.TrimSuffix(parts[i+1], ".git")
+			}
+		}
+	}
+	if (host == "ssh.dev.azure.com" || host == "vs-ssh.visualstudio.com") && len(parts) >= 4 && strings.EqualFold(parts[0], "v3") {
+		return parts[len(parts)-2] + "/" + strings.TrimSuffix(parts[len(parts)-1], ".git")
+	}
+	parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	return strings.Join(parts, "/")
 }
 
 // ExtractPRNumber returns the trailing numeric segment from a PR/MR URL.

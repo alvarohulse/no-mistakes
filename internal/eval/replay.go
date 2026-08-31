@@ -26,11 +26,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// ReplayOptions controls one isolated candidate comparison.
+// ReplayOptions controls one isolated candidate comparison. Optional callbacks
+// observe the immutable plan and each result after it has been persisted.
 type ReplayOptions struct {
 	Set       string
 	Candidate Candidate
 	Repeats   int
+	OnPlan    func(session Session, cases []Case)
+	OnResult  func(evaluation Evaluation, completed, total int)
 }
 
 // Session records the immutable local plan used for one replay batch.
@@ -60,7 +63,7 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 	if opts.Repeats <= 0 {
 		return Session{}, nil, fmt.Errorf("repeats must be at least 1")
 	}
-	if _, err := candidateModelArgs(opts.Candidate); err != nil {
+	if err := opts.Candidate.Validate(); err != nil {
 		return Session{}, nil, err
 	}
 	cases, session, err := store.prepareReplay(ctx, opts)
@@ -75,7 +78,11 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 		store.releaseReplayReservation(session.ID)
 	}()
 
-	evaluations := make([]Evaluation, 0, len(cases)*opts.Repeats)
+	if opts.OnPlan != nil {
+		opts.OnPlan(session, cases)
+	}
+	total := len(cases) * opts.Repeats
+	evaluations := make([]Evaluation, 0, total)
 	var failed int
 	for repeat := 1; repeat <= opts.Repeats; repeat++ {
 		for _, c := range cases {
@@ -87,6 +94,9 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 				return session, evaluations, err
 			}
 			evaluations = append(evaluations, evaluation)
+			if opts.OnResult != nil {
+				opts.OnResult(evaluation, len(evaluations), total)
+			}
 		}
 	}
 	if failed > 0 {
@@ -246,14 +256,11 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	cfg.Agent = candidate.Agent
 	cfg.Agents = []types.AgentName{candidate.Agent}
 
-	modelArgs, err := candidateModelArgs(candidate)
-	if err != nil {
-		evaluation.Error = safeurl.RedactText(err.Error())
-		evaluation.CompletedAt = time.Now().Unix()
-		return evaluation
-	}
-	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), modelArgs, agent.Options{
+	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), nil, agent.Options{
 		ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
+		Model:                   candidate.Model,
+		Vendor:                  candidate.Vendor,
+		Effort:                  candidate.Effort,
 		DisableProjectSettings:  cfg.DisableProjectSettings,
 		ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 	})
@@ -511,16 +518,6 @@ func replayConfig(c Case) (*config.Config, error) {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
 	return config.Merge(global, repo), nil
-}
-
-func candidateModelArgs(candidate Candidate) ([]string, error) {
-	if _, ok := types.ACPTargetFor(candidate.Agent); ok {
-		return nil, fmt.Errorf("candidate agent %q cannot enforce an explicit model", candidate.Agent)
-	}
-	if candidate.Agent == types.AgentCodex {
-		return []string{"-m", candidate.Model}, nil
-	}
-	return []string{"--model", candidate.Model}, nil
 }
 
 type observedAgent struct {

@@ -5,6 +5,7 @@ package e2e
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -80,12 +81,12 @@ func TestEvalJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval sets: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "LOCAL-ONLY EVAL CASE SETS") || !strings.Contains(out, "diversified:") {
+	if !strings.Contains(out, "eval case sets") || !strings.Contains(out, "Diversified holdout") {
 		t.Fatalf("sets output = %q", out)
 	}
 	t.Logf("eval sets output:\n%s", out)
 
-	out, err = h.Run("eval", "run", "--cases", "all", "--candidate", "claude+claude-opus-5", "--repeats", "1")
+	out, err = h.Run("eval", "run", "--cases", "all", "--candidate", "claude,model=claude-opus-5,vendor=anthropic", "--repeats", "1")
 	if err != nil {
 		report, reportErr := h.Run("eval", "report")
 		t.Fatalf("eval run: %v\n%s\neval report after failure (%v):\n%s", err, out, reportErr, report)
@@ -107,7 +108,7 @@ func TestEvalJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval report: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "LOCAL-ONLY EVAL REPORT") || !strings.Contains(out, "claude+claude-opus-5") || !strings.Contains(out, "unlabeled / pending") || !strings.Contains(out, "queued unmatched candidate findings: 1") {
+	if !strings.Contains(out, "LOCAL-ONLY EVAL REPORT") || !strings.Contains(out, "claude,model=claude-opus-5,vendor=anthropic") || !strings.Contains(out, "unlabeled / pending") || !strings.Contains(out, "queued unmatched candidate findings: 1") {
 		t.Fatalf("report output = %q", out)
 	}
 	t.Logf("eval report output:\n%s", out)
@@ -177,12 +178,12 @@ func TestEvalAutoCaptureJourney(t *testing.T) {
 		if err != nil {
 			t.Fatalf("eval sets: %v\n%s", err, out)
 		}
-		if strings.Contains(out, "all: 1 cases") || time.Now().After(deadline) {
+		if regexp.MustCompile(`all\s+1 case\(s\)`).MatchString(out) || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if !strings.Contains(out, "all: 1 cases") {
+	if !regexp.MustCompile(`all\s+1 case\(s\)`).MatchString(out) {
 		t.Fatalf("no eval case was collected without an explicit capture; sets output = %q", out)
 	}
 	t.Logf("eval sets output after an ordinary run:\n%s", out)

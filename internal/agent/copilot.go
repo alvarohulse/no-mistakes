@@ -22,6 +22,7 @@ type copilotAgent struct {
 	bin                     string
 	extraArgs               []string
 	model                   string
+	effort                  Effort
 	processTerminationGrace time.Duration
 }
 
@@ -156,9 +157,15 @@ func (a *copilotAgent) buildArgs(prompt string) []string {
 	if a.model != "" {
 		extraArgs = withoutFlagValues(extraArgs, "--model")
 	}
+	if a.effort != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--effort", "--reasoning-effort")
+	}
 	args = append(args, extraArgs...)
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.effort != "" {
+		args = append(args, "--effort", string(a.effort))
 	}
 	args = append(args,
 		"-p", prompt,

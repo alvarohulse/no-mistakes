@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/eval"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/spf13/cobra"
@@ -16,7 +17,7 @@ func newEvalCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "eval",
 		Short: "Inspect and locally replay review evaluation cases",
-		Long:  "Inspect automatically collected review cases, capture runs on demand, ingest confirmed post-PR misses as false-negative gold, and compare agent+model candidates. Eval never starts or uses the shared daemon.",
+		Long:  "Inspect automatically collected review cases, capture runs on demand, ingest confirmed post-PR misses as false-negative gold, and compare agent candidates pinned to an explicit model, vendor, and optional reasoning effort. Eval never starts or uses the shared daemon.",
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(newEvalCaptureCmd())
@@ -43,7 +44,23 @@ func openEvalStore() (*paths.Paths, *eval.Store, error) {
 		return nil, nil, err
 	}
 	store.SetDiversifiedSize(cfg.Eval.DiversifiedSize)
+	store.SetRepoNames(evalRepoNames(p))
 	return p, store, nil
+}
+
+// evalRepoNames is best-effort display enrichment. It opens existing pipeline
+// state read-only so an eval dashboard can never initialize or migrate it.
+func evalRepoNames(p *paths.Paths) map[string]string {
+	database, err := db.OpenReadOnly(p.DB())
+	if err != nil {
+		return nil
+	}
+	defer database.Close()
+	repos, err := database.GetRepos()
+	if err != nil {
+		return nil
+	}
+	return eval.RepoDisplayNames(repos)
 }
 
 func newEvalCaptureCmd() *cobra.Command {
@@ -134,7 +151,7 @@ func newEvalRunCmd() *cobra.Command {
 	var candidateRaw string
 	var repeats int
 	cmd := &cobra.Command{
-		Use:   "run --cases <all|labeled|diversified|tune> --candidate <agent+model>",
+		Use:   "run --cases <all|labeled|diversified|tune> --candidate <agent,model=...,vendor=...[,effort=...]>",
 		Short: "Replay captured review passes and score findings against gold",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -147,8 +164,24 @@ func newEvalRunCmd() *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			session, evaluations, runErr := eval.Replay(cmd.Context(), store, eval.ReplayOptions{Set: cases, Candidate: candidate, Repeats: repeats})
-			fmt.Fprintf(cmd.OutOrStdout(), "local eval session %s: %d replay(s), candidate %s, repeats %d\n", session.ID, len(evaluations), candidate, repeats)
+			out := cmd.OutOrStdout()
+			caseCount := 0
+			session, evaluations, runErr := eval.Replay(cmd.Context(), store, eval.ReplayOptions{
+				Set: cases, Candidate: candidate, Repeats: repeats,
+				OnPlan: func(session eval.Session, planned []eval.Case) {
+					caseCount = len(planned)
+					fmt.Fprintf(out, "replaying %d case(s) x %d repeat(s) with %s on %s (cohort %s)\n\n",
+						len(planned), session.Repeats, session.Candidate, session.Set, session.Cohort)
+				},
+				OnResult: func(evaluation eval.Evaluation, completed, total int) {
+					evalRunProgress(out, evaluation, completed, total)
+				},
+			})
+			if len(evaluations) > 0 {
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, renderEvalRunSummary(session, evaluations, caseCount))
+			}
+			fmt.Fprintf(out, "local eval session %s: %d replay(s), candidate %s, repeats %d\n", session.ID, len(evaluations), candidate, repeats)
 			if runErr != nil {
 				return runErr
 			}
@@ -156,7 +189,7 @@ func newEvalRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cases, "cases", "", "case set: all, labeled (finding-level gold), diversified (official gold-only holdout), or tune")
-	cmd.Flags().StringVar(&candidateRaw, "candidate", "", "candidate as agent+model (for example codex+gpt-5.4)")
+	cmd.Flags().StringVar(&candidateRaw, "candidate", "", eval.CandidateUsage())
 	cmd.Flags().IntVar(&repeats, "repeats", 3, "replays per case (minimum 1)")
 	_ = cmd.MarkFlagRequired("cases")
 	_ = cmd.MarkFlagRequired("candidate")
@@ -184,7 +217,7 @@ func newEvalSetsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprint(cmd.OutOrStdout(), eval.RenderSets(summaries))
+			fmt.Fprintln(cmd.OutOrStdout(), renderEvalSetsDashboard(summaries))
 			return nil
 		},
 	}

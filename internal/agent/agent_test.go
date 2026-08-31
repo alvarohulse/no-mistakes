@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -120,6 +121,141 @@ func TestNewWithOptions_CarriesConfiguredModelIdentity(t *testing.T) {
 	if got := ConfiguredModel(a); got != (ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}) {
 		t.Fatalf("configured model = %#v", got)
 	}
+}
+
+func TestNewWithOptions_RoutesEffortThroughEachSupportedHarness(t *testing.T) {
+	tests := []struct {
+		name   types.AgentName
+		vendor string
+		check  func(t *testing.T, a Agent)
+	}{
+		{types.AgentClaude, "anthropic", func(t *testing.T, a Agent) {
+			assertArgsContainSequence(t, a.(*modelIdentityAgent).inner.(*claudeAgent).buildArgs(nil, ""), "--effort", "high")
+		}},
+		{types.AgentCodex, "openai", func(t *testing.T, a Agent) {
+			assertArgsContainSequence(t, a.(*modelIdentityAgent).inner.(*codexAgent).buildArgs("", ""), "-c", `model_reasoning_effort="high"`)
+		}},
+		{types.AgentCursor, "openai", func(t *testing.T, a Agent) {
+			assertArgsContainSequence(t, a.(*modelIdentityAgent).inner.(*cursorAgent).buildArgs("/work", "/repo", ""), "--model", "model[effort=high]")
+		}},
+		{types.AgentPi, "google", func(t *testing.T, a Agent) {
+			assertArgsContainSequence(t, a.(*modelIdentityAgent).inner.(*piAgent).buildArgs(), "--thinking", "high")
+		}},
+		{types.AgentCopilot, "openai", func(t *testing.T, a Agent) {
+			assertArgsContainSequence(t, a.(*modelIdentityAgent).inner.(*copilotAgent).buildArgs("prompt"), "--effort", "high")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.name), func(t *testing.T) {
+			a, err := NewWithOptions(tt.name, string(tt.name), nil, Options{
+				Model: "model", Vendor: tt.vendor, Effort: EffortHigh,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			tt.check(t, a)
+		})
+	}
+}
+
+func TestNewWithOptions_FirstClassEffortOverridesRawHarnessFlag(t *testing.T) {
+	tests := []struct {
+		name   types.AgentName
+		vendor string
+		raw    []string
+		want   []string
+	}{
+		{types.AgentClaude, "anthropic", []string{"--effort", "low"}, []string{"--effort", "high"}},
+		{types.AgentCodex, "openai", []string{"-c", `model_reasoning_effort="low"`}, []string{"-c", `model_reasoning_effort="high"`}},
+		{types.AgentCursor, "openai", []string{"--effort=low"}, []string{"--model", "model[effort=high]"}},
+		{types.AgentPi, "google", []string{"--thinking", "low"}, []string{"--thinking", "high"}},
+		{types.AgentCopilot, "openai", []string{"--reasoning-effort", "low"}, []string{"--effort", "high"}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.name), func(t *testing.T) {
+			a, err := NewWithOptions(tt.name, string(tt.name), tt.raw, Options{
+				Model: "model", Vendor: tt.vendor, Effort: EffortHigh,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			var args []string
+			switch inner := a.(*modelIdentityAgent).inner.(type) {
+			case *claudeAgent:
+				args = inner.buildArgs(nil, "")
+			case *codexAgent:
+				args = inner.buildArgs("", "")
+			case *cursorAgent:
+				args = inner.buildArgs("/work", "/repo", "")
+			case *piAgent:
+				args = inner.buildArgs()
+			case *copilotAgent:
+				args = inner.buildArgs("prompt")
+			}
+			assertArgsContainSequence(t, args, tt.want...)
+			for _, arg := range args {
+				if arg == "low" || strings.Contains(arg, `="low"`) || strings.HasSuffix(arg, "=low") {
+					t.Fatalf("effective args retain overridden effort: %q", args)
+				}
+			}
+		})
+	}
+}
+
+func TestNewWithOptions_RejectsUnsupportedOrInvalidEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name   types.AgentName
+		effort Effort
+	}{
+		{"acp:cursor", EffortHigh},
+		{types.AgentRovoDev, EffortHigh},
+		{types.AgentClaude, Effort("turbo")},
+	} {
+		if _, err := NewWithOptions(tc.name, string(tc.name), nil, Options{Model: "model", Vendor: "vendor", Effort: tc.effort}); err == nil {
+			t.Errorf("NewWithOptions(%s, effort=%s) succeeded, want error", tc.name, tc.effort)
+		}
+	}
+}
+
+func TestNewWithOptions_RejectsExplicitCursorEffortForParameterizedModel(t *testing.T) {
+	_, err := NewWithOptions(types.AgentCursor, "cursor-agent", nil, Options{
+		Model: "claude-opus-5[context=1m]", Vendor: "anthropic", Effort: EffortHigh,
+	})
+	if err == nil || !strings.Contains(err.Error(), "already parameterized") {
+		t.Fatalf("NewWithOptions() error = %v, want safe parameterized-model refusal", err)
+	}
+}
+
+func TestNewWithOptions_RoutesOpenCodeEffortInMessage(t *testing.T) {
+	a, err := NewWithOptions(types.AgentOpenCode, "opencode", nil, Options{
+		Model: "openai/gpt-5.4", Vendor: "openai", Effort: EffortHigh,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body, err := a.(*modelIdentityAgent).inner.(*opencodeAgent).messageBody("review", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body["variant"] != "high" {
+		t.Fatalf("message variant = %#v, want high", body["variant"])
+	}
+	if got := body["model"]; !reflect.DeepEqual(got, map[string]string{"providerID": "openai", "modelID": "gpt-5.4"}) {
+		t.Fatalf("message model = %#v", got)
+	}
+}
+
+func assertArgsContainSequence(t *testing.T, args []string, want ...string) {
+	t.Helper()
+	for i := 0; i+len(want) <= len(args); i++ {
+		if reflect.DeepEqual(args[i:i+len(want)], want) {
+			return
+		}
+	}
+	t.Fatalf("args %q do not contain sequence %q", args, want)
 }
 
 func TestNewWithOptions_RovoDevRejectsUnverifiedModelRouting(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -417,32 +416,7 @@ func (m *ModelRoute) UnmarshalYAML(value *yaml.Node) error {
 // Validate checks that a configured model has a complete, canonical identity.
 // The zero value remains valid because model routing is optional.
 func (m ModelRoute) Validate() error {
-	if m.Name == "" && m.Vendor == "" {
-		return nil
-	}
-	if strings.TrimSpace(m.Name) == "" {
-		return fmt.Errorf("model.name is required when model is configured")
-	}
-	if m.Name != strings.TrimSpace(m.Name) || strings.IndexFunc(m.Name, unicode.IsControl) >= 0 {
-		return fmt.Errorf("model.name must not contain surrounding whitespace or control characters")
-	}
-	if m.Vendor == "" {
-		return fmt.Errorf("model.vendor is required when model is configured")
-	}
-	if m.Vendor != strings.ToLower(m.Vendor) || !validVendorIdentity(m.Vendor) {
-		return fmt.Errorf("model.vendor %q must be a lowercase identifier containing only letters, digits, and hyphens", m.Vendor)
-	}
-	return nil
-}
-
-func validVendorIdentity(vendor string) bool {
-	for i, r := range vendor {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' && i > 0 && i < len(vendor)-1 {
-			continue
-		}
-		return false
-	}
-	return vendor != ""
+	return types.ValidateModelIdentity(m.Name, m.Vendor)
 }
 
 // ReviewCandidate is one explicit full-review route. Candidates are selected
@@ -2432,7 +2406,7 @@ intent:
 #         Repo-specific testing guidance.
 
 # Local review evaluation corpus, used by "no-mistakes eval" to compare
-# agent+model candidates against review passes your own pipeline already made.
+# explicit agent/model/vendor candidates against review passes your own pipeline already made.
 # capture_provenance records, on every review round, the exact commits and
 # configuration a replay needs; it cannot be added afterwards, so a round
 # recorded without it is never replayable. auto_capture freezes each finished
@@ -2869,49 +2843,14 @@ func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) err
 	if model.Name == "" {
 		return nil
 	}
-	if isACPAgent(name) {
-		if !types.IsBareACPModelName(model.Name) {
-			return fmt.Errorf("parameterized or malformed bracketed model %q is not supported for ACP agent %q; configure a bare model family", model.Name, name)
-		}
-		return nil
-	}
-	if name == types.AgentOpenCode && !validOpenCodeModelName(model.Name) {
-		return fmt.Errorf("agent %q requires model %q to use provider/model form", name, model.Name)
-	}
-	if name == types.AgentRovoDev {
-		return fmt.Errorf("model %q is not supported for agent %q because Rovo Dev exposes no verified model-selection interface", model.Name, name)
-	}
-	if !agentCanServeModel(name, model) {
-		return fmt.Errorf("agent %q cannot serve model %q from declared vendor %q", name, model.Name, model.Vendor)
-	}
-	return nil
+	return types.ValidateAgentRoute(name, model.Name, model.Vendor, "")
 }
 
 func agentCanServeModel(name types.AgentName, model ModelRoute) bool {
 	if model.Name == "" {
 		return true
 	}
-	switch name {
-	case types.AgentClaude:
-		return model.Vendor == "anthropic" && !strings.Contains(model.Name, "/")
-	case types.AgentCodex:
-		return model.Vendor == "openai" && !strings.Contains(model.Name, "/")
-	case types.AgentRovoDev:
-		return false
-	case types.AgentOpenCode:
-		return validOpenCodeModelName(model.Name)
-	case types.AgentPi, types.AgentCopilot:
-		return true
-	case types.AgentCursor:
-		return true
-	default:
-		return false
-	}
-}
-
-func validOpenCodeModelName(name string) bool {
-	providerID, modelID, ok := strings.Cut(name, "/")
-	return ok && providerID != "" && modelID != ""
+	return types.ValidateAgentRoute(name, model.Name, model.Vendor, "") == nil
 }
 
 func resolvedAgentIdentity(name types.AgentName) string {

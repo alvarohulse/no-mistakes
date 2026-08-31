@@ -207,10 +207,22 @@ type SetSummary struct {
 	PinCount       int
 	Cap            int
 	Warning        string
-	Composition    map[string]int
+	Composition    []CompositionRow
+	SelfScore      EvaluationSummary
 }
 
-// InspectSets summarizes all logical sets and their diversified mix.
+// CompositionRow is one repository-aware stratum bucket.
+type CompositionRow struct {
+	Repo        string
+	Language    string
+	Size        string
+	Severity    string
+	FindingType string
+	Cases       int
+}
+
+// InspectSets summarizes all logical sets and their diversified mix from local
+// persisted state only.
 func InspectSets(store *Store) ([]SetSummary, error) {
 	sets := []string{"all", "labeled", "diversified", "tune"}
 	all, err := store.ListCases("all")
@@ -233,7 +245,7 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 		if err != nil {
 			return nil, err
 		}
-		summary := SetSummary{Name: name, Cases: len(cases), Composition: map[string]int{}, Cap: store.diversifiedSize}
+		summary := SetSummary{Name: name, Cases: len(cases), Cap: store.diversifiedSize, SelfScore: SelfScoreRecordedReviews(cases)}
 		if name == "diversified" {
 			if n, err := store.pinCount(); err == nil {
 				summary.PinCount = n
@@ -245,6 +257,14 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 		if name == "tune" && len(cases) == 0 && labeledCount > 0 {
 			summary.Warning = "tune is empty; do not fit matcher thresholds on diversified"
 		}
+		type compositionKey struct {
+			repoFingerprint string
+			language        string
+			size            string
+			severity        string
+			findingType     string
+		}
+		composition := map[compositionKey]int{}
 		for _, c := range cases {
 			if c.Labels.HasGold() {
 				summary.GoldCases++
@@ -263,12 +283,75 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 			}
 			summary.QueuedFindings += queuedByCase[c.ID]
 			language, size, severity := caseComposition(c)
-			ftype := findingType(c)
-			summary.Composition["repo="+shortFingerprint(c.RepoFingerprint)+", language="+language+", size="+size+", severity="+severity+", type="+ftype]++
+			composition[compositionKey{
+				repoFingerprint: c.RepoFingerprint,
+				language:        language,
+				size:            size,
+				severity:        severity,
+				findingType:     findingType(c),
+			}]++
 		}
+		for key, count := range composition {
+			summary.Composition = append(summary.Composition, CompositionRow{
+				Repo: store.repoDisplay(key.repoFingerprint), Language: key.language,
+				Size: key.size, Severity: key.severity, FindingType: key.findingType, Cases: count,
+			})
+		}
+		sortedCompositionRows(summary.Composition)
 		result = append(result, summary)
 	}
 	return result, nil
+}
+
+func sortedCompositionRows(rows []CompositionRow) []CompositionRow {
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.Repo != b.Repo {
+			return a.Repo < b.Repo
+		}
+		if a.Language != b.Language {
+			return a.Language < b.Language
+		}
+		if a.Size != b.Size {
+			return a.Size < b.Size
+		}
+		if a.Severity != b.Severity {
+			return a.Severity < b.Severity
+		}
+		if a.FindingType != b.FindingType {
+			return a.FindingType < b.FindingType
+		}
+		return a.Cases < b.Cases
+	})
+	return rows
+}
+
+// SelfScoreRecordedReviews scores the frozen source review against its own
+// gold with the same matcher used for candidates. It never invokes an agent.
+func SelfScoreRecordedReviews(cases []Case) EvaluationSummary {
+	evaluations := make([]Evaluation, 0, len(cases))
+	for _, c := range cases {
+		evaluation := Evaluation{
+			CaseID: c.ID, Candidate: "recorded-review", Status: "completed",
+			HasFindingGold: c.Labels.HasGold(), GoldCount: c.Labels.TrueIssueCount(),
+			FalsePositiveGold: c.Labels.FalsePositiveCount(),
+		}
+		findings, err := osReadRoundFindings(c)
+		if err != nil {
+			evaluation.Status = "failed"
+		} else {
+			score := ScoreCandidate(c.Labels, findings)
+			evaluation.TruePositive = score.TruePositive
+			evaluation.TruePositiveExact = score.TruePositiveExact
+			evaluation.TruePositiveFuzzy = score.TruePositiveFuzzy
+			evaluation.FalseNegative = score.FalseNegative
+			evaluation.FalsePositive = score.FalsePositive
+			evaluation.FalsePositiveGold = score.FalsePositiveGold
+			evaluation.Pending = score.Pending
+		}
+		evaluations = append(evaluations, evaluation)
+	}
+	return SummarizeEvaluations(evaluations)
 }
 
 func shortFingerprint(value string) string {
@@ -296,13 +379,9 @@ func RenderSets(summaries []SetSummary) string {
 		if summary.Warning != "" {
 			fmt.Fprintf(&b, "  warning: %s\n", summary.Warning)
 		}
-		keys := make([]string, 0, len(summary.Composition))
-		for key := range summary.Composition {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			fmt.Fprintf(&b, "  %d  %s\n", summary.Composition[key], key)
+		for _, row := range summary.Composition {
+			fmt.Fprintf(&b, "  %d  repo=%s, language=%s, size=%s, severity=%s, type=%s\n",
+				row.Cases, row.Repo, row.Language, row.Size, row.Severity, row.FindingType)
 		}
 	}
 	return b.String()

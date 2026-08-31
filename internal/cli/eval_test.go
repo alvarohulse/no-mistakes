@@ -27,7 +27,7 @@ func TestEvalSetsIsLocalOnlyAndEmitsNoTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval sets: %v", err)
 	}
-	if !strings.Contains(out, "LOCAL-ONLY EVAL CASE SETS") {
+	if !strings.Contains(out, "eval case sets") || !strings.Contains(out, "local-only") {
 		t.Fatalf("output = %q", out)
 	}
 	if strings.Contains(out, "verdict") || strings.Contains(out, "park") || strings.Contains(out, ", pass ") {
@@ -131,7 +131,7 @@ func TestEvalCaptureAndSetsSpeakInFindingGoldTerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval sets: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "1 with finding-level gold (true-positive 1, false-negative 0, false-positive 0)") || !strings.Contains(out, "0 unlabeled / pending") {
+	if !strings.Contains(out, "TP      1") || !strings.Contains(out, "FP      0") || !strings.Contains(out, "org/repo") || !strings.Contains(out, "0 unlabeled / pending") {
 		t.Fatalf("sets output = %q, want finding-level gold, not park/pass", out)
 	}
 	if strings.Contains(out, "verdict") || strings.Contains(out, "park") || strings.Contains(out, ", pass ") {
@@ -243,9 +243,7 @@ func TestEvalMissIngestLabelsFalseNegativeGold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval sets: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "1 with finding-level gold (true-positive 0, false-negative 1, false-positive 0)") {
-		t.Fatalf("sets output = %q, want ingested false-negative gold", out)
-	}
+	assertEvalSetsFalseNegativeGold(t, out)
 
 	out, err = executeCmd("eval", "capture", run.ID)
 	if err != nil {
@@ -255,9 +253,7 @@ func TestEvalMissIngestLabelsFalseNegativeGold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval sets after recapture: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "1 with finding-level gold (true-positive 0, false-negative 1, false-positive 0)") {
-		t.Fatalf("sets after recapture = %q, want ingested false-negative gold to persist", out)
-	}
+	assertEvalSetsFalseNegativeGold(t, out)
 
 	out, err = executeCmd("eval", "miss", "ingest", run.ID, "--finding", `{"id":"silent-wrong-set","file":"pkg/compute.go","line":12,"severity":"error","description":"returns the wrong set for a valid input"}`)
 	if err != nil {
@@ -265,6 +261,21 @@ func TestEvalMissIngestLabelsFalseNegativeGold(t *testing.T) {
 	}
 	if !strings.Contains(out, "ingested 0 false-negative gold finding") {
 		t.Fatalf("duplicate ingest output = %q", out)
+	}
+}
+
+func assertEvalSetsFalseNegativeGold(t *testing.T, output string) {
+	t.Helper()
+	normalized := strings.Join(strings.Fields(output), " ")
+	for _, want := range []string{
+		"Gold findings 1 across 1 gold case(s)",
+		"review raised TP 0 FP 0",
+		"review missed FN 1 TN -",
+		"all 1 case(s) · 1 gold · 0 unlabeled / pending",
+	} {
+		if !strings.Contains(normalized, want) {
+			t.Fatalf("sets output = %q, want %q", output, want)
+		}
 	}
 }
 

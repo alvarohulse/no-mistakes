@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -50,34 +51,79 @@ const (
 	goldSourcePostPRMiss     = "recorded-post-pr-miss"
 )
 
-// Candidate identifies one agent and model combination under evaluation. The
-// canonical command-line spelling is agent+model, for example codex+gpt-5.4.
+// Candidate identifies one explicit agent route under evaluation.
 type Candidate struct {
-	Agent types.AgentName `json:"agent"`
-	Model string          `json:"model"`
+	Agent  types.AgentName `json:"agent"`
+	Model  string          `json:"model"`
+	Vendor string          `json:"vendor"`
+	Effort agent.Effort    `json:"effort,omitempty"`
 }
 
-func (c Candidate) String() string { return string(c.Agent) + "+" + c.Model }
+var candidateUsage = "candidate must be agent,model=<model>,vendor=<vendor>[,effort=<minimal|low|medium|high|xhigh|max>] (for example codex,model=gpt-5.4,vendor=openai,effort=low)"
 
-// ParseCandidate accepts exactly agent+model. Keeping the model explicit makes
-// comparison records self-describing rather than silently inheriting a user's
-// current agent default.
+// CandidateUsage returns the canonical CLI spelling and supported effort
+// vocabulary.
+func CandidateUsage() string { return candidateUsage }
+
+func (c Candidate) String() string {
+	value := string(c.Agent) + ",model=" + c.Model + ",vendor=" + c.Vendor
+	if c.Effort != "" {
+		value += ",effort=" + string(c.Effort)
+	}
+	return value
+}
+
+// Validate rejects incomplete or unsupported routes before a replay reserves
+// cases or records a measurement session.
+func (c Candidate) Validate() error {
+	if strings.TrimSpace(string(c.Agent)) == "" {
+		return fmt.Errorf("candidate must name an agent")
+	}
+	if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.Vendor) == "" {
+		return fmt.Errorf("candidate must set both model=<model> and vendor=<vendor>; an implicit route is not reproducible")
+	}
+	return types.ValidateAgentRoute(c.Agent, c.Model, c.Vendor, string(c.Effort))
+}
+
+// ParseCandidate accepts the explicit, harness-neutral candidate spelling.
 func ParseCandidate(raw string) (Candidate, error) {
 	value := strings.TrimSpace(raw)
-	if strings.Count(value, "+") != 1 {
-		return Candidate{}, fmt.Errorf("candidate must be agent+model (for example codex+gpt-5.4)")
+	if value == "" {
+		return Candidate{}, fmt.Errorf("%s", candidateUsage)
 	}
-	agentName, model, _ := strings.Cut(value, "+")
-	agentName = strings.TrimSpace(agentName)
-	model = strings.TrimSpace(model)
-	if agentName == "" || model == "" {
-		return Candidate{}, fmt.Errorf("candidate must include both an agent and model")
+	if !strings.Contains(value, ",") && strings.Contains(value, "+") {
+		return Candidate{}, fmt.Errorf("candidate agent+model spelling was replaced; %s", candidateUsage)
 	}
-	name := types.AgentName(agentName)
-	if _, ok := types.ACPTargetFor(name); ok {
-		return Candidate{}, fmt.Errorf("candidate agent %q cannot enforce an explicit model", name)
+	parts := strings.Split(value, ",")
+	candidate := Candidate{Agent: types.AgentName(strings.TrimSpace(parts[0]))}
+	seen := map[string]bool{}
+	for _, part := range parts[1:] {
+		key, fieldValue, ok := strings.Cut(part, "=")
+		key = strings.TrimSpace(key)
+		fieldValue = strings.TrimSpace(fieldValue)
+		if !ok || key == "" || fieldValue == "" || seen[key] {
+			return Candidate{}, fmt.Errorf("invalid candidate field %q", strings.TrimSpace(part))
+		}
+		seen[key] = true
+		switch key {
+		case "model":
+			candidate.Model = fieldValue
+		case "vendor":
+			candidate.Vendor = fieldValue
+		case "effort":
+			effort, err := agent.ParseEffort(fieldValue)
+			if err != nil {
+				return Candidate{}, err
+			}
+			candidate.Effort = effort
+		default:
+			return Candidate{}, fmt.Errorf("unknown candidate field %q", key)
+		}
 	}
-	return Candidate{Agent: name, Model: model}, nil
+	if err := candidate.Validate(); err != nil {
+		return Candidate{}, err
+	}
+	return candidate, nil
 }
 
 // Manifest pins every input needed to recreate a review pass without storing a
