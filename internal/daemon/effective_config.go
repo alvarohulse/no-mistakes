@@ -800,19 +800,23 @@ func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Ar
 		return nil, false, nil
 	}
 	required := policy.Version >= effectiveConfigRequiredPolicyVersion
-	var artifact *effectiveconfig.Artifact
-	if required {
-		artifact, err = effectiveconfig.ReadWithBinary(p, run.ID, *run.ResolvedPolicyDigest, policy.Binary.Version, policy.Binary.BuildSHA)
-	} else {
-		artifact, err = effectiveconfig.Read(p, run.ID, *run.ResolvedPolicyDigest)
-	}
+	artifact, err := effectiveconfig.ReadWithBinary(p, run.ID, *run.ResolvedPolicyDigest, policy.Binary.Version, policy.Binary.BuildSHA)
 	if err != nil {
-		if !required && errors.Is(err, os.ErrNotExist) {
+		if !required && errors.Is(err, os.ErrNotExist) && effectiveConfigPairAbsent(p, run.ID) {
 			return nil, false, nil
 		}
 		return nil, required, err
 	}
 	return artifact, required, nil
+}
+
+func effectiveConfigPairAbsent(p *paths.Paths, runID string) bool {
+	if p == nil {
+		return false
+	}
+	_, yamlErr := os.Lstat(p.EffectiveConfigYAML(runID))
+	_, metaErr := os.Lstat(p.EffectiveConfigMeta(runID))
+	return errors.Is(yamlErr, os.ErrNotExist) && errors.Is(metaErr, os.ErrNotExist)
 }
 
 func removeEffectiveConfigArtifacts(p *paths.Paths, runID string) {

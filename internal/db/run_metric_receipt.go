@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -93,12 +94,20 @@ func (d *DB) ListNewestTerminalUnpinned(limit int) ([]string, error) {
 }
 
 // ArchiveRunWithMetricReceipt stores one immutable receipt and deletes the
-// matching terminal rich run in the same transaction. The transaction takes a
-// write lock before the rich run is deleted, so a concurrent pin cannot
-// succeed during archival. Filesystem cleanup runs only after the transaction
-// commits. When requireUnpinned is true, a pin that committed first turns the
-// operation into a no-op.
+// matching terminal rich run in the same transaction. A receipt with pending
+// cleanup is the durable owner for filesystem deletion after commit, so a
+// crash or cleanup failure can be retried without retaining the rich row.
+// When requireUnpinned is true, a pin that committed first turns the operation
+// into a no-op.
 func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinned bool, beforeDelete func() error) (bool, error) {
+	return d.archiveRunWithMetricReceipt(receipt, requireUnpinned, nil, beforeDelete)
+}
+
+func (d *DB) ArchiveRunWithMetricReceiptAndTargets(receipt RunMetricReceipt, requireUnpinned bool, targets []string, beforeDelete func() error) (bool, error) {
+	return d.archiveRunWithMetricReceipt(receipt, requireUnpinned, targets, beforeDelete)
+}
+
+func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinned bool, targets []string, beforeDelete func() error) (bool, error) {
 	if strings.TrimSpace(receipt.RunID) == "" || strings.TrimSpace(receipt.RepoID) == "" {
 		return false, fmt.Errorf("archive run metric receipt: run and repository IDs are required")
 	}
@@ -167,18 +176,32 @@ func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 	case err != nil && err != sql.ErrNoRows:
 		return false, fmt.Errorf("read existing run metric receipt: %w", err)
 	case err == sql.ErrNoRows:
+		cleanupPending := 0
+		if beforeDelete != nil {
+			cleanupPending = 1
+		}
 		_, err = tx.Exec(`
 			INSERT INTO run_metric_receipts (
 				run_id, repo_id, run_created_at, run_status, schema_version,
 				payload_json, receipt_sha256, archived_at, pull_request,
-				reported_findings, fixed_findings, step_stats_json, agent_aggregates_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				reported_findings, fixed_findings, step_stats_json, agent_aggregates_json,
+				artifact_cleanup_pending
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			receipt.RunID, receipt.RepoID, receipt.RunCreatedAt, receipt.RunStatus, receipt.SchemaVersion,
 			receipt.PayloadJSON, receipt.ReceiptSHA256, receipt.ArchivedAt, receipt.PullRequest,
-			receipt.ReportedFindings, receipt.FixedFindings, string(stepStatsJSON), string(aggregatesJSON),
+			receipt.ReportedFindings, receipt.FixedFindings, string(stepStatsJSON), string(aggregatesJSON), cleanupPending,
 		)
 		if err != nil {
 			return false, fmt.Errorf("insert run metric receipt: %w", err)
+		}
+		if beforeDelete != nil {
+			targetsJSON, marshalErr := json.Marshal(targets)
+			if marshalErr != nil {
+				return false, fmt.Errorf("encode artifact cleanup targets: %w", marshalErr)
+			}
+			if _, err = tx.Exec(`INSERT INTO run_artifact_cleanup_journal (run_id, targets_json) VALUES (?, ?)`, receipt.RunID, string(targetsJSON)); err != nil {
+				return false, fmt.Errorf("insert artifact cleanup journal: %w", err)
+			}
 		}
 	}
 	deleteSQL := `DELETE FROM runs WHERE id = ? AND status IN ('completed', 'failed', 'cancelled')`
@@ -203,8 +226,91 @@ func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 		if err := beforeDelete(); err != nil {
 			return true, fmt.Errorf("clean rich run artifacts after archival: %w", err)
 		}
+		if err := d.markRunArtifactCleanupComplete(receipt.RunID); err != nil {
+			return true, err
+		}
 	}
 	return true, nil
+}
+
+// CleanupPendingRunArtifacts retries filesystem cleanup durably owned by
+// archived metric receipts. A successful callback is marked only afterward,
+// so crashes and partial cleanup remain safely retryable.
+func (d *DB) CleanupPendingRunArtifacts(repoID string, cleanup func(string) error) (int, error) {
+	if cleanup == nil {
+		return 0, nil
+	}
+	return d.cleanupPendingRunArtifacts(repoID, func(runID string, _ []string) error { return cleanup(runID) })
+}
+
+func (d *DB) CleanupPendingRunArtifactsWithTargets(repoID string, cleanup func(string, []string) error) (int, error) {
+	return d.cleanupPendingRunArtifacts(repoID, cleanup)
+}
+
+func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []string) error) (int, error) {
+	if cleanup == nil {
+		return 0, nil
+	}
+	query := `SELECT r.run_id, COALESCE(j.targets_json, '[]') FROM run_metric_receipts r LEFT JOIN run_artifact_cleanup_journal j ON j.run_id = r.run_id WHERE r.artifact_cleanup_pending = 1`
+	args := []any{}
+	if repoID != "" {
+		query += ` AND r.repo_id = ?`
+		args = append(args, repoID)
+	}
+	query += ` ORDER BY r.run_created_at, r.run_id`
+	rows, err := d.sql.Query(query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("list pending run artifact cleanup: %w", err)
+	}
+	type pending struct {
+		runID   string
+		targets []string
+	}
+	var pendingRuns []pending
+	for rows.Next() {
+		var runID string
+		var targetsJSON string
+		if err := rows.Scan(&runID, &targetsJSON); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan pending run artifact cleanup: %w", err)
+		}
+		var targets []string
+		if err := json.Unmarshal([]byte(targetsJSON), &targets); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("decode pending run artifact cleanup: %w", err)
+		}
+		pendingRuns = append(pendingRuns, pending{runID, targets})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate pending run artifact cleanup: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close pending run artifact cleanup: %w", err)
+	}
+
+	cleaned := 0
+	var failures []error
+	for _, item := range pendingRuns {
+		if err := cleanup(item.runID, item.targets); err != nil {
+			failures = append(failures, fmt.Errorf("clean archived run %s artifacts: %w", item.runID, err))
+			continue
+		}
+		if err := d.markRunArtifactCleanupComplete(item.runID); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		cleaned++
+	}
+	return cleaned, errors.Join(failures...)
+}
+
+func (d *DB) markRunArtifactCleanupComplete(runID string) error {
+	if _, err := d.sql.Exec(`UPDATE run_metric_receipts SET artifact_cleanup_pending = 0 WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("mark run %s artifact cleanup complete: %w", runID, err)
+	}
+	_, _ = d.sql.Exec(`DELETE FROM run_artifact_cleanup_journal WHERE run_id = ?`, runID)
+	return nil
 }
 
 func (d *DB) GetRunMetricReceipt(runID string) (*RunMetricReceipt, error) {

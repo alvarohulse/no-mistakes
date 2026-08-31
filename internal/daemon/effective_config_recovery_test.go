@@ -118,29 +118,86 @@ func TestRunEffectiveConfigTreatsPreRequirementPoliciesAsUnavailable(t *testing.
 	}
 }
 
-func TestRunEffectiveConfigExposesAnIntactVersionEightArtifact(t *testing.T) {
-	p, database := newRefreshRunFixture(t)
-	repo, _ := setupTestGitRepo(t, p, database, "version-eight-effective-config")
-	policy, err := resolvedPolicyFromConfig(resolvedRoutingTestConfig(), nil, []pipeline.Step{policyTestStep{name: types.StepReview}}, nil, types.RefreshStrategyRebase, false)
-	if err != nil {
-		t.Fatal(err)
+func TestRunEffectiveConfigValidatesOptionalVersionEightArtifacts(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(t *testing.T, metaPath string)
+		wantError string
+	}{
+		{name: "intact"},
+		{
+			name: "binary identity mismatch",
+			mutate: func(t *testing.T, metaPath string) {
+				t.Helper()
+				raw, err := os.ReadFile(metaPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var metadata effectiveconfig.Metadata
+				if err := json.Unmarshal(raw, &metadata); err != nil {
+					t.Fatal(err)
+				}
+				metadata.BinaryBuildSHA = "different-build"
+				raw, err = json.Marshal(metadata)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(metaPath, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "binary identity",
+		},
+		{
+			name: "partial pair",
+			mutate: func(t *testing.T, metaPath string) {
+				t.Helper()
+				if err := os.Remove(metaPath); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "read effective config sidecar",
+		},
 	}
-	policy.Version = 8
-	encoded, digest, err := marshalResolvedPolicyDTO(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := &db.Run{ID: "version-eight-run", RepoID: repo.ID, ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest}
-	yamlBytes := []byte("enabled: true # source=runtime; is_default=false\n")
-	writeEffectiveConfigRecoveryFixture(t, p.RunDir(run.ID), run.ID, digest, yamlBytes)
 
-	artifact, required, err := ReadEffectiveConfigForRun(p, run)
-	if err != nil || required || artifact == nil || string(artifact.YAML) != string(yamlBytes) {
-		t.Fatalf("ReadEffectiveConfigForRun() = artifact %#v required %t error %v, want optional intact v8 artifact", artifact, required, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, database := newRefreshRunFixture(t)
+			repo, _ := setupTestGitRepo(t, p, database, "version-eight-effective-config")
+			policy, err := resolvedPolicyFromConfig(resolvedRoutingTestConfig(), nil, []pipeline.Step{policyTestStep{name: types.StepReview}}, nil, types.RefreshStrategyRebase, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy.Version = 8
+			encoded, digest, err := marshalResolvedPolicyDTO(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := &db.Run{ID: "version-eight-run", RepoID: repo.ID, ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest}
+			yamlBytes := []byte("enabled: true # source=runtime; is_default=false\n")
+			writeEffectiveConfigRecoveryFixture(t, p.RunDir(run.ID), run.ID, digest, yamlBytes, policy.Binary.Version, policy.Binary.BuildSHA)
+			if tt.mutate != nil {
+				tt.mutate(t, p.EffectiveConfigMeta(run.ID))
+			}
+
+			artifact, required, err := ReadEffectiveConfigForRun(p, run)
+			if required {
+				t.Fatal("version-eight artifact unexpectedly required")
+			}
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) || artifact != nil {
+					t.Fatalf("ReadEffectiveConfigForRun() = artifact %#v error %v, want %q", artifact, err, tt.wantError)
+				}
+				return
+			}
+			if err != nil || artifact == nil || string(artifact.YAML) != string(yamlBytes) {
+				t.Fatalf("ReadEffectiveConfigForRun() = artifact %#v error %v, want optional intact v8 artifact", artifact, err)
+			}
+		})
 	}
 }
 
-func writeEffectiveConfigRecoveryFixture(t *testing.T, dir, runID, policyDigest string, yamlBytes []byte) {
+func writeEffectiveConfigRecoveryFixture(t *testing.T, dir, runID, policyDigest string, yamlBytes []byte, binaryVersion, binaryBuildSHA string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -148,7 +205,7 @@ func writeEffectiveConfigRecoveryFixture(t *testing.T, dir, runID, policyDigest 
 	digest := sha256.Sum256(yamlBytes)
 	metaBytes, err := json.Marshal(effectiveconfig.Metadata{
 		SchemaVersion: effectiveconfig.SchemaVersion, RunID: runID, PolicyDigest: policyDigest,
-		YAMLSHA256: hex.EncodeToString(digest[:]), BinaryVersion: "test", BinaryBuildSHA: "test",
+		YAMLSHA256: hex.EncodeToString(digest[:]), BinaryVersion: binaryVersion, BinaryBuildSHA: binaryBuildSHA,
 		Generator: effectiveconfig.Generator, GeneratorSchema: effectiveconfig.SchemaVersion,
 	})
 	if err != nil {

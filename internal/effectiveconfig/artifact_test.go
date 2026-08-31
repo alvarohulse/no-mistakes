@@ -1,11 +1,13 @@
 package effectiveconfig_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -86,6 +88,71 @@ func TestReadReturnsOnlyAnIntactSupportedArtifact(t *testing.T) {
 				t.Fatalf("Read() = %+v, want exact stored bytes and matching metadata", artifact)
 			}
 		})
+	}
+}
+
+func TestReadRejectsOversizedArtifactFilesAtTheReadBoundary(t *testing.T) {
+	const runID = "01M1EFFECTIVECONFIGBOUNDED"
+	const policyDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	tests := []struct {
+		name      string
+		mutate    func(t *testing.T, p *paths.Paths)
+		wantError string
+	}{
+		{
+			name: "YAML",
+			mutate: func(t *testing.T, p *paths.Paths) {
+				t.Helper()
+				if err := os.WriteFile(p.EffectiveConfigYAML(runID), bytes.Repeat([]byte{'x'}, effectiveconfig.YAMLMaxBytes+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "read effective config YAML: exceeds",
+		},
+		{
+			name: "sidecar",
+			mutate: func(t *testing.T, p *paths.Paths) {
+				t.Helper()
+				if err := os.WriteFile(p.EffectiveConfigMeta(runID), bytes.Repeat([]byte{' '}, 64*1024+1), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "read effective config sidecar: exceeds",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			writeArtifact(t, p, runID, policyDigest, []byte("enabled: true # source=runtime; is_default=false\n"), effectiveconfig.SchemaVersion)
+			tt.mutate(t, p)
+			if _, err := effectiveconfig.Read(p, runID, policyDigest); err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Read() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestReadRejectsArtifactLinksBeforeOpeningThem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows CI")
+	}
+	const runID = "01M1EFFECTIVECONFIGLINK"
+	const policyDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	p := paths.WithRoot(t.TempDir())
+	yamlBytes := []byte("enabled: true # source=runtime; is_default=false\n")
+	writeArtifact(t, p, runID, policyDigest, yamlBytes, effectiveconfig.SchemaVersion)
+	yamlPath := p.EffectiveConfigYAML(runID)
+	targetPath := yamlPath + ".target"
+	if err := os.Rename(yamlPath, targetPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(targetPath, yamlPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := effectiveconfig.Read(p, runID, policyDigest); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("Read() error = %v, want link rejection", err)
 	}
 }
 

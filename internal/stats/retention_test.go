@@ -218,7 +218,7 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	}
 }
 
-func TestPruneRichRunDataLeavesRawRunWhenArtifactCleanupFails(t *testing.T) {
+func TestPruneRichRunDataRetriesCommittedArtifactCleanup(t *testing.T) {
 	database, run := newAuditRun(t)
 	now := time.Unix(run.CreatedAt, 0).UTC().Add(15 * 24 * time.Hour)
 	for index := 0; index < 50; index++ {
@@ -232,14 +232,29 @@ func TestPruneRichRunDataLeavesRawRunWhenArtifactCleanupFails(t *testing.T) {
 	}
 	cleanupErr := "artifact cleanup failed"
 	pruned, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(string) error { return &retentionTestError{message: cleanupErr} })
-	if err == nil || !strings.Contains(err.Error(), cleanupErr) || pruned != 0 {
+	if err == nil || !strings.Contains(err.Error(), cleanupErr) || pruned != 1 {
 		t.Fatalf("prune cleanup failure = %d, %v", pruned, err)
 	}
-	if retained, getErr := database.GetRun(run.ID); getErr != nil || retained == nil {
-		t.Fatalf("cleanup failure removed raw run: %+v, %v", retained, getErr)
+	if retained, getErr := database.GetRun(run.ID); getErr != nil || retained != nil {
+		t.Fatalf("committed archival retained raw run: %+v, %v", retained, getErr)
 	}
-	if receipt, getErr := database.GetRunMetricReceipt(run.ID); getErr != nil || receipt != nil {
-		t.Fatalf("cleanup failure stored receipt: %+v, %v", receipt, getErr)
+	if receipt, getErr := database.GetRunMetricReceipt(run.ID); getErr != nil || receipt == nil {
+		t.Fatalf("committed archival lost retry owner: %+v, %v", receipt, getErr)
+	}
+
+	var retried []string
+	pruned, err = PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(runID string) error {
+		retried = append(retried, runID)
+		return nil
+	})
+	if err != nil || pruned != 0 || !reflect.DeepEqual(retried, []string{run.ID}) {
+		t.Fatalf("retry pending cleanup = pruned %d retried %v error %v", pruned, retried, err)
+	}
+	if _, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(runID string) error {
+		retried = append(retried, runID)
+		return nil
+	}); err != nil || !reflect.DeepEqual(retried, []string{run.ID}) {
+		t.Fatalf("completed cleanup retried again: %v, %v", retried, err)
 	}
 }
 
