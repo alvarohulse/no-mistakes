@@ -38,3 +38,38 @@ func withoutFlagValues(args []string, flags ...string) []string {
 	}
 	return filtered
 }
+
+// withoutCodexConfigKey removes only one typed `-c key=value` override while
+// preserving every unrelated Codex config entry and its original order.
+func withoutCodexConfigKey(args []string, key string) []string {
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-c" || arg == "--config" {
+			if i+1 < len(args) && codexConfigAssignmentKey(args[i+1]) == key {
+				i++
+				continue
+			}
+			filtered = append(filtered, arg)
+			continue
+		}
+		for _, prefix := range []string{"-c ", "--config ", "-c=", "--config="} {
+			if strings.HasPrefix(arg, prefix) && codexConfigAssignmentKey(strings.TrimPrefix(arg, prefix)) == key {
+				arg = ""
+				break
+			}
+		}
+		if arg != "" {
+			filtered = append(filtered, arg)
+		}
+	}
+	return filtered
+}
+
+func codexConfigAssignmentKey(value string) string {
+	key, _, ok := strings.Cut(strings.TrimSpace(value), "=")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(key)
+}

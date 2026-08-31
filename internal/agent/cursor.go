@@ -19,6 +19,7 @@ type cursorAgent struct {
 	bin                     string
 	extraArgs               []string
 	model                   string
+	effort                  Effort
 	processTerminationGrace time.Duration
 }
 
@@ -35,10 +36,16 @@ func (a *cursorAgent) buildArgs(workspace, repo, resumeID string) []string {
 	if a.model != "" {
 		extraArgs = withoutFlagValues(extraArgs, "--model")
 	}
+	if a.effort != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--effort")
+	}
 	args := make([]string, 0, len(extraArgs)+14)
 	args = append(args, extraArgs...)
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.effort != "" {
+		args = append(args, "--effort", string(a.effort))
 	}
 	args = append(args,
 		"-p",

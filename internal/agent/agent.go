@@ -329,6 +329,9 @@ type Options struct {
 	// identity and is never inferred from Model naming.
 	Model  string
 	Vendor string
+	// Effort is the typed, harness-neutral reasoning-depth selection. Each
+	// supported adapter maps it to its verified native flag or request field.
+	Effort Effort
 	// ProcessTerminationGrace is the maximum time a process group gets to exit
 	// after SIGTERM before cleanup escalates to SIGKILL.
 	ProcessTerminationGrace time.Duration
@@ -897,11 +900,11 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
+	if err := ValidateModelEffort(name, opts.Model, opts.Effort); err != nil {
+		return nil, err
+	}
 	var created Agent
 	if target, ok := types.ACPTargetFor(name); ok {
-		if opts.Model != "" && !types.IsBareACPModelName(opts.Model) {
-			return nil, fmt.Errorf("parameterized or malformed bracketed model %q is not supported for ACP agent %q; configure a bare model family", opts.Model, name)
-		}
 		rawCommand := types.ACPRawCommand(target, opts.ACPRegistryOverrides)
 		rawCommand, err := composeACPTargetCommand(target, rawCommand, extraArgs, opts.Model)
 		if err != nil {
@@ -909,24 +912,21 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 		}
 		created = &acpxAgent{bin: bin, target: target, rawCommand: rawCommand, processTerminationGrace: opts.ProcessTerminationGrace}
 	} else {
-		if name == types.AgentRovoDev && opts.Model != "" {
-			return nil, fmt.Errorf("model %q is not supported for agent %q because Rovo Dev exposes no verified model-selection interface", opts.Model, name)
-		}
 		switch name {
 		case types.AgentClaude:
-			created = &claudeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
+			created = &claudeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentCodex:
-			created = &codexAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
+			created = &codexAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentCursor:
-			created = &cursorAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, processTerminationGrace: opts.ProcessTerminationGrace}
+			created = &cursorAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentRovoDev:
 			created = &rovodevAgent{bin: bin, extraArgs: extraArgs}
 		case types.AgentOpenCode:
-			created = &opencodeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model}
+			created = &opencodeAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort}
 		case types.AgentPi:
-			created = &piAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
+			created = &piAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort, disableProjectSettings: opts.DisableProjectSettings, processTerminationGrace: opts.ProcessTerminationGrace}
 		case types.AgentCopilot:
-			created = &copilotAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, processTerminationGrace: opts.ProcessTerminationGrace}
+			created = &copilotAgent{bin: bin, extraArgs: extraArgs, model: opts.Model, effort: opts.Effort, processTerminationGrace: opts.ProcessTerminationGrace}
 		default:
 			return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 		}

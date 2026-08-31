@@ -22,6 +22,7 @@ type codexAgent struct {
 	bin       string
 	extraArgs []string
 	model     string
+	effort    Effort
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
 	disableProjectSettings  bool
@@ -186,9 +187,15 @@ func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	if a.model != "" {
 		extraArgs = withoutFlagValues(extraArgs, "-m", "--model")
 	}
+	if a.effort != "" {
+		extraArgs = withoutCodexConfigKey(extraArgs, "model_reasoning_effort")
+	}
 	args = append(args, extraArgs...)
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.effort != "" {
+		args = append(args, "-c", `model_reasoning_effort="`+string(a.effort)+`"`)
 	}
 	if resumeID != "" {
 		args = append(args, resumeID)

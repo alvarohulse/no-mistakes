@@ -13,6 +13,7 @@ type opencodeAgent struct {
 	bin       string
 	extraArgs []string
 	model     string
+	effort    Effort
 	mu        sync.Mutex
 	server    *managedServer
 }

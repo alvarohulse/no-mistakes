@@ -267,7 +267,7 @@ func TestReplayTwiceKeepsCorpusUntouchedAndCohortStable(t *testing.T) {
 		}
 	}
 
-	opts := ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test"}, Repeats: 1}
+	opts := ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1}
 	firstSession, firstEvals, err := Replay(ctx, store, opts)
 	if err != nil {
 		t.Fatal(err)

@@ -60,7 +60,10 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 	if opts.Repeats <= 0 {
 		return Session{}, nil, fmt.Errorf("repeats must be at least 1")
 	}
-	if _, err := candidateModelArgs(opts.Candidate); err != nil {
+	if opts.Candidate.Model == "" || opts.Candidate.Vendor == "" {
+		return Session{}, nil, fmt.Errorf("candidate must include model and vendor")
+	}
+	if err := agent.ValidateModelEffort(opts.Candidate.Agent, opts.Candidate.Model, opts.Candidate.Effort); err != nil {
 		return Session{}, nil, err
 	}
 	cases, session, err := store.prepareReplay(ctx, opts)
@@ -246,14 +249,11 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	cfg.Agent = candidate.Agent
 	cfg.Agents = []types.AgentName{candidate.Agent}
 
-	modelArgs, err := candidateModelArgs(candidate)
-	if err != nil {
-		evaluation.Error = safeurl.RedactText(err.Error())
-		evaluation.CompletedAt = time.Now().Unix()
-		return evaluation
-	}
-	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), modelArgs, agent.Options{
+	baseAgent, err := agent.NewWithOptions(candidate.Agent, cfg.AgentPathFor(candidate.Agent), nil, agent.Options{
 		ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
+		Model:                   candidate.Model,
+		Vendor:                  candidate.Vendor,
+		Effort:                  candidate.Effort,
 		DisableProjectSettings:  cfg.DisableProjectSettings,
 		ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 	})
@@ -511,16 +511,6 @@ func replayConfig(c Case) (*config.Config, error) {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
 	return config.Merge(global, repo), nil
-}
-
-func candidateModelArgs(candidate Candidate) ([]string, error) {
-	if _, ok := types.ACPTargetFor(candidate.Agent); ok {
-		return nil, fmt.Errorf("candidate agent %q cannot enforce an explicit model", candidate.Agent)
-	}
-	if candidate.Agent == types.AgentCodex {
-		return []string{"-m", candidate.Model}, nil
-	}
-	return []string{"--model", candidate.Model}, nil
 }
 
 type observedAgent struct {

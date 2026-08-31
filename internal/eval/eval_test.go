@@ -348,7 +348,7 @@ func TestReplayRestoresCaseIntoAnIsolatedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	session, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test"}, Repeats: 1})
+	session, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +885,7 @@ func TestCaptureAndReportScoresMatchingCandidateAsTruePositive(t *testing.T) {
 	if _, err := Capture(ctx, store, p, sourceDB, run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test"}, Repeats: 1}); err != nil {
+	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1}); err != nil {
 		t.Fatal(err)
 	} else if len(evaluations) != 1 || evaluations[0].TruePositive != 1 || evaluations[0].FalseNegative != 0 || evaluations[0].Pending != 0 {
 		t.Fatalf("replay scores = %#v, want true-positive match on the same issue", evaluations)
@@ -931,7 +931,7 @@ func TestCaptureAndReportLeavesUnmatchedCandidateFindingsPending(t *testing.T) {
 	if len(cases) != 1 || cases[0].Labels.HasGold() {
 		t.Fatalf("approve capture = %#v, want unlabeled gold", cases)
 	}
-	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test"}, Repeats: 1}); err != nil {
+	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1}); err != nil {
 		t.Fatal(err)
 	} else if len(evaluations) != 1 || evaluations[0].FalsePositive != 0 || evaluations[0].Pending != 1 {
 		t.Fatalf("replay scores = %#v, want unmatched finding queued, not a false-positive", evaluations)
@@ -949,27 +949,75 @@ func TestCaptureAndReportLeavesUnmatchedCandidateFindingsPending(t *testing.T) {
 	}
 }
 
-func TestParseCandidateRequiresAgentAndModel(t *testing.T) {
-	for _, input := range []string{"claude", "+model", "claude+", "claude+model+extra", "acp:custom+model"} {
+func TestParseCandidateRequiresExplicitModelAndVendor(t *testing.T) {
+	for _, input := range []string{
+		"",
+		"claude",
+		"claude,model=opus",
+		"claude,vendor=anthropic",
+		"claude,model=opus,vendor=anthropic,model=sonnet",
+		"claude,model=opus,vendor=anthropic,unknown=value",
+	} {
 		if _, err := ParseCandidate(input); err == nil {
 			t.Errorf("ParseCandidate(%q) succeeded, want error", input)
 		}
 	}
-	for _, tc := range []struct {
-		input string
-		agent types.AgentName
-		model string
-	}{
-		{input: "codex+gpt-5.4", agent: types.AgentCodex, model: "gpt-5.4"},
-		{input: "cursor+gpt-5.6-terra", agent: types.AgentCursor, model: "gpt-5.6-terra"},
+
+	candidate, err := ParseCandidate(" claude,model=opus,vendor=anthropic ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Agent != types.AgentClaude || candidate.Model != "opus" || candidate.Vendor != "anthropic" || candidate.Effort != "" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+}
+
+func TestParseCandidateRejectsReplacedAgentPlusModelSpelling(t *testing.T) {
+	_, err := ParseCandidate("codex+gpt-5.4")
+	if err == nil || !strings.Contains(err.Error(), "was replaced") || !strings.Contains(err.Error(), "vendor=") {
+		t.Fatalf("ParseCandidate(agent+model) error = %v, want migration guidance", err)
+	}
+
+	candidate, err := ParseCandidate("claude,model=some+model,vendor=anthropic")
+	if err != nil {
+		t.Fatalf("ParseCandidate with plus in model: %v", err)
+	}
+	if candidate.Model != "some+model" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+}
+
+func TestParseCandidateCarriesEffortInIdentity(t *testing.T) {
+	low, err := ParseCandidate("codex,model=gpt-5.4,vendor=openai,effort=low")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if low.Effort != "low" {
+		t.Fatalf("candidate effort = %q, want low", low.Effort)
+	}
+	if got := low.String(); got != "codex,model=gpt-5.4,vendor=openai,effort=low" {
+		t.Fatalf("candidate string = %q", got)
+	}
+	high, err := ParseCandidate("codex,model=gpt-5.4,vendor=openai,effort=high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if high.String() == low.String() {
+		t.Fatal("two efforts of one model share a candidate identity")
+	}
+}
+
+func TestParseCandidateAcceptsACPModelButRejectsACPEffort(t *testing.T) {
+	for _, input := range []string{
+		"acp:custom,model=gpt-5,vendor=openai",
+		"cursor,model=gpt-5,vendor=openai",
 	} {
-		candidate, err := ParseCandidate(tc.input)
-		if err != nil {
-			t.Fatal(err)
+		if _, err := ParseCandidate(input); err != nil {
+			t.Fatalf("ParseCandidate(%q) = %v, want accepted model route", input, err)
 		}
-		if candidate.Agent != tc.agent || candidate.Model != tc.model {
-			t.Fatalf("ParseCandidate(%q) = %#v", tc.input, candidate)
-		}
+	}
+	if _, err := ParseCandidate("acp:custom,model=gpt-5,vendor=openai,effort=high"); err == nil || !strings.Contains(err.Error(), "effort") {
+		t.Fatalf("ParseCandidate(ACP effort) error = %v, want unsupported effort", err)
 	}
 }
 

@@ -21,6 +21,7 @@ type piAgent struct {
 	bin       string
 	extraArgs []string
 	model     string
+	effort    Effort
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses pi's project-level AGENTS.md/CLAUDE.md discovery.
 	disableProjectSettings  bool
@@ -133,6 +134,9 @@ func (a *piAgent) buildArgs() []string {
 	if a.model != "" {
 		extraArgs = withoutFlagValues(extraArgs, "--model")
 	}
+	if a.effort != "" {
+		extraArgs = withoutFlagValues(extraArgs, "--thinking")
+	}
 	// Project-settings opt-out (trusted-only; see config.DisableProjectSettings):
 	// disable AGENTS.md/CLAUDE.md discovery so an agent-orchestration target
 	// (firstmate) cannot install a fleet-captain identity on the gate agent.
@@ -155,6 +159,9 @@ func (a *piAgent) buildArgs() []string {
 	}
 	if a.model != "" {
 		args = append(args, "--model", a.model)
+	}
+	if a.effort != "" {
+		args = append(args, "--thinking", string(a.effort))
 	}
 	args = append(args, "--mode", "json", "--no-session")
 	return args
