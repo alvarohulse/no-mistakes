@@ -152,6 +152,70 @@ func TestOpenDoesNotMarkLegacyMetricReceiptsForArtifactCleanup(t *testing.T) {
 	}
 }
 
+func TestCleanupPendingRunArtifactsContinuesPastReceiptWithoutTargets(t *testing.T) {
+	database := openTestDB(t)
+	repo, err := database.InsertRepo("/tmp/pending-cleanup", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archivePending := func(runID string) (*Run, string) {
+		run, err := database.InsertRunWithIDAndOptions(runID, repo.ID, "feature", "head", "base", RunOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), run.ID)
+		record := RunMetricReceipt{
+			RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+			SchemaVersion: 1, PayloadJSON: `{"schema_version":1}`, ArchivedAt: run.UpdatedAt,
+		}
+		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, false, []string{target}, func() error {
+			return &retentionTestError{message: "leave cleanup pending"}
+		})
+		if !archived || err == nil {
+			t.Fatalf("seed pending cleanup for %s = archived %t, error %v", run.ID, archived, err)
+		}
+		return run, target
+	}
+
+	invalid, _ := archivePending("a-invalid-cleanup")
+	valid, validTarget := archivePending("b-valid-cleanup")
+	if _, err := database.sql.Exec(`DELETE FROM run_artifact_cleanup_journal WHERE run_id = ?`, invalid.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var cleaned []string
+	count, err := database.CleanupPendingRunArtifactsWithTargets(repo.ID, func(runID string, targets []string) error {
+		cleaned = append(cleaned, runID)
+		if runID != valid.ID || len(targets) != 1 || targets[0] != validTarget {
+			t.Fatalf("cleanup callback = run %q, targets %v", runID, targets)
+		}
+		return nil
+	})
+	if count != 1 || len(cleaned) != 1 || cleaned[0] != valid.ID {
+		t.Fatalf("cleanup = count %d, runs %v, error %v; want valid sibling cleaned", count, cleaned, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), invalid.ID) || !strings.Contains(err.Error(), "has no targets") {
+		t.Fatalf("cleanup error = %v; want invalid run identity and missing-target reason", err)
+	}
+
+	for _, expectation := range []struct {
+		runID   string
+		pending int
+	}{{invalid.ID, 1}, {valid.ID, 0}} {
+		var pending int
+		if err := database.sql.QueryRow(`SELECT artifact_cleanup_pending FROM run_metric_receipts WHERE run_id = ?`, expectation.runID).Scan(&pending); err != nil {
+			t.Fatal(err)
+		}
+		if pending != expectation.pending {
+			t.Fatalf("run %s cleanup pending = %d, want %d", expectation.runID, pending, expectation.pending)
+		}
+	}
+}
+
 type retentionTestError struct{ message string }
 
 func (e *retentionTestError) Error() string { return e.message }

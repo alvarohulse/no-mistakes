@@ -262,6 +262,7 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 		targets []string
 	}
 	var pendingRuns []pending
+	var failures []error
 	for rows.Next() {
 		var runID string
 		var targetsJSON string
@@ -271,12 +272,12 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 		}
 		var targets []string
 		if err := json.Unmarshal([]byte(targetsJSON), &targets); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("decode pending run artifact cleanup: %w", err)
+			failures = append(failures, fmt.Errorf("decode pending run %q artifact cleanup targets: %w", runID, err))
+			continue
 		}
 		if len(targets) == 0 {
-			rows.Close()
-			return 0, fmt.Errorf("pending run artifact cleanup %q has no targets", runID)
+			failures = append(failures, fmt.Errorf("pending run artifact cleanup %q has no targets", runID))
+			continue
 		}
 		pendingRuns = append(pendingRuns, pending{runID, targets})
 	}
@@ -289,7 +290,6 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 	}
 
 	cleaned := 0
-	var failures []error
 	for _, item := range pendingRuns {
 		if err := cleanup(item.runID, item.targets); err != nil {
 			failures = append(failures, fmt.Errorf("clean archived run %s artifacts: %w", item.runID, err))
