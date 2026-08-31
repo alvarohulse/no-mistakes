@@ -114,6 +114,9 @@ type GlobalConfig struct {
 	// machine, while post_worktree is a repo's own install command and stays
 	// repo-only.
 	Hooks Hooks `yaml:"-"`
+	// EffectiveConfig controls operator-owned disclosure of the complete
+	// stored effective configuration. Publication is disabled by default.
+	EffectiveConfig EffectiveConfigRaw `yaml:"-"`
 	// Overrides carries machine-local per-repository configuration, keyed by
 	// the repository's `<owner>/<repo>` identity (for example
 	// "scaleapi/scaleapi"). Each entry is a RepoConfig-shaped overlay applied
@@ -162,6 +165,7 @@ type globalConfigRaw struct {
 	LogLevel                string                 `yaml:"log_level"`
 	SessionReuse            *bool                  `yaml:"session_reuse"`
 	Hooks                   Hooks                  `yaml:"hooks"`
+	EffectiveConfig         EffectiveConfigRaw     `yaml:"effective_config"`
 	Overrides               map[string]*RepoConfig `yaml:"overrides"`
 	AutoFix                 AutoFixRaw             `yaml:"auto_fix"`
 	Commit                  CommitRaw              `yaml:"commit"`
@@ -188,13 +192,14 @@ type legacyPricingRaw struct {
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {
-	Agent          types.AgentName   `yaml:"agent"`
-	Agents         []types.AgentName `yaml:"-"`
-	Commands       Commands          `yaml:"commands"`
-	Preflight      []runner.Command  `yaml:"preflight"`
-	Pipeline       PipelineRaw       `yaml:"pipeline"`
-	Hooks          Hooks             `yaml:"hooks"`
-	IgnorePatterns []string          `yaml:"ignore_patterns"`
+	Agent           types.AgentName    `yaml:"agent"`
+	Agents          []types.AgentName  `yaml:"-"`
+	Commands        Commands           `yaml:"commands"`
+	Preflight       []runner.Command   `yaml:"preflight"`
+	Pipeline        PipelineRaw        `yaml:"pipeline"`
+	Hooks           Hooks              `yaml:"hooks"`
+	EffectiveConfig EffectiveConfigRaw `yaml:"effective_config"`
+	IgnorePatterns  []string           `yaml:"ignore_patterns"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
 	// fields (commands.{build,test,lint,format}, preflight,
 	// hooks.{post_worktree,pr_body}, agent, and every step agent route) from a contributor's
@@ -295,27 +300,28 @@ func knownPipelineStep(step types.StepName) bool {
 // fields that must never leak into captured eval provenance.
 func (c RepoConfig) MarshalYAML() (any, error) {
 	type repoConfigYAML struct {
-		Agent                  agentList        `yaml:"agent,omitempty"`
-		Commands               Commands         `yaml:"commands,omitempty"`
-		Preflight              []runner.Command `yaml:"preflight,omitempty"`
-		Pipeline               PipelineRaw      `yaml:"pipeline,omitempty"`
-		Hooks                  Hooks            `yaml:"hooks,omitempty"`
-		IgnorePatterns         []string         `yaml:"ignore_patterns,omitempty"`
-		AllowRepoCommands      bool             `yaml:"allow_repo_commands,omitempty"`
-		AutoFix                AutoFixRaw       `yaml:"auto_fix,omitempty"`
-		Commit                 CommitRaw        `yaml:"commit,omitempty"`
-		Intent                 IntentRaw        `yaml:"intent,omitempty"`
-		Refresh                RefreshRaw       `yaml:"refresh,omitempty"`
-		Review                 ReviewRaw        `yaml:"review,omitempty"`
-		Build                  StepAgentRaw     `yaml:"build,omitempty"`
-		Test                   TestRaw          `yaml:"test,omitempty"`
-		Document               DocumentRaw      `yaml:"document,omitempty"`
-		Lint                   StepAgentRaw     `yaml:"lint,omitempty"`
-		PR                     StepAgentRaw     `yaml:"pr,omitempty"`
-		CI                     CIRaw            `yaml:"ci,omitempty"`
-		Prompts                PromptConfig     `yaml:"prompts,omitempty"`
-		DisableProjectSettings bool             `yaml:"disable_project_settings,omitempty"`
-		NoCI                   bool             `yaml:"no_ci,omitempty"`
+		Agent                  agentList          `yaml:"agent,omitempty"`
+		Commands               Commands           `yaml:"commands,omitempty"`
+		Preflight              []runner.Command   `yaml:"preflight,omitempty"`
+		Pipeline               PipelineRaw        `yaml:"pipeline,omitempty"`
+		Hooks                  Hooks              `yaml:"hooks,omitempty"`
+		EffectiveConfig        EffectiveConfigRaw `yaml:"effective_config,omitempty"`
+		IgnorePatterns         []string           `yaml:"ignore_patterns,omitempty"`
+		AllowRepoCommands      bool               `yaml:"allow_repo_commands,omitempty"`
+		AutoFix                AutoFixRaw         `yaml:"auto_fix,omitempty"`
+		Commit                 CommitRaw          `yaml:"commit,omitempty"`
+		Intent                 IntentRaw          `yaml:"intent,omitempty"`
+		Refresh                RefreshRaw         `yaml:"refresh,omitempty"`
+		Review                 ReviewRaw          `yaml:"review,omitempty"`
+		Build                  StepAgentRaw       `yaml:"build,omitempty"`
+		Test                   TestRaw            `yaml:"test,omitempty"`
+		Document               DocumentRaw        `yaml:"document,omitempty"`
+		Lint                   StepAgentRaw       `yaml:"lint,omitempty"`
+		PR                     StepAgentRaw       `yaml:"pr,omitempty"`
+		CI                     CIRaw              `yaml:"ci,omitempty"`
+		Prompts                PromptConfig       `yaml:"prompts,omitempty"`
+		DisableProjectSettings bool               `yaml:"disable_project_settings,omitempty"`
+		NoCI                   bool               `yaml:"no_ci,omitempty"`
 	}
 	return repoConfigYAML{
 		Agent:                  agentList(stepAgentNames(c.Agent, c.Agents)),
@@ -323,6 +329,7 @@ func (c RepoConfig) MarshalYAML() (any, error) {
 		Preflight:              cloneRunnerCommands(c.Preflight, false),
 		Pipeline:               c.Pipeline.clone(),
 		Hooks:                  c.Hooks,
+		EffectiveConfig:        c.EffectiveConfig,
 		IgnorePatterns:         c.IgnorePatterns,
 		AllowRepoCommands:      c.AllowRepoCommands,
 		AutoFix:                c.AutoFix,
@@ -744,30 +751,31 @@ func RenderedInstructions(instructions string) string {
 }
 func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	type repoConfigRaw struct {
-		Agent                  agentList        `yaml:"agent"`
-		Commands               Commands         `yaml:"commands"`
-		Preflight              []runner.Command `yaml:"preflight"`
-		Pipeline               PipelineRaw      `yaml:"pipeline"`
-		Hooks                  Hooks            `yaml:"hooks"`
-		IgnorePatterns         []string         `yaml:"ignore_patterns"`
-		AllowRepoCommands      bool             `yaml:"allow_repo_commands"`
-		AutoFix                AutoFixRaw       `yaml:"auto_fix"`
-		Commit                 CommitRaw        `yaml:"commit"`
-		Intent                 IntentRaw        `yaml:"intent"`
-		Refresh                *RefreshRaw      `yaml:"refresh"`
-		LegacyRebase           *StepAgentRaw    `yaml:"rebase"`
-		Review                 ReviewRaw        `yaml:"review"`
-		Build                  StepAgentRaw     `yaml:"build"`
-		Test                   TestRaw          `yaml:"test"`
-		Document               DocumentRaw      `yaml:"document"`
-		Lint                   StepAgentRaw     `yaml:"lint"`
-		PR                     StepAgentRaw     `yaml:"pr"`
-		CI                     CIRaw            `yaml:"ci"`
-		Prompts                PromptConfig     `yaml:"prompts"`
-		DisableProjectSettings bool             `yaml:"disable_project_settings"`
-		NoCI                   bool             `yaml:"no_ci"`
-		LegacyEval             any              `yaml:"eval"`
-		LegacyRepoBinding      any              `yaml:"repo"`
+		Agent                  agentList          `yaml:"agent"`
+		Commands               Commands           `yaml:"commands"`
+		Preflight              []runner.Command   `yaml:"preflight"`
+		Pipeline               PipelineRaw        `yaml:"pipeline"`
+		Hooks                  Hooks              `yaml:"hooks"`
+		EffectiveConfig        EffectiveConfigRaw `yaml:"effective_config"`
+		IgnorePatterns         []string           `yaml:"ignore_patterns"`
+		AllowRepoCommands      bool               `yaml:"allow_repo_commands"`
+		AutoFix                AutoFixRaw         `yaml:"auto_fix"`
+		Commit                 CommitRaw          `yaml:"commit"`
+		Intent                 IntentRaw          `yaml:"intent"`
+		Refresh                *RefreshRaw        `yaml:"refresh"`
+		LegacyRebase           *StepAgentRaw      `yaml:"rebase"`
+		Review                 ReviewRaw          `yaml:"review"`
+		Build                  StepAgentRaw       `yaml:"build"`
+		Test                   TestRaw            `yaml:"test"`
+		Document               DocumentRaw        `yaml:"document"`
+		Lint                   StepAgentRaw       `yaml:"lint"`
+		PR                     StepAgentRaw       `yaml:"pr"`
+		CI                     CIRaw              `yaml:"ci"`
+		Prompts                PromptConfig       `yaml:"prompts"`
+		DisableProjectSettings bool               `yaml:"disable_project_settings"`
+		NoCI                   bool               `yaml:"no_ci"`
+		LegacyEval             any                `yaml:"eval"`
+		LegacyRepoBinding      any                `yaml:"repo"`
 	}
 	var raw repoConfigRaw
 	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
@@ -780,6 +788,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Preflight = cloneRunnerCommands(raw.Preflight, false)
 	c.Pipeline = raw.Pipeline.clone()
 	c.Hooks = raw.Hooks
+	c.EffectiveConfig = raw.EffectiveConfig
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
@@ -849,6 +858,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	}
 	if override.has("hooks.pr_body") {
 		out.Hooks.PRBody = override.Hooks.PRBody
+	}
+	if override.has("effective_config.publish") {
+		out.EffectiveConfig.Publish = override.EffectiveConfig.Publish
 	}
 	if override.has("ignore_patterns") {
 		out.IgnorePatterns = copyStrings(override.IgnorePatterns)
@@ -1505,6 +1517,23 @@ type CI struct {
 	RerunTransient int
 }
 
+// EffectiveConfigRaw is the YAML representation of effective-configuration
+// publication settings. The pointer distinguishes an omitted value from an
+// explicit false value so precedence and provenance remain exact.
+type EffectiveConfigRaw struct {
+	Publish *bool `yaml:"publish,omitempty"`
+}
+
+// IsZero lets repository-config serialization omit an absent block.
+func (c EffectiveConfigRaw) IsZero() bool {
+	return c.Publish == nil
+}
+
+// EffectiveConfig holds resolved effective-configuration settings.
+type EffectiveConfig struct {
+	Publish bool
+}
+
 // AutoFix holds resolved per-step auto-fix attempt limits.
 // A value of 0 means auto-fix is disabled (requires manual approval).
 type AutoFix struct {
@@ -1543,6 +1572,7 @@ type Config struct {
 	Preflight               []runner.Command
 	ConfiguredSkipSteps     []types.StepName
 	Hooks                   Hooks
+	EffectiveConfig         EffectiveConfig
 	AllowRepoCommands       bool
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
@@ -3336,6 +3366,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		cfg.SessionReuse = *raw.SessionReuse
 	}
 	cfg.Hooks.PRBody = strings.TrimSpace(raw.Hooks.PRBody)
+	cfg.EffectiveConfig = raw.EffectiveConfig
 	if len(raw.Overrides) > 0 {
 		overrides, err := normalizeGlobalOverrides(raw.Overrides)
 		if err != nil {
@@ -3579,8 +3610,9 @@ func validatePathInstructionGlob(pattern string) error {
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Prompts follow the same
 // opt-in boundary. Refresh strategy, document instructions, review path
-// instructions, project-settings suppression, no-CI readiness, and the CI
-// rerun budget are always trusted-only.
+// instructions, effective-configuration publication, project-settings
+// suppression, no-CI readiness, and the CI rerun budget are always
+// trusted-only.
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
 // prompt additions, and agent selection, including step routes.
@@ -3607,7 +3639,7 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 	provenance := effectiveRepoLayerProvenance(pushed, EffectiveConfigSourcePushed)
 	trustedOnly := []string{
 		"refresh.strategy", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci",
-		"ci.rerun_transient", "pipeline.skip_steps", "allow_repo_commands",
+		"ci.rerun_transient", "pipeline.skip_steps", "allow_repo_commands", "effective_config.publish",
 	}
 	provenance.replaceRepoLayer(trusted, EffectiveConfigSourceTrusted, trustedOnly...)
 	// Configured skips are machine-owner policy. The later global override
@@ -3615,6 +3647,7 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 	effective.Pipeline = PipelineRaw{}
 	effective.AllowRepoCommands = allowRepoCommands
 	if trusted != nil {
+		effective.EffectiveConfig = trusted.EffectiveConfig
 		effective.Refresh.Strategy = trusted.Refresh.Strategy
 		effective.Document.Instructions = trusted.Document.Instructions
 		effective.Review.PathInstructions = append([]PathInstruction(nil), trusted.Review.PathInstructions...)
@@ -3634,6 +3667,7 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 		// pushed branch cannot raise its own rerun budget to the cap.
 		effective.CI.RerunTransient = trusted.CI.RerunTransient
 	} else {
+		effective.EffectiveConfig = EffectiveConfigRaw{}
 		effective.Refresh.Strategy = ""
 		effective.Document.Instructions = ""
 		effective.Review.PathInstructions = nil
@@ -4010,6 +4044,14 @@ func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMe
 		hooks.PRBody = repo.Hooks.PRBody
 		provenance.apply("hooks.pr_body")
 	}
+	effectiveConfig := EffectiveConfig{}
+	if global.EffectiveConfig.Publish != nil {
+		effectiveConfig.Publish = *global.EffectiveConfig.Publish
+	}
+	if repo.EffectiveConfig.Publish != nil {
+		effectiveConfig.Publish = *repo.EffectiveConfig.Publish
+		provenance.apply("effective_config.publish")
+	}
 
 	cfg := &Config{
 		Managed:                 global.Managed,
@@ -4032,6 +4074,7 @@ func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMe
 		Preflight:               cloneRunnerCommands(repo.Preflight, true),
 		ConfiguredSkipSteps:     cloneStepNames(repo.Pipeline.SkipSteps),
 		Hooks:                   hooks,
+		EffectiveConfig:         effectiveConfig,
 		AllowRepoCommands:       repo.AllowRepoCommands,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
