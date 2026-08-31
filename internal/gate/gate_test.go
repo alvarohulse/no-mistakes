@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
@@ -1089,6 +1090,67 @@ func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
 	}
 	if _, err := d.CleanupPendingRunArtifactsWithTargets("", runstats.RemoveRunArtifactTargets); err == nil || !strings.Contains(err.Error(), pending.ID) {
 		t.Fatalf("pending cleanup retry error = %v; want invalid target for run %s", err, pending.ID)
+	}
+}
+
+func TestEjectRefusesWhenArtifactCleanupCompletionCannotBePersisted(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d := openTestDB(t, p)
+	repo, _, err := Init(context.Background(), d, p, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature/archive", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := p.RunDir(run.ID)
+	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "effective-config.yaml"), []byte("artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TRIGGER fail_artifact_cleanup_completion
+		BEFORE UPDATE OF artifact_cleanup_pending ON run_metric_receipts
+		WHEN NEW.artifact_cleanup_pending = 0
+		BEGIN
+			SELECT RAISE(FAIL, 'injected artifact cleanup completion failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Eject(context.Background(), d, p, workDir); err == nil || !strings.Contains(err.Error(), "injected artifact cleanup completion failure") {
+		t.Fatalf("eject cleanup completion error = %v", err)
+	}
+	if _, err := os.Stat(artifactDir); !os.IsNotExist(err) {
+		t.Fatalf("artifact directory survived successful removal: %v", err)
+	}
+	if registered, err := d.GetRepo(repo.ID); err != nil || registered == nil {
+		t.Fatalf("cleanup completion failure removed repo: %+v, %v", registered, err)
+	}
+	if _, err := gitpkg.GetRemoteURL(context.Background(), workDir, RemoteName); err != nil {
+		t.Fatalf("cleanup completion failure removed gate remote: %v", err)
+	}
+	if !fileExists(p.RepoDir(repo.ID)) {
+		t.Fatal("cleanup completion failure removed bare gate")
 	}
 }
 

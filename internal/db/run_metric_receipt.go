@@ -30,6 +30,16 @@ type RunMetricReceipt struct {
 	AgentAggregates  []AgentInvocationAggregate
 }
 
+// PendingArtifactCleanupError reports a per-receipt target or removal failure
+// that remains durably retryable. Database failures while reading or updating
+// cleanup state are never wrapped in this type.
+type PendingArtifactCleanupError struct {
+	err error
+}
+
+func (e *PendingArtifactCleanupError) Error() string { return e.err.Error() }
+func (e *PendingArtifactCleanupError) Unwrap() error { return e.err }
+
 // ListRunRetentionCandidates returns terminal, unpinned runs outside both the
 // age window and the newest-terminal floor, oldest first. Unknown lifecycle
 // states fail safe by never entering the terminal candidate set.
@@ -226,7 +236,7 @@ func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 	}
 	if beforeDelete != nil {
 		if err := beforeDelete(); err != nil {
-			return true, fmt.Errorf("clean rich run artifacts after archival: %w", err)
+			return true, &PendingArtifactCleanupError{err: fmt.Errorf("clean rich run artifacts after archival: %w", err)}
 		}
 		if err := d.markRunArtifactCleanupComplete(receipt.RunID); err != nil {
 			return true, err
@@ -298,12 +308,14 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 			continue
 		}
 		if err := d.markRunArtifactCleanupComplete(item.runID); err != nil {
-			failures = append(failures, err)
-			continue
+			return cleaned, err
 		}
 		cleaned++
 	}
-	return cleaned, errors.Join(failures...)
+	if err := errors.Join(failures...); err != nil {
+		return cleaned, &PendingArtifactCleanupError{err: err}
+	}
+	return cleaned, nil
 }
 
 func (d *DB) markRunArtifactCleanupComplete(runID string) error {
