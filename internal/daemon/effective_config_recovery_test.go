@@ -20,85 +20,106 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestPrepareRecoveredRunValidatesRequiredEffectiveConfigBeforeReadingCurrentConfig(t *testing.T) {
-	p, database := newRefreshRunFixture(t)
-	repo, headSHA := setupTestGitRepo(t, p, database, "effective-config-recovery-order")
-	stepPlan := []pipeline.Step{policyTestStep{name: types.StepReview}}
-	policy, err := resolvedPolicyFromConfig(resolvedRoutingTestConfig(), nil, stepPlan, nil, types.RefreshStrategyRebase, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy.Version = 9
-	encoded, digest, err := marshalResolvedPolicyDTO(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := database.InsertRunWithOptions(repo.ID, "main", headSHA, headSHA, db.RunOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.UpdateRunResolvedPolicy(run.ID, encoded, digest); err != nil {
-		t.Fatal(err)
-	}
-	run.ResolvedPolicy = &encoded
-	run.ResolvedPolicyDigest = &digest
-	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
-		t.Fatal(err)
-	}
-	run, err = database.GetRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	worktree := p.WorktreeDir(repo.ID, run.ID)
-	if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
-		t.Fatal(err)
-	}
-	step, err := database.InsertStepResult(run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.StartStep(step.ID); err != nil {
-		t.Fatal(err)
-	}
-	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
-	if err := database.SetStepFindings(step.ID, findings); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, headSHA, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p.ConfigFile(), []byte("commands: [malformed\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestPrepareRecoveredRunValidatesEffectiveConfigBeforeReadingCurrentConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		policyVersion int
+		partialPair   bool
+		wantReadError string
+	}{
+		{name: "required pair absent", policyVersion: 9, wantReadError: "read effective config YAML"},
+		{name: "legacy pair partial", policyVersion: 8, partialPair: true, wantReadError: "read effective config sidecar"},
 	}
 
-	manager := NewRunManager(database, p, func() []pipeline.Step { return stepPlan })
-	t.Cleanup(manager.Shutdown)
-	_, err = manager.prepareRecoveredRun(context.Background(), run)
-	if err == nil || !strings.Contains(err.Error(), "read effective config YAML") {
-		t.Fatalf("prepareRecoveredRun() error = %v, want missing-artifact failure before current config read", err)
-	}
-	if plans := manager.recoverableParkedRuns(context.Background()); len(plans) != 0 {
-		t.Fatalf("recoverableParkedRuns() returned %d plans, want none", len(plans))
-	}
-	failed, err := database.GetRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if failed.Status != types.RunFailed || failed.Error == nil || !strings.Contains(*failed.Error, "read effective config YAML") {
-		t.Fatalf("rejected recovery = status %s error %v, want durable effective-config failure", failed.Status, failed.Error)
-	}
-	failedStep, err := database.GetStepResult(step.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if failedStep.Status != types.StepStatusFailed || failedStep.Error == nil || !strings.Contains(*failedStep.Error, "read effective config YAML") {
-		t.Fatalf("rejected recovery step = status %s error %v, want matching durable failure", failedStep.Status, failedStep.Error)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, database := newRefreshRunFixture(t)
+			repo, headSHA := setupTestGitRepo(t, p, database, "effective-config-recovery-order")
+			stepPlan := []pipeline.Step{policyTestStep{name: types.StepReview}}
+			policy, err := resolvedPolicyFromConfig(resolvedRoutingTestConfig(), nil, stepPlan, nil, types.RefreshStrategyRebase, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy.Version = tt.policyVersion
+			encoded, digest, err := marshalResolvedPolicyDTO(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRunWithOptions(repo.ID, "main", headSHA, headSHA, db.RunOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunResolvedPolicy(run.ID, encoded, digest); err != nil {
+				t.Fatal(err)
+			}
+			run.ResolvedPolicy = &encoded
+			run.ResolvedPolicyDigest = &digest
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs approval","action":"ask-user"}],"summary":"needs approval"}`
+			if err := database.SetStepFindings(step.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, headSHA, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+				t.Fatal(err)
+			}
+			if tt.partialPair {
+				yamlBytes := []byte("enabled: true # source=runtime; is_default=false\n")
+				writeEffectiveConfigRecoveryFixture(t, p.RunDir(run.ID), run.ID, digest, yamlBytes, policy.Binary.Version, policy.Binary.BuildSHA)
+				if err := os.Remove(p.EffectiveConfigMeta(run.ID)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(p.ConfigFile(), []byte("commands: [malformed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			manager := NewRunManager(database, p, func() []pipeline.Step { return stepPlan })
+			t.Cleanup(manager.Shutdown)
+			_, err = manager.prepareRecoveredRun(context.Background(), run)
+			if err == nil || !strings.Contains(err.Error(), tt.wantReadError) {
+				t.Fatalf("prepareRecoveredRun() error = %v, want %q before current config read", err, tt.wantReadError)
+			}
+			if plans := manager.recoverableParkedRuns(context.Background()); len(plans) != 0 {
+				t.Fatalf("recoverableParkedRuns() returned %d plans, want none", len(plans))
+			}
+			failed, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failed.Status != types.RunFailed || failed.Error == nil || !strings.Contains(*failed.Error, tt.wantReadError) {
+				t.Fatalf("rejected recovery = status %s error %v, want durable %q failure", failed.Status, failed.Error, tt.wantReadError)
+			}
+			failedStep, err := database.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failedStep.Status != types.StepStatusFailed || failedStep.Error == nil || !strings.Contains(*failedStep.Error, tt.wantReadError) {
+				t.Fatalf("rejected recovery step = status %s error %v, want matching %q failure", failedStep.Status, failedStep.Error, tt.wantReadError)
+			}
+		})
 	}
 }
 
