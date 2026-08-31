@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -256,12 +257,14 @@ func TestReplayTwiceKeepsCorpusUntouchedAndCohortStable(t *testing.T) {
 	if replayConfigBefore != string(replayConfigJSON) {
 		t.Fatalf("replay config = %s, want %s", replayConfigBefore, replayConfigJSON)
 	}
-	info, err := os.Stat(replayPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("replay config mode = %o, want 600", info.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(replayPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("replay config mode = %o, want 600", info.Mode().Perm())
+		}
 	}
 
 	opts := ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test"}, Repeats: 1}
