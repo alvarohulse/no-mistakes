@@ -76,8 +76,12 @@ func assertProtectedCurrentUserDACL(t *testing.T, path string) {
 	if err := windows.GetAce(dacl, 0, &entry); err != nil {
 		t.Fatalf("read access entry for %s: %v", filepath.Base(path), err)
 	}
-	if entry.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || entry.Mask != windows.GENERIC_ALL {
-		t.Fatalf("DACL for %s has type %d mask %#x, want current-user full access", filepath.Base(path), entry.Header.AceType, entry.Mask)
+	// ACLFromEntries maps GENERIC_ALL to FILE_ALL_ACCESS when it constructs the
+	// file-object ACE. Comparing against GENERIC_ALL works on some Windows
+	// versions but rejects the equivalent, mapped mask used by GitHub runners.
+	const fileAllAccess = 0x1f01ff
+	if entry.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || entry.Mask != fileAllAccess {
+		t.Fatalf("DACL for %s has type %d mask %#x, want current-user file full access %#x", filepath.Base(path), entry.Header.AceType, entry.Mask, fileAllAccess)
 	}
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
