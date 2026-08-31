@@ -30,6 +30,16 @@ type RunMetricReceipt struct {
 	AgentAggregates  []AgentInvocationAggregate
 }
 
+// PendingArtifactCleanupError reports a per-receipt target or removal failure
+// that remains durably retryable. Database failures while reading or updating
+// cleanup state are never wrapped in this type.
+type PendingArtifactCleanupError struct {
+	err error
+}
+
+func (e *PendingArtifactCleanupError) Error() string { return e.err.Error() }
+func (e *PendingArtifactCleanupError) Unwrap() error { return e.err }
+
 // ListRunRetentionCandidates returns terminal, unpinned runs outside both the
 // age window and the newest-terminal floor, oldest first. Unknown lifecycle
 // states fail safe by never entering the terminal candidate set.
@@ -226,7 +236,7 @@ func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 	}
 	if beforeDelete != nil {
 		if err := beforeDelete(); err != nil {
-			return true, fmt.Errorf("clean rich run artifacts after archival: %w", err)
+			return true, &PendingArtifactCleanupError{err: fmt.Errorf("clean rich run artifacts after archival: %w", err)}
 		}
 		if err := d.markRunArtifactCleanupComplete(receipt.RunID); err != nil {
 			return true, err
@@ -236,8 +246,10 @@ func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 }
 
 // CleanupPendingRunArtifactsWithTargets retries filesystem cleanup durably
-// owned by archived metric receipts. A successful callback is marked only
-// afterward, so crashes and partial cleanup remain safely retryable.
+// owned by archived metric receipts. Each receipt is handled independently:
+// invalid targets and cleanup failures remain pending while valid siblings
+// continue. A successful callback is marked only afterward, so crashes and
+// partial cleanup remain safely retryable.
 func (d *DB) CleanupPendingRunArtifactsWithTargets(repoID string, cleanup func(string, []string) error) (int, error) {
 	return d.cleanupPendingRunArtifacts(repoID, cleanup)
 }
@@ -262,6 +274,7 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 		targets []string
 	}
 	var pendingRuns []pending
+	var failures []error
 	for rows.Next() {
 		var runID string
 		var targetsJSON string
@@ -271,12 +284,12 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 		}
 		var targets []string
 		if err := json.Unmarshal([]byte(targetsJSON), &targets); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("decode pending run artifact cleanup: %w", err)
+			failures = append(failures, fmt.Errorf("decode pending run %q artifact cleanup targets: %w", runID, err))
+			continue
 		}
 		if len(targets) == 0 {
-			rows.Close()
-			return 0, fmt.Errorf("pending run artifact cleanup %q has no targets", runID)
+			failures = append(failures, fmt.Errorf("pending run artifact cleanup %q has no targets", runID))
+			continue
 		}
 		pendingRuns = append(pendingRuns, pending{runID, targets})
 	}
@@ -289,19 +302,20 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 	}
 
 	cleaned := 0
-	var failures []error
 	for _, item := range pendingRuns {
 		if err := cleanup(item.runID, item.targets); err != nil {
 			failures = append(failures, fmt.Errorf("clean archived run %s artifacts: %w", item.runID, err))
 			continue
 		}
 		if err := d.markRunArtifactCleanupComplete(item.runID); err != nil {
-			failures = append(failures, err)
-			continue
+			return cleaned, err
 		}
 		cleaned++
 	}
-	return cleaned, errors.Join(failures...)
+	if err := errors.Join(failures...); err != nil {
+		return cleaned, &PendingArtifactCleanupError{err: err}
+	}
+	return cleaned, nil
 }
 
 func (d *DB) markRunArtifactCleanupComplete(runID string) error {

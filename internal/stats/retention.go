@@ -206,6 +206,10 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, cleanup *Run
 			return 0, fmt.Errorf("archive repository runs: artifact cleanup target selector and remover are required")
 		}
 		if _, err := database.CleanupPendingRunArtifactsWithTargets(repoID, cleanup.Remove); err != nil {
+			var pendingCleanupErr *db.PendingArtifactCleanupError
+			if !errors.As(err, &pendingCleanupErr) {
+				return 0, err
+			}
 			cleanupFailures = append(cleanupFailures, err)
 		}
 	}
@@ -228,11 +232,12 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, cleanup *Run
 			archivedCount++
 		}
 		if err != nil {
-			if archived {
-				cleanupFailures = append(cleanupFailures, fmt.Errorf("archive run %s: %w", run.ID, err))
-				continue
+			var pendingCleanupErr *db.PendingArtifactCleanupError
+			if !errors.As(err, &pendingCleanupErr) {
+				return archivedCount, err
 			}
-			return archivedCount, err
+			cleanupFailures = append(cleanupFailures, fmt.Errorf("archive run %s: %w", run.ID, err))
+			continue
 		}
 	}
 	if err := errors.Join(cleanupFailures...); err != nil {

@@ -792,9 +792,9 @@ func validatePersistedEffectiveConfig(dir, runID, policyDigest string) error {
 }
 
 // ReadEffectiveConfigForRun returns a validated immutable artifact when one is
-// available. required reports whether this run's policy version makes any read
-// failure a recovery blocker. Pre-v9 runs may expose a real intact artifact,
-// but a missing artifact remains an explicit legacy-unavailable state.
+// available. required reports whether this run's policy version requires the
+// artifact to exist. Pre-v9 runs may omit both files, but a pair with either
+// file present must still pass complete validation.
 func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Artifact, bool, error) {
 	if run == nil {
 		return nil, true, fmt.Errorf("effective config run is nil")
@@ -804,6 +804,9 @@ func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Ar
 		return nil, true, fmt.Errorf("resolve effective config requirement: %w", err)
 	}
 	if legacy {
+		if !effectiveConfigPairAbsent(p, run.ID) {
+			return nil, false, fmt.Errorf("effective config artifact is present for legacy run")
+		}
 		return nil, false, nil
 	}
 	required := policy.Version >= effectiveConfigRequiredPolicyVersion

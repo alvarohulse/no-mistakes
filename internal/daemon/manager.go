@@ -174,10 +174,8 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
-	if _, required, err := ReadEffectiveConfigForRun(m.paths, run); required && err != nil {
-		return nil, fmt.Errorf("validate required effective config artifact: %w", err)
-	} else if err != nil {
-		slog.Debug("ignoring invalid optional legacy effective config artifact during recovery", "run_id", run.ID, "error", err)
+	if _, _, err := ReadEffectiveConfigForRun(m.paths, run); err != nil {
+		return nil, fmt.Errorf("validate effective config artifact: %w", err)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {

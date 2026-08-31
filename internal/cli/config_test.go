@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	toon "github.com/toon-format/toon-go"
+
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
@@ -235,8 +237,24 @@ func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testi
 	if err != nil {
 		t.Fatalf("axi status stored run: %v\n%s", err, statusOutput)
 	}
-	if !strings.Contains(statusOutput, "effective_config: "+p.EffectiveConfigYAML(storedRun.ID)) {
-		t.Fatalf("axi status omitted effective config path:\n%s", statusOutput)
+	var statusDocument struct {
+		Run struct {
+			EffectiveConfig string `toon:"effective_config"`
+		} `toon:"run"`
+	}
+	if err := toon.UnmarshalString(statusOutput, &statusDocument); err != nil {
+		t.Fatalf("decode axi status: %v\n%s", err, statusOutput)
+	}
+	actualInfo, err := os.Stat(statusDocument.Run.EffectiveConfig)
+	if err != nil {
+		t.Fatalf("stat reported effective config path %q: %v", statusDocument.Run.EffectiveConfig, err)
+	}
+	expectedInfo, err := os.Stat(p.EffectiveConfigYAML(storedRun.ID))
+	if err != nil {
+		t.Fatalf("stat expected effective config path: %v", err)
+	}
+	if !os.SameFile(actualInfo, expectedInfo) {
+		t.Fatalf("axi status effective config path = %q, want same file as %q", statusDocument.Run.EffectiveConfig, p.EffectiveConfigYAML(storedRun.ID))
 	}
 	if err := os.WriteFile(p.EffectiveConfigYAML(storedRun.ID), append(storedYAML, ' '), 0o600); err != nil {
 		t.Fatal(err)

@@ -89,6 +89,7 @@ no-mistakes eject
 ```
 
 Removes the `no-mistakes` remote, deletes the bare repo, cleans up worktrees, and removes the database record.
+If artifact cleanup cannot be durably marked complete, eject stops before removing the gate; retry after the database error is resolved. Filesystem cleanup failures remain queued for retry and do not block eject.
 It does not remove repo-local agent skill files created by `no-mistakes init`.
 
 ## Uninstall
