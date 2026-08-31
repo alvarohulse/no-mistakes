@@ -53,7 +53,7 @@ func TestCaptureLeavesAutoFixClosedUnlabeled(t *testing.T) {
 	assertCaptureUnlabeled(t, ctx, p, sourceDB, run.ID)
 }
 
-func TestCaptureLeavesRevertedAutoFixUnlabeled(t *testing.T) {
+func TestCaptureLabelsSelectedAutoFixAsTruePositiveEvenWhenLaterRoundReRaisesIt(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
@@ -77,13 +77,20 @@ func TestCaptureLeavesRevertedAutoFixUnlabeled(t *testing.T) {
 		t.Fatalf("captured cases = %d, want both review rounds", len(cases))
 	}
 	for _, c := range cases {
-		if c.SourceRoundID == firstRound.ID && c.Labels.HasGold() {
-			t.Fatalf("reverted auto-fix round labels = %#v, want unlabeled (did not land)", c.Labels)
+		if c.SourceRoundID != firstRound.ID {
+			continue
+		}
+		if len(c.Labels.Findings) != 1 {
+			t.Fatalf("re-raised auto-fix round labels = %#v, want one gold finding", c.Labels)
+		}
+		gold := c.Labels.Findings[0]
+		if gold.Kind != GoldTruePositive || gold.Source != goldSourceAutoFixMerged || gold.ID != "real-bug" {
+			t.Fatalf("re-raised auto-fix gold = %#v, want recorded-auto-fix-merged true-positive from the recorded fix decision", gold)
 		}
 	}
 }
 
-func TestCaptureLeavesSupersededAutoFixUnlabeled(t *testing.T) {
+func TestCaptureLabelsBothRoundsOfASupersededAutoFix(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
@@ -111,8 +118,9 @@ func TestCaptureLeavesSupersededAutoFixUnlabeled(t *testing.T) {
 	for _, c := range cases {
 		byRound[c.SourceRoundID] = c.Labels
 	}
-	if byRound[firstRound.ID].HasGold() {
-		t.Fatalf("superseded first-round labels = %#v, want unlabeled", byRound[firstRound.ID])
+	first := byRound[firstRound.ID]
+	if len(first.Findings) != 1 || first.Findings[0].Kind != GoldTruePositive || first.Findings[0].Source != goldSourceAutoFixMerged || first.Findings[0].ID != "real-bug" {
+		t.Fatalf("superseded first-round gold = %#v, want auto-fix-merged TP from its own recorded fix decision", first)
 	}
 	got := byRound[second.ID]
 	if len(got.Findings) != 1 || got.Findings[0].Kind != GoldTruePositive || got.Findings[0].Source != goldSourceAutoFixMerged || got.Findings[0].ID != "real-bug-v2" {
@@ -125,6 +133,9 @@ func TestCaptureWritesShippedUnfixedAsFalsePositive(t *testing.T) {
 	p, sourceDB, run, _, reviewRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
 	if err := sourceDB.SetStepRoundSelection(reviewRound.ID, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceDB.SetStepRoundDeclined(reviewRound.ID); err != nil {
 		t.Fatal(err)
 	}
 	steps, err := sourceDB.GetStepsByRun(run.ID)
@@ -144,11 +155,14 @@ func TestCaptureWritesShippedUnfixedAsFalsePositive(t *testing.T) {
 	}
 }
 
-func TestCaptureLeavesLaterRoundLandedUnselectedUnlabeled(t *testing.T) {
+func TestCaptureLabelsDeclinedFindingEvenWhenALaterRoundDropsIt(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
 	if err := sourceDB.SetStepRoundSelection(firstRound.ID, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceDB.SetStepRoundDeclined(firstRound.ID); err != nil {
 		t.Fatal(err)
 	}
 	steps, err := sourceDB.GetStepsByRun(run.ID)
@@ -171,19 +185,24 @@ func TestCaptureLeavesLaterRoundLandedUnselectedUnlabeled(t *testing.T) {
 	for _, c := range cases {
 		byRound[c.SourceRoundID] = c.Labels
 	}
-	if byRound[firstRound.ID].HasGold() {
-		t.Fatalf("later-fixed first-round labels = %#v, want unlabeled (finding no longer raised)", byRound[firstRound.ID])
+	first := byRound[firstRound.ID]
+	if len(first.Findings) != 1 || first.Findings[0].Kind != GoldFalsePositive || first.Findings[0].Source != goldSourceShippedUnfixed || first.Findings[0].ID != "real-bug" {
+		t.Fatalf("first-round gold = %#v, want shipped-unfixed FP from its own persisted decline", first)
 	}
-	var second Labels
-	for id, labels := range byRound {
-		if id != firstRound.ID {
-			second = labels
-			break
-		}
+}
+
+func TestCaptureLeavesMergedRoundWithoutPersistedDecisionUnlabeled(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, run, _, reviewRound := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+	if err := sourceDB.SetStepRoundSelection(reviewRound.ID, nil, ""); err != nil {
+		t.Fatal(err)
 	}
-	if len(second.Findings) != 1 || second.Findings[0].Kind != GoldFalsePositive || second.Findings[0].Source != goldSourceShippedUnfixed || second.Findings[0].ID != "other-bug" {
-		t.Fatalf("last-round gold = %#v, want shipped-unfixed FP for the still-raised finding", second)
+	if err := sourceDB.UpdateRunPRState(run.ID, "merged"); err != nil {
+		t.Fatal(err)
 	}
+
+	assertCaptureUnlabeled(t, ctx, p, sourceDB, run.ID)
 }
 
 func TestCaptureWritesEmptyActionShippedUnfixedAsFalsePositive(t *testing.T) {
@@ -350,11 +369,14 @@ func TestRelabelDoesNotClobberAdjudicatedLabels(t *testing.T) {
 	}
 }
 
-func TestCaptureDoesNotWriteShippedUnfixedWhenIntermediateRoundThenFinalRoundDropsIt(t *testing.T) {
+func TestCaptureWritesShippedUnfixedFromPersistedDecisionWhenFinalRoundDropsIt(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
 	if err := sourceDB.SetStepRoundSelection(firstRound.ID, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceDB.SetStepRoundDeclined(firstRound.ID); err != nil {
 		t.Fatal(err)
 	}
 	steps, err := sourceDB.GetStepsByRun(run.ID)
@@ -381,16 +403,20 @@ func TestCaptureDoesNotWriteShippedUnfixedWhenIntermediateRoundThenFinalRoundDro
 	for _, c := range cases {
 		byRound[c.SourceRoundID] = c.Labels
 	}
-	if byRound[firstRound.ID].HasGold() {
-		t.Fatalf("first-round labels = %#v, want unlabeled: the finding was gone from the final review round before merge", byRound[firstRound.ID])
+	first := byRound[firstRound.ID]
+	if len(first.Findings) != 1 || first.Findings[0].Kind != GoldFalsePositive || first.Findings[0].Source != goldSourceShippedUnfixed || first.Findings[0].ID != "real-bug" {
+		t.Fatalf("first-round gold = %#v, want shipped-unfixed FP keyed on its persisted decline", first)
 	}
 }
 
-func TestRelabelRemovesShippedUnfixedWhenLaterRoundShowsTheFindingLanded(t *testing.T) {
+func TestRelabelReplacesShippedUnfixedWhenRoundRecordsFixDecision(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, _, firstRound := setupCapturedRun(t, ctx)
 	defer sourceDB.Close()
 	if err := sourceDB.SetStepRoundSelection(firstRound.ID, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceDB.SetStepRoundDeclined(firstRound.ID); err != nil {
 		t.Fatal(err)
 	}
 	steps, err := sourceDB.GetStepsByRun(run.ID)
@@ -413,21 +439,19 @@ func TestRelabelRemovesShippedUnfixedWhenLaterRoundShowsTheFindingLanded(t *test
 		t.Fatalf("initial capture = %#v, want shipped-unfixed FP before the later round exists", first)
 	}
 
-	later := `{"findings":[{"id":"other-bug","severity":"warning","file":"main.go","line":1,"description":"style","action":"ask-user","review_scope":"source"}],"risk_level":"low","risk_rationale":"different issue","risk_scope":"source-or-external"}`
-	if _, err := sourceDB.InsertReviewStepRoundWithProvenance(steps[0].ID, 2, "auto_fix", &later, nil, run.HeadSHA, stringValue(firstRound.ReviewedHeadSHA), stringValue(firstRound.TrustedConfigSHA), firstRound.GlobalConfigYAML, firstRound.RepoConfigYAML, 25); err != nil {
+	if err := sourceDB.SetStepRoundSelection(firstRound.ID, strPtr(`["real-bug"]`), db.RoundSelectionSourceUser); err != nil {
 		t.Fatal(err)
 	}
 	relabeled, err := RelabelRun(ctx, store, p, sourceDB, run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(relabeled) != 1 {
-		t.Fatalf("relabeled cases = %d, want the original round", len(relabeled))
+	if len(relabeled) != 1 || len(relabeled[0].Labels.Findings) != 1 {
+		t.Fatalf("relabeled = %#v, want exactly the recomputed user-fix gold", relabeled)
 	}
-	for _, gold := range relabeled[0].Labels.Findings {
-		if gold.ID == "real-bug" && gold.Source == goldSourceShippedUnfixed {
-			t.Fatalf("relabeled labels = %#v, want obsolete shipped-unfixed FP removed once a later round no longer raises the finding", relabeled[0].Labels)
-		}
+	gold := relabeled[0].Labels.Findings[0]
+	if gold.Kind != GoldTruePositive || gold.Source != goldSourceUserFix {
+		t.Fatalf("relabeled gold = %#v, want obsolete shipped-unfixed FP replaced by the persisted user Fix", gold)
 	}
 }
 
@@ -469,15 +493,7 @@ func TestRelabelClearsStoredShippedUnfixedFPWhenRecomputedUnlabeled(t *testing.T
 	if err := sourceDB.UpdateStepStatus(steps[0].ID, types.StepStatusCompleted); err != nil {
 		t.Fatal(err)
 	}
-	stillRaised := `{"findings":[{"id":"real-bug","severity":"error","file":"main.go","line":3,"description":"bug","action":"ask-user","review_scope":"source"}],"risk_level":"high","risk_rationale":"still present","risk_scope":"source-or-external"}`
-	if _, err := sourceDB.InsertReviewStepRoundWithProvenance(steps[0].ID, 2, "auto_fix", &stillRaised, nil, run.HeadSHA, stringValue(firstRound.ReviewedHeadSHA), stringValue(firstRound.TrustedConfigSHA), firstRound.GlobalConfigYAML, firstRound.RepoConfigYAML, 25); err != nil {
-		t.Fatal(err)
-	}
-	final := `{"findings":[{"id":"other-bug","severity":"warning","file":"main.go","line":1,"description":"style","action":"ask-user","review_scope":"source"}],"risk_level":"low","risk_rationale":"different issue","risk_scope":"source-or-external"}`
-	if _, err := sourceDB.InsertReviewStepRoundWithProvenance(steps[0].ID, 3, "auto_fix", &final, nil, run.HeadSHA, stringValue(firstRound.ReviewedHeadSHA), stringValue(firstRound.TrustedConfigSHA), firstRound.GlobalConfigYAML, firstRound.RepoConfigYAML, 25); err != nil {
-		t.Fatal(err)
-	}
-	if err := sourceDB.UpdateRunPRState(run.ID, "merged"); err != nil {
+	if err := sourceDB.UpdateRunPRState(run.ID, "open"); err != nil {
 		t.Fatal(err)
 	}
 

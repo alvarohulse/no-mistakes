@@ -194,7 +194,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		return nil, fmt.Errorf("read source invocation metrics: %w", err)
 	}
 	captured := make([]Case, 0, len(reviewRounds))
-	for i, round := range reviewRounds {
+	for _, round := range reviewRounds {
 		if round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {
 			// An interrupted or cancelled later round is not a replayable
 			// pass. Skip it so a completed sibling of the same run can still
@@ -202,7 +202,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 			continue
 		}
 		decision := decisionForRound(round, reviewStep)
-		labels := goldFromRound(round, decision, runPRState(run), reviewRounds[i+1:])
+		labels := goldFromRound(round, decision, runPRState(run))
 		if !labels.HasGold() && (reviewStep.Status == types.StepStatusAwaitingApproval || reviewStep.Status == types.StepStatusFixReview) {
 			return nil, fmt.Errorf("%w: review round %q has no recorded gate decision", ErrNoCapturableReview, round.ID)
 		}
@@ -256,7 +256,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		caseID := run.ID + "-" + round.ID
 		caseDir := store.caseDir(caseID)
 		if existing, err := os.Stat(caseDir); err == nil && existing.IsDir() {
-			c, err := relabelExistingCase(store, caseDir, round, decision, runPRState(run), reviewRounds[i+1:])
+			c, err := relabelExistingCase(store, caseDir, round, decision, runPRState(run))
 			if err != nil {
 				return nil, fmt.Errorf("relabel existing case %q: %w", caseID, err)
 			}
@@ -516,8 +516,18 @@ func baselineForRound(invocations []db.AgentInvocation, round int) BaselineMetri
 	return baseline
 }
 
+const (
+	decisionUnknown = "unknown"
+	decisionFix     = "fix"
+	decisionSkip    = "skip"
+	decisionApprove = "approve"
+	decisionAbort   = "abort"
+
+	prStateMerged = "merged"
+)
+
 func decisionForRound(round *db.StepRound, step *db.StepResult) Decision {
-	decision := Decision{Action: "unknown"}
+	decision := Decision{Action: decisionUnknown}
 	if round.SelectionSource != nil {
 		decision.SelectionSource = *round.SelectionSource
 	}
@@ -528,39 +538,33 @@ func decisionForRound(round *db.StepRound, step *db.StepResult) Decision {
 		decision.HasUserFindings = true
 	}
 	if len(decision.SelectedFindingIDs) > 0 {
-		decision.Action = "fix"
+		decision.Action = decisionFix
 		return decision
 	}
 	if step == nil {
 		return decision
 	}
 	if step.Status == types.StepStatusSkipped {
-		decision.Action = "skip"
+		decision.Action = decisionSkip
 		return decision
 	}
 	if step.Status == types.StepStatusFailed && step.Error != nil && strings.Contains(*step.Error, "aborted by user") {
-		decision.Action = "abort"
+		decision.Action = decisionAbort
 		return decision
 	}
 	if round.FindingsJSON != nil {
 		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
 		if err == nil && types.HasAskUserFindings(findings) && step.Status == types.StepStatusCompleted {
-			decision.Action = "approve"
+			decision.Action = decisionApprove
 		}
 	}
 	return decision
 }
 
-// goldFromRound writes labels the recorded gate evidence supports.
-// A user-selected finding is true-positive gold without merge. An auto-fix
-// selection is true-positive gold only when the source PR merged and the fix
-// landed. A raised auto-fix/ask-user finding that shipped unfixed in a merged
-// PR is false-positive gold. An intermediate re-raise that is gone from the
-// last later review round is treated as fixed, not shipped-unfixed. Skip,
-// approve-with-findings on an unmerged PR, reverted auto-fixes, and no-op
-// notes stay unlabeled. Confirmed post-PR misses are written later by
-// IngestPostPRMiss, not here.
-func goldFromRound(round *db.StepRound, decision Decision, prState string, later []*db.StepRound) Labels {
+// goldFromRound writes labels from this round's recorded gate decision. Later
+// review output cannot rewrite what the operator decided about an earlier
+// finding, and a round with no decision stays unknown.
+func goldFromRound(round *db.StepRound, decision Decision, prState string) Labels {
 	labels := Labels{Version: labelsVersion}
 	byID := findingIndex(round)
 	seen := map[string]bool{}
@@ -588,7 +592,7 @@ func goldFromRound(round *db.StepRound, decision Decision, prState string, later
 			labels.Findings = append(labels.Findings, goldForRecordedFinding(finding, goldSourceUserFix, GoldTruePositive))
 		}
 	}
-	if decision.SelectionSource == db.RoundSelectionSourceAutoFix && prState == "merged" {
+	if decision.SelectionSource == db.RoundSelectionSourceAutoFix && prState == prStateMerged {
 		for _, id := range decision.SelectedFindingIDs {
 			id = strings.TrimSpace(id)
 			if id == "" || seen[id] {
@@ -596,9 +600,6 @@ func goldFromRound(round *db.StepRound, decision Decision, prState string, later
 			}
 			finding, ok := byID[id]
 			if !ok {
-				continue
-			}
-			if !fixLanded(finding, later) {
 				continue
 			}
 			seen[id] = true
@@ -620,16 +621,13 @@ func goldFromRound(round *db.StepRound, decision Decision, prState string, later
 			labels.Findings = append(labels.Findings, goldForRecordedFinding(finding, goldSourceUserAdded, GoldFalseNegative))
 		}
 	}
-	if prState == "merged" && round.FindingsJSON != nil {
+	if prState == prStateMerged && hasRecordedDecision(decision) && round.FindingsJSON != nil {
 		for _, finding := range parseFindingItems(*round.FindingsJSON) {
 			id := strings.TrimSpace(finding.ID)
 			if id == "" || seen[id] || selected[id] {
 				continue
 			}
 			if finding.ActionOrDefault() == types.ActionNoOp {
-				continue
-			}
-			if !stillRaisedAtMerge(finding, later) {
 				continue
 			}
 			seen[id] = true
@@ -652,53 +650,16 @@ func goldForRecordedFinding(finding types.Finding, source, kind string) FindingG
 	}
 }
 
-func fixLanded(finding types.Finding, later []*db.StepRound) bool {
-	gold := FindingGold{ID: finding.ID, File: finding.File, Description: finding.Description}
-	for _, round := range later {
-		if round == nil || round.FindingsJSON == nil {
-			continue
-		}
-		for _, item := range parseFindingItems(*round.FindingsJSON) {
-			if sameUnderlyingIssue(gold, item) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// stillRaisedAtMerge reports whether the finding is still present in the last
-// later review round, which is the merge-time evidence for shipped-unfixed FP.
-// An intermediate re-raise that disappears before that last round is a fix,
-// not a shipped-unfixed finding. No later round means this round is last.
-func stillRaisedAtMerge(finding types.Finding, later []*db.StepRound) bool {
-	last := lastLaterRound(later)
-	if last == nil {
+func hasRecordedDecision(decision Decision) bool {
+	if strings.TrimSpace(decision.SelectionSource) != "" {
 		return true
 	}
-	if last.FindingsJSON == nil {
+	switch decision.Action {
+	case decisionFix, decisionSkip, decisionApprove:
+		return true
+	default:
 		return false
 	}
-	gold := FindingGold{ID: finding.ID, File: finding.File, Description: finding.Description}
-	for _, item := range parseFindingItems(*last.FindingsJSON) {
-		if sameUnderlyingIssue(gold, item) {
-			return true
-		}
-	}
-	return false
-}
-
-func lastLaterRound(later []*db.StepRound) *db.StepRound {
-	var last *db.StepRound
-	for _, round := range later {
-		if round == nil {
-			continue
-		}
-		if last == nil || round.Round > last.Round {
-			last = round
-		}
-	}
-	return last
 }
 
 func runPRState(run *db.Run) string {
@@ -805,9 +766,8 @@ func relabelRunLocked(store *Store, database *db.DB, runID string) ([]Case, erro
 			out = append(out, c)
 			continue
 		}
-		later := laterReviewRounds(reviewRounds, round)
 		decision := decisionForRound(round, reviewStep)
-		updated, err := relabelExistingCase(store, c.Dir, round, decision, runPRState(run), later)
+		updated, err := relabelExistingCase(store, c.Dir, round, decision, runPRState(run))
 		if err != nil {
 			return nil, err
 		}
@@ -845,25 +805,12 @@ func loadReviewRounds(database *db.DB, runID string) (*db.Run, []*db.StepRound, 
 	return run, rounds, reviewStep, nil
 }
 
-func laterReviewRounds(rounds []*db.StepRound, current *db.StepRound) []*db.StepRound {
-	if current == nil {
-		return nil
-	}
-	out := make([]*db.StepRound, 0)
-	for _, round := range rounds {
-		if round.Round > current.Round {
-			out = append(out, round)
-		}
-	}
-	return out
-}
-
-func relabelExistingCase(store *Store, dir string, round *db.StepRound, decision Decision, prState string, later []*db.StepRound) (Case, error) {
+func relabelExistingCase(store *Store, dir string, round *db.StepRound, decision Decision, prState string) (Case, error) {
 	c, err := loadCase(dir)
 	if err != nil {
 		return Case{}, err
 	}
-	computed := goldFromRound(round, decision, prState, later)
+	computed := goldFromRound(round, decision, prState)
 	c.Labels = mergeGold(c.Labels, computed)
 	if err := writeJSON(filepath.Join(c.Dir, "labels.json"), c.Labels); err != nil {
 		return Case{}, fmt.Errorf("write relabeled gold: %w", err)

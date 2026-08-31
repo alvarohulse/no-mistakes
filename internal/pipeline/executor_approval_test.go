@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -120,6 +121,20 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 	if resumed.AwaitingAgentSince != nil {
 		t.Errorf("AwaitingAgentSince = %d after respond, want nil", *resumed.AwaitingAgentSince)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
+		t.Fatalf("approved review decision = %#v, want persisted user decline", rounds)
+	}
+	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != db.DeclinedSelectionJSON {
+		t.Fatalf("approved review selection = %#v, want explicit empty selection", rounds[0].SelectedFindingIDs)
 	}
 }
 
@@ -428,6 +443,13 @@ func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T)
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != reviewedHead {
 		t.Fatalf("recovered approval = %#v, want %s", got.ReviewApprovedHeadSHA, reviewedHead)
+	}
+	rounds, err := database.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
+		t.Fatalf("recovered approval decision = %#v, want persisted user decline", rounds)
 	}
 }
 

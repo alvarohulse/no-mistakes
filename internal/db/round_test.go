@@ -250,6 +250,70 @@ func TestStepRoundStats(t *testing.T) {
 	}
 }
 
+func TestSetStepRoundDeclinedPersistsAnExplicitEmptyDecision(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "https://github.com/user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"bug","action":"ask-user"}]}`
+	round, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.SetStepRoundDeclined(round.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rounds[0]
+	if got.SelectionSource == nil || *got.SelectionSource != RoundSelectionSourceUserDeclined {
+		t.Fatalf("selection source = %v, want %q", got.SelectionSource, RoundSelectionSourceUserDeclined)
+	}
+	if got.SelectedFindingIDs == nil || *got.SelectedFindingIDs != DeclinedSelectionJSON {
+		t.Fatalf("selected finding IDs = %v, want %q", got.SelectedFindingIDs, DeclinedSelectionJSON)
+	}
+	stats, err := d.StepRoundStats(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SelectedForFix || stats.AutoSelectedForFix || stats.PendingFixSource != "" {
+		t.Fatalf("decline counted as a fix selection: %#v", stats)
+	}
+}
+
+func TestSetStepRoundDeclinedDoesNotOverwriteARecordedSelection(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "https://github.com/user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"bug","action":"auto-fix"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 100)
+	selected := `["review-1"]`
+	if err := d.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceAutoFix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.SetStepRoundDeclined(round.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rounds[0]
+	if got.SelectionSource == nil || *got.SelectionSource != RoundSelectionSourceAutoFix {
+		t.Fatalf("selection source = %v, want original %q", got.SelectionSource, RoundSelectionSourceAutoFix)
+	}
+	if got.SelectedFindingIDs == nil || *got.SelectedFindingIDs != selected {
+		t.Fatalf("selected finding IDs = %v, want original %q", got.SelectedFindingIDs, selected)
+	}
+}
+
 func TestStepFixSummariesNoFixRounds(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")

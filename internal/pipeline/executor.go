@@ -493,12 +493,14 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
 	case types.ActionApprove:
+		e.recordDeclinedReviewRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := completeRecoveredGate(); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	case types.ActionSkip:
+		e.recordDeclinedReviewRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		e.recordSkipExplanation(gate.stepResult.ID, "Step was skipped by the user at its approval gate.")
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -506,6 +508,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	case types.ActionAbort:
+		e.recordDeclinedReviewRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
 			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
 		}
@@ -1160,11 +1163,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		case types.ActionApprove:
 			// Approved - execution already frozen in executionMS, reset phaseStart
 			// so the done label computes no additional elapsed.
+			e.recordDeclinedReviewRound(currentRoundID, outcome.Findings, stepName, roundNum)
 			phaseStart = time.Now()
 			goto done
 
 		case types.ActionSkip:
 			// Skip - mark step skipped and return (not an error)
+			e.recordDeclinedReviewRound(currentRoundID, outcome.Findings, stepName, roundNum)
 			e.recordSkipExplanation(sr.ID, "Step was skipped by the user at its approval gate.")
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
 				return false, fmt.Errorf("complete step %s (skip): %w", stepName, err)
@@ -1173,6 +1178,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, nil
 
 		case types.ActionAbort:
+			e.recordDeclinedReviewRound(currentRoundID, outcome.Findings, stepName, roundNum)
 			if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
@@ -1237,6 +1243,18 @@ done:
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, nil
+}
+
+// recordDeclinedReviewRound persists an explicit empty selection when a human
+// resolves a Review gate without choosing a finding to fix, preserving the
+// evidence eval needs to distinguish a decline from an unresolved round.
+func (e *Executor) recordDeclinedReviewRound(roundID, findingsJSON string, stepName types.StepName, roundNum int) {
+	if e == nil || e.db == nil || stepName != types.StepReview || roundID == "" || findingsCount(findingsJSON) == 0 {
+		return
+	}
+	if err := e.db.SetStepRoundDeclined(roundID); err != nil {
+		slog.Warn("failed to record declined review findings", "round", roundNum, "error", err)
+	}
 }
 
 func roundInsertID(_ string, inserted *db.StepRound, err error) string {
