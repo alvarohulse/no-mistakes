@@ -17,7 +17,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -76,9 +75,9 @@ const (
 	DefaultEvalDiversifiedSize = 32
 	// DefaultEvidenceRetention is the minimum run age from creation before
 	// terminal rich data becomes eligible for pruning. It is comfortably longer
-	// than typical PR review latency. A PR body can reference artifacts by local
-	// path whenever publishing is off or the provider has no derivable links. This
-	// is no-mistakes' own budget: the point of owning it is that no OS temp
+	// than typical PR review latency. A PR body can identify artifacts by local
+	// path while they remain owner-local. This is no-mistakes' own budget: the
+	// point of owning it is that no OS temp
 	// timer decides when a user's screenshots disappear.
 	DefaultEvidenceRetention = 14 * 24 * time.Hour
 	// DefaultEvidenceMaxRuns is the requested newest-terminal floor retained
@@ -928,15 +927,6 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("test.model") {
 		out.Test.Model = override.Test.Model
 	}
-	if override.has("test.evidence.store_in_repo") {
-		out.Test.Evidence.StoreInRepo = override.Test.Evidence.StoreInRepo
-	}
-	if override.has("test.evidence.dir") {
-		out.Test.Evidence.Dir = override.Test.Evidence.Dir
-	}
-	if override.has("test.evidence.branch") {
-		out.Test.Evidence.Branch = override.Test.Evidence.Branch
-	}
 	if override.has("document.agent") {
 		out.Document.Agent = override.Document.Agent
 		out.Document.Agents = copyAgents(override.Document.Agents)
@@ -1651,7 +1641,7 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 		Model    ModelRoute  `yaml:"model"`
 		Evidence EvidenceRaw `yaml:"evidence"`
 	}
-	if err := decodeKnownFields(value, &raw); err != nil {
+	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
 		return err
 	}
 	c.Agent = firstAgent(raw.Agent)
@@ -1661,25 +1651,17 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// EvidenceRaw is the YAML representation of test-evidence settings.
-// Pointer fields distinguish "not set" (nil) from explicit zero/false values.
+// EvidenceRaw is the YAML representation of owner-local test-evidence
+// retention settings. Pointer fields distinguish "not set" (nil) from
+// explicit zero values.
 type EvidenceRaw struct {
-	StoreInRepo *bool   `yaml:"store_in_repo"`
-	Dir         *string `yaml:"dir"`
-	// Branch selects the orphan evidence branch. It names a git ref the
-	// daemon pushes to with the maintainer's credentials, so it is honored
-	// ONLY from the trusted default-branch copy of .no-mistakes.yaml (see
-	// EffectiveRepoConfig): a contributor's pushed branch must not be able to
-	// aim evidence commits at another branch of the repository.
-	Branch *string `yaml:"branch"`
 	// LocalRoot, Retention, and MaxRuns describe this MACHINE's evidence
 	// storage: where the daemon writes artifacts on local disk and how long it
 	// keeps them. They are global-only - Merge resolves them straight from
 	// GlobalConfig and never from a repository, trusted copy included. A
 	// repository does not get to name a filesystem path the daemon writes to,
 	// nor to set the retention budget for a resource every other repository on
-	// the machine shares. (Contrast Branch, which is trusted-repo-settable
-	// because a branch genuinely is per-repository state.)
+	// the machine shares.
 	//
 	// LocalRoot must be absolute; see validateTestRaw.
 	LocalRoot *string `yaml:"local_root"`
@@ -1687,21 +1669,62 @@ type EvidenceRaw struct {
 	MaxRuns   *int    `yaml:"max_runs"`
 }
 
+func (c *EvidenceRaw) UnmarshalYAML(value *yaml.Node) error {
+	if key := retiredEvidencePublicationKey(value, make(map[*yaml.Node]bool)); key != "" {
+		return fmt.Errorf("test.evidence.%s was removed; remove this key and start a new run; test evidence is retained only in owner-local storage configured by test.evidence.local_root", key)
+	}
+	type rawEvidence struct {
+		LocalRoot *string `yaml:"local_root"`
+		Retention *string `yaml:"retention"`
+		MaxRuns   *int    `yaml:"max_runs"`
+	}
+	var raw rawEvidence
+	if err := decodeKnownFields(value, &raw); err != nil {
+		return err
+	}
+	c.LocalRoot = raw.LocalRoot
+	c.Retention = raw.Retention
+	c.MaxRuns = raw.MaxRuns
+	return nil
+}
+
+func retiredEvidencePublicationKey(value *yaml.Node, seen map[*yaml.Node]bool) string {
+	if value == nil || seen[value] {
+		return ""
+	}
+	seen[value] = true
+	switch value.Kind {
+	case yaml.AliasNode:
+		return retiredEvidencePublicationKey(value.Alias, seen)
+	case yaml.SequenceNode:
+		for _, item := range value.Content {
+			if key := retiredEvidencePublicationKey(item, seen); key != "" {
+				return key
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key, nested := value.Content[i], value.Content[i+1]
+			switch key.Value {
+			case "store_in_repo", "dir", "branch":
+				return key.Value
+			case "<<":
+				if retired := retiredEvidencePublicationKey(nested, seen); retired != "" {
+					return retired
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // Test is the resolved test-step config.
 type Test struct {
 	Evidence Evidence
 }
 
-// Evidence is the resolved test-evidence config. When StoreInRepo is true, the
-// run publishes its evidence artifacts to the orphan Branch of the same
-// repository, under Dir, and links them from the pull request body. Evidence
-// never enters the pushed code branch, so it never reaches the default
-// branch's history. Otherwise evidence stays on local disk under LocalRoot,
-// referenced only by local path.
+// Evidence is the resolved owner-local test-evidence retention config.
 type Evidence struct {
-	StoreInRepo bool
-	Dir         string
-	Branch      string
 	// LocalRoot overrides the app-root default for on-disk evidence; empty
 	// means paths.EvidenceDir(). Retention and MaxRuns bound how much of it
 	// survives: no-mistakes reaps its own evidence rather than leaving that to
@@ -2265,12 +2288,8 @@ intent:
   # disabled_readers: [codex]
 
 # Test-step evidence artifacts (screenshots, recordings, logs the test step
-# gathers to demonstrate the change works). By default they are kept on local
-# disk under <NM_HOME>/evidence and referenced by local path. Opt in to
-# store_in_repo to publish them to an orphan evidence branch in the same
-# repository and link them from the PR body. The evidence branch shares no
-# history with your code branches, so artifacts never enter the pushed branch or
-# the default branch.
+# gathers to demonstrate the change works). They are kept on local disk under
+# <NM_HOME>/evidence and never published to a repository by no-mistakes.
 #
 # no-mistakes reaps its own evidence rather than leaving that to an OS temp
 # directory timer. Rich data survives while a run is active, pinned, inside the
@@ -2283,9 +2302,6 @@ intent:
 # A repository's .no-mistakes.yaml cannot change where this machine writes evidence or how long it keeps it.
 # test:
 #   evidence:
-#     store_in_repo: true
-#     dir: .no-mistakes/evidence
-#     branch: no-mistakes/evidence
 #     local_root: /var/lib/no-mistakes/evidence
 #     retention: 720h
 #     max_runs: 50
@@ -3426,8 +3442,8 @@ func validatePathInstructionGlob(pattern string) error {
 // taken only from the trusted copy when it is present, so a contributor's
 // pushed branch cannot inject shell or pick an agent. Prompts follow the same
 // opt-in boundary. Refresh strategy, document instructions, review path
-// instructions, project-settings suppression, no-CI readiness, the CI rerun
-// budget, and the evidence branch are always trusted-only.
+// instructions, project-settings suppression, no-CI readiness, and the CI
+// rerun budget are always trusted-only.
 // true the maintainer has explicitly opted in (via allow_repo_commands on the
 // TRUSTED default-branch copy) to honoring the pushed branch's commands, hooks,
 // prompt additions, and agent selection, including step routes.
@@ -3441,8 +3457,6 @@ func validatePathInstructionGlob(pattern string) error {
 // Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
 // always taken from the pushed copy, matching prior behavior, since they cannot
 // run arbitrary shell, select a process, or spend the maintainer's CI minutes.
-// The single exception inside test is evidence.branch, which names a git ref
-// the daemon pushes to and is therefore trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
@@ -3470,13 +3484,6 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// billed to the repository. It is trusted-only for that reason, so a
 		// pushed branch cannot raise its own rerun budget to the cap.
 		effective.CI.RerunTransient = trusted.CI.RerunTransient
-		// test.evidence.branch names the git ref evidence commits are pushed
-		// to with the maintainer's credentials. It is trusted-only so a pushed
-		// branch cannot aim them at another branch of the repository; the rest
-		// of test.evidence stays pushed-readable because it only picks where
-		// artifacts are collected. The publisher independently refuses any
-		// branch without its marker file, so this is defense in depth.
-		effective.Test.Evidence.Branch = trusted.Test.Evidence.Branch
 	} else {
 		effective.Refresh.Strategy = ""
 		effective.Document.Instructions = ""
@@ -3484,7 +3491,6 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.DisableProjectSettings = false
 		effective.NoCI = false
 		effective.CI = CIRaw{}
-		effective.Test.Evidence.Branch = nil
 	}
 	if allowRepoCommands {
 		return &effective
@@ -3601,40 +3607,14 @@ func applyIntentOverrides(dst *Intent, src *IntentRaw) {
 	}
 }
 
-// testDefaults returns the default test-step settings. Evidence publication is
-// opt-in (off by default); when enabled it lands under .no-mistakes/evidence on
-// the default orphan evidence branch.
+// testDefaults returns the owner-local test-evidence retention defaults.
 func testDefaults() Test {
 	return Test{
 		Evidence: Evidence{
-			StoreInRepo: false,
-			Dir:         ".no-mistakes/evidence",
-			Branch:      evidence.DefaultBranch,
-			LocalRoot:   "",
-			Retention:   DefaultEvidenceRetention,
-			MaxRuns:     DefaultEvidenceMaxRuns,
+			LocalRoot: "",
+			Retention: DefaultEvidenceRetention,
+			MaxRuns:   DefaultEvidenceMaxRuns,
 		},
-	}
-}
-
-// applyTestOverrides applies non-nil raw values onto resolved defaults.
-// The branch name is validated at config parse time (validateTestRaw), so an
-// unusable value never reaches here.
-//
-// It deliberately covers only the repository-relevant half of test.evidence.
-// The local-storage half is applied separately by applyEvidenceStorageOverrides
-// so a repository config can never reach it (see EvidenceRaw.LocalRoot).
-func applyTestOverrides(dst *Test, src *TestRaw) {
-	if src.Evidence.StoreInRepo != nil {
-		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
-	}
-	if src.Evidence.Dir != nil && strings.TrimSpace(*src.Evidence.Dir) != "" {
-		dst.Evidence.Dir = strings.TrimSpace(*src.Evidence.Dir)
-	}
-	if src.Evidence.Branch != nil && strings.TrimSpace(*src.Evidence.Branch) != "" {
-		if branch, err := evidence.NormalizeBranch(*src.Evidence.Branch); err == nil {
-			dst.Evidence.Branch = branch
-		}
 	}
 }
 
@@ -3718,19 +3698,8 @@ func validateEvalRaw(raw EvalRaw) error {
 	return nil
 }
 
-// validateTestRaw fails the config closed on a test.evidence.branch value Git
-// would reject as a branch name. Rejecting the config surfaces the typo where
-// the user can fix it, rather than letting a run reach the push and fail there.
-//
-// Like validateReviewRaw this deliberately also runs on the PUSHED copy even
-// though EffectiveRepoConfig only honors the trusted branch name: a branch
-// carrying an invalid value has to fail before it merges.
+// validateTestRaw fails closed on unusable owner-local evidence retention.
 func validateTestRaw(test TestRaw) error {
-	if test.Evidence.Branch != nil {
-		if _, err := evidence.NormalizeBranch(*test.Evidence.Branch); err != nil {
-			return fmt.Errorf("test.evidence.branch: %w", err)
-		}
-	}
 	// local_root must be absolute. The daemon's working directory is a bare
 	// gate repository, so a relative path would resolve somewhere the operator
 	// never named - and evidence would silently scatter instead of landing
@@ -3857,8 +3826,6 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyIntentOverrides(&intent, &repo.Intent)
 
 	test := testDefaults()
-	applyTestOverrides(&test, &global.Test)
-	applyTestOverrides(&test, &repo.Test)
 	// Applied last and from the global config only: where the daemon writes
 	// evidence on this machine, and how long it keeps it, is never a
 	// repository's decision (see EvidenceRaw.LocalRoot).

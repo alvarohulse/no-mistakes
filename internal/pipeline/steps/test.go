@@ -164,10 +164,7 @@ Previous test findings to address:
 			sctx.Log("user intent available, asking agent to gather test evidence...")
 		}
 		reassessHistory := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + testguidance.Rule + configuredPromptSection(sctx, s.Name())
-		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
-		if sctx.Config.Test.Evidence.StoreInRepo {
-			evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
-		}
+		evidenceGuidance := fmt.Sprintf("- Write new evidence files into this owner-local evidence directory, never into the worktree: %s. Text may be rendered in the PR within its limits; media remains local-only and unavailable from the PR.", evidenceDir)
 		configuredTestCommand := ""
 		if testCmd != "" {
 			configuredTestCommand = fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", testCmd)

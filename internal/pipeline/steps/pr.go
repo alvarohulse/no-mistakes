@@ -380,7 +380,7 @@ func redactOutboundPRContent(content prContent, bodyLimit int) prContent {
 
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, records RunRecords) (string, string, string) {
 	summary, riskLine := buildPipelineSummary(records.Steps, records.Rounds, records.Invocations, sctx.Run.RefreshStrategy, sctx.Run.HeadSHA)
-	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx))
+	testingMD := BuildTestingSummaryForPR(records.Steps, records.Rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx))
 	configSources := configSourcesSummary(sctx.Run.ConfigSources)
 	if summary == "" || configSources == "" {
 		return summary, riskLine, testingMD

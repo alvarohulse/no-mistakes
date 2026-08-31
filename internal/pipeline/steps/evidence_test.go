@@ -45,17 +45,3 @@ func TestTestEvidenceDir_DefaultResolutionStaysUnderTheAppRoot(t *testing.T) {
 		t.Errorf("evidence dir %q is still under the legacy shared temp root %q", got, legacy)
 	}
 }
-
-func TestEvidenceBranchSlug_KeepsBranchStructureAndDropsUnsafeSegments(t *testing.T) {
-	cases := map[string]string{
-		"feature/add-login":  "feature/add-login",
-		"../../etc/pa ss~wd": "etc/pa-ss-wd",
-		"///":                "",
-	}
-	for branch, want := range cases {
-		got := strings.Join(evidenceBranchSlug(branch), "/")
-		if got != want {
-			t.Errorf("slug(%q) = %q, want %q", branch, got, want)
-		}
-	}
-}

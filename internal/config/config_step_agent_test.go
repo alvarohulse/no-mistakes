@@ -27,8 +27,6 @@ review:
   agent: [codex, claude]
 test:
   agent: pi
-  evidence:
-    store_in_repo: true
 document:
   agent: opencode
   instructions: docs/ owns product guidance.
@@ -60,9 +58,6 @@ ci:
 	}
 	if got := cfg.ConfiguredStepAgents(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ConfiguredStepAgents() = %v, want %v", got, want)
-	}
-	if cfg.Test.Evidence.StoreInRepo == nil || !*cfg.Test.Evidence.StoreInRepo {
-		t.Fatal("test.evidence.store_in_repo was not preserved")
 	}
 	if cfg.Document.Instructions != "docs/ owns product guidance." {
 		t.Fatalf("document.instructions = %q", cfg.Document.Instructions)

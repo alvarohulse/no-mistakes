@@ -72,10 +72,6 @@ type testingSummaryOptions struct {
 	// under neither is dropped rather than rendered into the PR body. Empty
 	// disables the evidence half of the allowlist, which fails closed.
 	evidenceRoot string
-	// evidence links artifacts published to the repository's orphan evidence
-	// branch. It is nil when nothing was published, and the artifacts then
-	// render as local paths rather than as links that would not resolve.
-	evidence *evidenceLinks
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -211,14 +207,13 @@ func BuildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 	return buildTestingSummary(steps, rounds, testingSummaryOptions{includeTestedDetails: true})
 }
 
-func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, evidence *evidenceLinks) string {
+func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.compactArtifacts = true
 	opts.summaryParagraph = true
 	opts.omitOutcome = true
 	opts.repoRoot = repoRoot
 	opts.evidenceRoot = evidenceRoot
-	opts.evidence = evidence
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -522,7 +517,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 		if target != "" {
 			b.WriteString(fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target))
 		} else if localPath != "" {
-			b.WriteString(renderLocalArtifactLine(label, localPath))
+			b.WriteString(renderLocalArtifactLine(label))
 		}
 	}
 	if descriptionLine != "" {
@@ -559,7 +554,7 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		if target != "" {
 			return fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target)
 		}
-		return renderLocalArtifactLine(label, localPath)
+		return renderLocalArtifactLine(label)
 	}
 
 	fenceBody, descriptionLine := caption, ""
@@ -573,7 +568,7 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 	if target != "" {
 		b.WriteString(fmt.Sprintf("Source: [%s](%s)\n\n", html.EscapeString(label), target))
 	} else if !hasFile && localPath != "" {
-		b.WriteString(renderLocalArtifactReference("Source", label, localPath))
+		b.WriteString(renderLocalArtifactReference("Source", label))
 		b.WriteString("\n")
 	}
 	if descriptionLine != "" {
@@ -701,10 +696,6 @@ func trimUTF8Start(data []byte) []byte {
 }
 
 func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
-	raw := isImageArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, artifact.Path)
-	if target := opts.evidence.target(artifact.Path, raw); target != "" {
-		return target
-	}
 	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
 	if repoPath == "" {
 		return ""
@@ -719,9 +710,6 @@ func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptio
 }
 
 func artifactLinkTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
-	if target := opts.evidence.target(artifact.Path, false); target != "" {
-		return target
-	}
 	repoPath := repoRelativeArtifactPath(artifact.Path, opts)
 	if repoPath == "" {
 		return ""
@@ -841,12 +829,12 @@ func sameVolume(a, b string) bool {
 	return strings.EqualFold(filepath.VolumeName(a), filepath.VolumeName(b)) || filepath.VolumeName(a) == "" || filepath.VolumeName(b) == ""
 }
 
-func renderLocalArtifactLine(label, localPath string) string {
-	return renderLocalArtifactReference("- Evidence", label, localPath)
+func renderLocalArtifactLine(label string) string {
+	return renderLocalArtifactReference("- Evidence", label)
 }
 
-func renderLocalArtifactReference(prefix, label, localPath string) string {
-	return fmt.Sprintf("%s: %s (local file: <code>%s</code>)\n", prefix, html.EscapeString(label), html.EscapeString(localPath))
+func renderLocalArtifactReference(prefix, label string) string {
+	return fmt.Sprintf("%s: %s (local-only; unavailable from the pull request)\n", prefix, html.EscapeString(label))
 }
 
 func sanitizeArtifactURL(target string) string {

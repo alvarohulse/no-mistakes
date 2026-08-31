@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 7
+	resolvedPolicyVersion     = 8
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -101,9 +101,11 @@ type resolvedPolicyAutoFix struct {
 }
 
 type resolvedPolicyEvidence struct {
-	StoreInRepo bool  `json:"store_in_repo"`
-	RetentionNS int64 `json:"retention_ns"`
-	MaxRuns     int   `json:"max_runs"`
+	// LegacyStoreInRepo survives only to identify version 7 and older snapshots
+	// that depended on the retired remote publisher. New snapshots omit it.
+	LegacyStoreInRepo bool  `json:"store_in_repo,omitempty"`
+	RetentionNS       int64 `json:"retention_ns"`
+	MaxRuns           int   `json:"max_runs"`
 }
 
 type resolvedPolicyIntent struct {
@@ -253,8 +255,9 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 }
 
 // Older versions predate managed routing, resolved runner provenance, trusted
-// preflight, source-aware skip receipts, or removal of pricing profiles. Their
-// missing or retired fields are normalized before semantic comparison.
+// preflight, source-aware skip receipts, removal of pricing profiles, or
+// removal of the evidence publisher. Their missing or retired fields are
+// normalized before semantic comparison.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	if policy.Version == 1 {
 		if policy.Routing.Version == 1 {
@@ -273,6 +276,9 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	}
 	if policy.Version >= 1 && policy.Version <= 6 {
 		policy.LegacyPricing = nil
+	}
+	if policy.Version >= 1 && policy.Version <= 7 {
+		policy.TestEvidence.LegacyStoreInRepo = false
 		policy.Version = resolvedPolicyVersion
 	}
 }
@@ -356,7 +362,6 @@ func resolvedPolicyFromConfigWithSkips(cfg *config.Config, sources []db.ConfigSo
 			MaxCases: cfg.Eval.MaxCases, DiversifiedSize: cfg.Eval.DiversifiedSize,
 		},
 		TestEvidence: resolvedPolicyEvidence{
-			StoreInRepo: cfg.Test.Evidence.StoreInRepo,
 			RetentionNS: int64(cfg.Test.Evidence.Retention),
 			MaxRuns:     cfg.Test.Evidence.MaxRuns,
 		},
@@ -399,7 +404,7 @@ func (p *resolvedPolicy) validate() error {
 			return fmt.Errorf("resolved policy enabled step %q has a skip source", step.Name)
 		}
 		if step.Status == resolvedPolicyStepSkipped {
-			if step.SkipSource == "" && p.Version == resolvedPolicyVersion {
+			if step.SkipSource == "" && p.Version >= 5 {
 				return fmt.Errorf("resolved policy skipped step %q has no skip source", step.Name)
 			}
 			if step.SkipSource != "" && !step.SkipSource.Valid() {
@@ -463,6 +468,9 @@ func (p *resolvedPolicy) validate() error {
 	}
 	if p.Version >= 7 && p.LegacyPricing != nil {
 		return fmt.Errorf("resolved policy contains retired pricing profiles")
+	}
+	if p.TestEvidence.LegacyStoreInRepo {
+		return fmt.Errorf("resolved policy uses retired test.evidence.store_in_repo; remove test.evidence.store_in_repo, test.evidence.dir, and test.evidence.branch, then start a new run")
 	}
 	for _, limit := range []int{p.Budgets.AutoFix.Lint, p.Budgets.AutoFix.Build, p.Budgets.AutoFix.Test, p.Budgets.AutoFix.Review, p.Budgets.AutoFix.Document, p.Budgets.AutoFix.CI, p.Budgets.AutoFix.Refresh} {
 		if limit < 0 {

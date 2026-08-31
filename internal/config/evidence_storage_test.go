@@ -10,9 +10,9 @@ import (
 //
 // local_root names a filesystem path the daemon writes to, and retention and
 // max_runs budget a resource every repository on the machine shares. Neither is
-// per-repository policy, so neither may be settable from a repository config -
-// including the trusted default-branch copy, which is where test.evidence.branch
-// legitimately comes from. Merge must resolve all three from GlobalConfig alone.
+// per-repository policy, so neither may be settable from a repository config,
+// including the trusted default-branch copy. Merge must resolve all three from
+// GlobalConfig alone.
 func TestEvidenceLocalStorageIsGlobalOnly(t *testing.T) {
 	globalRoot := t.TempDir()
 	repoRoot := t.TempDir()
