@@ -51,6 +51,18 @@ func TestWorktreePaths(t *testing.T) {
 	}
 }
 
+func TestRunArtifactPaths(t *testing.T) {
+	root := filepath.Join("tmp", "nm-test")
+	p := WithRoot(root)
+
+	if got := p.EffectiveConfigYAML("run1"); got != filepath.Join(root, "runs", "run1", "effective-config.yaml") {
+		t.Errorf("EffectiveConfigYAML() = %q", got)
+	}
+	if got := p.EffectiveConfigMeta("run1"); got != filepath.Join(root, "runs", "run1", "effective-config.meta.json") {
+		t.Errorf("EffectiveConfigMeta() = %q", got)
+	}
+}
+
 func TestLogPaths(t *testing.T) {
 	root := filepath.Join("tmp", "nm-test")
 	p := WithRoot(root)
@@ -118,7 +130,7 @@ func TestEnsureDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, d := range []string{p.Root(), p.ReposDir(), p.WorktreesDir(), p.LogsDir(), p.ServerPIDsDir()} {
+	for _, d := range []string{p.Root(), p.ReposDir(), p.WorktreesDir(), p.RunsDir(), p.LogsDir(), p.ServerPIDsDir()} {
 		info, err := os.Stat(d)
 		if err != nil {
 			t.Errorf("expected dir %q to exist: %v", d, err)

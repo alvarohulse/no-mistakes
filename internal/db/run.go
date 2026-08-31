@@ -168,7 +168,14 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // InsertRunWithOptions atomically creates a run with its refresh selection and
 // optional PR note.
 func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions) (*Run, error) {
-	return d.insertRunWithOptions(repoID, branch, headSHA, baseSHA, opts, types.RunPending, nil)
+	return d.InsertRunWithIDAndOptions(NewRunID(), repoID, branch, headSHA, baseSHA, opts)
+}
+
+// InsertRunWithIDAndOptions creates a run using an identity allocated before
+// insertion. The daemon uses this boundary to finish immutable run artifacts
+// before the run row or worktree can exist.
+func (d *DB) InsertRunWithIDAndOptions(id, repoID, branch, headSHA, baseSHA string, opts RunOptions) (*Run, error) {
+	return d.insertRunWithIDAndOptions(id, repoID, branch, headSHA, baseSHA, opts, types.RunPending, nil)
 }
 
 // InsertFailedRunWithOptions atomically records a pre-execution failure. It is
@@ -178,10 +185,13 @@ func (d *DB) InsertFailedRunWithOptions(repoID, branch, headSHA, baseSHA string,
 	if strings.TrimSpace(failure) == "" {
 		return nil, fmt.Errorf("failed run error is empty")
 	}
-	return d.insertRunWithOptions(repoID, branch, headSHA, baseSHA, opts, types.RunFailed, &failure)
+	return d.insertRunWithIDAndOptions(NewRunID(), repoID, branch, headSHA, baseSHA, opts, types.RunFailed, &failure)
 }
 
-func (d *DB) insertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts RunOptions, status types.RunStatus, runError *string) (*Run, error) {
+func (d *DB) insertRunWithIDAndOptions(id, repoID, branch, headSHA, baseSHA string, opts RunOptions, status types.RunStatus, runError *string) (*Run, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("run ID is empty")
+	}
 	ts := now()
 	var terminalHeadVerifiedAt *int64
 	if runError != nil && status == types.RunFailed {
@@ -201,7 +211,7 @@ func (d *DB) insertRunWithOptions(repoID, branch, headSHA, baseSHA string, opts 
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
 	r := &Run{
-		ID:                     newID(),
+		ID:                     id,
 		RepoID:                 repoID,
 		Branch:                 branch,
 		HeadSHA:                headSHA,

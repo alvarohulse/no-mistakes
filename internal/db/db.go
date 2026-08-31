@@ -84,6 +84,11 @@ func newID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), entropy).String()
 }
 
+// NewRunID allocates the identity for a run before its database row exists.
+// Launch-time filesystem artifacts use the same ID and must be complete before
+// InsertRunWithIDAndOptions makes the run visible.
+func NewRunID() string { return newID() }
+
 // now returns the current unix timestamp in seconds.
 func now() int64 {
 	return time.Now().Unix()
