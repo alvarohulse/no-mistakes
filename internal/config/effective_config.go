@@ -83,14 +83,15 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 	configuredDefault := cfg.configuredAgents()
 	configuredSteps := cloneAgentRoutes(cfg.StepAgents)
 	configuredCandidates := copyReviewCandidates(cfg.ReviewCandidates)
-	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
+	origins, err := cfg.resolveAgentWithOrigins(ctx, lookPath)
+	if err != nil {
 		return err
 	}
 	if r.Provenance == nil {
 		return nil
 	}
 
-	r.Provenance.recordResolvedAgents("resolved.agent.default", "agent", configuredDefault, cfg.Agents)
+	r.Provenance.recordResolvedAgents("resolved.agent.default", "agent", configuredDefault, cfg.Agents, origins.Default)
 
 	steps := make(map[types.StepName]bool, len(cfg.StepAgents)+len(cfg.StepModels))
 	for step := range cfg.StepAgents {
@@ -108,7 +109,7 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		}
 		resolvedAgents := cfg.StepAgents[step]
 		prefix := "resolved.agent.step_routes." + string(step)
-		r.Provenance.recordResolvedAgents(prefix+".agents", sourcePath, configuredAgents, resolvedAgents)
+		r.Provenance.recordResolvedAgents(prefix+".agents", sourcePath, configuredAgents, resolvedAgents, origins.Steps[step])
 		r.Provenance.setSubtree(prefix+".model.name", r.Provenance.Value(string(step)+".model.name"))
 		r.Provenance.setSubtree(prefix+".model.vendor", r.Provenance.Value(string(step)+".model.vendor"))
 	}
@@ -145,23 +146,17 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 	return nil
 }
 
-func (p *EffectiveConfigProvenance) recordResolvedAgents(path, sourcePath string, configured, resolved []types.AgentName) {
+func (p *EffectiveConfigProvenance) recordResolvedAgents(path, sourcePath string, configured, resolved []types.AgentName, runtimeOrigins []bool) {
 	configuredValue := p.Value(sourcePath)
 	listValue := configuredValue
-	if !slices.Equal(configured, resolved) {
+	if !slices.Equal(configured, resolved) || slices.Contains(runtimeOrigins, true) {
 		listValue = EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
 	}
 	p.setSubtree(path, listValue)
-	usedConfigured := make([]bool, len(configured))
-	for i, agent := range resolved {
+	for i := range resolved {
 		value := EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
-		for j, candidate := range configured {
-			if usedConfigured[j] || candidate == types.AgentAuto || candidate != agent {
-				continue
-			}
-			usedConfigured[j] = true
+		if i < len(runtimeOrigins) && !runtimeOrigins[i] {
 			value = configuredValue
-			break
 		}
 		p.setSubtree(path+"["+strconv.Itoa(i)+"]", value)
 	}

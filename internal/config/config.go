@@ -2514,6 +2514,16 @@ var loadReviewCandidateModelCatalog = func(ctx context.Context, name types.Agent
 // identity, and kept as fallbacks. The lookPath function should behave like
 // exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
+	_, err := c.resolveAgentWithOrigins(ctx, lookPath)
+	return err
+}
+
+type agentResolutionOrigins struct {
+	Default []bool
+	Steps   map[types.StepName][]bool
+}
+
+func (c *Config) resolveAgentWithOrigins(ctx context.Context, lookPath func(string) (string, error)) (*agentResolutionOrigins, error) {
 	if c.StepAgents == nil {
 		c.StepAgents = make(map[types.StepName][]types.AgentName)
 	}
@@ -2521,15 +2531,17 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		c.StepModels = make(map[types.StepName]ModelRoute)
 	}
 	if err := c.validateManagedRoutes(); err != nil {
-		return err
+		return nil, err
 	}
+	origins := &agentResolutionOrigins{Steps: make(map[types.StepName][]bool)}
 	defaultCandidates := c.configuredAgents()
-	resolved, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.Agent = resolved[0]
 	c.Agents = resolved
+	origins.Default = runtimeOrigins
 	for _, step := range []types.StepName{
 		types.StepIntent,
 		types.StepRefresh,
@@ -2549,16 +2561,17 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		if len(candidates) == 0 {
 			candidates = defaultCandidates
 		}
-		resolved, err := c.resolveAgents(ctx, candidates, model, lookPath)
+		resolved, runtimeOrigins, err := c.resolveAgents(ctx, candidates, model, lookPath)
 		if err != nil {
-			return fmt.Errorf("resolve %s agent route: %w", step, err)
+			return nil, fmt.Errorf("resolve %s agent route: %w", step, err)
 		}
 		c.StepAgents[step] = resolved
+		origins.Steps[step] = runtimeOrigins
 	}
 	if err := c.resolveReviewCandidates(ctx, lookPath); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return origins, nil
 }
 
 func (c *Config) validateManagedRoutes() error {
@@ -2675,34 +2688,35 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 	return nil
 }
 
-func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	if len(candidates) <= 1 {
 		name := firstAgent(candidates)
+		configured := name
 		if name == types.AgentAuto {
 			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return []types.AgentName{name}, nil
+			return []types.AgentName{name}, []bool{true}, nil
 		}
 		if err := validateAgentModelCompatibility(name, model); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, name, lookPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
-			return nil, noRunnableAgentError([]types.AgentName{name}, []string{probe})
+			return nil, nil, noRunnableAgentError([]types.AgentName{name}, []string{probe})
 		}
-		return []types.AgentName{resolved}, nil
+		return []types.AgentName{resolved}, []bool{resolved != configured}, nil
 	}
 
-	resolved, err := c.resolveAgentList(ctx, candidates, model, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgentList(ctx, candidates, model, lookPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resolved, nil
+	return resolved, runtimeOrigins, nil
 }
 
 func (c *Config) configuredAgents() []types.AgentName {
@@ -2771,11 +2785,14 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
 
-func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
+	runtimeOrigins := make([]bool, 0, len(candidates))
 	seen := map[string]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
+		configured := candidate
+		fromAuto := candidate == types.AgentAuto
 		if candidate == types.AgentAuto {
 			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
 			if err != nil && strings.HasPrefix(err.Error(), "no runnable agent found") {
@@ -2783,13 +2800,13 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			candidate = name
 		}
 		if err := validateAgentModelCompatibility(candidate, model); err != nil {
 			if isACPAgent(candidate) {
-				return nil, err
+				return nil, nil, err
 			}
 			probed = append(probed, err.Error())
 			continue
@@ -2799,7 +2816,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 			probed = append(probed, probe)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
 			continue
@@ -2810,11 +2827,12 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		}
 		seen[identity] = true
 		resolved = append(resolved, name)
+		runtimeOrigins = append(runtimeOrigins, fromAuto || name != configured)
 	}
 	if len(resolved) == 0 {
-		return nil, noRunnableAgentError(candidates, probed)
+		return nil, nil, noRunnableAgentError(candidates, probed)
 	}
-	return resolved, nil
+	return resolved, runtimeOrigins, nil
 }
 
 func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) error {

@@ -261,7 +261,33 @@ func TestStartRunEffectiveConfigMarksAutoDerivedAgentAsRuntime(t *testing.T) {
 }
 
 func TestStartRunEffectiveConfigPreservesExplicitFallbackBesideAuto(t *testing.T) {
-	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-mixed-routing")
+	yamlBytes := runEffectiveConfigWithMixedAgentFallbacks(t, "effective-config-mixed-routing", "[auto, acp:cursor]")
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 2 || defaultAgents.Content[0].Value != "cursor" || defaultAgents.Content[1].Value != "acp:cursor" {
+		t.Fatalf("agent.default = %#v, want [cursor, acp:cursor]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("auto-derived agent provenance = %q, want runtime", got)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[1]); got != "source=pushed; is_default=false" {
+		t.Fatalf("explicit fallback provenance = %q, want pushed", got)
+	}
+}
+
+func TestStartRunEffectiveConfigKeepsAutoOriginWhenExplicitDuplicateIsDiscarded(t *testing.T) {
+	yamlBytes := runEffectiveConfigWithMixedAgentFallbacks(t, "effective-config-auto-duplicate", "[auto, cursor]")
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 1 || defaultAgents.Content[0].Value != "cursor" {
+		t.Fatalf("agent.default = %#v, want [cursor]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("auto-selected deduplicated agent provenance = %q, want runtime", got)
+	}
+}
+
+func runEffectiveConfigWithMixedAgentFallbacks(t *testing.T, repoID, configuredAgents string) []byte {
+	t.Helper()
+	p, database, repo, marker := newPolicyResolutionFixture(t, repoID)
 	agentDir := t.TempDir()
 	mockCursor := writeRunnableMockAgent(t, agentDir, "cursor-agent")
 	mockACPX := writeRunnableMockAgent(t, agentDir, "acpx")
@@ -282,7 +308,7 @@ func TestStartRunEffectiveConfigPreservesExplicitFallbackBesideAuto(t *testing.T
 	trustedYAML := "allow_repo_commands: true\nauto_fix:\n  review: 0\n" +
 		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n"
 	writePolicyConfigCommit(t, repo, trustedYAML, "allow pushed routing", "refs/heads/main")
-	writePolicyConfigCommit(t, repo, "agent: [auto, acp:cursor]\nauto_fix:\n  review: 0\n", "configure mixed routing", "refs/heads/feature/mixed-routing")
+	writePolicyConfigCommit(t, repo, "agent: "+configuredAgents+"\nauto_fix:\n  review: 0\n", "configure mixed routing", "refs/heads/feature/mixed-routing")
 	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 	step := &mockPassStep{name: types.StepReview}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
@@ -296,17 +322,7 @@ func TestStartRunEffectiveConfigPreservesExplicitFallbackBesideAuto(t *testing.T
 	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
 		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
 	}
-	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
-	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
-	if len(defaultAgents.Content) != 2 || defaultAgents.Content[0].Value != "cursor" || defaultAgents.Content[1].Value != "acp:cursor" {
-		t.Fatalf("agent.default = %#v, want [cursor, acp:cursor]", defaultAgents)
-	}
-	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
-		t.Fatalf("auto-derived agent provenance = %q, want runtime", got)
-	}
-	if got := effectiveConfigNodeComment(defaultAgents.Content[1]); got != "source=pushed; is_default=false" {
-		t.Fatalf("explicit fallback provenance = %q, want pushed", got)
-	}
+	return readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
 }
 
 func TestStartRunEffectiveConfigRecordsLayeredProvenance(t *testing.T) {
