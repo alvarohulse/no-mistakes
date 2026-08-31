@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/prbody"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -789,6 +790,38 @@ func TestPRStep_PublishesCompleteStoredEffectiveConfigInBuiltInGitHubBody(t *tes
 	}
 	if strings.Contains(body, "source=trusted") || strings.Contains(body, "source=global") || strings.Contains(body, "source=run-request") {
 		t.Fatalf("published effective config retained provenance comments:\n%s", body)
+	}
+}
+
+func TestOwnedPatchesForPRContent_PreservesCompleteEffectiveConfigWithinPublicationLimit(t *testing.T) {
+	t.Parallel()
+	prose := "## Summary\n\n" + strings.Repeat("p", 24*1024) + "\n\nSurrounding prose tail."
+	disclosure := "### Effective Configuration\n\n```yaml\nvalue: '" + strings.Repeat("c", 24*1024) + "'\n```"
+	wantContent := prose + "\n\n" + disclosure
+	wantDocument, err := prbody.NewOwnedDocument(prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: "generated", Content: wantContent}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wantDocument) >= maxPullRequestBodyBytes || scm.PRBodyLen(wantDocument) >= githubPullRequestBodyHardLimitChars {
+		t.Fatalf("test precondition: complete body is not below publication limits: %d bytes, %d characters", len(wantDocument), scm.PRBodyLen(wantDocument))
+	}
+
+	patches, err := ownedPatchesForPRContent(prContent{
+		Body:                      prose,
+		EffectiveConfigDisclosure: disclosure,
+	}, githubPullRequestBodyHardLimitChars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDocument, err := prbody.NewOwnedDocument(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDocument != wantDocument {
+		t.Fatalf("complete in-limit body was truncated: got %d bytes, want %d", len(gotDocument), len(wantDocument))
 	}
 }
 
