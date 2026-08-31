@@ -439,7 +439,7 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 		"For UI, HTML, CSS, Electron renderer, browser, visual layout, or copy-placement changes, attempt to capture reviewer-visible visual evidence",
 		"DOM snapshots, selector assertions, and text-only render summaries are not substitutes for visual evidence when a rendered surface is available",
 		"If a UI-facing change has no screenshot, image, video, GIF, or rendered HTML artifact, state why in testing_summary",
-		"Write new evidence files into this evidence directory, never into the worktree:",
+		"Write new evidence files into this owner-local evidence directory, never into the worktree:",
 		sctx.EvidenceDir,
 		"Do not move, commit, or modify source files only to make evidence linkable",
 		"If no existing test produces sufficient evidence, write or improve a focused test",
@@ -497,7 +497,7 @@ func TestTestStep_EvidenceDirectoryIsAlwaysOutsideTheWorktree(t *testing.T) {
 
 	prompt := ag.calls[1].Prompt
 	wantDir := sctx.EvidenceDir
-	if !strings.Contains(prompt, "Write new evidence files into this evidence directory, never into the worktree: "+wantDir) {
+	if !strings.Contains(prompt, "Write new evidence files into this owner-local evidence directory, never into the worktree: "+wantDir) {
 		t.Fatalf("expected evidence guidance to point outside the worktree, got:\n%s", prompt)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".no-mistakes")); err == nil {
@@ -541,7 +541,7 @@ func TestTestStep_DoesNotExecuteDisplayEvidenceAsARecoveredPlan(t *testing.T) {
 	}
 }
 
-func TestTestStep_PublishedEvidenceGuidanceNamesTheEvidenceBranch(t *testing.T) {
+func TestTestStep_EvidenceGuidanceKeepsArtifactsOwnerLocal(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -556,8 +556,6 @@ func TestTestStep_PublishedEvidenceGuidanceNamesTheEvidenceBranch(t *testing.T) 
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Show users a success screen after checkout"
-	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: ".no-mistakes/evidence", Branch: "team/ci/evidence"}
-
 	step := &TestStep{}
 	if _, err := step.Execute(sctx); err != nil {
 		t.Fatal(err)
@@ -565,11 +563,18 @@ func TestTestStep_PublishedEvidenceGuidanceNamesTheEvidenceBranch(t *testing.T) 
 
 	prompt := ag.calls[1].Prompt
 	wantDir := sctx.EvidenceDir
-	if !strings.Contains(prompt, "published to the repository's team/ci/evidence branch automatically and linked from the PR: "+wantDir) {
-		t.Fatalf("expected evidence-branch publishing guidance, got:\n%s", prompt)
+	if !strings.Contains(prompt, "owner-local evidence directory, never into the worktree: "+wantDir) {
+		t.Fatalf("expected owner-local evidence guidance, got:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "committed and pushed automatically") {
-		t.Fatalf("evidence must not be promised as a commit on the pushed branch, got:\n%s", prompt)
+	for _, want := range []string{"media remains local-only", "unavailable from the PR"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected evidence guidance to contain %q, got:\n%s", want, prompt)
+		}
+	}
+	for _, forbidden := range []string{"published", "attachment", "evidence branch"} {
+		if strings.Contains(strings.ToLower(prompt), forbidden) {
+			t.Fatalf("evidence guidance contains retired remote behavior %q:\n%s", forbidden, prompt)
+		}
 	}
 }
 

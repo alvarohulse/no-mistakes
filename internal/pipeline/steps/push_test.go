@@ -322,7 +322,7 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	}
 }
 
-func TestPushStep_DoesNotPublishTestEvidenceIntoThePushedBranch(t *testing.T) {
+func TestPushStep_DoesNotPublishTestEvidenceToAnyRemoteBranch(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -348,7 +348,6 @@ func TestPushStep_DoesNotPublishTestEvidenceIntoThePushedBranch(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "feature"
-	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence", Branch: "no-mistakes/evidence"}
 	recordReviewApproval(t, sctx, headSHA)
 
 	// Evidence for this run exists, collected outside the worktree.
@@ -371,6 +370,10 @@ func TestPushStep_DoesNotPublishTestEvidenceIntoThePushedBranch(t *testing.T) {
 	tracked := gitCmd(t, clone, "ls-files")
 	if strings.Contains(tracked, "evidence") || strings.Contains(tracked, ".png") {
 		t.Fatalf("pushed branch carries evidence files:\n%s", tracked)
+	}
+	refs := gitCmd(t, upstream, "for-each-ref", "--format=%(refname)", "refs/heads")
+	if refs != "refs/heads/feature\nrefs/heads/main" {
+		t.Fatalf("push created an unexpected remote branch:\n%s", refs)
 	}
 }
 

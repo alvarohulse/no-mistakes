@@ -342,7 +342,7 @@ func repoConfigAt(ctx context.Context, gateDir, sha string) (*config.RepoConfig,
 }
 
 func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
-	if _, err := config.LoadGlobalFromBytes(data); err != nil {
+	if _, err := config.LoadPersistedGlobalFromBytes(data); err != nil {
 		return nil, fmt.Errorf("read pinned global config for capture: %w", err)
 	}
 	var raw map[string]any

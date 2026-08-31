@@ -21,7 +21,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	cfg.StepQuietWarning = 15 * time.Minute
 	cfg.ProcessTerminationGrace = 2 * time.Second
 	cfg.CI = config.CI{RerunTransient: 2}
-	cfg.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "/private/repo-evidence", Branch: "private-evidence-branch", LocalRoot: "/private/evidence", Retention: 14 * 24 * time.Hour, MaxRuns: 50}
+	cfg.Test.Evidence = config.Evidence{LocalRoot: "/private/evidence", Retention: 14 * 24 * time.Hour, MaxRuns: 50}
 	cfg.AgentPathOverride = map[string]string{"codex": "/private/codex"}
 	cfg.AgentArgsOverride = map[string][]string{"codex": {"--secret", "token-value"}}
 	cfg.ACPRegistryOverrides = map[string]string{"private": "/private/acp --token secret"}
@@ -52,7 +52,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if strings.Contains(encoded, `"pricing"`) {
 		t.Errorf("resolved policy retained pricing selection:\n%s", encoded)
 	}
-	for _, forbidden := range []string{"/private/codex", "token-value", "/private/acp", "private prompt", "/private/evidence", "/private/repo-evidence", "private-evidence-branch", "private document steering", "private review steering"} {
+	for _, forbidden := range []string{"store_in_repo", "/private/codex", "token-value", "/private/acp", "private prompt", "/private/evidence", "private document steering", "private review steering"} {
 		if strings.Contains(encoded, forbidden) {
 			t.Errorf("resolved policy leaked %q:\n%s", forbidden, encoded)
 		}
@@ -101,6 +101,55 @@ func TestDecodeResolvedPolicyAcceptsAndDropsVersionSixPricingSelection(t *testin
 	}
 	if strings.Contains(normalized, `"pricing"`) {
 		t.Fatalf("normalized policy retained legacy pricing: %s", normalized)
+	}
+}
+
+func TestDecodeResolvedPolicyRejectsLegacyEvidencePublisher(t *testing.T) {
+	policy, err := resolvedPolicyFromConfig(
+		resolvedRoutingTestConfig(),
+		nil,
+		[]pipeline.Step{policyTestStep{name: types.StepReview}},
+		nil,
+		types.RefreshStrategyRebase,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 7
+	policy.TestEvidence.LegacyStoreInRepo = true
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = decodeResolvedPolicy(&encoded, &digest)
+	if err == nil {
+		t.Fatal("legacy evidence publisher policy was accepted for recovery")
+	}
+	for _, want := range []string{"test.evidence.store_in_repo", "remove", "new run"} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Fatalf("recovery error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestValidateResolvedPolicyNormalizesVersionSevenLocalEvidencePolicy(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	steps := []pipeline.Step{policyTestStep{name: types.StepReview}}
+	policy, err := resolvedPolicyFromConfig(cfg, nil, steps, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 7
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+
+	if err := validateResolvedPolicy(cfg, run, steps); err != nil {
+		t.Fatalf("version-seven local-only policy rejected: %v", err)
 	}
 }
 

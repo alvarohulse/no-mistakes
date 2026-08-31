@@ -94,20 +94,12 @@ func TestOverlayRepoConfigOverridesNestedSettingsWithoutReplacingSiblings(t *tes
 	t.Parallel()
 	zero := 0
 	one := 1
-	storeInRepo := true
 	committed := &RepoConfig{
 		AutoFix: AutoFixRaw{Review: &one, Test: &one},
-		Test: TestRaw{Evidence: EvidenceRaw{
-			StoreInRepo: &storeInRepo,
-			Dir:         stringPtr("committed-evidence"),
-		}},
 	}
 	machine, err := LoadRepoFromBytes([]byte(`
 auto_fix:
   review: 0
-test:
-  evidence:
-    dir: machine-evidence
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -119,12 +111,6 @@ test:
 	}
 	if got.AutoFix.Test == nil || *got.AutoFix.Test != one {
 		t.Fatalf("auto_fix.test = %v, want inherited 1", got.AutoFix.Test)
-	}
-	if got.Test.Evidence.StoreInRepo == nil || !*got.Test.Evidence.StoreInRepo {
-		t.Fatalf("test.evidence.store_in_repo = %v, want inherited true", got.Test.Evidence.StoreInRepo)
-	}
-	if got.Test.Evidence.Dir == nil || *got.Test.Evidence.Dir != "machine-evidence" {
-		t.Fatalf("test.evidence.dir = %v, want machine-evidence", got.Test.Evidence.Dir)
 	}
 }
 

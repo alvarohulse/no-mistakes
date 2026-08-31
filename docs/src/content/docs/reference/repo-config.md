@@ -9,11 +9,11 @@ Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository 
 `commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` only from that trusted copy.
+The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, intent settings other than its agent/model route, and repository-scoped `test.evidence` fields) are still read from the pushed branch, except `test.evidence.branch`, which names a Git ref the daemon pushes to. `refresh.strategy` is also trusted-only because it controls branch-history mutation.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, and intent settings other than its agent/model route) are still read from the pushed branch. `refresh.strategy` is trusted-only because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
@@ -103,10 +103,6 @@ intent:
 
 test:
   agent: pi
-  evidence:
-    store_in_repo: true
-    dir: .no-mistakes/evidence
-    branch: no-mistakes/evidence
 
 # Optional prompt additions, read only from the trusted default branch.
 # Built-in prompts stay authoritative.
@@ -230,7 +226,7 @@ Opt in to honoring the code-executing and agent-steering fields (`commands.{buil
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, and `test.evidence.branch` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### hooks.post_worktree
 
@@ -651,19 +647,9 @@ Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `p
 
 ### test.evidence
 
-Configure repository publication of evidence artifacts from the test step.
-Fields not set here inherit from global config and then the built-in defaults.
+Test evidence is always retained in the owner-local store configured by the [global `test.evidence` settings](/no-mistakes/reference/global-config/#testevidence). Repository config cannot change its location or retention.
 
-| Field | Type | Default |
-| --- | --- | --- |
-| `test.evidence.store_in_repo` | `bool` | Inherits from global (default `false`) |
-| `test.evidence.dir` | `string` | Inherits from global (default `.no-mistakes/evidence`) |
-| `test.evidence.branch` | `string` | Inherits from global (default `no-mistakes/evidence`) |
-
-By default, test evidence is written to `<NM_HOME>/evidence/<run-id>` and referenced by local path. Where it is stored locally and how long it is kept are global-only settings; see [`test.evidence`](/no-mistakes/reference/global-config/#testevidence).
-For GitHub repositories, set `store_in_repo: true` to publish it to an orphan evidence branch in the code branch's push-target repository and link the artifacts from the PR body; evidence is never committed to the pushed branch, so it never reaches the default branch.
-`test.evidence.branch` is read ONLY from the trusted default-branch copy of this file, because it names a Git ref the daemon pushes to; a pushed branch cannot redirect evidence commits.
-See [global config](/no-mistakes/reference/global-config/#testevidence) for provider support, limits, validation, and fail-closed behavior.
+The former `test.evidence.store_in_repo`, `test.evidence.dir`, and `test.evidence.branch` keys are rejected in repository config, including trusted-default copies and machine overrides. Remove them and start a new run. no-mistakes does not publish an evidence branch or use PR attachments as a fallback.
 
 ### prompts
 

@@ -47,9 +47,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 
 	// Commit any changes made by the configured formatter. Test evidence is
-	// deliberately not among them: it is collected outside the worktree and
-	// published to the orphan evidence branch (internal/evidence), so no
-	// artifact ever enters the pushed branch or the default branch's history.
+	// deliberately not among them: it is retained outside the worktree in
+	// owner-local storage, so no artifact enters repository history.
 	status, err = git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("check formatter changes: %w", err)
