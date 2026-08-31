@@ -223,7 +223,7 @@ Creates a pull request or adopts the existing one for the branch.
 - Checks for an existing PR on the branch
 - If one exists, reads and updates only valid no-mistakes-owned body sections. If none exists, creates a new one with versioned owned-section markers.
 - Targets the run's `--stacked-on` branch when set; otherwise targets the repository default branch
-- If an existing PR targets a different base, retargets it with a base-only update that carries no title or body; matching bases are not sent again
+- If an existing PR targets a different base, validates the complete owned-body candidate first, then sends the base and body together; matching bases are not sent again
 - Uses the provider CLI for GitHub/GitLab, the `az` CLI for Azure DevOps, and the Bitbucket API for Bitbucket Cloud
 - For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
 - PR title: agent-generated from the final branch delta with user intent when available, in conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. If drafting fails, the fallback uses the neutral title `chore: update pull request` rather than inferring scope from earlier commits.

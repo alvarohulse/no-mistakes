@@ -41,7 +41,7 @@ Creates or refreshes a local bare repo, installs the managed pre-receive admissi
 `init` writes no skill files into the repo; the user-level copies cover every supported agent (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, OpenCode, Rovo Dev, and Pi) across all repos.
 If the home `.claude` links to `.agents`, `.claude/skills` links to `.agents/skills`, or the reverse, `init` follows that layout and still makes the skill readable from both logical paths.
 If the repo still contains a vendored skill copy written by an older no-mistakes version, `init` leaves it untouched and prints a notice that it is no longer needed and can be removed.
-The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`. Use `-o no-mistakes.skip=none` to clear configured skips for that push.
+The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`. Use `-o no-mistakes.skip=none` to clear configured skips for that push. Set `-o no-mistakes.publish-effective-config=true` or `-o no-mistakes.publish-effective-config=false` to explicitly enable or disable the built-in GitHub effective-configuration disclosure for that run.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
 The push, refresh branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
@@ -450,7 +450,7 @@ Repository, time, step, agent, model, purpose, and status selectors combine with
 
 Rich run rows, logs, findings, and evidence follow the [`test.evidence` retention policy](/no-mistakes/reference/global-config/#local-storage-and-cleanup), which protects active and pinned runs and enforces minimum age and newest-run floors. Older runs continue to appear through immutable content-free metric receipts with `rich_data_retained: false`; the [environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns the archived field and privacy boundary.
 
-The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body publishes only a bounded subset of it.
+The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body normally publishes only a bounded subset of it. Explicitly enabling [`effective_config.publish`](/no-mistakes/reference/repo-config/#effective_configpublish) is the documented exact-disclosure exception.
 The field definitions and their local/remote split are owned by [the environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes pr-body

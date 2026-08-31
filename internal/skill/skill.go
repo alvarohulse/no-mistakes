@@ -145,6 +145,8 @@ Optional ` + "`--pr-note`" + ` (or ` + "`--pr-note-file <path>`" + ` for longer 
 
 Optional ` + "`--metadata <string>`" + ` stores one opaque UTF-8 string up to 16 KiB. no-mistakes does not parse it as JSON, keys, or associations: pipeline subprocesses receive the exact value as ` + "`NM_METADATA`" + `, agent prompts receive a sanitized copy marked as untrusted, and the PR body formatter contract exposes the original string. Treat metadata as non-secret input. ` + "`no-mistakes rerun`" + ` inherits the previous value when the flag is absent; pass an explicit empty value to clear it.
 
+Optional ` + "`--publish-effective-config`" + ` or ` + "`--no-publish-effective-config`" + ` explicitly controls effective-configuration disclosure for a new run. They are mutually exclusive and override configured values. Never enable publication without the operator's explicit instruction: the built-in GitHub PR body receives the complete comment-free stored YAML, which may contain commands, hooks, prompts, paths, or credentials and has no confidentiality guarantee.
+
 ## Validate and decide
 
 Run the pipeline and decide on its findings as they come up:
