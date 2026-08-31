@@ -236,8 +236,10 @@ func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 }
 
 // CleanupPendingRunArtifactsWithTargets retries filesystem cleanup durably
-// owned by archived metric receipts. A successful callback is marked only
-// afterward, so crashes and partial cleanup remain safely retryable.
+// owned by archived metric receipts. Each receipt is handled independently:
+// invalid targets and cleanup failures remain pending while valid siblings
+// continue. A successful callback is marked only afterward, so crashes and
+// partial cleanup remain safely retryable.
 func (d *DB) CleanupPendingRunArtifactsWithTargets(repoID string, cleanup func(string, []string) error) (int, error) {
 	return d.cleanupPendingRunArtifacts(repoID, cleanup)
 }
