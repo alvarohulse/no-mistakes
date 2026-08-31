@@ -96,11 +96,11 @@ The launch artifacts are `effective-config.yaml` and `effective-config.meta.json
 The YAML preserves the exact resolved configuration values and marks every YAML
 leaf and list item with its provenance: global, global override, trusted,
 pushed, run-request, runtime, or default, plus clear, append, and merge
-qualifiers where applicable. The value-free JSON sidecar binds the YAML's
-SHA-256 to the run ID, canonical policy digest, schema version, and generator
-and binary identities. On Unix, the artifact and staging directories are mode
-`0700` and both files are mode `0600`; Windows protects both with owner-only
-ACLs. The complete YAML is limited to 256 KiB.
+qualifiers where applicable. The value-free JSON sidecar records
+`schema_version`, `run_id`, `policy_digest`, `yaml_sha256`, and generator and
+binary identities. On Unix, the `runs/` container, artifact directories, and
+staging directories are mode `0700` and both files are mode `0600`; Windows
+protects them with owner-only ACLs. The complete YAML is limited to 256 KiB.
 The daemon renders, validates, and atomically writes both artifacts after
 preflight but before replacing an active run, inserting a run row, or creating
 a worktree. A serialization, completeness, integrity, size, or write failure
