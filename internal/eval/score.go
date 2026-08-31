@@ -39,10 +39,10 @@ type Score struct {
 //   - Pending: unmatched candidate findings, never inferred as invalid
 //
 // Matching is a documented cascade of strengths: exact-id, exact-text,
-// nearby-line Jaccard, then gated containment. Assignment is maximum matching
-// per strength tier so an earlier gold cannot consume a candidate that a later
-// gold matches more strongly. Headline recall uses the full cascade; exact vs
-// fuzzy counts are reported separately so a threshold change is visible.
+// nearby-line Jaccard, then gated containment. Assignment is globally optimal
+// across all strengths, so neither input order nor a tier boundary can consume
+// a candidate another gold needed. Headline recall uses the full cascade;
+// exact vs fuzzy counts remain visible.
 func ScoreCandidate(labels Labels, findingsJSON string) Score {
 	candidate := parseFindingItems(findingsJSON)
 	assigned := assignMatches(labels.Findings, candidate)
@@ -98,72 +98,160 @@ func assignMatches(golds []FindingGold, candidate []types.Finding) []assignedMat
 	for i := range out {
 		out[i].cand = -1
 	}
-	matchedGold := make([]bool, len(golds))
-	usedCand := make([]bool, len(candidate))
-	for _, strength := range []string{matchExactID, matchExactText, matchLocation, matchContainment} {
-		adj := make([][]int, len(golds))
-		for gi, gold := range golds {
-			if matchedGold[gi] {
-				continue
-			}
-			for ci, finding := range candidate {
-				if usedCand[ci] {
-					continue
-				}
+	if len(golds) == 0 || len(candidate) == 0 {
+		return out
+	}
+
+	base := int64(len(golds)+len(candidate)) + 1
+	weights := make([][]int64, len(golds))
+	strengths := make([][]string, len(golds))
+	for goldIndex, gold := range golds {
+		weights[goldIndex] = make([]int64, len(candidate))
+		strengths[goldIndex] = make([]string, len(candidate))
+		for candidateIndex, finding := range candidate {
+			for _, strength := range []string{matchExactID, matchExactText, matchLocation, matchContainment} {
 				if matchAt(gold, finding, strength) {
-					adj[gi] = append(adj[gi], ci)
+					weights[goldIndex][candidateIndex] = matchWeight(strength, base)
+					strengths[goldIndex][candidateIndex] = strength
+					break
 				}
 			}
 		}
-		goldToCand := maxBipartiteMatching(adj, len(candidate))
-		for gi, ci := range goldToCand {
-			if ci < 0 {
-				continue
-			}
-			out[gi] = assignedMatch{cand: ci, strength: strength}
-			matchedGold[gi] = true
-			usedCand[ci] = true
+	}
+	for goldIndex, candidateIndex := range maxWeightAssignment(weights) {
+		if candidateIndex < 0 || weights[goldIndex][candidateIndex] == 0 {
+			continue
+		}
+		out[goldIndex] = assignedMatch{cand: candidateIndex, strength: strengths[goldIndex][candidateIndex]}
+	}
+	return out
+}
+
+// matchWeight makes the optimum lexicographic by strength. base is larger than
+// the maximum number of pairs, so no combination of weaker matches can replace
+// one stronger match.
+func matchWeight(strength string, base int64) int64 {
+	switch strength {
+	case matchExactID, matchExactText:
+		return base * base
+	case matchLocation:
+		return base
+	case matchContainment:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// maxWeightAssignment returns the candidate column assigned to each gold row,
+// maximizing total weight. It transposes rectangular inputs because the
+// Hungarian solver requires no more rows than columns.
+func maxWeightAssignment(weights [][]int64) []int {
+	rows, columns := len(weights), len(weights[0])
+	if rows <= columns {
+		return hungarianMinCost(negateWeights(weights))
+	}
+
+	transposed := make([][]int64, columns)
+	for column := range transposed {
+		transposed[column] = make([]int64, rows)
+		for row := range weights {
+			transposed[column][row] = -weights[row][column]
+		}
+	}
+	candidateToGold := hungarianMinCost(transposed)
+	goldToCandidate := make([]int, rows)
+	for row := range goldToCandidate {
+		goldToCandidate[row] = -1
+	}
+	for candidate, gold := range candidateToGold {
+		if gold >= 0 {
+			goldToCandidate[gold] = candidate
+		}
+	}
+	return goldToCandidate
+}
+
+func negateWeights(weights [][]int64) [][]int64 {
+	out := make([][]int64, len(weights))
+	for row, values := range weights {
+		out[row] = make([]int64, len(values))
+		for column, weight := range values {
+			out[row][column] = -weight
 		}
 	}
 	return out
 }
 
-func maxBipartiteMatching(adj [][]int, candCount int) []int {
-	candToGold := make([]int, candCount)
-	for i := range candToGold {
-		candToGold[i] = -1
+// hungarianMinCost solves a rectangular minimum-cost assignment in O(n^2*m).
+// It requires len(cost) <= len(cost[0]).
+func hungarianMinCost(cost [][]int64) []int {
+	rows := len(cost)
+	if rows == 0 {
+		return nil
 	}
-	var dfs func(gi int, seen []bool) bool
-	dfs = func(gi int, seen []bool) bool {
-		for _, ci := range adj[gi] {
-			if seen[ci] {
-				continue
+	columns := len(cost[0])
+	const infinity = int64(1) << 62
+	u := make([]int64, rows+1)
+	v := make([]int64, columns+1)
+	columnToRow := make([]int, columns+1)
+	path := make([]int, columns+1)
+	for row := 1; row <= rows; row++ {
+		columnToRow[0] = row
+		column := 0
+		minimum := make([]int64, columns+1)
+		used := make([]bool, columns+1)
+		for i := range minimum {
+			minimum[i] = infinity
+		}
+		for {
+			used[column] = true
+			currentRow := columnToRow[column]
+			delta := infinity
+			nextColumn := 0
+			for candidateColumn := 1; candidateColumn <= columns; candidateColumn++ {
+				if used[candidateColumn] {
+					continue
+				}
+				current := cost[currentRow-1][candidateColumn-1] - u[currentRow] - v[candidateColumn]
+				if current < minimum[candidateColumn] {
+					minimum[candidateColumn] = current
+					path[candidateColumn] = column
+				}
+				if minimum[candidateColumn] < delta {
+					delta = minimum[candidateColumn]
+					nextColumn = candidateColumn
+				}
 			}
-			seen[ci] = true
-			if candToGold[ci] < 0 || dfs(candToGold[ci], seen) {
-				candToGold[ci] = gi
-				return true
+			for candidateColumn := 0; candidateColumn <= columns; candidateColumn++ {
+				if used[candidateColumn] {
+					u[columnToRow[candidateColumn]] += delta
+					v[candidateColumn] -= delta
+				} else {
+					minimum[candidateColumn] -= delta
+				}
+			}
+			column = nextColumn
+			if columnToRow[column] == 0 {
+				break
 			}
 		}
-		return false
-	}
-	for gi := range adj {
-		if len(adj[gi]) == 0 {
-			continue
-		}
-		seen := make([]bool, candCount)
-		_ = dfs(gi, seen)
-	}
-	goldToCand := make([]int, len(adj))
-	for i := range goldToCand {
-		goldToCand[i] = -1
-	}
-	for ci, gi := range candToGold {
-		if gi >= 0 {
-			goldToCand[gi] = ci
+		for column != 0 {
+			previousColumn := path[column]
+			columnToRow[column] = columnToRow[previousColumn]
+			column = previousColumn
 		}
 	}
-	return goldToCand
+	rowToColumn := make([]int, rows)
+	for row := range rowToColumn {
+		rowToColumn[row] = -1
+	}
+	for column := 1; column <= columns; column++ {
+		if columnToRow[column] > 0 {
+			rowToColumn[columnToRow[column]-1] = column - 1
+		}
+	}
+	return rowToColumn
 }
 
 func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
@@ -179,10 +267,6 @@ func matchAt(gold FindingGold, finding types.Finding, strength string) bool {
 	default:
 		return false
 	}
-}
-
-func sameUnderlyingIssue(gold FindingGold, finding types.Finding) bool {
-	return matchAt(gold, finding, matchExactID) || matchAt(gold, finding, matchExactText)
 }
 
 func exactTextMatch(gold FindingGold, finding types.Finding) bool {

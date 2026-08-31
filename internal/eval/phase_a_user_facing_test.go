@@ -191,11 +191,14 @@ func TestPhaseAUserFacingTranscripts(t *testing.T) {
 		write("eval-report-f1-headline.txt", withFPOut)
 	})
 
-	t.Run("capture labels shipped-unfixed as FP and leaves dropped reraise unlabeled", func(t *testing.T) {
+	t.Run("capture labels shipped-unfixed from each persisted decision", func(t *testing.T) {
 		ctx := context.Background()
 		p, sourceDB, run, _, reviewRound := setupCapturedRun(t, ctx)
 		defer sourceDB.Close()
 		if err := sourceDB.SetStepRoundSelection(reviewRound.ID, nil, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := sourceDB.SetStepRoundDeclined(reviewRound.ID); err != nil {
 			t.Fatal(err)
 		}
 		steps, err := sourceDB.GetStepsByRun(run.ID)
@@ -231,6 +234,9 @@ func TestPhaseAUserFacingTranscripts(t *testing.T) {
 		if err := sourceDB2.SetStepRoundSelection(firstRound.ID, nil, ""); err != nil {
 			t.Fatal(err)
 		}
+		if err := sourceDB2.SetStepRoundDeclined(firstRound.ID); err != nil {
+			t.Fatal(err)
+		}
 		steps2, err := sourceDB2.GetStepsByRun(run2.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -254,8 +260,9 @@ func TestPhaseAUserFacingTranscripts(t *testing.T) {
 		for _, c := range dropped {
 			byRound[c.SourceRoundID] = c.Labels
 		}
-		if byRound[firstRound.ID].HasGold() {
-			t.Fatalf("dropped-reraise first-round labels = %#v, want unlabeled", byRound[firstRound.ID])
+		first := byRound[firstRound.ID]
+		if len(first.Findings) != 1 || first.Findings[0].Kind != GoldFalsePositive || first.Findings[0].Source != goldSourceShippedUnfixed {
+			t.Fatalf("dropped-reraise first-round labels = %#v, want the persisted decline to remain false-positive gold", first)
 		}
 		type droppedRow struct {
 			RoundID string `json:"source_round_id"`

@@ -1,11 +1,20 @@
 package db
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 const (
 	RoundSelectionSourceUser    = "user"
 	RoundSelectionSourceAutoFix = "auto_fix"
+	// RoundSelectionSourceUserDeclined records that a human resolved the
+	// approval gate without selecting a finding to fix. The explicit empty
+	// selection distinguishes this decision from an unresolved round.
+	RoundSelectionSourceUserDeclined = "user_declined"
 )
+
+const DeclinedSelectionJSON = "[]"
 
 // StepRound represents one execution round within a pipeline step.
 type StepRound struct {
@@ -107,7 +116,7 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 		if r.SelectionSource != nil {
 			stats.LatestSelection = *r.SelectionSource
 		}
-		if r.SelectedFindingIDs != nil && *r.SelectedFindingIDs != "" {
+		if hasSelectedFinding(r.SelectedFindingIDs) {
 			stats.SelectedForFix = true
 			stats.AutoSelectedForFix = r.SelectionSource != nil && *r.SelectionSource == RoundSelectionSourceAutoFix
 			latestSelectedRound = r.Round
@@ -123,6 +132,22 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 		stats.PendingFixSource = latestSelectedSource
 	}
 	return stats, nil
+}
+
+func hasSelectedFinding(raw *string) bool {
+	if raw == nil {
+		return false
+	}
+	var ids []string
+	if json.Unmarshal([]byte(*raw), &ids) != nil {
+		return false
+	}
+	for _, id := range ids {
+		if id != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // InsertStepRound creates a new round record for a step result. fixSummary may
@@ -192,8 +217,9 @@ func (d *DB) insertStepRound(stepResultID string, round int, trigger string, fin
 
 // SetStepRoundSelection records which findings were selected for fix AFTER the
 // given round produced its findings, along with whether that selection came
-// from the user or auto-fix filtering. Passing a nil or empty JSON array clears
-// both columns.
+// from the user or auto-fix filtering. Passing nil or an empty string clears
+// both columns. Passing DeclinedSelectionJSON with a source records a decision
+// that selected nothing.
 func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source string) error {
 	var selectionSource *string
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {
@@ -204,6 +230,21 @@ func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source
 		selectedFindingIDs, selectionSource, id,
 	); err != nil {
 		return fmt.Errorf("set step round selection: %w", err)
+	}
+	return nil
+}
+
+// SetStepRoundDeclined records that a human resolved this round's approval
+// gate without selecting any finding to fix. It never overwrites an existing
+// selection.
+func (d *DB) SetStepRoundDeclined(id string) error {
+	declined := DeclinedSelectionJSON
+	if _, err := d.sql.Exec(
+		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
+		  WHERE id = ? AND selection_source IS NULL`,
+		declined, RoundSelectionSourceUserDeclined, id,
+	); err != nil {
+		return fmt.Errorf("set step round declined: %w", err)
 	}
 	return nil
 }

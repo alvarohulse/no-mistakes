@@ -28,7 +28,9 @@ type IngestResult struct {
 // ParsePostPRMissFinding accepts one finding object. ID and description are
 // required; they are the eval matcher keys. This is the typed source of truth
 // for a confirmed post-PR miss. no-mistakes does not read firstmate ledgers
-// or scrape GitHub review comments.
+// or scrape GitHub review comments. Severity and action are validated against
+// the Review finding vocabulary because this hand-written path bypasses the
+// normal agent response validation.
 func ParsePostPRMissFinding(raw string) (FindingGold, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -43,9 +45,17 @@ func ParsePostPRMissFinding(raw string) (FindingGold, error) {
 	if id == "" || description == "" {
 		return FindingGold{}, fmt.Errorf("finding requires id and description")
 	}
-	severity := strings.TrimSpace(finding.Severity)
+	severity := types.NormalizeFindingSeverity(finding.Severity)
 	if severity == "" {
-		severity = "error"
+		severity = types.FindingSeverityError
+	}
+	if !types.IsKnownFindingSeverity(severity) {
+		return FindingGold{}, fmt.Errorf("finding severity %q is not one of: %s",
+			strings.TrimSpace(finding.Severity), strings.Join(types.KnownFindingSeverities(), ", "))
+	}
+	if action := types.NormalizeFindingAction(finding.Action); action != "" && !types.IsKnownFindingAction(action) {
+		return FindingGold{}, fmt.Errorf("finding action %q is not one of: %s",
+			strings.TrimSpace(finding.Action), strings.Join(types.KnownFindingActions(), ", "))
 	}
 	return FindingGold{
 		ID:          id,
