@@ -120,7 +120,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		bodyUpdate, err := prepareOwnedPRBodyUpdate(ctx, host, updated, patches, limits)
 		if err != nil {
 			if content.EffectiveConfigDisclosure != "" && errors.Is(err, prbody.ErrOversize) {
-				return nil, effectiveConfigBodyOverflowError(len(bodyUpdate.candidate))
+				return nil, effectiveConfigBodyOverflowError(len(content.EffectiveConfigDisclosure), len(bodyUpdate.candidate))
 			}
 			return nil, fmt.Errorf("update pull request body: %w", err)
 		}
@@ -203,7 +203,21 @@ func ownedPatchesForPRContent(content prContent, bodyLimit int) (prbody.PatchSet
 		Version:  prbody.PatchVersion,
 		Sections: []prbody.SectionPatch{{ID: "generated", Content: ""}},
 	})
-	if err == nil && disclosure == "" {
+	if err == nil && disclosure != "" {
+		disclosureDocument, disclosureErr := prbody.NewOwnedDocument(prbody.PatchSet{
+			Version:  prbody.PatchVersion,
+			Sections: []prbody.SectionPatch{{ID: "generated", Content: disclosure}},
+		})
+		if disclosureErr != nil {
+			return prbody.PatchSet{}, disclosureErr
+		}
+		budget := maxPullRequestBodyBytes - len(disclosureDocument) - len("\n\n")
+		if budget < 0 {
+			budget = 0
+		}
+		body = truncateTextAtLineBoundary(body, budget, essentialPRBodyTruncationMarker())
+	}
+	if err == nil {
 		if bodyLimit > 0 {
 			budget := bodyLimit - scm.PRBodyLen(empty)
 			if budget < 0 {
@@ -247,7 +261,7 @@ func fitEffectiveConfigDisclosure(body, disclosure string, bodyLimit int) (strin
 		return "", fmt.Errorf("build complete effective configuration disclosure: %w", err)
 	}
 	if len(fixedDocument) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(fixedDocument) > bodyLimit) {
-		return "", effectiveConfigBodyOverflowError(len(fixedDocument))
+		return "", effectiveConfigBodyOverflowError(len(disclosure), len(fixedDocument))
 	}
 
 	separator := ""
@@ -264,15 +278,18 @@ func fitEffectiveConfigDisclosure(body, disclosure string, bodyLimit int) (strin
 	}
 	if err := prbody.ValidateOwnedDocument(candidate, prBodyValidationLimits(bodyLimit, disclosure)); err != nil {
 		if errors.Is(err, prbody.ErrOversize) {
-			return "", effectiveConfigBodyOverflowError(len(candidate))
+			return "", effectiveConfigBodyOverflowError(len(disclosure), len(candidate))
 		}
 		return "", fmt.Errorf("validate pull request body with complete effective configuration: %w", err)
 	}
 	return section, nil
 }
 
-func effectiveConfigBodyOverflowError(size int) error {
-	return fmt.Errorf("complete effective configuration cannot fit in the GitHub PR body: %d bytes exceeds the %d-byte publication limit (GitHub host limit: %d characters)", size, maxPullRequestBodyBytes, githubPullRequestBodyHardLimitChars)
+func effectiveConfigBodyOverflowError(disclosureSize, combinedSize int) error {
+	if disclosureSize == combinedSize {
+		return fmt.Errorf("complete effective configuration cannot fit in the GitHub PR body: %d bytes exceeds the %d-byte publication limit (GitHub host limit: %d characters)", disclosureSize, maxPullRequestBodyBytes, githubPullRequestBodyHardLimitChars)
+	}
+	return fmt.Errorf("complete effective configuration cannot fit in the GitHub PR body: combined body is %d bytes, including %d bytes of disclosure, exceeding the %d-byte publication limit (GitHub host limit: %d characters)", combinedSize, disclosureSize, maxPullRequestBodyBytes, githubPullRequestBodyHardLimitChars)
 }
 
 func describePR(pr *scm.PR) string {

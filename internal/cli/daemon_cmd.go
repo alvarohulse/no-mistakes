@@ -395,6 +395,9 @@ func parseEffectiveConfigPublishPushOptions(options []string) (*bool, error) {
 		default:
 			return nil, fmt.Errorf("effective-config publication push option must be true or false")
 		}
+		if publish != nil && *publish != parsed {
+			return nil, fmt.Errorf("conflicting effective-config publication push options")
+		}
 		publish = &parsed
 	}
 	return publish, nil
@@ -411,7 +414,10 @@ func effectiveConfigPublishOverride(cmd *cobra.Command, publish, noPublish bool)
 		return &value, nil
 	}
 	if noPublishChanged {
-		value := !noPublish
+		if !noPublish {
+			return nil, fmt.Errorf("--no-publish-effective-config must not be set to false")
+		}
+		value := false
 		return &value, nil
 	}
 	return nil, nil

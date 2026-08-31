@@ -37,9 +37,10 @@ func requirePRBodyReadRevision(host prBodyReader) error {
 	return nil
 }
 
-// updateOwnedPRBody is the only existing-body publication path. The first
-// read supplies the merge substrate, the second detects an edit made while the
-// candidate was built, and the final read proves the exact bytes landed.
+// updateOwnedPRBody is a test convenience wrapper around the prepare and
+// publish operations. The first read supplies the merge substrate, the second
+// detects an edit made while the candidate was built, and the final read
+// proves the exact bytes landed.
 func updateOwnedPRBody(ctx context.Context, host prBodyUpdater, pr *scm.PR, patches prbody.PatchSet, limits prbody.ValidationLimits) error {
 	update, err := prepareOwnedPRBodyUpdate(ctx, host, pr, patches, limits)
 	if err != nil {

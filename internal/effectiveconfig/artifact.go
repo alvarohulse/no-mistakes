@@ -167,7 +167,15 @@ func ValidateWithBinary(yamlBytes, metaBytes []byte, runID, policyDigest, binary
 // inside configured strings remain data rather than becoming YAML comments.
 func CommentFreeYAML(yamlBytes []byte) ([]byte, error) {
 	var root yaml.Node
-	if err := yaml.Unmarshal(yamlBytes, &root); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes))
+	if err := decoder.Decode(&root); err != nil {
+		return nil, fmt.Errorf("render comment-free effective config: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("render comment-free effective config: multiple YAML documents")
+		}
 		return nil, fmt.Errorf("render comment-free effective config: %w", err)
 	}
 	clearComments(&root)

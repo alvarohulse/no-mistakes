@@ -1033,12 +1033,6 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	return m.handleRerun(ctx, repoID, branch, "", skipSteps, intent, prNote, nil, nil, refreshStrategy, stackedOn)
 }
 
-// HandleRerunWithMetadata creates a rerun while distinguishing absent metadata
-// (inherit) from an explicitly supplied empty string (clear).
-func (m *RunManager) HandleRerunWithMetadata(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.handleRerun(ctx, repoID, branch, previousRunID, skipSteps, intent, prNote, metadata, nil, refreshStrategy, stackedOn)
-}
-
 // HandleRerunWithOverrides creates a rerun while preserving explicit false
 // values for optional run-scoped overrides.
 func (m *RunManager) HandleRerunWithOverrides(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, effectiveConfigPublish *bool, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {

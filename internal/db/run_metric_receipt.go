@@ -274,6 +274,10 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 			rows.Close()
 			return 0, fmt.Errorf("decode pending run artifact cleanup: %w", err)
 		}
+		if len(targets) == 0 {
+			rows.Close()
+			return 0, fmt.Errorf("pending run artifact cleanup %q has no targets", runID)
+		}
 		pendingRuns = append(pendingRuns, pending{runID, targets})
 	}
 	if err := rows.Err(); err != nil {
