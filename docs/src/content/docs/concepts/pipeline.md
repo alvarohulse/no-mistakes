@@ -93,7 +93,7 @@ You can't reorder steps. You *can*:
 
 - Swap the agent, or configure an ordered fallback list, globally or per-repo.
 - Set explicit `commands.lint`, `commands.format`, and an optional **targeted** `commands.test` (local intent validation only; not a full CI suite).
-- Store test evidence locally by default or, on a supported provider, opt into publishing it to an orphan evidence branch with `test.evidence.store_in_repo`.
+- Store complete test evidence in owner-local retention outside the worktree; no pipeline step publishes it to a Git branch or PR attachment.
 - Control auto-fix limits per step.
 - Select `refresh.strategy: rebase|merge` in trusted repo config, override it for one run with `--refresh-strategy`, and declare a stack base with `--stacked-on <branch>`.
 - Ignore paths during review and documentation checks.

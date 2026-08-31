@@ -88,9 +88,6 @@ intent:
 
 test:
   evidence:
-    store_in_repo: false
-    dir: .no-mistakes/evidence
-    branch: no-mistakes/evidence
     retention: 336h
     max_runs: 200
 
@@ -519,30 +516,23 @@ Otherwise, accepted candidates are ranked by confidence, which combines the raw 
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and referenced by local path.
+Evidence artifacts are written to `<NM_HOME>/evidence/<run-id>` and remain owner-local.
 
 |      |          |
 | ---- | -------- |
 | Type | `object` |
 
-| Field                         | Type     | Default                  | Description                                                                |
-| ----------------------------- | -------- | ------------------------ | -------------------------------------------------------------------------- |
-| `test.evidence.store_in_repo` | `bool`   | `false`                  | Publish test evidence artifacts to the repository's orphan evidence branch |
-| `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
-| `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
-| `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
-| `test.evidence.retention`     | `string` | `336h` (14 days)         | Minimum run age from creation before rich terminal data is eligible for pruning; positive values below 14 days use the 14-day floor, while `unlimited`/`none`/`off`/`never` or a non-positive duration disables rich pruning |
-| `test.evidence.max_runs`      | `int`    | `200`                    | Minimum newest terminal-unpinned set retained regardless of age; values below 50 retain the required floor |
+| Field                      | Type     | Default              | Description                                                                |
+| -------------------------- | -------- | -------------------- | -------------------------------------------------------------------------- |
+| `test.evidence.local_root` | `string` | `<NM_HOME>/evidence` | Absolute directory where run evidence is written on local disk             |
+| `test.evidence.retention`  | `string` | `336h` (14 days)     | Minimum run age from creation before rich terminal data is eligible for pruning; positive values below 14 days use the 14-day floor, while `unlimited`/`none`/`off`/`never` or a non-positive duration disables rich pruning |
+| `test.evidence.max_runs`   | `int`    | `200`                | Minimum newest terminal-unpinned set retained regardless of age; values below 50 retain the required floor |
 
-The test step always collects evidence outside the worktree, so artifacts never enter the branch under validation.
-When `store_in_repo` is true for a GitHub repository, the PR step copies that directory onto `branch` under `<dir>/<branch-slug>` in the code branch's push-target repository (the fork when fork routing is configured), pushes it, and links the artifacts from the pull request body.
-The branch is an orphan: it shares no history with your code branches, so evidence never reaches the default branch. Links use the evidence commit rather than the branch, so they keep resolving after later runs.
-Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
-`branch` must be a valid Git branch name; an invalid value fails the config with the offending key and value.
-The publisher never force-pushes. It appends to the fetched evidence-branch tip with a fast-forward push, retries one lost race, and refuses to use the run branch, default branch, or an existing branch whose tip lacks the `.no-mistakes-evidence` marker.
-Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
-Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed and the PR body keeps its local rendering.
-Enabling this pushes a branch to your remote, so pick a `branch` name your CI workflows do not build.
+The test step always collects evidence outside the worktree, so artifacts never enter any repository branch. Complete text and media files remain available in the local evidence directory for its retention lifetime. The built-in PR renderer may embed bounded UTF-8 text; media, binary, and over-budget artifacts are identified as local-only and unavailable from the pull request. no-mistakes does not publish an evidence branch or upload PR attachments.
+
+:::caution[Removed evidence publication settings]
+`test.evidence.store_in_repo`, `test.evidence.dir`, and `test.evidence.branch` have been removed. Delete these keys from global config, repository config, and machine overrides before starting a new run. Config containing any retired key fails with migration guidance, and an interrupted run whose persisted policy enabled the old publisher cannot recover; start a new run after removing the keys. no-mistakes does not delete previously published remote branches, so remove an old evidence branch through your Git host if you no longer want to retain it.
+:::
 
 #### Local storage and cleanup
 
@@ -558,9 +548,9 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 
 Reaping runs after each finished run and again at daemon startup. Use `no-mistakes runs pin <run-id>` and `unpin` to change explicit retention. Before rich rows cascade away their steps, rounds, and invocations, no-mistakes atomically stores an immutable, no-foreign-key metric receipt so historical stats survive. The [local/remote data boundary](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns that receipt's content-free fields and privacy exclusions. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
-`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` sets the guaranteed age window for a PR body's local artifact links, raise it rather than lowering it if your reviews run long.
+`local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` sets the guaranteed age window for local artifacts, raise it rather than lowering it if your reviews run long.
 
-The publication fields are global defaults. Repo config can override `store_in_repo` and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+`local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
 ### eval
 
