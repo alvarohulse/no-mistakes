@@ -163,7 +163,7 @@ Fatal step errors are appended to that log, so failures such as rejected pushes 
 
 ### Recovery reports an invalid effective-config artifact
 
-Runs launched with the effective-config recovery contract require both `<NM_HOME>/runs/<runID>/effective-config.yaml` and `effective-config.meta.json` to remain present, supported, and integrity-matched. A missing, corrupt, or mismatched file makes restart recovery fail closed before the daemon reads configuration that may have changed. Inspect the durable reason with `no-mistakes axi status --run <id>` and the owner-local files with `no-mistakes config explain --run <id>` when validation still succeeds. Do not recreate or edit the files: start a new run from the intended branch state. Older runs that predate the requirement report the artifact unavailable instead of inventing provenance.
+The saved snapshot is missing, incomplete, corrupt, or does not match the run that launched it, so recovery stops before reading configuration that may have changed. Inspect the durable reason with `no-mistakes axi status --run <id>` and the owner-local files with `no-mistakes config explain --run <id>` when validation still succeeds. Do not recreate or edit the files: start a new run from the intended branch state. A legacy run reports configuration unavailable only when neither artifact exists; a partial legacy pair is invalid. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns the artifact validation and recovery contract.
 
 ### Push fails with `refusing to force-push`
 

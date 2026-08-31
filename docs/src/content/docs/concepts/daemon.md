@@ -100,7 +100,8 @@ qualifiers where applicable. The value-free JSON sidecar records
 `schema_version`, `run_id`, `policy_digest`, `yaml_sha256`, and generator and
 binary identities. On Unix, the `runs/` container, artifact directories, and
 staging directories are mode `0700` and both files are mode `0600`; Windows
-protects them with owner-only ACLs. The complete YAML is limited to 256 KiB.
+protects them with owner-only ACLs. Recovery accepts only regular files: the
+complete YAML is limited to 256 KiB and the value-free sidecar to 64 KiB.
 The daemon renders, validates, and atomically writes both artifacts after
 preflight but before replacing an active run, inserting a run row, or creating
 a worktree. A serialization, completeness, integrity, size, or write failure
@@ -140,6 +141,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Requires runs launched with resolved-policy v9 or newer to retain a supported, integrity-matched effective-config YAML and sidecar before any current configuration is read. Missing, corrupt, or mismatched artifacts fail the parked run with the specific recovery reason; the daemon never regenerates them from files that may have changed. Older runs retain legacy recovery behavior.
+- A pre-v9 run with neither artifact reports its configuration unavailable. If either legacy artifact is present, the pair must still be complete, supported, integrity-matched, and bound to the launch binary; a partial, corrupt, or mismatched pair fails recovery rather than supplying unverified configuration.
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
