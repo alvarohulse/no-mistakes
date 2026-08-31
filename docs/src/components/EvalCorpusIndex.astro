@@ -82,15 +82,17 @@ const formatPercent = (value: number) => {
     <div class="eval-corpus-index__heatmap" role="group" aria-label="Rows are change sizes; columns are highest source severities">
       <span aria-hidden="true"></span>
       {severities.map((severity) => (
-        <span
+        <abbr
           class="eval-corpus-index__axis-label eval-corpus-index__axis-label--column"
           data-axis-kind="severity"
           data-axis-value={severity.id}
           data-axis-label={severity.label}
           data-axis-total={columnTotals[severity.id]}
+          title={severity.label}
+          aria-label={severity.label}
         >
-          {severity.label}
-        </span>
+          {severity.initial}
+        </abbr>
       ))}
       <span class="eval-corpus-index__total-label eval-corpus-index__total-label--header">Total</span>
 
@@ -99,15 +101,17 @@ const formatPercent = (value: number) => {
         const fullRowLabel = `${row.label}: ${row.range}`;
         return (
           <>
-            <span
+            <abbr
               class="eval-corpus-index__axis-label eval-corpus-index__axis-label--row"
               data-axis-kind="row"
               data-axis-value={row.id}
               data-axis-label={fullRowLabel}
               data-axis-total={total}
+              title={fullRowLabel}
+              aria-label={fullRowLabel}
             >
-              {fullRowLabel}
-            </span>
+              {row.initial}
+            </abbr>
             {severities.map((severity) => {
               const count = row.counts[severity.id];
               const rowShare = percent(count, total);
@@ -254,7 +258,7 @@ const formatPercent = (value: number) => {
           if (!pinnedCell) highlightCell(cell);
         });
         cell.addEventListener("pointerleave", () => {
-          if (!pinnedCell) clearHighlight();
+          if (!pinnedCell) restoreHighlight();
         });
         cell.addEventListener("focus", () => {
           focusedCell = cell;
@@ -283,7 +287,7 @@ const formatPercent = (value: number) => {
           if (!pinnedCell) highlightAxis(axis);
         });
         axis.addEventListener("pointerleave", () => {
-          if (!pinnedCell) clearHighlight();
+          if (!pinnedCell) restoreHighlight();
         });
       }
 
@@ -498,7 +502,7 @@ const formatPercent = (value: number) => {
 
   @media (max-width: 30rem) {
     .eval-corpus-index__heatmap {
-      grid-template-columns: 5.5rem repeat(4, minmax(2.5rem, 1fr));
+      grid-template-columns: 1.75rem repeat(4, minmax(2.5rem, 1fr));
       gap: 0.3rem;
     }
 
