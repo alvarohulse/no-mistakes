@@ -194,6 +194,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		return nil, fmt.Errorf("read source invocation metrics: %w", err)
 	}
 	captured := make([]Case, 0, len(reviewRounds))
+	finalRoundID := finalReplayableRoundID(reviewRounds)
 	for _, round := range reviewRounds {
 		if round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {
 			// An interrupted or cancelled later round is not a replayable
@@ -202,7 +203,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 			continue
 		}
 		decision := decisionForRound(round, reviewStep)
-		labels := goldFromRound(round, decision, runPRState(run))
+		labels := goldFromRound(round, decision, runPRState(run), round.ID == finalRoundID)
 		if !labels.HasGold() && (reviewStep.Status == types.StepStatusAwaitingApproval || reviewStep.Status == types.StepStatusFixReview) {
 			return nil, fmt.Errorf("%w: review round %q has no recorded gate decision", ErrNoCapturableReview, round.ID)
 		}
@@ -256,7 +257,7 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 		caseID := run.ID + "-" + round.ID
 		caseDir := store.caseDir(caseID)
 		if existing, err := os.Stat(caseDir); err == nil && existing.IsDir() {
-			c, err := relabelExistingCase(store, caseDir, round, decision, runPRState(run))
+			c, err := relabelExistingCase(store, caseDir, round, decision, runPRState(run), round.ID == finalRoundID)
 			if err != nil {
 				return nil, fmt.Errorf("relabel existing case %q: %w", caseID, err)
 			}
@@ -564,7 +565,7 @@ func decisionForRound(round *db.StepRound, step *db.StepResult) Decision {
 // goldFromRound writes labels from this round's recorded gate decision. Later
 // review output cannot rewrite what the operator decided about an earlier
 // finding, and a round with no decision stays unknown.
-func goldFromRound(round *db.StepRound, decision Decision, prState string) Labels {
+func goldFromRound(round *db.StepRound, decision Decision, prState string, isFinalRound bool) Labels {
 	labels := Labels{Version: labelsVersion}
 	byID := findingIndex(round)
 	seen := map[string]bool{}
@@ -621,7 +622,7 @@ func goldFromRound(round *db.StepRound, decision Decision, prState string) Label
 			labels.Findings = append(labels.Findings, goldForRecordedFinding(finding, goldSourceUserAdded, GoldFalseNegative))
 		}
 	}
-	if prState == prStateMerged && hasRecordedDecision(decision) && round.FindingsJSON != nil {
+	if prState == prStateMerged && hasRecordedDecision(decision, isFinalRound) && round.FindingsJSON != nil {
 		for _, finding := range parseFindingItems(*round.FindingsJSON) {
 			id := strings.TrimSpace(finding.ID)
 			if id == "" || seen[id] || selected[id] {
@@ -650,9 +651,12 @@ func goldForRecordedFinding(finding types.Finding, source, kind string) FindingG
 	}
 }
 
-func hasRecordedDecision(decision Decision) bool {
+func hasRecordedDecision(decision Decision, isFinalRound bool) bool {
 	if strings.TrimSpace(decision.SelectionSource) != "" {
 		return true
+	}
+	if !isFinalRound {
+		return false
 	}
 	switch decision.Action {
 	case decisionFix, decisionSkip, decisionApprove:
@@ -660,6 +664,22 @@ func hasRecordedDecision(decision Decision) bool {
 	default:
 		return false
 	}
+}
+
+func finalReplayableRoundID(rounds []*db.StepRound) string {
+	var final *db.StepRound
+	for _, round := range rounds {
+		if round == nil || round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {
+			continue
+		}
+		if final == nil || round.Round > final.Round {
+			final = round
+		}
+	}
+	if final == nil {
+		return ""
+	}
+	return final.ID
 }
 
 func runPRState(run *db.Run) string {
@@ -751,6 +771,7 @@ func relabelRunLocked(store *Store, database *db.DB, runID string) ([]Case, erro
 	if run == nil || len(reviewRounds) == 0 {
 		return nil, nil
 	}
+	finalRoundID := finalReplayableRoundID(reviewRounds)
 	existing, err := store.casesForRun(run.ID)
 	if err != nil {
 		return nil, err
@@ -767,7 +788,7 @@ func relabelRunLocked(store *Store, database *db.DB, runID string) ([]Case, erro
 			continue
 		}
 		decision := decisionForRound(round, reviewStep)
-		updated, err := relabelExistingCase(store, c.Dir, round, decision, runPRState(run))
+		updated, err := relabelExistingCase(store, c.Dir, round, decision, runPRState(run), round.ID == finalRoundID)
 		if err != nil {
 			return nil, err
 		}
@@ -805,12 +826,12 @@ func loadReviewRounds(database *db.DB, runID string) (*db.Run, []*db.StepRound, 
 	return run, rounds, reviewStep, nil
 }
 
-func relabelExistingCase(store *Store, dir string, round *db.StepRound, decision Decision, prState string) (Case, error) {
+func relabelExistingCase(store *Store, dir string, round *db.StepRound, decision Decision, prState string, isFinalRound bool) (Case, error) {
 	c, err := loadCase(dir)
 	if err != nil {
 		return Case{}, err
 	}
-	computed := goldFromRound(round, decision, prState)
+	computed := goldFromRound(round, decision, prState, isFinalRound)
 	c.Labels = mergeGold(c.Labels, computed)
 	if err := writeJSON(filepath.Join(c.Dir, "labels.json"), c.Labels); err != nil {
 		return Case{}, fmt.Errorf("write relabeled gold: %w", err)
