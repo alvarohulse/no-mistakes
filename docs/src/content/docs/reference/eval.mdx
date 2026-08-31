@@ -2,6 +2,8 @@
 title: Evaluation toolkit
 ---
 
+import EvalCorpusIndex from "../../../components/EvalCorpusIndex.astro";
+
 `no-mistakes eval` is a **local-only** toolkit for comparing review candidates against review passes your own pipeline has already recorded.
 
 The corpus collects itself: eligible finished runs' decided review passes become cases, so the sets are populated by the time you want to compare something. Replay and reporting stay explicit commands you run.
@@ -85,6 +87,14 @@ no-mistakes eval sets
 ```
 
 The command shows counts, finding-level gold coverage, unlabeled / pending cases, queued candidate findings, and composition by repository fingerprint, dominant language, change-size bucket, source severity, and finding type.
+
+### Evaluation corpus index by change size and highest severity
+
+<EvalCorpusIndex />
+
+This fixed aggregate snapshot is descriptive, not a benchmark or a view of your local cases. It contains 35 cases across the evaluation corpus and exposes no replay data. The default `eval.diversified_size` cap is 32 and applies only to the gold-only diversified holdout, so it is intentionally separate from the corpus total shown here. Use `no-mistakes eval sets` for your live corpus composition.
+
+The semantic table retains every count, including zeroes. The heatmap can shade by count or by the percentage within each change-size bucket; hover, keyboard focus, and a selected cell all reveal the complete labels and proportions.
 
 Four logical sets are available to replay:
 

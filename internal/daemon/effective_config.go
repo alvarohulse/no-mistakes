@@ -413,12 +413,9 @@ type effectiveTestDocument struct {
 }
 
 type effectiveEvidenceDocument struct {
-	StoreInRepo bool   `yaml:"store_in_repo"`
-	Dir         string `yaml:"dir"`
-	Branch      string `yaml:"branch"`
-	LocalRoot   string `yaml:"local_root"`
-	Retention   string `yaml:"retention"`
-	MaxRuns     int    `yaml:"max_runs"`
+	LocalRoot string `yaml:"local_root"`
+	Retention string `yaml:"retention"`
+	MaxRuns   int    `yaml:"max_runs"`
 }
 
 type effectiveDocumentDocument struct {
@@ -550,7 +547,7 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		CI:                     effectiveCIDocument{RerunTransient: cfg.CI.RerunTransient},
 		Commit:                 effectiveCommitDocument{FixMessage: cfg.Commit.FixMessage},
 		Intent:                 effectiveIntentDocument{Enabled: cfg.Intent.Enabled, Threshold: cfg.Intent.Threshold, SlackDays: cfg.Intent.SlackDays, DisabledReaders: disabledReaders},
-		Test:                   effectiveTestDocument{Evidence: effectiveEvidenceDocument{StoreInRepo: cfg.Test.Evidence.StoreInRepo, Dir: cfg.Test.Evidence.Dir, Branch: cfg.Test.Evidence.Branch, LocalRoot: cfg.Test.Evidence.LocalRoot, Retention: cfg.Test.Evidence.Retention.String(), MaxRuns: cfg.Test.Evidence.MaxRuns}},
+		Test:                   effectiveTestDocument{Evidence: effectiveEvidenceDocument{LocalRoot: cfg.Test.Evidence.LocalRoot, Retention: cfg.Test.Evidence.Retention.String(), MaxRuns: cfg.Test.Evidence.MaxRuns}},
 		Document:               effectiveDocumentDocument{Instructions: cfg.Document.Instructions},
 		Review:                 effectiveReviewDocument{PathInstructions: append([]config.PathInstruction(nil), cfg.Review.PathInstructions...)},
 		Eval:                   effectiveEvalDocument{CaptureProvenance: cfg.Eval.CaptureProvenance, AutoCapture: cfg.Eval.AutoCapture, MaxCases: cfg.Eval.MaxCases, DiversifiedSize: cfg.Eval.DiversifiedSize},
