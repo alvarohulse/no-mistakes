@@ -136,6 +136,10 @@ type FindingGold struct {
 // Labels is a local, growing label file. Finding-level gold is the unit of
 // truth. Queued candidate findings are kept as evidence for later
 // adjudication and are never scored as false positives.
+//
+// QueuedCandidateFindings is a legacy stored counter. Queued counts now derive
+// from completed evaluation rows; the field remains so older labels.json files
+// round-trip unchanged.
 type Labels struct {
 	Version                 int           `json:"version"`
 	Findings                []FindingGold `json:"findings,omitempty"`

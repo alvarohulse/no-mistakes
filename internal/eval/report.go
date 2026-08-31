@@ -223,6 +223,10 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 			labeledCount++
 		}
 	}
+	queuedByCase, err := store.pendingFindingCounts()
+	if err != nil {
+		return nil, err
+	}
 	result := make([]SetSummary, 0, len(sets))
 	for _, name := range sets {
 		cases, err := store.ListCases(name)
@@ -257,7 +261,7 @@ func InspectSets(store *Store) ([]SetSummary, error) {
 			} else {
 				summary.Unlabeled++
 			}
-			summary.QueuedFindings += c.Labels.QueuedCandidateFindings
+			summary.QueuedFindings += queuedByCase[c.ID]
 			language, size, severity := caseComposition(c)
 			ftype := findingType(c)
 			summary.Composition["repo="+shortFingerprint(c.RepoFingerprint)+", language="+language+", size="+size+", severity="+severity+", type="+ftype]++

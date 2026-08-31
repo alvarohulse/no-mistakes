@@ -40,17 +40,19 @@ The ingest payload is the source of truth. Eval does not scrape GitHub review co
 
 Automatic collection and `eval capture` do the same freeze, so a case is equally trustworthy either way. Capturing a run that was already collected relabels gold from later merge evidence and otherwise leaves the frozen case in place. `eval miss ingest` can still attach confirmed post-PR-miss gold afterwards.
 
+Capture and relabel are convergent: repeating either command does not create another case or another copy of the same gold finding. This also applies to human-added findings without IDs, which are matched by stable finding content; recapture repairs duplicates written by older versions.
+
 A run is skipped when there is nothing honest to freeze: no Review step, no finished pass, a gate decision the human has not made yet, or rounds recorded before provenance was on. An incomplete later review round (no recorded findings) is skipped so a completed sibling of the same run can still be captured. Capturing a run with nothing capturable reports the reason instead of freezing an incomplete label; for a parked Review, retry after the decision is recorded.
 
 A case includes:
 
 - the reviewed commit, base, and trusted-config commit pinned at capture
-- agent-neutral global configuration and the effective repository configuration frozen at capture
+- a versioned `config/replay.json` containing only the allowlisted, candidate-independent Review inputs needed to reproduce the pass
 - the original run, step, review-round, decision, and local invocation-metric records
 - a manifest with commit pins, changed-file counts, build identity, and a hash of the redacted remote URL
-- a local `labels.json` file that stores finding-level gold and queued unmatched candidate findings
+- a local `labels.json` file that stores finding-level gold
 
-The manifest never stores a remote URL. Capture is read-only against the existing local database and gate. It does not fetch from the network.
+The replay configuration excludes commands, hooks, machine paths, agent arguments and routes, and non-Review prompts. Older cases can retain the legacy YAML snapshots; when a versioned `replay.json` exists, corrupt or unsupported data fails closed instead of falling back to those files. Case directories are owner-only (`0700`), private files are `0600`, and file replacement is atomic. The manifest never stores a remote URL. Capture is read-only against the existing local database and gate. It does not fetch from the network.
 
 ## Finding-level gold
 
@@ -118,6 +120,8 @@ no-mistakes eval run \
 
 A candidate is always explicit: `agent+model`. The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
 
+Repeating a replay creates a new measurement session, but the same case IDs and repeat count produce the same cohort. Replay never mutates the frozen case manifest, labels, or replay configuration. Set inspection, diversified refresh, and report reads likewise stabilize when repeated.
+
 Replay scores each candidate finding against that gold:
 
 - **true-positive**: the candidate raises the same underlying issue as a true-issue gold finding (user Fix, auto-fix-merged, human-added miss, or a confirmed post-PR miss)
@@ -142,7 +146,7 @@ The report groups local replays by candidate and cohort. A cohort pins the selec
 - finding-level true-positive, false-negative, false-positive, and pending counts
 - recall over gold issues, or unlabeled / pending when a case has no finding-level gold
 - precision bounds, and F1 only when false-positive gold exists
-- queued unmatched candidate findings, which are not scored as false positives
+- queued unmatched candidate findings, derived from completed evaluation records and not scored as false positives
 - failed candidate invocations
 - reported fresh-input plus output token cost
 - average wall time
