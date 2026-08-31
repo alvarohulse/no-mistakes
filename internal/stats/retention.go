@@ -87,13 +87,18 @@ type MetricInvocation struct {
 
 // PruneRichRunData archives and removes terminal unpinned runs outside the
 // required age and newest-run floors. beforeDelete owns filesystem artifacts;
-// any cleanup failure leaves the rich database row untouched.
+// cleanup failures remain durably pending on the immutable metric receipt and
+// are retried on the next pass.
 func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration, keepNewestTerminal int, beforeDelete func(string) error) (int, error) {
 	if database == nil {
 		return 0, fmt.Errorf("prune rich run data: database is nil")
 	}
+	var failures []error
+	if _, err := database.CleanupPendingRunArtifacts("", beforeDelete); err != nil {
+		failures = append(failures, err)
+	}
 	if retentionAge <= 0 {
-		return 0, nil
+		return 0, errors.Join(failures...)
 	}
 	if retentionAge < RichRunRetentionAge {
 		retentionAge = RichRunRetentionAge
@@ -106,7 +111,6 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 		return 0, err
 	}
 	pruned := 0
-	var failures []error
 	for _, runID := range candidates {
 		_, record, err := BuildMetricReceipt(database, runID, now)
 		if err != nil {
@@ -119,12 +123,12 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 			}
 			return beforeDelete(runID)
 		})
+		if archived {
+			pruned++
+		}
 		if err != nil {
 			failures = append(failures, fmt.Errorf("archive run %s: %w", runID, err))
 			continue
-		}
-		if archived {
-			pruned++
 		}
 	}
 	return pruned, errors.Join(failures...)
@@ -143,6 +147,9 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete
 			return 0, fmt.Errorf("repository %s has active run %s", repoID, run.ID)
 		}
 	}
+	if _, err := database.CleanupPendingRunArtifacts(repoID, beforeDelete); err != nil {
+		return 0, err
+	}
 	archivedCount := 0
 	for _, run := range runs {
 		_, record, err := BuildMetricReceipt(database, run.ID, now)
@@ -155,11 +162,11 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete
 			}
 			return beforeDelete(run.ID)
 		})
-		if err != nil {
-			return archivedCount, err
-		}
 		if archived {
 			archivedCount++
+		}
+		if err != nil {
+			return archivedCount, err
 		}
 	}
 	return archivedCount, nil

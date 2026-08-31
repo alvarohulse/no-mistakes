@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	SchemaVersion = 1
-	YAMLMaxBytes  = 256 * 1024
-	Generator     = "no-mistakes/effective-config"
+	SchemaVersion    = 1
+	YAMLMaxBytes     = 256 * 1024
+	metadataMaxBytes = 64 * 1024
+	Generator        = "no-mistakes/effective-config"
 )
 
 var provenanceCommentPattern = regexp.MustCompile(`^#?\s*source=(global|global-override|trusted|pushed|run-request|runtime); is_default=(true|false)(; qualifier=(clear|append|merge)(,(clear|append|merge))*)?$`)
@@ -63,15 +64,45 @@ func read(p *paths.Paths, runID, policyDigest, binaryVersion, binaryBuildSHA str
 	if strings.TrimSpace(runID) == "" || filepath.Base(runID) != runID || runID == "." || runID == ".." {
 		return nil, fmt.Errorf("read effective config: invalid run ID %q", runID)
 	}
-	yamlBytes, err := os.ReadFile(p.EffectiveConfigYAML(runID))
+	yamlBytes, err := readBoundedFile(p.EffectiveConfigYAML(runID), YAMLMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read effective config YAML: %w", err)
 	}
-	metaBytes, err := os.ReadFile(p.EffectiveConfigMeta(runID))
+	metaBytes, err := readBoundedFile(p.EffectiveConfigMeta(runID), metadataMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read effective config sidecar: %w", err)
 	}
 	return ValidateWithBinary(yamlBytes, metaBytes, runID, policyDigest, binaryVersion, binaryBuildSHA)
+}
+
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > maxBytes {
+		return nil, fmt.Errorf("exceeds %d-byte limit", maxBytes)
+	}
+	return contents, nil
 }
 
 // Validate checks completeness, schema support, and identity/integrity binding.
