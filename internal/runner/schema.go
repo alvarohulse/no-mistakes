@@ -223,28 +223,74 @@ func (c Command) ValidateRunners() error {
 // Scalar values replace the whole command; mapping values merge only fields
 // explicitly present in YAML.
 func (c Command) Overlay(override Command) Command {
+	result, _ := c.OverlayWithAppliedPaths(override)
+	return result
+}
+
+// OverlayWithAppliedPaths applies override and reports the semantic leaves it
+// changed. An empty path means the parsed scalar replaced the whole command.
+// Callers use the receipt to keep field-level metadata aligned with the same
+// presence rules that own command merging here.
+func (c Command) OverlayWithAppliedPaths(override Command) (Command, []string) {
 	if override.form == yamlFormScalar || override.form == yamlFormUnknown {
-		return override.Clone()
+		return override.Clone(), []string{""}
 	}
 	result := c.Clone()
+	applied := make([]string, 0, 8)
 	if override.has("run") {
 		result.Run = override.Run
+		applied = append(applied, "run")
 	}
 	if override.has("runner") {
 		result.Runner = overlaySpec(result.Runner, override.Runner)
+		applied = append(applied, appliedSpecPaths("runner", override.Runner)...)
 	}
 	if override.has("linux") {
 		result.Linux = overlayOverride(result.Linux, override.Linux)
+		applied = append(applied, appliedOverridePaths("linux", override.Linux)...)
 	}
 	if override.has("macos") {
 		result.MacOS = overlayOverride(result.MacOS, override.MacOS)
+		applied = append(applied, appliedOverridePaths("macos", override.MacOS)...)
 	}
 	if override.has("windows") {
 		result.Windows = overlayOverride(result.Windows, override.Windows)
+		applied = append(applied, appliedOverridePaths("windows", override.Windows)...)
 	}
 	result.form = yamlFormMapping
 	result.present = nil
-	return result
+	return result, applied
+}
+
+func appliedOverridePaths(prefix string, override *Override) []string {
+	if override == nil {
+		return []string{prefix}
+	}
+	if override.form == yamlFormScalar {
+		return []string{prefix}
+	}
+	paths := make([]string, 0, 3)
+	if override.present["run"] {
+		paths = append(paths, prefix+".run")
+	}
+	if override.present["runner"] {
+		paths = append(paths, appliedSpecPaths(prefix+".runner", override.Runner)...)
+	}
+	return paths
+}
+
+func appliedSpecPaths(prefix string, spec *Spec) []string {
+	if spec == nil || spec.present == nil {
+		return []string{prefix}
+	}
+	paths := make([]string, 0, 2)
+	if spec.present["executable"] {
+		paths = append(paths, prefix+".executable")
+	}
+	if spec.present["args"] {
+		paths = append(paths, prefix+".args")
+	}
+	return paths
 }
 
 func (c Command) has(field string) bool { return c.present != nil && c.present[field] }

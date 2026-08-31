@@ -441,7 +441,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapEvidence(d, root)
 	reapLegacyEvidence(d, root)
 	pruneRichRuns(d, p, root, policy, now)
-	reapEffectiveConfigStagingDirs(p, now)
+	reapEffectiveConfigArtifactDirs(d, p, now)
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
@@ -449,20 +449,43 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 
 const effectiveConfigStagingMaxAge = 24 * time.Hour
 
-func reapEffectiveConfigStagingDirs(p *paths.Paths, now time.Time) {
+func reapEffectiveConfigArtifactDirs(d *db.DB, p *paths.Paths, now time.Time) {
+	if d == nil || p == nil {
+		return
+	}
 	entries, err := os.ReadDir(p.RunsDir())
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".") || !strings.Contains(entry.Name(), "-") {
+		if !entry.IsDir() {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil || now.Sub(info.ModTime()) < effectiveConfigStagingMaxAge {
+		path := filepath.Join(p.RunsDir(), entry.Name())
+		if strings.HasPrefix(entry.Name(), ".") {
+			if !strings.Contains(entry.Name(), "-") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || now.Sub(info.ModTime()) < effectiveConfigStagingMaxAge {
+				continue
+			}
+			if err := os.RemoveAll(path); err != nil {
+				slog.Warn("failed to remove stale effective config staging directory", "path", path, "error", err)
+			}
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(p.RunsDir(), entry.Name()))
+		run, err := d.GetRun(entry.Name())
+		if err != nil {
+			slog.Warn("failed to inspect effective config artifact owner", "run_id", entry.Name(), "error", err)
+			continue
+		}
+		if run != nil {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			slog.Warn("failed to remove orphaned effective config artifact directory", "path", path, "error", err)
+		}
 	}
 }
 

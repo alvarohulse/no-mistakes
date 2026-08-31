@@ -96,9 +96,11 @@ The launch artifacts are `effective-config.yaml` and `effective-config.meta.json
 The YAML preserves the exact resolved configuration values and marks every YAML
 leaf and list item with its provenance: global, global override, trusted,
 pushed, run-request, runtime, or default, plus clear, append, and merge
-qualifiers where applicable. The value-free JSON sidecar binds the YAML's
-SHA-256 to the run ID, canonical policy digest, and generator binary identity.
-Both files are mode `0600`; the complete YAML is limited to 256 KiB.
+qualifiers where applicable. The value-free JSON sidecar records
+`schema_version`, `run_id`, `policy_digest`, `yaml_sha256`, and generator and
+binary identities. On Unix, the `runs/` container, artifact directories, and
+staging directories are mode `0700` and both files are mode `0600`; Windows
+protects them with owner-only ACLs. The complete YAML is limited to 256 KiB.
 The daemon renders, validates, and atomically writes both artifacts after
 preflight but before replacing an active run, inserting a run row, or creating
 a worktree. A serialization, completeness, integrity, size, or write failure
@@ -138,6 +140,8 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
+- Reaps orphaned final effective-config artifact directories with no run record,
+  plus staging directories older than 24 hours
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
 - Removes orphaned worktree directories via `git worktree remove --force`, falling back to direct removal for a `<runID>-command-plan` planning checkout - but never one whose run is still `pending` or `running`, a status a planning checkout inherits from its parent run; only leftovers from terminal runs or directories with no matching run record are removed
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation

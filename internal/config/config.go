@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -140,6 +141,7 @@ type GlobalConfig struct {
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
 	Eval    Eval
 	present map[string]bool
+	applied map[string]bool
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -807,11 +809,17 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 // while explicit empty values can deliberately clear commands and agent
 // routes.
 func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
+	out, _ := overlayRepoConfigWithProvenance(base, override, nil)
+	return out
+}
+
+func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *EffectiveConfigProvenance) (*RepoConfig, *EffectiveConfigProvenance) {
 	if base == nil {
 		base = &RepoConfig{}
 	}
+	resolvedProvenance := provenance.clone()
 	if override == nil {
-		return cloneRepoConfig(base)
+		return cloneRepoConfig(base), resolvedProvenance
 	}
 	out := cloneRepoConfig(base)
 	if override.has("agent") {
@@ -998,7 +1006,32 @@ func OverlayRepoConfig(base, override *RepoConfig) *RepoConfig {
 	if override.has("no_ci") {
 		out.NoCI = override.NoCI
 	}
-	return out
+	applied := effectiveRepoLayerProvenance(override, EffectiveConfigSourceGlobalOverride)
+	// Evidence storage is global-only; OverlayRepoConfig deliberately ignores
+	// repository-shaped evidence fields even when an override declares them.
+	applied.clearSubtree("test.evidence")
+	// allow_repo_commands is evaluated from the trusted default branch before
+	// this overlay and cannot be changed by machine-overlay-shaped repo data.
+	applied.clearSubtree("allow_repo_commands")
+	for _, command := range []struct {
+		path  string
+		value runner.Command
+	}{
+		{path: "commands.build", value: override.Commands.BuildCommand()},
+		{path: "commands.test", value: override.Commands.TestCommand()},
+		{path: "commands.lint", value: override.Commands.LintCommand()},
+		{path: "commands.format", value: override.Commands.FormatCommand()},
+	} {
+		if !override.has(command.path) {
+			continue
+		}
+		_, paths := (runner.Command{}).OverlayWithAppliedPaths(command.value)
+		if slices.Contains(paths, "") {
+			resolvedProvenance.clearSubtree(command.path)
+		}
+	}
+	resolvedProvenance.applyPrefix(applied, "")
+	return out, resolvedProvenance
 }
 
 func (c *RepoConfig) has(paths ...string) bool {
@@ -1510,6 +1543,7 @@ type Config struct {
 	Preflight               []runner.Command
 	ConfiguredSkipSteps     []types.StepName
 	Hooks                   Hooks
+	AllowRepoCommands       bool
 	IgnorePatterns          []string
 	AutoFix                 AutoFix
 	CI                      CI
@@ -2480,6 +2514,16 @@ var loadReviewCandidateModelCatalog = func(ctx context.Context, name types.Agent
 // identity, and kept as fallbacks. The lookPath function should behave like
 // exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
+	_, err := c.resolveAgentWithOrigins(ctx, lookPath)
+	return err
+}
+
+type agentResolutionOrigins struct {
+	Default []bool
+	Steps   map[types.StepName][]bool
+}
+
+func (c *Config) resolveAgentWithOrigins(ctx context.Context, lookPath func(string) (string, error)) (*agentResolutionOrigins, error) {
 	if c.StepAgents == nil {
 		c.StepAgents = make(map[types.StepName][]types.AgentName)
 	}
@@ -2487,15 +2531,17 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		c.StepModels = make(map[types.StepName]ModelRoute)
 	}
 	if err := c.validateManagedRoutes(); err != nil {
-		return err
+		return nil, err
 	}
+	origins := &agentResolutionOrigins{Steps: make(map[types.StepName][]bool)}
 	defaultCandidates := c.configuredAgents()
-	resolved, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.Agent = resolved[0]
 	c.Agents = resolved
+	origins.Default = runtimeOrigins
 	for _, step := range []types.StepName{
 		types.StepIntent,
 		types.StepRefresh,
@@ -2515,16 +2561,17 @@ func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string
 		if len(candidates) == 0 {
 			candidates = defaultCandidates
 		}
-		resolved, err := c.resolveAgents(ctx, candidates, model, lookPath)
+		resolved, runtimeOrigins, err := c.resolveAgents(ctx, candidates, model, lookPath)
 		if err != nil {
-			return fmt.Errorf("resolve %s agent route: %w", step, err)
+			return nil, fmt.Errorf("resolve %s agent route: %w", step, err)
 		}
 		c.StepAgents[step] = resolved
+		origins.Steps[step] = runtimeOrigins
 	}
 	if err := c.resolveReviewCandidates(ctx, lookPath); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return origins, nil
 }
 
 func (c *Config) validateManagedRoutes() error {
@@ -2641,34 +2688,35 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 	return nil
 }
 
-func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	if len(candidates) <= 1 {
 		name := firstAgent(candidates)
+		configured := name
 		if name == types.AgentAuto {
 			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return []types.AgentName{name}, nil
+			return []types.AgentName{name}, []bool{true}, nil
 		}
 		if err := validateAgentModelCompatibility(name, model); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, name, lookPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
-			return nil, noRunnableAgentError([]types.AgentName{name}, []string{probe})
+			return nil, nil, noRunnableAgentError([]types.AgentName{name}, []string{probe})
 		}
-		return []types.AgentName{resolved}, nil
+		return []types.AgentName{resolved}, []bool{resolved != configured}, nil
 	}
 
-	resolved, err := c.resolveAgentList(ctx, candidates, model, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgentList(ctx, candidates, model, lookPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resolved, nil
+	return resolved, runtimeOrigins, nil
 }
 
 func (c *Config) configuredAgents() []types.AgentName {
@@ -2737,11 +2785,14 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
 
-func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, error) {
+func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
+	runtimeOrigins := make([]bool, 0, len(candidates))
 	seen := map[string]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
+		configured := candidate
+		fromAuto := candidate == types.AgentAuto
 		if candidate == types.AgentAuto {
 			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
 			if err != nil && strings.HasPrefix(err.Error(), "no runnable agent found") {
@@ -2749,13 +2800,13 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			candidate = name
 		}
 		if err := validateAgentModelCompatibility(candidate, model); err != nil {
 			if isACPAgent(candidate) {
-				return nil, err
+				return nil, nil, err
 			}
 			probed = append(probed, err.Error())
 			continue
@@ -2765,7 +2816,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 			probed = append(probed, probe)
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if !ok {
 			continue
@@ -2776,11 +2827,12 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		}
 		seen[identity] = true
 		resolved = append(resolved, name)
+		runtimeOrigins = append(runtimeOrigins, fromAuto || name != configured)
 	}
 	if len(resolved) == 0 {
-		return nil, noRunnableAgentError(candidates, probed)
+		return nil, nil, noRunnableAgentError(candidates, probed)
 	}
-	return resolved, nil
+	return resolved, runtimeOrigins, nil
 }
 
 func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) error {
@@ -3311,6 +3363,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.PR = raw.PR
 	cfg.Prompts = raw.Prompts
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
+	cfg.applied = globalEffectiveConfigAppliedPaths(&raw, cfg)
 
 	return cfg, nil
 }
@@ -3542,13 +3595,25 @@ func validatePathInstructionGlob(pattern string) error {
 // always taken from the pushed copy, matching prior behavior, since they cannot
 // run arbitrary shell, select a process, or spend the maintainer's CI minutes.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
+	effective, _ := effectiveRepoConfigWithProvenance(pushed, trusted, allowRepoCommands)
+	return effective
+}
+
+func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCommands bool) (*RepoConfig, *EffectiveConfigProvenance) {
 	if pushed == nil {
 		pushed = &RepoConfig{}
 	}
-	effective := *pushed
+	effective := cloneRepoConfig(pushed)
+	provenance := effectiveRepoLayerProvenance(pushed, EffectiveConfigSourcePushed)
+	trustedOnly := []string{
+		"refresh.strategy", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci",
+		"ci.rerun_transient", "pipeline.skip_steps", "allow_repo_commands",
+	}
+	provenance.replaceRepoLayer(trusted, EffectiveConfigSourceTrusted, trustedOnly...)
 	// Configured skips are machine-owner policy. The later global override
 	// layer may add them; neither committed branch copy can.
 	effective.Pipeline = PipelineRaw{}
+	effective.AllowRepoCommands = allowRepoCommands
 	if trusted != nil {
 		effective.Refresh.Strategy = trusted.Refresh.Strategy
 		effective.Document.Instructions = trusted.Document.Instructions
@@ -3577,8 +3642,14 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.CI = CIRaw{}
 	}
 	if allowRepoCommands {
-		return &effective
+		return effective, provenance
 	}
+	routed := []string{
+		"agent", "commands", "preflight", "hooks", "prompts", "intent.agent", "intent.model", "refresh.agent", "refresh.model",
+		"review.agent", "review.model", "review.candidates", "build.agent", "build.model", "test.agent", "test.model",
+		"document.agent", "document.model", "lint.agent", "lint.model", "pr.agent", "pr.model", "ci.agent", "ci.model",
+	}
+	provenance.replaceRepoLayer(trusted, EffectiveConfigSourceTrusted, routed...)
 	if trusted != nil {
 		effective.Commands = trusted.Commands.Clone()
 		effective.Preflight = cloneRunnerCommands(trusted.Preflight, false)
@@ -3626,7 +3697,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.CI.StepAgentRaw = StepAgentRaw{}
 		effective.Prompts = PromptConfig{}
 	}
-	return &effective
+	return effective, provenance
 }
 
 func copyStepAgentRaw(src StepAgentRaw) StepAgentRaw {
@@ -3893,9 +3964,14 @@ func (c *Config) AutoFixLimit(step types.StepName) int {
 // ordered fallback lists, override global agent values when non-empty. Commands
 // and ignore patterns come from repo config only.
 func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
+	return mergeConfig(global, repo, nil)
+}
+
+func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMergeProvenance) *Config {
 	af := autoFixDefaults()
 	applyAutoFixOverrides(&af, &global.AutoFix)
 	applyAutoFixOverrides(&af, &repo.AutoFix)
+	provenance.applyAutoFix(&repo.AutoFix)
 
 	ci := ciDefaults()
 	// The operator's global value is a machine-wide floor they can always set;
@@ -3904,10 +3980,12 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	// word on how many workflow runs their project is billed for.
 	applyCIOverrides(&ci, &global.CI)
 	applyCIOverrides(&ci, &repo.CI)
+	provenance.applyCI(&repo.CI)
 
 	intent := intentDefaults()
 	applyIntentOverrides(&intent, &global.Intent)
 	applyIntentOverrides(&intent, &repo.Intent)
+	provenance.applyIntent(global, repo)
 
 	test := testDefaults()
 	// Applied last and from the global config only: where the daemon writes
@@ -3921,13 +3999,16 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 	if repo.Commit.FixMessage != nil {
 		commit.FixMessage = *repo.Commit.FixMessage
+		provenance.apply("commit.fix_message")
 	}
 
 	// post_worktree is repo-only, so it comes straight from the repo layer.
 	// pr_body takes a machine-wide default that a repo config can override.
 	hooks := Hooks{PostWorktree: repo.Hooks.PostWorktree, PRBody: global.Hooks.PRBody}
+	provenance.apply("hooks.post_worktree")
 	if strings.TrimSpace(repo.Hooks.PRBody) != "" {
 		hooks.PRBody = repo.Hooks.PRBody
+		provenance.apply("hooks.pr_body")
 	}
 
 	cfg := &Config{
@@ -3951,6 +4032,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Preflight:               cloneRunnerCommands(repo.Preflight, true),
 		ConfiguredSkipSteps:     cloneStepNames(repo.Pipeline.SkipSteps),
 		Hooks:                   hooks,
+		AllowRepoCommands:       repo.AllowRepoCommands,
 		IgnorePatterns:          repo.IgnorePatterns,
 		AutoFix:                 af,
 		CI:                      ci,
@@ -3967,21 +4049,31 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		DisableProjectSettings: repo.DisableProjectSettings,
 		NoCI:                   repo.NoCI,
 	}
+	for _, prefix := range []string{"commands", "preflight", "pipeline.skip_steps", "ignore_patterns", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci", "allow_repo_commands"} {
+		provenance.applyPrefix(prefix)
+	}
+	provenance.apply("refresh.strategy")
+	provenance.applyPrompts(global.Prompts, repo.Prompts)
 	if repo.Agent != "" {
 		cfg.Agent = repo.Agent
 		cfg.Agents = copyAgents(repo.Agents)
 		if len(cfg.Agents) == 0 {
 			cfg.Agents = []types.AgentName{repo.Agent}
 		}
+		provenance.apply("agent")
 	}
 	for step, agents := range repo.ConfiguredStepAgents() {
 		cfg.StepAgents[step] = copyAgents(agents)
+		provenance.apply(string(step) + ".agent")
 	}
 	for step, model := range repo.ConfiguredStepModels() {
 		cfg.StepModels[step] = model
+		provenance.apply(string(step) + ".model.name")
+		provenance.apply(string(step) + ".model.vendor")
 	}
 	if repo.Review.Candidates != nil {
 		cfg.ReviewCandidates = copyReviewCandidates(repo.Review.Candidates)
+		provenance.apply("review.candidates")
 	}
 	return cfg
 }

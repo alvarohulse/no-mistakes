@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -36,6 +38,8 @@ func TestStartRunPersistsExactEffectiveConfigArtifactsBeforeWorktreeExecution(t 
 	}
 
 	runDir := filepath.Join(p.Root(), "runs", runID)
+	assertOwnerOnlyDirectory(t, p.RunsDir())
+	assertOwnerOnlyDirectory(t, runDir)
 	yamlBytes := readOwnerOnlyArtifact(t, filepath.Join(runDir, "effective-config.yaml"))
 	metaBytes := readOwnerOnlyArtifact(t, filepath.Join(runDir, "effective-config.meta.json"))
 
@@ -74,6 +78,323 @@ func TestStartRunPersistsExactEffectiveConfigArtifactsBeforeWorktreeExecution(t 
 	if meta.BinaryVersion != buildinfo.CurrentVersion() || meta.BinaryBuildSHA != buildinfo.Commit || meta.Generator != "no-mistakes/effective-config" || meta.GeneratorSchema != 1 {
 		t.Fatalf("sidecar generation identity = %+v", meta)
 	}
+	var document map[string]any
+	if err := yaml.Unmarshal(yamlBytes, &document); err != nil {
+		t.Fatal(err)
+	}
+	testConfig, ok := document["test"].(map[string]any)
+	if !ok {
+		t.Fatalf("test config = %#v, want mapping", document["test"])
+	}
+	evidence, ok := testConfig["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("test.evidence = %#v, want mapping", testConfig["evidence"])
+	}
+	if got, want := sortedMapKeys(evidence), []string{"local_root", "max_runs", "retention"}; !slices.Equal(got, want) {
+		t.Fatalf("test.evidence fields = %v, want %v", got, want)
+	}
+}
+
+func TestStartRunEffectiveConfigProvenanceTracksAppliedValuesNotDeclarations(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-applied-provenance")
+	if err := os.WriteFile(p.ConfigFile(), []byte("hooks:\n  pr_body: global-formatter\nprompts:\n  review: global review guidance\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := "auto_fix:\n  review: 0\n" +
+		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n  pr_body: \"\"\n" +
+		"prompts:\n  review: \"\"\n"
+	writePolicyConfigCommit(t, repo, trustedYAML, "configure blank trusted values", "refs/heads/main")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "applied provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"hooks", "pr_body"}, "global-formatter", "source=global; is_default=false")
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"prompts", "review"}, "global review guidance", "source=global; is_default=false")
+}
+
+func TestStartRunEffectiveConfigPreservesNestedPlatformCommandLeafProvenance(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-command-provenance")
+	globalYAML := `overrides:
+  test/repo:
+    commands:
+      build:
+        windows:
+          runner:
+            executable: powershell
+`
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := "auto_fix:\n  review: 0\n" +
+		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n" +
+		`commands:
+  build:
+    run: trusted-build
+    windows:
+      run: trusted-windows-build
+      runner:
+        executable: pwsh
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+`
+	writePolicyConfigCommit(t, repo, trustedYAML, "configure nested command", "refs/heads/main")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "nested command provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"commands", "build", "windows", "run"}, "trusted-windows-build", "source=trusted; is_default=false")
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"commands", "build", "windows", "runner", "executable"}, "powershell", "source=global-override; is_default=false")
+	args := effectiveConfigNode(t, yamlBytes, "commands", "build", "windows", "runner", "args")
+	if args.Kind != yaml.SequenceNode || len(args.Content) != 4 {
+		t.Fatalf("commands.build.windows.runner.args = %#v, want four-item sequence", args)
+	}
+	if got := effectiveConfigNodeComment(args.Content[0]); got != "source=trusted; is_default=false" {
+		t.Fatalf("commands.build.windows.runner.args[0] provenance = %q, want trusted", got)
+	}
+}
+
+func TestStartRunEffectiveConfigPreservesExplicitNestedCommandClears(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	tests := []struct {
+		name           string
+		trustedCommand string
+		override       string
+		clearPath      []string
+	}{
+		{
+			name:           "runner",
+			trustedCommand: "  build: trusted-build\n",
+			override:       "        runner: null\n",
+			clearPath:      []string{"commands", "build", "runner"},
+		},
+		{
+			name: "platform",
+			trustedCommand: `  build:
+    run: trusted-build
+    windows: trusted-windows-build
+`,
+			override:  "        windows: null\n",
+			clearPath: []string{"commands", "build", "windows"},
+		},
+		{
+			name: "platform run",
+			trustedCommand: `  build:
+    run: trusted-build
+    windows:
+      run: trusted-windows-build
+      runner:
+        executable: powershell
+        args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+`,
+			override: `        windows:
+          run: null
+`,
+			clearPath: []string{"commands", "build", "windows", "run"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-command-clear-"+strings.ReplaceAll(tt.name, " ", "-"))
+			globalYAML := "overrides:\n  test/repo:\n    commands:\n      build:\n" + tt.override
+			if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			trustedYAML := "auto_fix:\n  review: 0\n" +
+				"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n" +
+				"commands:\n" + tt.trustedCommand
+			writePolicyConfigCommit(t, repo, trustedYAML, "configure command clear", "refs/heads/main")
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			step := &mockPassStep{name: types.StepReview}
+			manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+			t.Cleanup(manager.Shutdown)
+			setSafeBareRepositoryExplicitForDaemonTest(t)
+
+			runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "nested command clear", "", "", "")
+			if err != nil {
+				t.Fatalf("start run: %v", err)
+			}
+			if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+				t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+			}
+
+			yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+			assertEffectiveConfigScalar(t, yamlBytes, []string{"commands", "build", "run"}, "trusted-build", "source=trusted; is_default=false")
+			assertEffectiveConfigNull(t, yamlBytes, tt.clearPath, "source=global-override; is_default=false; qualifier=clear")
+		})
+	}
+}
+
+func TestStartRunEffectiveConfigExplainsRoutingTrustDecision(t *testing.T) {
+	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-routing-provenance")
+	agentDir := t.TempDir()
+	mockCodex := writeRunnableMockAgent(t, agentDir, "codex")
+	globalYAML := "agent_path_override:\n  codex: " + yamlDoubleQuoted(mockCodex) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := "allow_repo_commands: true\nauto_fix:\n  review: 0\n" +
+		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n"
+	writePolicyConfigCommit(t, repo, trustedYAML, "allow pushed routing", "refs/heads/main")
+	pushedYAML := `agent: codex
+auto_fix:
+  review: 0
+review:
+  agent: codex
+  model:
+    name: gpt-5.6-sol
+    vendor: openai
+`
+	writePolicyConfigCommit(t, repo, pushedYAML, "configure pushed routing", "refs/heads/feature/routing-provenance")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "feature/routing-provenance", head, refreshTestZeroSHA, "test", nil, "routing provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"allow_repo_commands"}, "true", "source=trusted; is_default=false")
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 1 || defaultAgents.Content[0].Value != "codex" {
+		t.Fatalf("agent.default = %#v, want [codex]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=pushed; is_default=false" {
+		t.Fatalf("agent.default[0] provenance = %q, want pushed", got)
+	}
+	reviewAgents := effectiveConfigNode(t, yamlBytes, "agent", "step_routes", "review", "agents")
+	if len(reviewAgents.Content) != 1 || reviewAgents.Content[0].Value != "codex" {
+		t.Fatalf("agent.step_routes.review.agents = %#v, want [codex]", reviewAgents)
+	}
+	if got := effectiveConfigNodeComment(reviewAgents.Content[0]); got != "source=pushed; is_default=false" {
+		t.Fatalf("agent.step_routes.review.agents[0] provenance = %q, want pushed", got)
+	}
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"agent", "step_routes", "review", "model", "name"}, "gpt-5.6-sol", "source=pushed; is_default=false")
+	assertEffectiveConfigScalar(t, yamlBytes, []string{"agent", "step_routes", "review", "model", "vendor"}, "openai", "source=pushed; is_default=false")
+}
+
+func TestStartRunEffectiveConfigMarksAutoDerivedAgentAsRuntime(t *testing.T) {
+	p, database, repo, _ := newPolicyResolutionFixture(t, "effective-config-runtime-routing")
+	agentDir := t.TempDir()
+	mockCodex := writeRunnableMockAgent(t, agentDir, "codex")
+	missingClaude := filepath.Join(agentDir, "missing-claude")
+	globalYAML := "agent: auto\nagent_path_override:\n  claude: " + yamlDoubleQuoted(missingClaude) + "\n  codex: " + yamlDoubleQuoted(mockCodex) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "runtime routing provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 1 || defaultAgents.Content[0].Value != "codex" {
+		t.Fatalf("agent.default = %#v, want runtime-selected codex", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("agent.default[0] provenance = %q, want runtime", got)
+	}
+}
+
+func TestStartRunEffectiveConfigPreservesExplicitFallbackBesideAuto(t *testing.T) {
+	yamlBytes := runEffectiveConfigWithMixedAgentFallbacks(t, "effective-config-mixed-routing", "[auto, acp:cursor]")
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 2 || defaultAgents.Content[0].Value != "cursor" || defaultAgents.Content[1].Value != "acp:cursor" {
+		t.Fatalf("agent.default = %#v, want [cursor, acp:cursor]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("auto-derived agent provenance = %q, want runtime", got)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[1]); got != "source=pushed; is_default=false" {
+		t.Fatalf("explicit fallback provenance = %q, want pushed", got)
+	}
+}
+
+func TestStartRunEffectiveConfigKeepsAutoOriginWhenExplicitDuplicateIsDiscarded(t *testing.T) {
+	yamlBytes := runEffectiveConfigWithMixedAgentFallbacks(t, "effective-config-auto-duplicate", "[auto, cursor]")
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 1 || defaultAgents.Content[0].Value != "cursor" {
+		t.Fatalf("agent.default = %#v, want [cursor]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("auto-selected deduplicated agent provenance = %q, want runtime", got)
+	}
+}
+
+func runEffectiveConfigWithMixedAgentFallbacks(t *testing.T, repoID, configuredAgents string) []byte {
+	t.Helper()
+	p, database, repo, marker := newPolicyResolutionFixture(t, repoID)
+	agentDir := t.TempDir()
+	mockCursor := writeRunnableMockAgent(t, agentDir, "cursor-agent")
+	mockACPX := writeRunnableMockAgent(t, agentDir, "acpx")
+	missing := func(name string) string { return filepath.Join(agentDir, "missing-"+name) }
+	globalYAML := "acpx_path: " + yamlDoubleQuoted(mockACPX) + "\n" +
+		"acp_registry_overrides:\n  cursor: " + yamlDoubleQuoted(mockCursor) + "\n" +
+		"agent_path_override:\n" +
+		"  claude: " + yamlDoubleQuoted(missing("claude")) + "\n" +
+		"  codex: " + yamlDoubleQuoted(missing("codex")) + "\n" +
+		"  opencode: " + yamlDoubleQuoted(missing("opencode")) + "\n" +
+		"  rovodev: " + yamlDoubleQuoted(missing("rovodev")) + "\n" +
+		"  pi: " + yamlDoubleQuoted(missing("pi")) + "\n" +
+		"  copilot: " + yamlDoubleQuoted(missing("copilot")) + "\n" +
+		"  cursor: " + yamlDoubleQuoted(mockCursor) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := "allow_repo_commands: true\nauto_fix:\n  review: 0\n" +
+		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n"
+	writePolicyConfigCommit(t, repo, trustedYAML, "allow pushed routing", "refs/heads/main")
+	writePolicyConfigCommit(t, repo, "agent: "+configuredAgents+"\nauto_fix:\n  review: 0\n", "configure mixed routing", "refs/heads/feature/mixed-routing")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "feature/mixed-routing", head, refreshTestZeroSHA, "test", nil, "mixed routing provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	return readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
 }
 
 func TestStartRunEffectiveConfigRecordsLayeredProvenance(t *testing.T) {
@@ -256,6 +577,46 @@ func TestPersistEffectiveConfigArtifactsRemovesPartialStagingOnIntegrityFailure(
 	assertNoEffectiveConfigArtifacts(t, p)
 }
 
+func TestReapEffectiveConfigArtifactDirsRemovesCrashOrphans(t *testing.T) {
+	f := newEvidenceFixture(t)
+	if err := os.MkdirAll(f.p.RunsDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := f.db.InsertRun(f.repo.ID, "retained", "head-retained", "base-retained")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	pathsByState := map[string]string{
+		"retained":      f.p.RunDir(retained.ID),
+		"orphan-final":  f.p.RunDir("01M1ORPHANEDFINALARTIFACT00"),
+		"stale-staging": filepath.Join(f.p.RunsDir(), ".01M1STALE-staging"),
+		"new-staging":   filepath.Join(f.p.RunsDir(), ".01M1NEW-staging"),
+	}
+	for state, path := range pathsByState {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("create %s directory: %v", state, err)
+		}
+	}
+	stale := now.Add(-effectiveConfigStagingMaxAge - time.Minute)
+	if err := os.Chtimes(pathsByState["stale-staging"], stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	reapEffectiveConfigArtifactDirs(f.db, f.p, now)
+
+	for _, state := range []string{"retained", "new-staging"} {
+		if _, err := os.Stat(pathsByState[state]); err != nil {
+			t.Fatalf("%s directory was not preserved: %v", state, err)
+		}
+	}
+	for _, state := range []string{"orphan-final", "stale-staging"} {
+		if _, err := os.Stat(pathsByState[state]); !os.IsNotExist(err) {
+			t.Fatalf("%s directory survived crash cleanup: %v", state, err)
+		}
+	}
+}
+
 func readOwnerOnlyArtifact(t *testing.T, path string) []byte {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -272,6 +633,17 @@ func readOwnerOnlyArtifact(t *testing.T, path string) []byte {
 	return data
 }
 
+func assertOwnerOnlyDirectory(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s mode = %#o, want 0700", path, info.Mode().Perm())
+	}
+}
+
 func assertNoEffectiveConfigArtifacts(t *testing.T, p *paths.Paths) {
 	t.Helper()
 	entries, err := os.ReadDir(p.RunsDir())
@@ -281,4 +653,71 @@ func assertNoEffectiveConfigArtifacts(t *testing.T, p *paths.Paths) {
 	if len(entries) != 0 {
 		t.Fatalf("effective config artifact entries = %d, want none", len(entries))
 	}
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func assertEffectiveConfigScalar(t *testing.T, data []byte, path []string, wantValue, wantProvenance string) {
+	t.Helper()
+	node := effectiveConfigNode(t, data, path...)
+	if node.Kind != yaml.ScalarNode || node.Value != wantValue {
+		t.Fatalf("effective config %s = kind %d value %q, want scalar %q", strings.Join(path, "."), node.Kind, node.Value, wantValue)
+	}
+	if got := effectiveConfigNodeComment(node); got != wantProvenance {
+		t.Fatalf("effective config %s provenance = %q, want %q", strings.Join(path, "."), got, wantProvenance)
+	}
+}
+
+func assertEffectiveConfigNull(t *testing.T, data []byte, path []string, wantProvenance string) {
+	t.Helper()
+	node := effectiveConfigNode(t, data, path...)
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!null" {
+		t.Fatalf("effective config %s = kind %d tag %q value %q, want null", strings.Join(path, "."), node.Kind, node.Tag, node.Value)
+	}
+	if got := effectiveConfigNodeComment(node); got != wantProvenance {
+		t.Fatalf("effective config %s provenance = %q, want %q", strings.Join(path, "."), got, wantProvenance)
+	}
+}
+
+func effectiveConfigNode(t *testing.T, data []byte, path ...string) *yaml.Node {
+	t.Helper()
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Content) != 1 {
+		t.Fatalf("effective config has %d roots, want one", len(document.Content))
+	}
+	node := document.Content[0]
+	for _, key := range path {
+		if node.Kind != yaml.MappingNode {
+			t.Fatalf("effective config path %s reaches non-mapping node", strings.Join(path, "."))
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			t.Fatalf("effective config path %s is missing key %q", strings.Join(path, "."), key)
+		}
+		node = next
+	}
+	return node
+}
+
+func effectiveConfigNodeComment(node *yaml.Node) string {
+	if node.LineComment != "" {
+		return strings.TrimPrefix(node.LineComment, "# ")
+	}
+	return strings.TrimPrefix(node.HeadComment, "# ")
 }
