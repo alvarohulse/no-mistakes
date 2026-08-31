@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
@@ -160,6 +161,77 @@ func TestLoadRecoveredConfigRestoresLaunchPublicationOverride(t *testing.T) {
 	}
 	if !recovered.EffectiveConfig.Publish {
 		t.Fatal("recovered config did not restore launch-time publication override")
+	}
+}
+
+func TestLoadRecoveredConfigDisablesPublicationForPolicylessRun(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "policyless-publication-recovery")
+	gitCmd(t, repo.WorkingPath, "remote", "add", "origin", p.RepoDir(repo.ID))
+	if err := os.WriteFile(p.ConfigFile(), []byte("effective_config:\n  publish: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistResolvedRoutingForTest(t, database, run)
+	manager := NewRunManager(database, p, nil)
+	t.Cleanup(manager.Shutdown)
+
+	recovered, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.EffectiveConfig.Publish {
+		t.Fatal("policyless legacy run inherited current effective-config publication")
+	}
+}
+
+func TestLoadRecoveredConfigDisablesPublicationForPolicylessOverrideRun(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "policyless-override-publication-recovery")
+	globalYAML := "effective_config:\n  publish: true\noverrides:\n  test/repo:\n    effective_config:\n      publish: true\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	globalInput, err := loadGlobalConfigInput(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := resolveGlobalOverride(globalInput, repo)
+	if override == nil {
+		t.Fatal("test global override did not match repository")
+	}
+	repoBytes, err := os.ReadFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoConfig, err := config.LoadRepoFromBytes(repoBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushed := repoConfigInputFromBytes(repoConfig, repoBytes, db.ConfigSourceBranch, head)
+	trusted := repoConfigInputFromBytes(repoConfig, repoBytes, db.ConfigSourceDefault, head)
+	_, sources := effectiveRepoConfigAndSources(globalInput, pushed, trusted, override)
+	run, err := database.InsertRunWithOptions(repo.ID, "main", head, refreshTestZeroSHA, db.RunOptions{LegacyResolvedPolicy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunConfigSources(run.ID, sources); err != nil {
+		t.Fatal(err)
+	}
+	run.ConfigSources = sources
+	persistResolvedRoutingForTest(t, database, run)
+	manager := NewRunManager(database, p, nil)
+	t.Cleanup(manager.Shutdown)
+
+	recovered, err := manager.loadRecoveredConfig(context.Background(), run, repo, repo.WorkingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.EffectiveConfig.Publish {
+		t.Fatal("policyless legacy override run inherited current effective-config publication")
 	}
 }
 

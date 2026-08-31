@@ -2,6 +2,8 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -125,8 +128,11 @@ func TestPRStep_RetargetsExistingPRToStackedBase(t *testing.T) {
 		t.Fatalf("existing PR was not retargeted to dependency:\n%s", logText)
 	}
 	editLine := lineContaining(logText, "pr edit")
-	if strings.Contains(editLine, "--title") || strings.Contains(editLine, "--body") {
-		t.Fatalf("retarget rewrote the adopted PR title or body: %s", editLine)
+	if strings.Contains(editLine, "--title") || !strings.Contains(editLine, "--body-file -") {
+		t.Fatalf("retarget did not atomically carry the verified owned body without changing the title: %s", editLine)
+	}
+	if got := strings.Count(logText, "pr edit 42"); got != 1 {
+		t.Fatalf("retarget/body updates = %d, want one atomic host write:\n%s", got, logText)
 	}
 }
 
@@ -751,6 +757,282 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	}
 	if run.PRURL == nil || *run.PRURL != "https://github.com/test/repo/pull/99" {
 		t.Errorf("PR URL = %v, want https://github.com/test/repo/pull/99", run.PRURL)
+	}
+}
+
+func TestPRStep_PublishesCompleteStoredEffectiveConfigInBuiltInGitHubBody(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Config.EffectiveConfig.Publish = true
+	stored := []byte("command: 'echo # literal' # source=trusted; is_default=false\ntoken: ghp_abcdefghijklmnopqrstuvwx12 # source=global; is_default=false\nfence: '```' # source=run-request; is_default=false\n")
+	metadata := writeEffectiveConfigArtifactForPRTest(t, sctx, stored)
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	for _, want := range []string{
+		"### Effective Configuration",
+		"Run ID: `" + sctx.Run.ID + "`",
+		"`policy_digest`: `" + metadata.PolicyDigest + "`",
+		"`yaml_sha256`: `" + metadata.YAMLSHA256 + "`",
+		"command: 'echo # literal'",
+		"token: ghp_abcdefghijklmnopqrstuvwx12",
+		"````yaml",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("published body missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "source=trusted") || strings.Contains(body, "source=global") || strings.Contains(body, "source=run-request") {
+		t.Fatalf("published effective config retained provenance comments:\n%s", body)
+	}
+}
+
+func TestPRStep_UpdatesEffectiveConfigWithoutChangingUnownedGitHubBodyBytes(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	bodyPath := fakeCLIEnvValue(t, env, "FAKE_CLI_PR_BODY_FILE")
+	original, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const humanText = "Human-owned context must stay byte exact."
+	seeded := strings.Replace(string(original), "\n\n<!-- no-mistakes:section", "\n\n"+humanText+"\n\n<!-- no-mistakes:section", 1)
+	if err := os.WriteFile(bodyPath, []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("publish: true # source=trusted; is_default=false\n"))
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	published, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(published), humanText) != 1 || !strings.Contains(string(published), "### Effective Configuration") {
+		t.Fatalf("owned update changed unowned bytes or omitted disclosure:\n%s", published)
+	}
+}
+
+func TestPRStep_DoesNotReadEffectiveConfigWhenPublicationIsDisabled(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if body := readFakeGHBodyArg(t, logFile); strings.Contains(body, "### Effective Configuration") {
+		t.Fatalf("disabled publication rendered effective config:\n%s", body)
+	}
+}
+
+func TestPRStep_RefusesEffectiveConfigThatCannotFitWithoutWritingThePR(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("value: '"+strings.Repeat("x", maxPullRequestBodyBytes)+"' # source=trusted; is_default=false\n"))
+
+	_, err := (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d", maxPullRequestBodyBytes)) || !strings.Contains(err.Error(), fmt.Sprintf("%d", githubPullRequestBodyHardLimitChars)) {
+		t.Fatalf("Execute() error = %v, want exact publication and GitHub limits", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pr create") {
+		t.Fatalf("overflow wrote a partial PR body:\n%s", logData)
+	}
+}
+
+func TestPRStep_RefusesCombinedEffectiveConfigOverflowWithoutWritingThePR(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		existingURL string
+		stacked     bool
+	}{
+		{name: "create"},
+		{name: "update", existingURL: "https://github.com/test/repo/pull/42", stacked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, logFile := fakeGH(t, tt.existingURL)
+			if tt.stacked {
+				env = append(env, "FAKE_CLI_PR_BASE=old-base")
+			}
+			bodyPath := fakeCLIEnvValue(t, env, "FAKE_CLI_PR_BODY_FILE")
+			bodyBefore, err := os.ReadFile(bodyPath)
+			if err != nil && tt.existingURL != "" {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					payload, err := json.Marshal(map[string]string{
+						"title":        "feat: publish effective configuration",
+						"summary":      strings.Repeat("s", 40*1024),
+						"what_changed": "- Publish the complete configuration.",
+					})
+					if err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: payload}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.Config.EffectiveConfig.Publish = true
+			if tt.stacked {
+				sctx.Run.StackedOn = "dependency"
+			}
+			writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("value: '"+strings.Repeat("x", 30*1024)+"' # source=trusted; is_default=false\n"))
+
+			_, err = (&PRStep{}).Execute(sctx)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d", maxPullRequestBodyBytes)) || !strings.Contains(err.Error(), fmt.Sprintf("%d", githubPullRequestBodyHardLimitChars)) {
+				t.Fatalf("Execute() error = %v, want exact publication and GitHub limits", err)
+			}
+			logData, readErr := os.ReadFile(logFile)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strings.Contains(string(logData), "pr create") || strings.Contains(string(logData), "pr edit") {
+				t.Fatalf("combined overflow wrote the PR body:\n%s", logData)
+			}
+			if tt.existingURL != "" {
+				bodyAfter, readErr := os.ReadFile(bodyPath)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if string(bodyAfter) != string(bodyBefore) {
+					t.Fatal("combined overflow changed the existing PR body")
+				}
+			}
+		})
+	}
+}
+
+func TestPRStep_RefusesCorruptEffectiveConfigBeforeRetargetingExistingPR(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_BASE=old-base")
+	bodyPath := fakeCLIEnvValue(t, env, "FAKE_CLI_PR_BODY_FILE")
+	bodyBefore, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("publish: true # source=trusted; is_default=false\n"))
+	if err := os.WriteFile(sctx.Paths.EffectiveConfigYAML(sctx.Run.ID), []byte("publish: false # source=trusted; is_default=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("Execute() error = %v, want stored-artifact integrity failure", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("corrupt artifact retargeted or rewrote the PR:\n%s", logData)
+	}
+	bodyAfter, readErr := os.ReadFile(bodyPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(bodyAfter) != string(bodyBefore) {
+		t.Fatal("corrupt artifact changed the existing PR body")
+	}
+}
+
+func TestPRStep_RefusesEffectiveConfigWhenUnownedBodyLeavesNoCapacityBeforeRetargeting(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_BASE=old-base")
+	bodyPath := fakeCLIEnvValue(t, env, "FAKE_CLI_PR_BODY_FILE")
+	original, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	humanText := strings.Repeat("human context\n", 4*1024)
+	seeded := strings.Replace(string(original), "\n\n<!-- no-mistakes:section", "\n\n"+humanText+"\n<!-- no-mistakes:section", 1)
+	if len(seeded) >= maxPullRequestBodyBytes {
+		t.Fatalf("test precondition: existing body is already oversized at %d bytes", len(seeded))
+	}
+	if err := os.WriteFile(bodyPath, []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.StackedOn = "dependency"
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("value: '"+strings.Repeat("x", 20*1024)+"' # source=trusted; is_default=false\n"))
+
+	_, err = (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d", maxPullRequestBodyBytes)) || !strings.Contains(err.Error(), fmt.Sprintf("%d", githubPullRequestBodyHardLimitChars)) {
+		t.Fatalf("Execute() error = %v, want exact publication and GitHub limits", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("insufficient remaining capacity retargeted or rewrote the PR:\n%s", logData)
+	}
+	bodyAfter, readErr := os.ReadFile(bodyPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(bodyAfter) != seeded {
+		t.Fatal("insufficient remaining capacity changed the existing PR body")
+	}
+}
+
+func TestPRStep_RefusesCorruptStoredEffectiveConfigBeforeWritingThePR(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("publish: true # source=trusted; is_default=false\n"))
+	if err := os.WriteFile(sctx.Paths.EffectiveConfigYAML(sctx.Run.ID), []byte("publish: false # source=trusted; is_default=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("Execute() error = %v, want stored-artifact integrity failure", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), "pr create") {
+		t.Fatalf("corrupt artifact reached PR publication:\n%s", logData)
 	}
 }
 
@@ -2133,6 +2415,56 @@ func readFakeGHBodyArg(t *testing.T, logFile string) string {
 	return strings.TrimSuffix(log[idx+len(marker):], "\n")
 }
 
+func writeEffectiveConfigArtifactForPRTest(t *testing.T, sctx *pipeline.StepContext, yamlBytes []byte) effectiveconfig.Metadata {
+	t.Helper()
+	if sctx.Paths == nil {
+		t.Fatal("test step context has no paths")
+	}
+	policyDigest := strings.Repeat("a", sha256.Size*2)
+	sctx.Run.ResolvedPolicyDigest = &policyDigest
+	version := "test-version"
+	buildSHA := "test-build"
+	sctx.Run.NoMistakesVersion = &version
+	sctx.Run.NoMistakesBuildSHA = &buildSHA
+	digest := sha256.Sum256(yamlBytes)
+	metadata := effectiveconfig.Metadata{
+		SchemaVersion:   effectiveconfig.SchemaVersion,
+		RunID:           sctx.Run.ID,
+		PolicyDigest:    policyDigest,
+		YAMLSHA256:      hex.EncodeToString(digest[:]),
+		BinaryVersion:   version,
+		BinaryBuildSHA:  buildSHA,
+		Generator:       effectiveconfig.Generator,
+		GeneratorSchema: effectiveconfig.SchemaVersion,
+	}
+	metaBytes, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sctx.Paths.RunDir(sctx.Run.ID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sctx.Paths.EffectiveConfigYAML(sctx.Run.ID), yamlBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sctx.Paths.EffectiveConfigMeta(sctx.Run.ID), metaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return metadata
+}
+
+func fakeCLIEnvValue(t *testing.T, env []string, key string) string {
+	t.Helper()
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	t.Fatalf("fake CLI environment is missing %s", key)
+	return ""
+}
+
 func assertGitHubBodyLimitForTest(t *testing.T, body string) {
 	t.Helper()
 	if got := len(body); got >= githubPullRequestBodyHardLimitChars {
@@ -2610,6 +2942,7 @@ func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
+	sctx.Config.EffectiveConfig.Publish = true
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -2625,6 +2958,9 @@ func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	}
 	if !strings.Contains(ghLog, "--title feat: improve gitlab flow") {
 		t.Fatalf("expected generated title in glab call, got:\n%s", ghLog)
+	}
+	if strings.Contains(ghLog, "### Effective Configuration") {
+		t.Fatalf("GitLab received GitHub-only effective-config publication:\n%s", ghLog)
 	}
 }
 

@@ -347,6 +347,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		if err != nil {
 			return nil, err
 		}
+		// Policyless runs predate publication persistence and cannot prove a
+		// publishable artifact identity during recovery.
+		cfg.EffectiveConfig.Publish = false
 		if _, err := restoreResolvedAgentRouting(cfg, run.ResolvedAgentRouting, steps.IsDemoMode()); err != nil {
 			return nil, err
 		}
@@ -382,6 +385,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	trustedRepoInput := loadTrustedRepoConfigInput(ctx, workDir, trustedSHA, run.ID)
 	effectiveRepoCfg := config.EffectiveRepoConfig(pushedRepoInput.Config, repoConfigFromInput(trustedRepoInput), trustedRepoInput != nil && trustedRepoInput.Config.AllowRepoCommands)
 	cfg := config.Merge(globalCfg, effectiveRepoCfg)
+	// Policyless runs predate publication persistence and cannot prove a
+	// publishable artifact identity during recovery.
+	cfg.EffectiveConfig.Publish = false
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 		return nil, err
 	}

@@ -421,6 +421,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		WorkDir:  workDir,
 		Config:   e.config,
 		DB:       e.db,
+		Paths:    e.paths,
 		Agent:    e.agents.AgentForStep(gate.step.Name()),
 		Sessions: e.sessions,
 		Log: func(message string) {
@@ -900,6 +901,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Reviewer:         reviewer,
 		Config:           e.config,
 		DB:               e.db,
+		Paths:            e.paths,
 		StepResultID:     sr.ID,
 		Env:              append([]string(nil), metadataEnv...),
 		UserIntent:       userIntent,

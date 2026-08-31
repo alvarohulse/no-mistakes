@@ -152,7 +152,8 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 	run := &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "refs/heads/feature", HeadSHA: headSHA, BaseSHA: baseSHA}
 	repo := &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"}
 	cfg := &config.Config{Agent: types.AgentClaude, Commands: cmds}
-	commandPlanning := pipeline.NewCommandPlanningWorkspace(paths.WithRoot(t.TempDir()), cfg, run, repo, workDir)
+	p := paths.WithRoot(t.TempDir())
+	commandPlanning := pipeline.NewCommandPlanningWorkspace(p, cfg, run, repo, workDir)
 	t.Cleanup(func() {
 		if err := commandPlanning.Close(context.Background()); err != nil {
 			t.Errorf("close command planning workspace: %v", err)
@@ -167,6 +168,7 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 		Agent:           ag,
 		Config:          cfg,
 		DB:              database,
+		Paths:           p,
 		CommandPlanning: commandPlanning,
 		EvidenceDir:     filepath.Join(t.TempDir(), "evidence", "run-1"),
 		Log:             func(s string) {},

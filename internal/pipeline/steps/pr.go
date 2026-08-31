@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
+	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -31,7 +32,8 @@ type prContent struct {
 	Body string `json:"body,omitempty"`
 	// OwnedPatches is publication material produced by hooks.pr_body. It is
 	// never part of the drafting agent's JSON schema.
-	OwnedPatches prbody.PatchSet `json:"-"`
+	OwnedPatches              prbody.PatchSet `json:"-"`
+	EffectiveConfigDisclosure string          `json:"-"`
 }
 
 var prContentSchema = json.RawMessage(`{
@@ -105,20 +107,31 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("pull request already exists: %s", describePR(existing)))
 		updated := existing
 		retargeting := strings.TrimSpace(existing.Base) != "" && strings.TrimSpace(existing.Base) != baseBranch
-		if retargeting {
-			updated, err = host.UpdatePR(ctx, existing, scm.PRContent{Base: baseBranch})
-			if err != nil {
-				return nil, fmt.Errorf("retarget pull request to %s: %w", baseBranch, err)
-			}
-		}
-
 		baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
 		content, buildErr := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
 		if buildErr != nil {
 			return nil, buildErr
 		}
-		patches := ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider))
-		if err := updateOwnedPRBody(ctx, host, updated, patches, prBodyValidationLimits(scm.MaxPRBodyChars(provider))); err != nil {
+		patches, err := ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider))
+		if err != nil {
+			return nil, err
+		}
+		limits := prBodyValidationLimits(scm.MaxPRBodyChars(provider), content.EffectiveConfigDisclosure)
+		bodyUpdate, err := prepareOwnedPRBodyUpdate(ctx, host, updated, patches, limits)
+		if err != nil {
+			if content.EffectiveConfigDisclosure != "" && errors.Is(err, prbody.ErrOversize) {
+				return nil, effectiveConfigBodyOverflowError(len(bodyUpdate.candidate))
+			}
+			return nil, fmt.Errorf("update pull request body: %w", err)
+		}
+		baseUpdate := ""
+		if retargeting {
+			baseUpdate = baseBranch
+		}
+		if err := publishOwnedPRBodyUpdate(ctx, host, updated, bodyUpdate, baseUpdate); err != nil {
+			if retargeting {
+				return nil, fmt.Errorf("retarget pull request to %s and update owned body: %w", baseBranch, err)
+			}
 			return nil, fmt.Errorf("update pull request body: %w", err)
 		}
 		sctx.Log("updated owned pull request sections and verified the hosted body")
@@ -138,11 +151,15 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 
-	body, err := prbody.NewOwnedDocument(ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider)))
+	patches, err := ownedPatchesForPRContent(content, scm.MaxPRBodyChars(provider))
+	if err != nil {
+		return nil, err
+	}
+	body, err := prbody.NewOwnedDocument(patches)
 	if err != nil {
 		return nil, fmt.Errorf("build owned pull request body: %w", err)
 	}
-	limits := prBodyValidationLimits(scm.MaxPRBodyChars(provider))
+	limits := prBodyValidationLimits(scm.MaxPRBodyChars(provider), content.EffectiveConfigDisclosure)
 	if err := prbody.ValidateOwnedDocument(body, limits); err != nil {
 		return nil, fmt.Errorf("validate pull request body: %w", err)
 	}
@@ -169,16 +186,24 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
 }
 
-func ownedPatchesForPRContent(content prContent, bodyLimit int) prbody.PatchSet {
+func ownedPatchesForPRContent(content prContent, bodyLimit int) (prbody.PatchSet, error) {
 	if len(content.OwnedPatches.Sections) > 0 {
-		return content.OwnedPatches
+		return content.OwnedPatches, nil
 	}
 	body := content.Body
+	disclosure := content.EffectiveConfigDisclosure
+	if disclosure != "" {
+		var err error
+		body, err = fitEffectiveConfigDisclosure(body, disclosure, bodyLimit)
+		if err != nil {
+			return prbody.PatchSet{}, err
+		}
+	}
 	empty, err := prbody.NewOwnedDocument(prbody.PatchSet{
 		Version:  prbody.PatchVersion,
 		Sections: []prbody.SectionPatch{{ID: "generated", Content: ""}},
 	})
-	if err == nil {
+	if err == nil && disclosure == "" {
 		if bodyLimit > 0 {
 			budget := bodyLimit - scm.PRBodyLen(empty)
 			if budget < 0 {
@@ -197,15 +222,57 @@ func ownedPatchesForPRContent(content prContent, bodyLimit int) prbody.PatchSet 
 	return prbody.PatchSet{
 		Version:  prbody.PatchVersion,
 		Sections: []prbody.SectionPatch{{ID: "generated", Content: body}},
-	}
+	}, nil
 }
 
-func prBodyValidationLimits(bodyLimit int) prbody.ValidationLimits {
-	return prbody.ValidationLimits{
+func prBodyValidationLimits(bodyLimit int, disclosure string) prbody.ValidationLimits {
+	limits := prbody.ValidationLimits{
 		MaxBytes:     maxPullRequestBodyBytes,
 		MaxUnits:     bodyLimit,
 		MeasureUnits: scm.PRBodyLen,
 	}
+	if disclosure != "" {
+		limits.SecretExemptions = []prbody.SecretExemption{{SectionID: "generated", ExactText: disclosure}}
+	}
+	return limits
+}
+
+func fitEffectiveConfigDisclosure(body, disclosure string, bodyLimit int) (string, error) {
+	disclosureOnly := prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: "generated", Content: disclosure}},
+	}
+	fixedDocument, err := prbody.NewOwnedDocument(disclosureOnly)
+	if err != nil {
+		return "", fmt.Errorf("build complete effective configuration disclosure: %w", err)
+	}
+	if len(fixedDocument) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(fixedDocument) > bodyLimit) {
+		return "", effectiveConfigBodyOverflowError(len(fixedDocument))
+	}
+
+	separator := ""
+	if strings.TrimSpace(body) != "" {
+		separator = "\n\n"
+	}
+	section := body + separator + disclosure
+	candidate, err := prbody.NewOwnedDocument(prbody.PatchSet{
+		Version:  prbody.PatchVersion,
+		Sections: []prbody.SectionPatch{{ID: "generated", Content: section}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("build pull request body with complete effective configuration: %w", err)
+	}
+	if err := prbody.ValidateOwnedDocument(candidate, prBodyValidationLimits(bodyLimit, disclosure)); err != nil {
+		if errors.Is(err, prbody.ErrOversize) {
+			return "", effectiveConfigBodyOverflowError(len(candidate))
+		}
+		return "", fmt.Errorf("validate pull request body with complete effective configuration: %w", err)
+	}
+	return section, nil
+}
+
+func effectiveConfigBodyOverflowError(size int) error {
+	return fmt.Errorf("complete effective configuration cannot fit in the GitHub PR body: %d bytes exceeds the %d-byte publication limit (GitHub host limit: %d characters)", size, maxPullRequestBodyBytes, githubPullRequestBodyHardLimitChars)
 }
 
 func describePR(pr *scm.PR) string {
@@ -287,7 +354,7 @@ Final diff paths and statuses:
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
 		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
-		return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit), nil
+		return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit))
 	}
 
 	var content prContent
@@ -318,13 +385,73 @@ Final diff paths and statuses:
 				} else {
 					content.Body = buildPRBody(narrative, riskLine, testingMD, pipelineMD, sctx)
 				}
-				return redactOutboundPRContent(applyPRBodyHook(sctx, records, content, whatChanged, scope), bodyLimit), nil
+				return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, content, whatChanged, scope), bodyLimit))
 			}
 		}
 	}
 
 	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
-	return redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit), nil
+	return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit))
+}
+
+func finalizePRContent(sctx *pipeline.StepContext, provider scm.Provider, content prContent) (prContent, error) {
+	if provider != scm.ProviderGitHub || sctx == nil || sctx.Config == nil || !sctx.Config.EffectiveConfig.Publish || len(content.OwnedPatches.Sections) > 0 {
+		return content, nil
+	}
+	disclosure, err := buildEffectiveConfigDisclosure(sctx)
+	if err != nil {
+		return prContent{}, err
+	}
+	content.EffectiveConfigDisclosure = disclosure
+	return content, nil
+}
+
+func buildEffectiveConfigDisclosure(sctx *pipeline.StepContext) (string, error) {
+	if sctx.Paths == nil || sctx.Run == nil || sctx.Run.ResolvedPolicyDigest == nil || sctx.Run.NoMistakesVersion == nil || sctx.Run.NoMistakesBuildSHA == nil {
+		return "", fmt.Errorf("publish effective configuration: run artifact identity is incomplete")
+	}
+	artifact, err := effectiveconfig.ReadWithBinary(
+		sctx.Paths,
+		sctx.Run.ID,
+		*sctx.Run.ResolvedPolicyDigest,
+		*sctx.Run.NoMistakesVersion,
+		*sctx.Run.NoMistakesBuildSHA,
+	)
+	if err != nil {
+		return "", fmt.Errorf("publish effective configuration: %w", err)
+	}
+	yamlBytes, err := effectiveconfig.CommentFreeYAML(artifact.YAML)
+	if err != nil {
+		return "", err
+	}
+	fence := effectiveConfigMarkdownFence(yamlBytes)
+	return fmt.Sprintf("### Effective Configuration\n\n- Run ID: `%s`\n- `policy_digest`: `%s`\n- `yaml_sha256`: `%s`\n\n%syaml\n%s%s",
+		sctx.Run.ID,
+		artifact.Metadata.PolicyDigest,
+		artifact.Metadata.YAMLSHA256,
+		fence,
+		yamlBytes,
+		fence,
+	), nil
+}
+
+func effectiveConfigMarkdownFence(yamlBytes []byte) string {
+	longest := 0
+	current := 0
+	for _, b := range yamlBytes {
+		if b == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+			continue
+		}
+		current = 0
+	}
+	if longest < 3 {
+		longest = 2
+	}
+	return strings.Repeat("`", longest+1)
 }
 
 func stripLeadingSectionHeading(text, heading string) string {

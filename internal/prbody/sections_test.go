@@ -261,6 +261,30 @@ func TestOwnedDocumentValidationRejectsUnsafeCandidates(t *testing.T) {
 	}
 }
 
+func TestOwnedDocumentValidationAllowsOneExactTrustedDisclosureOnlyInsideItsOwnedSection(t *testing.T) {
+	t.Parallel()
+	const disclosure = "### Effective Configuration\n\n```yaml\ntoken: ghp_abcdefghijklmnopqrstuvwx12\n```"
+	body, err := NewOwnedDocument(PatchSet{Version: PatchVersion, Sections: []SectionPatch{{ID: "generated", Content: "summary\n\n" + disclosure}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	limits := ValidationLimits{SecretExemptions: []SecretExemption{{SectionID: "generated", ExactText: disclosure}}}
+	if err := ValidateOwnedDocument(body, limits); err != nil {
+		t.Fatalf("exact trusted disclosure was rejected: %v", err)
+	}
+	for name, candidate := range map[string]string{
+		"wrong section": strings.Replace(body, ":generated:", ":summary:", 3),
+		"second copy":   disclosure + "\n\n" + body,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateOwnedDocument(candidate, limits); !errors.Is(err, ErrSecretDetected) {
+				t.Fatalf("error = %v, want ErrSecretDetected", err)
+			}
+		})
+	}
+}
+
 func TestPatchSetRejectsReplacementBodyAndInvalidSections(t *testing.T) {
 	t.Parallel()
 

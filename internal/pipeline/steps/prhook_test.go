@@ -130,10 +130,19 @@ func TestApplyPRBodyHookRejectsSecretInBootstrapLiteral(t *testing.T) {
 func TestApplyPRBodyHookFallsBackLoudlyOnFailure(t *testing.T) {
 	t.Parallel()
 	sctx, logs := newHookTestContext(t, "cat > /dev/null; echo 'no template' >&2; exit 2")
+	sctx.Config.EffectiveConfig.Publish = true
+	writeEffectiveConfigArtifactForPRTest(t, sctx, []byte("publish: true # source=trusted; is_default=false\n"))
 
 	got := applyPRBodyHook(sctx, RunRecords{}, prContent{Title: "fix: x", Body: "built-in body"}, "wc", prBodyScope{})
+	got, err := finalizePRContent(sctx, scm.ProviderGitHub, got)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.Body != "built-in body" {
 		t.Fatalf("body = %q, want the built-in body", got.Body)
+	}
+	if !strings.Contains(got.EffectiveConfigDisclosure, "### Effective Configuration") {
+		t.Fatalf("built-in fallback omitted effective-config disclosure: %+v", got)
 	}
 	if !logsContain(*logs, "using the built-in PR body") {
 		t.Fatalf("expected a loud fallback in the log, got %v", *logs)
@@ -269,6 +278,7 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Bound the retry window."
+	sctx.Config.EffectiveConfig.Publish = true
 	dump := filepath.Join(t.TempDir(), "contract.json")
 	sctx.Config.Hooks.PRBody = "cat > " + dump + `; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"formatted body"}]}'`
 
@@ -289,6 +299,9 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	if !strings.Contains(content.Body, "formatted body") || !strings.Contains(content.Body, "no-mistakes:owned-sections:v1") {
 		t.Fatalf("body = %q, want the formatter's output", content.Body)
 	}
+	if content.EffectiveConfigDisclosure != "" {
+		t.Fatal("custom formatter output received the built-in effective-config disclosure")
+	}
 
 	raw, err := os.ReadFile(dump)
 	if err != nil {
@@ -297,6 +310,9 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	var contract prbody.Contract
 	if err := json.Unmarshal(raw, &contract); err != nil {
 		t.Fatalf("contract is not valid JSON: %v", err)
+	}
+	if strings.Contains(string(raw), "effective_config") {
+		t.Fatalf("formatter v%d contract changed before its migration was approved: %s", prbody.Version, raw)
 	}
 	if contract.Sections.WhatChanged == nil {
 		t.Fatal("what_changed is absent, want the agent's own prose")
