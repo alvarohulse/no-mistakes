@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -303,7 +304,7 @@ func writeStoredEffectiveConfigForCLITest(t *testing.T, p *paths.Paths, runID, p
 	digest := sha256.Sum256(yamlBytes)
 	metaBytes, err := json.Marshal(effectiveconfig.Metadata{
 		SchemaVersion: effectiveconfig.SchemaVersion, RunID: runID, PolicyDigest: policyDigest,
-		YAMLSHA256: hex.EncodeToString(digest[:]), BinaryVersion: "test", BinaryBuildSHA: "test",
+		YAMLSHA256: hex.EncodeToString(digest[:]), BinaryVersion: buildinfo.CurrentVersion(), BinaryBuildSHA: buildinfo.Commit,
 		Generator: effectiveconfig.Generator, GeneratorSchema: effectiveconfig.SchemaVersion,
 	})
 	if err != nil {

@@ -47,6 +47,16 @@ type Artifact struct {
 // Read loads and validates the artifact for runID against the authoritative
 // launch-time policy digest. It never reconstructs data from current config.
 func Read(p *paths.Paths, runID, policyDigest string) (*Artifact, error) {
+	return read(p, runID, policyDigest, "", "")
+}
+
+// ReadWithBinary validates the artifact against the policy's authoritative
+// launch binary identity as well as its digest.
+func ReadWithBinary(p *paths.Paths, runID, policyDigest, binaryVersion, binaryBuildSHA string) (*Artifact, error) {
+	return read(p, runID, policyDigest, binaryVersion, binaryBuildSHA)
+}
+
+func read(p *paths.Paths, runID, policyDigest, binaryVersion, binaryBuildSHA string) (*Artifact, error) {
 	if p == nil {
 		return nil, fmt.Errorf("read effective config: paths are missing")
 	}
@@ -61,11 +71,17 @@ func Read(p *paths.Paths, runID, policyDigest string) (*Artifact, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read effective config sidecar: %w", err)
 	}
-	return Validate(yamlBytes, metaBytes, runID, policyDigest)
+	return ValidateWithBinary(yamlBytes, metaBytes, runID, policyDigest, binaryVersion, binaryBuildSHA)
 }
 
 // Validate checks completeness, schema support, and identity/integrity binding.
 func Validate(yamlBytes, metaBytes []byte, runID, policyDigest string) (*Artifact, error) {
+	return ValidateWithBinary(yamlBytes, metaBytes, runID, policyDigest, "", "")
+}
+
+// ValidateWithBinary additionally binds the artifact to the launch binary
+// recorded in the authoritative resolved policy.
+func ValidateWithBinary(yamlBytes, metaBytes []byte, runID, policyDigest, binaryVersion, binaryBuildSHA string) (*Artifact, error) {
 	if len(yamlBytes) == 0 || len(yamlBytes) > YAMLMaxBytes {
 		return nil, fmt.Errorf("effective config YAML completeness or size validation failed")
 	}
@@ -107,6 +123,10 @@ func Validate(yamlBytes, metaBytes []byte, runID, policyDigest string) (*Artifac
 	}
 	if strings.TrimSpace(metadata.BinaryVersion) == "" || strings.TrimSpace(metadata.BinaryBuildSHA) == "" {
 		return nil, fmt.Errorf("effective config sidecar binary identity is incomplete")
+	}
+	if (strings.TrimSpace(binaryVersion) != "" && metadata.BinaryVersion != binaryVersion) ||
+		(strings.TrimSpace(binaryBuildSHA) != "" && metadata.BinaryBuildSHA != binaryBuildSHA) {
+		return nil, fmt.Errorf("effective config sidecar binary identity does not match resolved policy")
 	}
 	return &Artifact{YAML: append([]byte(nil), yamlBytes...), Metadata: metadata}, nil
 }

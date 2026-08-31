@@ -800,7 +800,12 @@ func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Ar
 		return nil, false, nil
 	}
 	required := policy.Version >= effectiveConfigRequiredPolicyVersion
-	artifact, err := effectiveconfig.Read(p, run.ID, *run.ResolvedPolicyDigest)
+	var artifact *effectiveconfig.Artifact
+	if required {
+		artifact, err = effectiveconfig.ReadWithBinary(p, run.ID, *run.ResolvedPolicyDigest, policy.Binary.Version, policy.Binary.BuildSHA)
+	} else {
+		artifact, err = effectiveconfig.Read(p, run.ID, *run.ResolvedPolicyDigest)
+	}
 	if err != nil {
 		if !required && errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil

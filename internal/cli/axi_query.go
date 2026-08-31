@@ -80,7 +80,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 		return "", emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
 	rv := runViewFromDB(run, steps)
-	annotateRunView(env, &rv)
+	annotateRunView(env, &rv, run)
 	fields := []toon.Field{runObjectField(rv)}
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
@@ -125,11 +125,17 @@ func runStateFingerprint(rv runView) string {
 	return b.String()
 }
 
-func annotateRunView(env *axiEnv, rv *runView) {
+func annotateRunView(env *axiEnv, rv *runView, resolved ...*db.Run) {
 	if env == nil || rv == nil {
 		return
 	}
-	if run, err := env.d.GetRun(rv.ID); err == nil && run != nil {
+	var run *db.Run
+	if len(resolved) > 0 {
+		run = resolved[0]
+	} else if loaded, err := env.d.GetRun(rv.ID); err == nil {
+		run = loaded
+	}
+	if run != nil {
 		artifact, required, artifactErr := daemon.ReadEffectiveConfigForRun(env.p, run)
 		switch {
 		case artifact != nil:
