@@ -82,17 +82,15 @@ const formatPercent = (value: number) => {
     <div class="eval-corpus-index__heatmap" role="group" aria-label="Rows are change sizes; columns are highest source severities">
       <span aria-hidden="true"></span>
       {severities.map((severity) => (
-        <abbr
+        <span
           class="eval-corpus-index__axis-label eval-corpus-index__axis-label--column"
           data-axis-kind="severity"
           data-axis-value={severity.id}
           data-axis-label={severity.label}
           data-axis-total={columnTotals[severity.id]}
-          title={severity.label}
-          aria-label={severity.label}
         >
-          {severity.initial}
-        </abbr>
+          {severity.label}
+        </span>
       ))}
       <span class="eval-corpus-index__total-label eval-corpus-index__total-label--header">Total</span>
 
@@ -101,17 +99,15 @@ const formatPercent = (value: number) => {
         const fullRowLabel = `${row.label}: ${row.range}`;
         return (
           <>
-            <abbr
+            <span
               class="eval-corpus-index__axis-label eval-corpus-index__axis-label--row"
               data-axis-kind="row"
               data-axis-value={row.id}
               data-axis-label={fullRowLabel}
               data-axis-total={total}
-              title={fullRowLabel}
-              aria-label={fullRowLabel}
             >
-              {row.initial}
-            </abbr>
+              {fullRowLabel}
+            </span>
             {severities.map((severity) => {
               const count = row.counts[severity.id];
               const rowShare = percent(count, total);
@@ -174,6 +170,7 @@ const formatPercent = (value: number) => {
       const maxCount = Number(this.dataset.maxCount);
       let mode: HeatmapMode = "count";
       let pinnedCell: HTMLButtonElement | null = null;
+      let focusedCell: HTMLButtonElement | null = null;
 
       const formatPercent = (value: number) => {
         const rounded = Math.round(value * 10) / 10;
@@ -194,6 +191,15 @@ const formatPercent = (value: number) => {
           cell.classList.remove("is-active", "is-related", "is-muted");
         }
         if (detail) detail.textContent = "Hover, focus, or select a cell for its full labels and proportions.";
+      };
+
+      const restoreHighlight = () => {
+        const cell = pinnedCell ?? focusedCell;
+        if (cell) {
+          highlightCell(cell);
+        } else {
+          clearHighlight();
+        }
       };
 
       const highlightCell = (cell: HTMLButtonElement) => {
@@ -250,19 +256,19 @@ const formatPercent = (value: number) => {
         cell.addEventListener("pointerleave", () => {
           if (!pinnedCell) clearHighlight();
         });
-        cell.addEventListener("focus", () => highlightCell(cell));
+        cell.addEventListener("focus", () => {
+          focusedCell = cell;
+          highlightCell(cell);
+        });
         cell.addEventListener("blur", () => {
-          if (pinnedCell) {
-            highlightCell(pinnedCell);
-          } else {
-            clearHighlight();
-          }
+          if (focusedCell === cell) focusedCell = null;
+          restoreHighlight();
         });
         cell.addEventListener("click", () => {
           if (pinnedCell === cell) {
             pinnedCell = null;
             cell.setAttribute("aria-pressed", "false");
-            clearHighlight();
+            restoreHighlight();
             return;
           }
           if (pinnedCell) pinnedCell.setAttribute("aria-pressed", "false");
@@ -413,6 +419,10 @@ const formatPercent = (value: number) => {
     border: 0;
     cursor: help;
     font-weight: 600;
+    min-width: 0;
+    padding-inline: 0.2rem;
+    text-align: center;
+    overflow-wrap: anywhere;
     text-decoration: none;
   }
 
@@ -488,7 +498,7 @@ const formatPercent = (value: number) => {
 
   @media (max-width: 30rem) {
     .eval-corpus-index__heatmap {
-      grid-template-columns: 1.75rem repeat(4, minmax(2.5rem, 1fr));
+      grid-template-columns: 5.5rem repeat(4, minmax(2.5rem, 1fr));
       gap: 0.3rem;
     }
 
@@ -505,6 +515,10 @@ const formatPercent = (value: number) => {
 
     .eval-corpus-index__secondary {
       font-size: 0.7rem;
+    }
+
+    .eval-corpus-index__axis-label {
+      font-size: var(--sl-text-xs);
     }
   }
 
