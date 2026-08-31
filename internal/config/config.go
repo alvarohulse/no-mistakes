@@ -139,7 +139,8 @@ type GlobalConfig struct {
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
-	Eval Eval
+	Eval    Eval
+	present map[string]bool
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -1027,6 +1028,37 @@ func (c *RepoConfig) Declares(paths ...string) bool {
 	return c.has(paths...)
 }
 
+// DeclaredPaths returns the exact YAML paths present in this parsed repo
+// configuration. Callers that explain configuration layering use this
+// presence ledger instead of guessing provenance from the resolved value.
+func (c *RepoConfig) DeclaredPaths() map[string]bool {
+	if c == nil {
+		return nil
+	}
+	return clonePresenceMap(c.present)
+}
+
+// DeclaredPaths returns the exact YAML paths present in this parsed global
+// configuration. Built-in defaults have no declared paths, including when an
+// on-disk file is absent.
+func (c *GlobalConfig) DeclaredPaths() map[string]bool {
+	if c == nil {
+		return nil
+	}
+	return clonePresenceMap(c.present)
+}
+
+func clonePresenceMap(source map[string]bool) map[string]bool {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]bool, len(source))
+	for path, present := range source {
+		cloned[path] = present
+	}
+	return cloned
+}
+
 // NormalizeOverrideKey validates one global-config overrides key and returns
 // its normalized (lowercase) form. A key must be exactly `<owner>/<repo>`:
 // two non-empty path segments and nothing else - no scheme, host, userinfo,
@@ -1179,16 +1211,21 @@ func copyReviewCandidates(candidates []ReviewCandidate) []ReviewCandidate {
 
 func repoConfigPresence(value *yaml.Node) map[string]bool {
 	present := make(map[string]bool)
-	collectRepoConfigPresence(value, "", present)
+	collectRepoConfigPresence(value, "", present, make(map[*yaml.Node]bool))
 	return present
 }
 
-func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[string]bool) {
+func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[string]bool, visiting map[*yaml.Node]bool) {
 	if value == nil {
 		return
 	}
+	if visiting[value] {
+		return
+	}
+	visiting[value] = true
+	defer delete(visiting, value)
 	if value.Kind == yaml.AliasNode {
-		collectRepoConfigPresence(value.Alias, prefix, present)
+		collectRepoConfigPresence(value.Alias, prefix, present, visiting)
 		return
 	}
 	if value.Kind != yaml.MappingNode {
@@ -1200,10 +1237,10 @@ func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[stri
 			merged := value.Content[i+1]
 			if merged.Kind == yaml.SequenceNode {
 				for _, item := range merged.Content {
-					collectRepoConfigPresence(item, prefix, present)
+					collectRepoConfigPresence(item, prefix, present, visiting)
 				}
 			} else {
-				collectRepoConfigPresence(merged, prefix, present)
+				collectRepoConfigPresence(merged, prefix, present, visiting)
 			}
 			continue
 		}
@@ -1212,7 +1249,7 @@ func collectRepoConfigPresence(value *yaml.Node, prefix string, present map[stri
 			path = prefix + "." + key
 		}
 		present[path] = true
-		collectRepoConfigPresence(value.Content[i+1], path, present)
+		collectRepoConfigPresence(value.Content[i+1], path, present, visiting)
 	}
 }
 
@@ -3135,6 +3172,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg := DefaultGlobalConfig()
 	cfg.SourceYAML = append([]byte(nil), data...)
+	var source yaml.Node
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&source); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if len(source.Content) > 0 {
+		cfg.present = repoConfigPresence(source.Content[0])
+	}
 	var raw globalConfigRaw
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
