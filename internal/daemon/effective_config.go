@@ -826,6 +826,17 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	if err := os.Rename(tempDir, p.RunDir(runID)); err != nil {
 		return fmt.Errorf("persist effective config atomically: %w", err)
 	}
+	runsDir, err := os.Open(p.RunsDir())
+	if err != nil {
+		return fmt.Errorf("persist effective config: open runs directory: %w", err)
+	}
+	if err := runsDir.Sync(); err != nil {
+		_ = runsDir.Close()
+		return fmt.Errorf("persist effective config: sync runs directory: %w", err)
+	}
+	if err := runsDir.Close(); err != nil {
+		return fmt.Errorf("persist effective config: close runs directory: %w", err)
+	}
 	return nil
 }
 

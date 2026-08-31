@@ -115,6 +115,7 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 	}
 
 	usedCandidates := make([]bool, len(configuredCandidates))
+	candidatesRuntime := len(configuredCandidates) != len(cfg.ReviewCandidates)
 	for i, candidate := range cfg.ReviewCandidates {
 		value := r.Provenance.Value("review.candidates")
 		agentValue := value
@@ -131,10 +132,12 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		if matched < 0 {
 			value = EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
 			agentValue = value
+			candidatesRuntime = true
 		} else {
 			usedCandidates[matched] = true
 			if configuredCandidates[matched].Agent != candidate.Agent {
 				agentValue = EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
+				candidatesRuntime = true
 			}
 		}
 		prefix := "resolved.agent.review_candidates[" + strconv.Itoa(i) + "]"
@@ -142,6 +145,11 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		r.Provenance.setSubtree(prefix+".model.name", value)
 		r.Provenance.setSubtree(prefix+".model.vendor", value)
 		r.Provenance.setSubtree(prefix+".optional", value)
+	}
+	if candidatesRuntime {
+		r.Provenance.setSubtree("resolved.agent.review_candidates", EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime})
+	} else {
+		r.Provenance.setSubtree("resolved.agent.review_candidates", r.Provenance.Value("review.candidates"))
 	}
 	return nil
 }
@@ -339,10 +347,10 @@ func globalEffectiveConfigAppliedPaths(raw *globalConfigRaw, cfg *GlobalConfig) 
 
 	mark("managed", raw.Managed != nil)
 	mark("agent", len(raw.Agent) > 0)
-	mark("runner.executable", declared["runner.executable"])
-	mark("runner.args", declared["runner.args"])
-	mark("hooks.pr_body", declared["hooks.pr_body"])
-	mark("acpx_path", strings.TrimSpace(raw.ACPXPath) != "")
+	mark("runner.executable", strings.TrimSpace(cfg.Runner.Executable) != "")
+	mark("runner.args", len(cfg.Runner.Args) > 0)
+	mark("hooks.pr_body", strings.TrimSpace(cfg.Hooks.PRBody) != "")
+	mark("acpx_path", raw.ACPXPath != "")
 	mark("acp_registry_overrides", raw.ACPRegistryOverrides != nil)
 	mark("agent_path_override", raw.AgentPathOverride != nil)
 	mark("agent_args_override", raw.AgentArgsOverride != nil)
@@ -352,7 +360,7 @@ func globalEffectiveConfigAppliedPaths(raw *globalConfigRaw, cfg *GlobalConfig) 
 			mark("step_quiet_warning", duration > 0)
 		}
 	}
-	mark("process_termination_grace", strings.TrimSpace(raw.ProcessTerminationGrace) != "")
+	mark("process_termination_grace", raw.ProcessTerminationGrace != "")
 	mark("log_level", strings.TrimSpace(raw.LogLevel) != "")
 	mark("session_reuse", raw.SessionReuse != nil)
 
