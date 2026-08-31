@@ -329,6 +329,7 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 	}()
 	if _, err := runstats.ArchiveRepoRuns(d, repo.ID, time.Now(), func(runID string) error {
 		return errors.Join(
+			os.RemoveAll(p.RunDir(runID)),
 			os.RemoveAll(p.RunLogDir(runID)),
 			os.RemoveAll(filepath.Join(evidenceRoot, runID)),
 		)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -143,7 +144,7 @@ commands:
 		"- pushed/** # source=pushed; is_default=false",
 		"review: 0 # source=pushed; is_default=false",
 		"source=global-override; is_default=false; qualifier=append",
-		"- codex # source=pushed; is_default=false; qualifier=merge",
+		"- codex # source=pushed; is_default=false",
 		"refresh_strategy: rebase # source=run-request; is_default=false",
 		"source=run-request; is_default=false",
 		"source=runtime; is_default=false",
@@ -261,8 +262,8 @@ func readOwnerOnlyArtifact(t *testing.T, path string) []byte {
 	if err != nil {
 		t.Fatalf("stat %s: %v", path, err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("%s mode = %#o, want 0600", path, got)
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s mode = %#o, want 0600", path, info.Mode().Perm())
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

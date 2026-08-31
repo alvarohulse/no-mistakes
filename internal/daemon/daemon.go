@@ -441,9 +441,29 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapEvidence(d, root)
 	reapLegacyEvidence(d, root)
 	pruneRichRuns(d, p, root, policy, now)
+	reapEffectiveConfigStagingDirs(p, now)
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
+}
+
+const effectiveConfigStagingMaxAge = 24 * time.Hour
+
+func reapEffectiveConfigStagingDirs(p *paths.Paths, now time.Time) {
+	entries, err := os.ReadDir(p.RunsDir())
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".") || !strings.Contains(entry.Name(), "-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) < effectiveConfigStagingMaxAge {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(p.RunsDir(), entry.Name()))
+	}
 }
 
 // sweepOrphanRunProcesses terminates processes still standing in a run

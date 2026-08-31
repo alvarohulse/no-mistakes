@@ -172,10 +172,6 @@ func declaresEffectiveConfigPath(paths map[string]bool, path string) bool {
 	}
 }
 
-func (p *effectiveConfigProvenance) globalValue(path string) effectiveConfigProvenanceValue {
-	return p.value(path)
-}
-
 type effectiveRepoSource int
 
 const (
@@ -273,7 +269,7 @@ func captureDisabledReaderProvenance(global *globalConfigInput, effectiveRepo *c
 		for _, reader := range effectiveRepo.Intent.DisabledReaders {
 			reader = strings.ToLower(strings.TrimSpace(reader))
 			value := repoValue
-			if globalReaders[reader] || len(globalReaders) > 0 {
+			if globalReaders[reader] {
 				value.Qualifiers = append(value.Qualifiers, "merge")
 			}
 			values[reader] = value
@@ -586,7 +582,7 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 	set := func(artifactPath, configPath string) {
 		annotations[artifactPath] = ledger.value(configPath)
 	}
-	setGlobal := func(path string) { annotations[path] = ledger.globalValue(path) }
+	setGlobal := func(path string) { annotations[path] = ledger.value(path) }
 	runtimeValue := effectiveConfigProvenanceValue{Source: effectiveConfigSourceRuntime}
 	for _, path := range []string{"agent", "runner.resolved", "pipeline.steps"} {
 		annotations[path] = runtimeValue
