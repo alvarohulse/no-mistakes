@@ -92,7 +92,9 @@ The command shows counts, finding-level gold coverage, unlabeled / pending cases
 
 <EvalCorpusIndex />
 
-This snapshot is descriptive, not a benchmark. It contains 35 cases across the full local corpus index. The default `eval.diversified_size` cap is 32 and applies only to the gold-only diversified holdout, so it is intentionally separate from the corpus total shown here.
+This fixed aggregate snapshot is descriptive, not a benchmark or a view of your local cases. It contains 35 cases across the evaluation corpus and exposes no replay data. The default `eval.diversified_size` cap is 32 and applies only to the gold-only diversified holdout, so it is intentionally separate from the corpus total shown here. Use `no-mistakes eval sets` for your live corpus composition.
+
+The semantic table retains every count, including zeroes. The heatmap can shade by count or by the percentage within each change-size bucket; hover, keyboard focus, and a selected cell all reveal the complete labels and proportions.
 
 Four logical sets are available to replay:
 
