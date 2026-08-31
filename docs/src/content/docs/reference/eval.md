@@ -32,7 +32,7 @@ no-mistakes eval miss ingest <run-id> \
   --finding '{"id":"stable-id","file":"path.go","line":12,"severity":"error","description":"one-sentence defect"}'
 ```
 
-`--finding` is repeatable. The command captures the run if needed (recapture is a no-op, so existing labels survive), then writes false-negative gold onto the last completed non-blocking review pass. Duplicate finding IDs are no-ops. A parked or blocking review is refused: that class found something, so it is not a post-PR miss.
+`--finding` is repeatable. The command captures the run if needed (recapture is a no-op, so existing labels survive), then writes false-negative gold onto the last completed non-blocking review pass. Duplicate finding IDs are no-ops. Severity is normalized and limited to `error`, `warning`, or `info`; an action, when supplied, must use the Review vocabulary. A parked or blocking review is refused: that class found something, so it is not a post-PR miss.
 
 The ingest payload is the source of truth. Eval does not scrape GitHub review comments and does not read an external markdown ledger. The curator (a human, or an automation that already vetted the miss) supplies the structured finding.
 
@@ -58,13 +58,13 @@ Capture writes gold from recorded gate evidence: human Fix and add-finding decis
 
 - A finding the human selected for Fix (`selected_finding_ids` with a user source) is **true-positive** gold: that finding is a true issue. Merge is not required.
 - A finding the human added (`user_findings_json`, source `user`) is **false-negative** gold: the original review missed a real issue.
-- A finding the pipeline auto-fixed that later **landed in a merged PR** is **true-positive** gold (`recorded-auto-fix-merged`). Closed-not-merged, still-open, reverted, and superseded auto-fixes stay unlabeled.
-- A finding that was raised (`auto-fix` or `ask-user`, including a missing action that defaults to `ask-user`) and then **shipped unfixed in a merged PR** is **false-positive** gold (`recorded-shipped-unfixed`). If a later review round exists and the last of those rounds no longer raises the same issue, earlier rounds stay unlabeled - an intermediate re-raise that was gone before merge is a fix, not a false positive. Informational `no-op` findings are not labeled this way.
+- A finding selected by auto-fix on a source run that later **merged** is **true-positive** gold (`recorded-auto-fix-merged`). A later Review round does not rewrite that recorded decision. Closed-not-merged and still-open runs stay unlabeled.
+- A finding that was not selected for fixing in a round with a recorded gate decision and then **shipped in a merged PR** is **false-positive** gold (`recorded-shipped-unfixed`). Each round keeps its own decision even when a later round rewrites, re-raises, or drops the issue. Informational `no-op` findings are not labeled this way.
 - A confirmed post-PR miss ingested with `eval miss ingest` is also **false-negative** gold (`recorded-post-pr-miss`): review passed green, and a later vetted finding showed a real defect.
-- Skip, and approve-with-findings on an unmerged PR, stay **unlabeled / pending** until later adjudication.
+- A persisted decline on an unmerged PR and a round with no recorded decision stay **unlabeled / pending** until stronger evidence exists.
 - A later replay that raises a new issue absent from the gold set is queued as an unmatched candidate finding. It is never auto-scored as a false positive.
 
-If a PR merges after the first capture, already-captured cases are relabeled. The daemon does this best-effort when it observes the merge; `eval relabel [run-id]` or recapture is the CLI path. Relabel adds merge-derived labels onto previously unlabeled findings and drops obsolete derived merge labels that the current rounds no longer support. Adjudicated, user-fix, and ingested post-PR-miss labels are never overwritten.
+If a PR merges after the first capture, already-captured cases are relabeled. The daemon does this best-effort when it observes the merge; `eval relabel [run-id]` or recapture is the CLI path. Relabel recomputes merge-derived labels from each round's immutable recorded decision and drops obsolete derived labels when that decision or merge state no longer supports them. Adjudicated, user-fix, ingested post-PR-miss labels, and historical evaluation receipts are never overwritten.
 
 A case with no finding-level gold is unlabeled / pending, never a pass. True-negative also stays unlabeled because the current capture evidence cannot establish that a finding is invalid without the shipped-unfixed or adjudication paths above.
 
@@ -115,7 +115,7 @@ Replay scores each candidate finding against that gold:
 - **false-positive**: only when a candidate finding matches explicit false-positive gold (adjudicated invalid, or shipped-unfixed). Unmatched candidate findings are never treated as false positives
 - **pending / unlabeled**: unmatched candidate findings, and cases with no finding-level gold yet
 
-Matching is a documented cascade of strengths: the same finding ID, the same file and description after whitespace and case normalization, the same file with lines within 3 and token-Jaccard ≥ 0.5, then gated containment (same file, one normalized description contains the other, shorter side ≥ 8 tokens). Assignment is maximum matching per strength tier, preferring exact over fuzzy, so gold-label order cannot undercount. Headline recall uses the full cascade. Reports also show recall-if-exact-only so a fuzzy-threshold change is visible. File-less or description-less findings do not match on the text, location, or containment strengths.
+Matching is a documented cascade of strengths: the same finding ID, the same file and description after whitespace and case normalization, the same file with lines within 3 and token-Jaccard ≥ 0.5, then gated containment (same file, one normalized description contains the other, shorter side ≥ 8 tokens). One globally optimal assignment covers the full graph; stronger tiers outweigh every possible combination of weaker matches, while candidates are allocated so a locally valid exact choice cannot unnecessarily strand another gold finding. Headline recall uses the full cascade. Reports also show recall-if-exact-only so a fuzzy-threshold change is visible. File-less or description-less findings do not match on the text, location, or containment strengths.
 
 The report prints recall, precision bounds (adjudicated vs pending-as-FP), and F1 as the headline metric **only when false-positive gold exists** so precision is real. Otherwise F1 is withheld rather than reported as recall-in-disguise.
 

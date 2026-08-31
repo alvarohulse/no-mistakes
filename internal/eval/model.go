@@ -31,11 +31,11 @@ const (
 
 // Gold kinds are the scientific labels written from recorded evidence.
 // Capture writes true-positive gold from a user Fix or from an auto-fix
-// selection that later landed in a merged PR, false-negative gold from a
-// user-added finding, and false-positive gold from a finding that shipped
-// unfixed in a merged PR. IngestPostPRMiss writes additional false-negative
-// gold after a green review. Adjudicated labels are never inferred from
-// pending unmatched candidate findings.
+// selection on a merged run, false-negative gold from a user-added finding,
+// and false-positive gold from a declined finding that shipped in a merged
+// PR. IngestPostPRMiss writes additional false-negative gold after a green
+// review. Adjudicated labels are never inferred from pending unmatched
+// candidate findings.
 const (
 	GoldTruePositive  = "true-positive"
 	GoldFalseNegative = "false-negative"
@@ -108,8 +108,8 @@ type Manifest struct {
 }
 
 // Decision records the human gate evidence available for the exported review
-// pass. Approval actions were not persisted in historical rows, so Action can
-// be "unknown". The original selections themselves are never guessed.
+// pass. Approval actions were not persisted in legacy rows, so Action can be
+// "unknown". The original selections themselves are never guessed.
 type Decision struct {
 	Action             string   `json:"action"`
 	SelectionSource    string   `json:"selection_source,omitempty"`
