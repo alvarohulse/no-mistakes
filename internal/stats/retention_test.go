@@ -1,6 +1,9 @@
 package stats
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -140,10 +143,10 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 
 	var removed []string
 	oldNow := time.Unix(oldest.CreatedAt, 0).UTC().Add(15 * 24 * time.Hour)
-	pruned, err := PruneRichRunData(database, oldNow, RichRunRetentionAge, RichRunRetentionFloor, func(runID string) error {
+	pruned, err := PruneRichRunData(database, oldNow, RichRunRetentionAge, RichRunRetentionFloor, testRunArtifactCleanup(t, func(runID string) error {
 		removed = append(removed, runID)
 		return nil
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +234,7 @@ func TestPruneRichRunDataRetriesCommittedArtifactCleanup(t *testing.T) {
 		}
 	}
 	cleanupErr := "artifact cleanup failed"
-	pruned, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(string) error { return &retentionTestError{message: cleanupErr} })
+	pruned, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, testRunArtifactCleanup(t, func(string) error { return &retentionTestError{message: cleanupErr} }))
 	if err == nil || !strings.Contains(err.Error(), cleanupErr) || pruned != 1 {
 		t.Fatalf("prune cleanup failure = %d, %v", pruned, err)
 	}
@@ -243,18 +246,123 @@ func TestPruneRichRunDataRetriesCommittedArtifactCleanup(t *testing.T) {
 	}
 
 	var retried []string
-	pruned, err = PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(runID string) error {
+	pruned, err = PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, testRunArtifactCleanup(t, func(runID string) error {
 		retried = append(retried, runID)
 		return nil
-	})
+	}))
 	if err != nil || pruned != 0 || !reflect.DeepEqual(retried, []string{run.ID}) {
 		t.Fatalf("retry pending cleanup = pruned %d retried %v error %v", pruned, retried, err)
 	}
-	if _, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, func(runID string) error {
+	if _, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, testRunArtifactCleanup(t, func(runID string) error {
 		retried = append(retried, runID)
 		return nil
-	}); err != nil || !reflect.DeepEqual(retried, []string{run.ID}) {
+	})); err != nil || !reflect.DeepEqual(retried, []string{run.ID}) {
 		t.Fatalf("completed cleanup retried again: %v, %v", retried, err)
+	}
+}
+
+func TestPruneRichRunDataRetriesThePersistedCleanupTargetsAfterTheConfiguredRootChanges(t *testing.T) {
+	database, run := newAuditRun(t)
+	now := time.Unix(run.CreatedAt, 0).UTC().Add(15 * 24 * time.Hour)
+	for index := 0; index < 50; index++ {
+		newer, err := database.InsertRun(run.RepoID, "feature/newer", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateRunStatus(newer.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	oldRoot := filepath.Join(t.TempDir(), "old-evidence")
+	newRoot := filepath.Join(t.TempDir(), "new-evidence")
+	oldTarget := filepath.Join(oldRoot, run.ID)
+	if err := os.MkdirAll(oldTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	currentRoot := oldRoot
+	cleanupFailed := true
+	cleanup := &RunArtifactCleanup{}
+	cleanup.Targets = func(runID string) []string {
+		return []string{filepath.Join(currentRoot, runID)}
+	}
+	cleanup.Remove = func(_ string, targets []string) error {
+		if cleanupFailed {
+			cleanupFailed = false
+			return &retentionTestError{message: "simulated interrupted cleanup"}
+		}
+		for _, target := range targets {
+			if err := os.RemoveAll(target); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if pruned, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, cleanup); err == nil || pruned != 1 {
+		t.Fatalf("initial archival = pruned %d, error %v; want committed archival with cleanup failure", pruned, err)
+	}
+	currentRoot = newRoot
+	if pruned, err := PruneRichRunData(database, now, RichRunRetentionAge, RichRunRetentionFloor, cleanup); err != nil || pruned != 0 {
+		t.Fatalf("cleanup retry = pruned %d, error %v", pruned, err)
+	}
+	if _, err := os.Stat(oldTarget); !os.IsNotExist(err) {
+		t.Fatalf("persisted cleanup target survived root change: %v", err)
+	}
+}
+
+func TestArchiveRepoRunsArchivesRemainingRunsWhenPriorCleanupStillFails(t *testing.T) {
+	database, pending := newAuditRun(t)
+	_, record, err := BuildMetricReceipt(database, pending.ID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, false, []string{filepath.Join(t.TempDir(), pending.ID)}, func() error {
+		return &retentionTestError{message: "pending cleanup still blocked"}
+	})
+	if !archived || err == nil {
+		t.Fatalf("seed pending cleanup = archived %t, error %v", archived, err)
+	}
+
+	next, err := database.InsertRun(pending.RepoID, "feature/next", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(next.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cleanup := &RunArtifactCleanup{
+		Targets: func(runID string) []string { return []string{filepath.Join(root, runID)} },
+		Remove: func(runID string, _ []string) error {
+			if runID == pending.ID {
+				return &retentionTestError{message: "pending cleanup still blocked"}
+			}
+			return nil
+		},
+	}
+
+	count, err := ArchiveRepoRuns(database, pending.RepoID, time.Now(), cleanup)
+	var cleanupErr *ArtifactCleanupError
+	if count != 1 || !errors.As(err, &cleanupErr) {
+		t.Fatalf("archive repository runs = count %d, error %v; want one archive and cleanup-only error", count, err)
+	}
+	if rich, err := database.GetRun(next.ID); err != nil || rich != nil {
+		t.Fatalf("pending cleanup blocked later run archival: %+v, %v", rich, err)
+	}
+}
+
+func TestRemoveRunArtifactTargetsRejectsPathsNotOwnedByTheRun(t *testing.T) {
+	root := t.TempDir()
+	unrelated := filepath.Join(root, "another-run")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveRunArtifactTargets("expected-run", []string{unrelated}); err == nil {
+		t.Fatal("cleanup accepted a target not named for the run")
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Fatalf("rejected cleanup target was removed: %v", err)
 	}
 }
 
@@ -305,3 +413,12 @@ func TestPruneRichRunDataHonorsConfiguredNewestFloor(t *testing.T) {
 type retentionTestError struct{ message string }
 
 func (e *retentionTestError) Error() string { return e.message }
+
+func testRunArtifactCleanup(t *testing.T, remove func(string) error) *RunArtifactCleanup {
+	t.Helper()
+	root := t.TempDir()
+	return &RunArtifactCleanup{
+		Targets: func(runID string) []string { return []string{filepath.Join(root, runID)} },
+		Remove:  func(runID string, _ []string) error { return remove(runID) },
+	}
+}

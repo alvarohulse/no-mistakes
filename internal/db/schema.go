@@ -183,7 +183,7 @@ CREATE TABLE IF NOT EXISTS run_metric_receipts (
     fixed_findings         INTEGER NOT NULL DEFAULT 0,
     step_stats_json        TEXT NOT NULL DEFAULT '[]',
     agent_aggregates_json  TEXT NOT NULL DEFAULT '[]',
-    artifact_cleanup_pending INTEGER NOT NULL DEFAULT 1
+	artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
-	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE runs ADD COLUMN refresh_strategy TEXT NOT NULL DEFAULT 'rebase'`,

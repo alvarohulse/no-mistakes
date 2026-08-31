@@ -205,7 +205,7 @@ func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testi
 		_ = database.Close()
 		t.Fatal(err)
 	}
-	if archived, err := database.ArchiveRunWithMetricReceipt(archivedReceipt, false, nil); err != nil || !archived {
+	if archived, err := database.ArchiveRunWithMetricReceipt(archivedReceipt, false); err != nil || !archived {
 		_ = database.Close()
 		t.Fatalf("archive run = %t, %v", archived, err)
 	}

@@ -1,8 +1,6 @@
 package daemon
 
 import (
-	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,9 +12,11 @@ import (
 )
 
 func pruneRichRuns(database *db.DB, p *paths.Paths, evidenceRoot string, policy evidenceReapPolicy, now time.Time) {
-	pruned, err := runstats.PruneRichRunData(database, now, policy.Retention, policy.MaxRuns, func(runID string) error {
-		return removeRichRunArtifacts(p, evidenceRoot, runID)
-	})
+	cleanup := &runstats.RunArtifactCleanup{
+		Targets: func(runID string) []string { return richRunArtifactTargets(p, evidenceRoot, runID) },
+		Remove:  runstats.RemoveRunArtifactTargets,
+	}
+	pruned, err := runstats.PruneRichRunData(database, now, policy.Retention, policy.MaxRuns, cleanup)
 	if err != nil {
 		slog.Warn("rich run retention incomplete", "error", err, "pruned", pruned)
 		return
@@ -26,24 +26,15 @@ func pruneRichRuns(database *db.DB, p *paths.Paths, evidenceRoot string, policy 
 	}
 }
 
-func removeRichRunArtifacts(p *paths.Paths, evidenceRoot, runID string) error {
-	if filepath.Base(runID) != runID || runID == "." || runID == ".." {
-		return fmt.Errorf("invalid run ID %q for artifact cleanup", runID)
-	}
+func richRunArtifactTargets(p *paths.Paths, evidenceRoot, runID string) []string {
 	legacyRoot := filepath.Join(os.TempDir(), legacyEvidenceDirName)
-	pathsToRemove := []string{
+	targets := []string{
 		p.RunDir(runID),
 		p.RunLogDir(runID),
 		filepath.Join(evidenceRoot, runID),
 	}
 	if filepath.Clean(legacyRoot) != filepath.Clean(evidenceRoot) {
-		pathsToRemove = append(pathsToRemove, filepath.Join(legacyRoot, runID))
+		targets = append(targets, filepath.Join(legacyRoot, runID))
 	}
-	var failures []error
-	for _, path := range pathsToRemove {
-		if err := os.RemoveAll(path); err != nil {
-			failures = append(failures, fmt.Errorf("remove %s: %w", path, err))
-		}
-	}
-	return errors.Join(failures...)
+	return targets
 }

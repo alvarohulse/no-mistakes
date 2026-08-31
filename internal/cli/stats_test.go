@@ -102,7 +102,7 @@ func TestResolveStatsRepoIDsAcceptsArchivedRepositoryID(t *testing.T) {
 	archived, err := database.ArchiveRunWithMetricReceipt(db.RunMetricReceipt{
 		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
 		SchemaVersion: 1, PayloadJSON: `{"schema_version":1}`, ArchivedAt: run.UpdatedAt,
-	}, true, nil)
+	}, true)
 	if err != nil || !archived {
 		t.Fatalf("archive run = %v, %v", archived, err)
 	}

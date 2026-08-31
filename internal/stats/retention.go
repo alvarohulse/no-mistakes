@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -85,21 +87,63 @@ type MetricInvocation struct {
 	Activity             Activity                  `json:"activity"`
 }
 
+// RunArtifactCleanup binds the immutable filesystem targets selected at
+// archival time to the operation that removes them. Retries receive those
+// stored targets instead of resolving paths from mutable configuration.
+type RunArtifactCleanup struct {
+	Targets func(runID string) []string
+	Remove  func(runID string, targets []string) error
+}
+
+// ArtifactCleanupError reports post-archival cleanup failures. Rich rows have
+// already been preserved as metric receipts, so callers that are removing a
+// repository may safely continue while later retention passes retry cleanup.
+type ArtifactCleanupError struct {
+	err error
+}
+
+func (e *ArtifactCleanupError) Error() string { return e.err.Error() }
+func (e *ArtifactCleanupError) Unwrap() error { return e.err }
+
+// RemoveRunArtifactTargets removes only absolute directories named for runID.
+// Callers persist the returned target set before invoking this function so a
+// retry never needs to consult mutable configuration.
+func RemoveRunArtifactTargets(runID string, targets []string) error {
+	if filepath.Base(runID) != runID || runID == "." || runID == ".." {
+		return fmt.Errorf("invalid run ID %q for artifact cleanup", runID)
+	}
+	seen := make(map[string]struct{}, len(targets))
+	var failures []error
+	for _, target := range targets {
+		path := filepath.Clean(target)
+		if !filepath.IsAbs(path) || filepath.Base(path) != runID {
+			failures = append(failures, fmt.Errorf("invalid artifact cleanup target %q for run %q", target, runID))
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		if err := os.RemoveAll(path); err != nil {
+			failures = append(failures, fmt.Errorf("remove %s: %w", path, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
 // PruneRichRunData archives and removes terminal unpinned runs outside the
-// required age and newest-run floors. beforeDelete owns filesystem artifacts;
-// cleanup failures remain durably pending on the immutable metric receipt and
-// are retried on the next pass.
-func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration, keepNewestTerminal int, beforeDelete func(string) error, targetSelectors ...func(string) []string) (int, error) {
+// required age and newest-run floors. Cleanup failures remain durably pending
+// on the immutable metric receipt and are retried with the original targets.
+func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration, keepNewestTerminal int, cleanup *RunArtifactCleanup) (int, error) {
 	if database == nil {
 		return 0, fmt.Errorf("prune rich run data: database is nil")
 	}
 	var failures []error
-	var targets func(string) []string
-	if len(targetSelectors) > 0 {
-		targets = targetSelectors[0]
-	}
-	if beforeDelete != nil {
-		if _, err := database.CleanupPendingRunArtifacts("", beforeDelete); err != nil {
+	if cleanup != nil {
+		if cleanup.Targets == nil || cleanup.Remove == nil {
+			return 0, fmt.Errorf("prune rich run data: artifact cleanup target selector and remover are required")
+		}
+		if _, err := database.CleanupPendingRunArtifactsWithTargets("", cleanup.Remove); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -124,15 +168,14 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 			continue
 		}
 		var artifactTargets []string
-		if targets != nil {
-			artifactTargets = targets(runID)
+		if cleanup != nil && cleanup.Targets != nil {
+			artifactTargets = cleanup.Targets(runID)
 		}
-		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, true, artifactTargets, func() error {
-			if beforeDelete == nil {
-				return nil
-			}
-			return beforeDelete(runID)
-		})
+		var remove func() error
+		if cleanup != nil {
+			remove = func() error { return cleanup.Remove(runID, artifactTargets) }
+		}
+		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, true, artifactTargets, remove)
 		if archived {
 			pruned++
 		}
@@ -147,7 +190,7 @@ func PruneRichRunData(database *db.DB, now time.Time, retentionAge time.Duration
 // ArchiveRepoRuns preserves every terminal run before its repository record is
 // explicitly removed. Active runs fail closed rather than becoming incomplete
 // immutable receipts.
-func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete func(string) error, targetSelectors ...func(string) []string) (int, error) {
+func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, cleanup *RunArtifactCleanup) (int, error) {
 	runs, err := database.GetRunsByRepo(repoID)
 	if err != nil {
 		return 0, err
@@ -157,8 +200,14 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete
 			return 0, fmt.Errorf("repository %s has active run %s", repoID, run.ID)
 		}
 	}
-	if _, err := database.CleanupPendingRunArtifacts(repoID, beforeDelete); err != nil {
-		return 0, err
+	var cleanupFailures []error
+	if cleanup != nil {
+		if cleanup.Targets == nil || cleanup.Remove == nil {
+			return 0, fmt.Errorf("archive repository runs: artifact cleanup target selector and remover are required")
+		}
+		if _, err := database.CleanupPendingRunArtifactsWithTargets(repoID, cleanup.Remove); err != nil {
+			cleanupFailures = append(cleanupFailures, err)
+		}
 	}
 	archivedCount := 0
 	for _, run := range runs {
@@ -167,21 +216,27 @@ func ArchiveRepoRuns(database *db.DB, repoID string, now time.Time, beforeDelete
 			return archivedCount, err
 		}
 		var artifactTargets []string
-		if len(targetSelectors) > 0 {
-			artifactTargets = targetSelectors[0](run.ID)
+		if cleanup != nil && cleanup.Targets != nil {
+			artifactTargets = cleanup.Targets(run.ID)
 		}
-		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, false, artifactTargets, func() error {
-			if beforeDelete == nil {
-				return nil
-			}
-			return beforeDelete(run.ID)
-		})
+		var remove func() error
+		if cleanup != nil {
+			remove = func() error { return cleanup.Remove(run.ID, artifactTargets) }
+		}
+		archived, err := database.ArchiveRunWithMetricReceiptAndTargets(record, false, artifactTargets, remove)
 		if archived {
 			archivedCount++
 		}
 		if err != nil {
+			if archived {
+				cleanupFailures = append(cleanupFailures, fmt.Errorf("archive run %s: %w", run.ID, err))
+				continue
+			}
 			return archivedCount, err
 		}
+	}
+	if err := errors.Join(cleanupFailures...); err != nil {
+		return archivedCount, &ArtifactCleanupError{err: err}
 	}
 	return archivedCount, nil
 }

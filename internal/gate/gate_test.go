@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -1034,6 +1036,66 @@ func TestEjectArchivesTerminalRunMetricsBeforeRepoCascade(t *testing.T) {
 	}
 	if rich, err := d.GetRun(run.ID); err != nil || rich != nil {
 		t.Fatalf("rich run after eject = %+v, %v", rich, err)
+	}
+}
+
+func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
+	workDir := setupTestRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d := openTestDB(t, p)
+	repo, _, err := Init(context.Background(), d, p, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evidenceRoot := filepath.Join(blockedParent, "evidence")
+	configBody := fmt.Sprintf("test:\n  evidence:\n    local_root: %q\n", evidenceRoot)
+	if err := os.WriteFile(p.ConfigFile(), []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := d.InsertRun(repo.ID, "feature/pending-cleanup", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(pending.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	_, record, err := runstats.BuildMetricReceipt(d, pending.ID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(evidenceRoot, pending.ID)
+	archived, err := d.ArchiveRunWithMetricReceiptAndTargets(record, false, []string{target}, func() error {
+		return os.RemoveAll(target)
+	})
+	if !archived || err == nil {
+		t.Fatalf("seed pending cleanup = archived %t, error %v", archived, err)
+	}
+
+	remaining, err := d.InsertRun(repo.ID, "feature/archive", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(remaining.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Eject(context.Background(), d, p, workDir); err != nil {
+		t.Fatalf("pending cleanup blocked eject: %v", err)
+	}
+	if registered, err := d.GetRepo(repo.ID); err != nil || registered != nil {
+		t.Fatalf("repository survived eject: %+v, %v", registered, err)
+	}
+	if receipt, err := d.GetRunMetricReceipt(remaining.ID); err != nil || receipt == nil {
+		t.Fatalf("remaining terminal run was not archived: %+v, %v", receipt, err)
 	}
 }
 
