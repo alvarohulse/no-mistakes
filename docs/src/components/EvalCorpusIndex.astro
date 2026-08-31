@@ -175,6 +175,8 @@ const formatPercent = (value: number) => {
       let mode: HeatmapMode = "count";
       let pinnedCell: HTMLButtonElement | null = null;
       let focusedCell: HTMLButtonElement | null = null;
+      let hoveredCell: HTMLButtonElement | null = null;
+      let hoveredAxis: HTMLElement | null = null;
 
       const formatPercent = (value: number) => {
         const rounded = Math.round(value * 10) / 10;
@@ -197,10 +199,14 @@ const formatPercent = (value: number) => {
         if (detail) detail.textContent = "Hover, focus, or select a cell for its full labels and proportions.";
       };
 
-      const restoreHighlight = () => {
+      const renderHighlight = () => {
         const cell = pinnedCell ?? focusedCell;
         if (cell) {
           highlightCell(cell);
+        } else if (hoveredCell) {
+          highlightCell(hoveredCell);
+        } else if (hoveredAxis) {
+          highlightAxis(hoveredAxis);
         } else {
           clearHighlight();
         }
@@ -250,23 +256,26 @@ const formatPercent = (value: number) => {
           cell.dataset.level = count === 0 ? "0" : String(Math.max(1, Math.ceil(ratio * 5)));
         }
 
-        if (pinnedCell) highlightCell(pinnedCell);
+        renderHighlight();
       };
 
       for (const cell of cells) {
         cell.addEventListener("pointerenter", () => {
-          if (!pinnedCell) highlightCell(cell);
+          hoveredCell = cell;
+          hoveredAxis = null;
+          renderHighlight();
         });
         cell.addEventListener("pointerleave", () => {
-          if (!pinnedCell) restoreHighlight();
+          if (hoveredCell === cell) hoveredCell = null;
+          renderHighlight();
         });
         cell.addEventListener("focus", () => {
           focusedCell = cell;
-          highlightCell(cell);
+          renderHighlight();
         });
         cell.addEventListener("blur", () => {
           if (focusedCell === cell) focusedCell = null;
-          restoreHighlight();
+          renderHighlight();
         });
         cell.addEventListener("click", () => {
           if (pinnedCell === cell) {
@@ -278,16 +287,19 @@ const formatPercent = (value: number) => {
           if (pinnedCell) pinnedCell.setAttribute("aria-pressed", "false");
           pinnedCell = cell;
           cell.setAttribute("aria-pressed", "true");
-          highlightCell(cell);
+          renderHighlight();
         });
       }
 
       for (const axis of axes) {
         axis.addEventListener("pointerenter", () => {
-          if (!pinnedCell) highlightAxis(axis);
+          hoveredAxis = axis;
+          hoveredCell = null;
+          renderHighlight();
         });
         axis.addEventListener("pointerleave", () => {
-          if (!pinnedCell) restoreHighlight();
+          if (hoveredAxis === axis) hoveredAxis = null;
+          renderHighlight();
         });
       }
 
