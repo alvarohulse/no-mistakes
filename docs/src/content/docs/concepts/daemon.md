@@ -110,6 +110,8 @@ these artifacts with the run's other rich local data; pinning the run preserves
 both files. The long-lived metric receipt retains neither artifact content nor
 artifact digests.
 
+Resolved-policy v10 records the run's final `effective_config.publish` choice, including an explicit positive or negative run override. Crash recovery restores that launch-time value before the pipeline resumes instead of re-resolving publication from current files. The [configuration reference](/no-mistakes/reference/repo-config/#effective_configpublish) owns precedence and disclosure safety; the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) owns presentation and publication failures.
+
 Event delivery is bounded, so a slow or wedged client can never stall a run. Under pressure the daemon may drop ordinary log output, but it never silently loses a state change: it coalesces those into a single gap signal, and the TUI and `axi` respond by re-reading authoritative run state. A live view can therefore skip log lines while it is behind, but it converges on the run's real state. After a dropped connection, the TUI retries with a bounded delay and reconciles when it reattaches; if the daemon remains unavailable, it surfaces the connection error instead of retrying forever.
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
@@ -141,6 +143,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Requires runs launched with resolved-policy v9 or newer to retain a supported, integrity-matched effective-config YAML and sidecar before any current configuration is read. Missing, corrupt, or mismatched artifacts fail the parked run with the specific recovery reason; the daemon never regenerates them from files that may have changed. Older runs retain legacy recovery behavior.
+- Restores `effective_config.publish` from resolved-policy v10 for a resumed run. Policies v1 through v9, and older runs with no persisted policy, keep publication disabled because they predate that choice.
 - A pre-v9 run with neither artifact reports its configuration unavailable. If either legacy artifact is present, the pair must still be complete, supported, integrity-matched, and bound to the launch binary; a partial, corrupt, or mismatched pair fails recovery rather than supplying unverified configuration.
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"

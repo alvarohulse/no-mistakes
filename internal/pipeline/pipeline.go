@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -48,6 +49,7 @@ type StepContext struct {
 	Reviewer              agent.Agent
 	Config                *config.Config
 	DB                    *db.DB
+	Paths                 *paths.Paths
 	Log                   func(string) // discrete log line (newline-terminated, user-visible + file)
 	LogChunk              func(string) // raw streaming chunk (user-visible + file)
 	LogFile               func(string) // file-only log callback (not shown to user)

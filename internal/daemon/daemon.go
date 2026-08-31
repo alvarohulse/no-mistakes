@@ -909,7 +909,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerunWithMetadata(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRNote, p.Metadata, p.RefreshStrategy, p.StackedOn)
+		runID, err := mgr.HandleRerunWithOverrides(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRNote, p.Metadata, p.EffectiveConfigPublish, p.RefreshStrategy, p.StackedOn)
 		if err != nil {
 			return nil, err
 		}

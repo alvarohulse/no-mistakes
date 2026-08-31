@@ -327,14 +327,18 @@ func Eject(ctx context.Context, d *db.DB, p *paths.Paths, workDir string) (*db.R
 			}
 		}
 	}()
-	if _, err := runstats.ArchiveRepoRuns(d, repo.ID, time.Now(), func(runID string) error {
-		return errors.Join(
-			os.RemoveAll(p.RunDir(runID)),
-			os.RemoveAll(p.RunLogDir(runID)),
-			os.RemoveAll(filepath.Join(evidenceRoot, runID)),
-		)
-	}); err != nil {
-		return nil, fmt.Errorf("archive run metrics before eject: %w", err)
+	cleanup := &runstats.RunArtifactCleanup{
+		Targets: func(runID string) []string {
+			return []string{p.RunDir(runID), p.RunLogDir(runID), filepath.Join(evidenceRoot, runID)}
+		},
+		Remove: runstats.RemoveRunArtifactTargets,
+	}
+	if _, err := runstats.ArchiveRepoRuns(d, repo.ID, time.Now(), cleanup); err != nil {
+		var cleanupErr *runstats.ArtifactCleanupError
+		if !errors.As(err, &cleanupErr) {
+			return nil, fmt.Errorf("archive run metrics before eject: %w", err)
+		}
+		slog.Warn("repository ejected with artifact cleanup still pending", "repo_id", repo.ID, "error", cleanupErr)
 	}
 
 	// Remove remote from working repo (non-fatal).

@@ -86,7 +86,7 @@ func (e *agentRouteResolutionError) Unwrap() error { return e.err }
 // worktree. Callers must supply a commit object ID already selected from the
 // registered gate; the resolver still verifies that exact object in the gate.
 func (m *RunManager) ResolvePolicy(ctx context.Context, repo *db.Repo, headSHA string, skipped []types.StepName, refreshStrategy types.RefreshStrategy) (*PolicyExplanation, error) {
-	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipped, refreshStrategy)
+	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipped, refreshStrategy, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func (m *RunManager) ResolvePolicy(ctx context.Context, repo *db.Repo, headSHA s
 	return newPolicyExplanation(resolved)
 }
 
-func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.Repo, headSHA string, skipped []types.StepName, refreshStrategy types.RefreshStrategy) (*runPolicyResolution, error) {
+func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.Repo, headSHA string, skipped []types.StepName, refreshStrategy types.RefreshStrategy, effectiveConfigPublish *bool) (*runPolicyResolution, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("resolve run policy: repository is nil")
 	}
@@ -138,6 +138,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	}
 	override := resolveGlobalOverride(globalInput, repo)
 	effectiveResolution, sources := effectiveConfigResolutionAndSources(globalInput, pushedInput, trustedInput, override)
+	effectiveResolution.ApplyEffectiveConfigPublishOverride(effectiveConfigPublish)
 	effectiveRepoConfig := effectiveResolution.Repo
 	if override != nil {
 		slog.Warn("global config override is active: honoring machine-local repository configuration", "repo_id", repo.ID, "override", override.Key)

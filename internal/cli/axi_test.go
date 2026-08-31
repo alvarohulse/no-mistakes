@@ -610,7 +610,8 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	metadata := "resolves TEAM-123"
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", &metadata, refreshSelection{
+	publish := false
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "author note", &metadata, &publish, refreshSelection{
 		Strategy:  types.RefreshStrategyMerge,
 		StackedOn: "feature/dependency",
 	})
@@ -622,6 +623,9 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 	}
 	if params.Metadata == nil || *params.Metadata != metadata {
 		t.Fatalf("Metadata = %v, want %q", params.Metadata, metadata)
+	}
+	if params.EffectiveConfigPublish == nil || *params.EffectiveConfigPublish {
+		t.Fatalf("EffectiveConfigPublish = %v, want explicit false", params.EffectiveConfigPublish)
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
@@ -641,8 +645,10 @@ func TestRunCommandsExposeRefreshSelectionFlags(t *testing.T) {
 				t.Errorf("%s is missing --%s", name, flag)
 			}
 		}
-		if cmd.Flags().Lookup("metadata") == nil {
-			t.Errorf("%s is missing --metadata", name)
+		for _, flag := range []string{"metadata", "publish-effective-config", "no-publish-effective-config"} {
+			if cmd.Flags().Lookup(flag) == nil {
+				t.Errorf("%s is missing --%s", name, flag)
+			}
 		}
 	}
 }
@@ -1000,7 +1006,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, nil, refreshSelection{}, false); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", "", "", false, nil, nil, refreshSelection{}, false); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()

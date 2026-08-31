@@ -125,14 +125,16 @@ func TestResponseError(t *testing.T) {
 }
 
 func TestPushReceivedParams(t *testing.T) {
+	publish := false
 	params := PushReceivedParams{
-		Gate:            "/path/to/gate.git",
-		Ref:             "refs/heads/main",
-		Old:             "aaa",
-		New:             "bbb",
-		SkipSteps:       []types.StepName{types.StepBuild, types.StepTest, types.StepLint},
-		RefreshStrategy: types.RefreshStrategyMerge,
-		StackedOn:       "feature/dependency",
+		Gate:                   "/path/to/gate.git",
+		Ref:                    "refs/heads/main",
+		Old:                    "aaa",
+		New:                    "bbb",
+		SkipSteps:              []types.StepName{types.StepBuild, types.StepTest, types.StepLint},
+		RefreshStrategy:        types.RefreshStrategyMerge,
+		StackedOn:              "feature/dependency",
+		EffectiveConfigPublish: &publish,
 	}
 	data, _ := json.Marshal(params)
 	var got PushReceivedParams
@@ -147,6 +149,9 @@ func TestPushReceivedParams(t *testing.T) {
 	}
 	if got.RefreshStrategy != params.RefreshStrategy || got.StackedOn != params.StackedOn {
 		t.Errorf("refresh selection = (%q, %q), want (%q, %q)", got.RefreshStrategy, got.StackedOn, params.RefreshStrategy, params.StackedOn)
+	}
+	if got.EffectiveConfigPublish == nil || *got.EffectiveConfigPublish {
+		t.Errorf("effective_config_publish = %v, want explicit false", got.EffectiveConfigPublish)
 	}
 }
 
@@ -187,13 +192,15 @@ func TestGetActiveRunParams(t *testing.T) {
 }
 
 func TestRerunParams(t *testing.T) {
+	publish := false
 	params := RerunParams{
-		RepoID:          "repo456",
-		Branch:          "feature",
-		PreviousRunID:   "run123",
-		SkipSteps:       []types.StepName{types.StepReview},
-		RefreshStrategy: types.RefreshStrategyMerge,
-		StackedOn:       "feature/dependency",
+		RepoID:                 "repo456",
+		Branch:                 "feature",
+		PreviousRunID:          "run123",
+		SkipSteps:              []types.StepName{types.StepReview},
+		RefreshStrategy:        types.RefreshStrategyMerge,
+		StackedOn:              "feature/dependency",
+		EffectiveConfigPublish: &publish,
 	}
 	data, _ := json.Marshal(params)
 	var got RerunParams
@@ -214,6 +221,26 @@ func TestRerunParams(t *testing.T) {
 	}
 	if got.RefreshStrategy != params.RefreshStrategy || got.StackedOn != params.StackedOn {
 		t.Errorf("refresh selection = (%q, %q), want (%q, %q)", got.RefreshStrategy, got.StackedOn, params.RefreshStrategy, params.StackedOn)
+	}
+	if got.EffectiveConfigPublish == nil || *got.EffectiveConfigPublish {
+		t.Errorf("effective_config_publish = %v, want explicit false", got.EffectiveConfigPublish)
+	}
+}
+
+func TestRunParamsOmitUnsetEffectiveConfigPublication(t *testing.T) {
+	for name, params := range map[string]any{
+		"push":  PushReceivedParams{},
+		"rerun": RerunParams{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "effective_config_publish") {
+				t.Fatalf("unset publication override encoded as %s", encoded)
+			}
+		})
 	}
 }
 

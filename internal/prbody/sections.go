@@ -76,9 +76,17 @@ type BootstrapPart struct {
 // ValidationLimits applies the provider-independent byte limit plus an
 // optional provider-specific character/unit limit.
 type ValidationLimits struct {
-	MaxBytes     int
-	MaxUnits     int
-	MeasureUnits func(string) int
+	MaxBytes         int
+	MaxUnits         int
+	MeasureUnits     func(string) int
+	SecretExemptions []SecretExemption
+}
+
+// SecretExemption allows one exact trusted value to bypass generic secret
+// detection only when it appears once inside the named owned section.
+type SecretExemption struct {
+	SectionID string
+	ExactText string
 }
 
 type ownedSection struct {
@@ -283,11 +291,29 @@ func ValidateOwnedDocument(body string, limits ValidationLimits) error {
 			return fmt.Errorf("%w: %d host units exceeds %d", ErrOversize, units, limits.MaxUnits)
 		}
 	}
-	if intent.RedactSecrets(body) != body {
+	if len(limits.SecretExemptions) == 0 {
+		if intent.RedactSecrets(body) != body {
+			return ErrSecretDetected
+		}
+		_, err := parseOwnedDocument(body)
+		return err
+	}
+	doc, err := parseOwnedDocument(body)
+	if err != nil {
+		return err
+	}
+	secretCheck := body
+	for _, exemption := range limits.SecretExemptions {
+		section, ok := doc.byID[exemption.SectionID]
+		if exemption.ExactText == "" || !ok || strings.Count(section.content, exemption.ExactText) != 1 || strings.Count(body, exemption.ExactText) != 1 {
+			return fmt.Errorf("%w: trusted exemption is not one exact value in owned section %q", ErrSecretDetected, exemption.SectionID)
+		}
+		secretCheck = strings.Replace(secretCheck, exemption.ExactText, "[trusted exact disclosure]", 1)
+	}
+	if intent.RedactSecrets(secretCheck) != secretCheck {
 		return ErrSecretDetected
 	}
-	_, err := parseOwnedDocument(body)
-	return err
+	return nil
 }
 
 func renderOwnedSection(id, content string) string {

@@ -68,6 +68,7 @@ type effectiveConfigDocument struct {
 	Commands                effectiveCommandsDocument `yaml:"commands"`
 	Preflight               []runner.Command          `yaml:"preflight"`
 	Hooks                   config.Hooks              `yaml:"hooks"`
+	EffectiveConfig         effectivePublishDocument  `yaml:"effective_config"`
 	AllowRepoCommands       bool                      `yaml:"allow_repo_commands"`
 	ACPXPath                string                    `yaml:"acpx_path"`
 	ACPRegistryOverrides    map[string]string         `yaml:"acp_registry_overrides"`
@@ -160,6 +161,10 @@ type effectiveAutoFixDocument struct {
 
 type effectiveCIDocument struct {
 	RerunTransient int `yaml:"rerun_transient"`
+}
+
+type effectivePublishDocument struct {
+	Publish bool `yaml:"publish"`
 }
 
 type effectiveCommitDocument struct {
@@ -295,6 +300,7 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		},
 		Preflight:               canonicalResolvedCommands(cfg.Preflight),
 		Hooks:                   cfg.Hooks,
+		EffectiveConfig:         effectivePublishDocument{Publish: cfg.EffectiveConfig.Publish},
 		AllowRepoCommands:       cfg.AllowRepoCommands,
 		ACPXPath:                cfg.ACPXPath,
 		ACPRegistryOverrides:    copyStringMap(cfg.ACPRegistryOverrides),
@@ -536,6 +542,7 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 	set("preflight", "preflight")
 	set("hooks.post_worktree", "hooks.post_worktree")
 	set("hooks.pr_body", "hooks.pr_body")
+	set("effective_config.publish", "effective_config.publish")
 	set("allow_repo_commands", "allow_repo_commands")
 	for _, path := range []string{"acpx_path", "acp_registry_overrides", "agent_path_override", "agent_args_override", "ci_timeout", "step_quiet_warning", "process_termination_grace", "log_level", "session_reuse"} {
 		setGlobal(path)

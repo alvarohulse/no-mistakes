@@ -41,7 +41,7 @@ Creates or refreshes a local bare repo, installs the managed pre-receive admissi
 `init` writes no skill files into the repo; the user-level copies cover every supported agent (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex, OpenCode, Rovo Dev, and Pi) across all repos.
 If the home `.claude` links to `.agents`, `.claude/skills` links to `.agents/skills`, or the reverse, `init` follows that layout and still makes the skill readable from both logical paths.
 If the repo still contains a vendored skill copy written by an older no-mistakes version, `init` leaves it untouched and prints a notice that it is no longer needed and can be removed.
-The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`. Use `-o no-mistakes.skip=none` to clear configured skips for that push.
+The gate advertises Git push-option support, so you can skip steps for one push with `git push -o no-mistakes.skip=test,lint no-mistakes <branch>`. Use `-o no-mistakes.skip=none` to clear configured skips for that push. Set `-o no-mistakes.publish-effective-config=true` or `-o no-mistakes.publish-effective-config=false` to explicitly enable or disable the built-in GitHub effective-configuration disclosure for that run.
 
 For GitHub fork contributions, keep `origin` pointed at the parent repository and pass `--fork-url` with your fork remote URL.
 The push, refresh branch-sync, and CI auto-fix pushes use the fork, while GitHub PR and CI commands stay scoped to the parent repository and create PRs with `--head <fork-owner>:<branch>`.
@@ -91,6 +91,7 @@ no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --pr-note-file ./pr-note.md
 no-mistakes axi run --intent "the user's goal" --metadata $'resolves TEAM-123\ncontributes to TEAM-456'
+no-mistakes axi run --intent "the user's goal" --publish-effective-config
 no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacked-on feature/dependency
 ```
 
@@ -102,6 +103,8 @@ no-mistakes axi run --intent "the user's goal" --refresh-strategy merge --stacke
 | `--pr-note`   | `string` | (none)  | Trusted author text added verbatim to the generated PR body      |
 | `--pr-note-file` | `string` | (none) | Read trusted PR note text from a file                            |
 | `--metadata`  | `string` | (none)  | Opaque run metadata; maximum 16 KiB; an explicit empty value clears it on rerun |
+| `--publish-effective-config` | `bool` | configured value | Publish the complete stored effective configuration in the built-in GitHub PR body |
+| `--no-publish-effective-config` | `bool` | configured value | Disable effective-configuration publication for this run |
 | `--refresh-strategy` | `string` | trusted `refresh.strategy`, then `rebase` | Refresh with `rebase` or `merge` |
 | `--stacked-on` | `string` | default branch | Use this branch as the refresh and pull-request base             |
 
@@ -113,6 +116,7 @@ Reattaching to an in-flight run does not require `--intent`.
 Refresh selection is resolved once for a new run with precedence `--refresh-strategy` > trusted default-branch `refresh.strategy` > `rebase` and is persisted with the run. `--stacked-on` is strategy-neutral: rebase refresh incorporates that branch as its new base, merge refresh merges it, and the PR targets it. Refresh options apply only when starting a new run, not when reattaching to one.
 `--pr-note` and `--pr-note-file` are mutually exclusive, limited to 16 KiB, and valid only when starting a new run. The trimmed text is rendered verbatim in the PR body — as the leading `## Notes` section before `## Summary` in the built-in body, or wherever a configured [`hooks.pr_body`](/no-mistakes/reference/repo-config/#hookspr_body) formatter places it — supplied to the PR-summary agent as trusted guidance, and must not contain secrets. For an existing PR, the note can update only a matching valid owned section; unowned content remains byte-preserved.
 `--metadata` accepts one opaque, valid-UTF-8 string up to 16 KiB with no NUL bytes, and is valid only when starting a new run. no-mistakes stores it exactly without parsing JSON, keys, or associations; exposes a sanitized untrusted copy to agent prompts; passes the exact string to pipeline subprocesses as [`NM_METADATA`](/no-mistakes/reference/environment/#nm_metadata); and includes it in the PR formatter contract. Treat it as non-secret input.
+`--publish-effective-config` and `--no-publish-effective-config` are mutually exclusive, apply only when starting a new run, and override global, trusted repository, and machine-override settings. The selected value is stored with the run and restored unchanged during crash recovery. Publication can expose secrets; read the [`effective_config.publish`](/no-mistakes/reference/repo-config/#effective_configpublish) warning before enabling it.
 Reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -316,6 +320,8 @@ Rerun the pipeline for the current branch.
 no-mistakes rerun
 no-mistakes rerun --metadata "resolves TEAM-123"
 no-mistakes rerun --metadata ""
+no-mistakes rerun --publish-effective-config
+no-mistakes rerun --no-publish-effective-config
 no-mistakes rerun --refresh-strategy merge
 no-mistakes rerun --stacked-on feature/dependency
 no-mistakes rerun --intent "the revised user goal"
@@ -327,6 +333,8 @@ no-mistakes rerun --intent "the revised user goal"
 | `--stacked-on` | `string` | prior run's stack base | Use this branch as the refresh and pull-request base |
 | `--metadata` | `string` | inherited | Replace inherited opaque metadata; an explicit empty value clears it |
 | `--intent` | `string` | inherited or freshly inferred | Override inherited intent or fresh inference with canonical explicit intent |
+| `--publish-effective-config` | `bool` | configured value | Publish the complete stored effective configuration in the built-in GitHub PR body |
+| `--no-publish-effective-config` | `bool` | configured value | Disable effective-configuration publication for this rerun |
 
 Starts a new pipeline run using the last-known head SHA on the current branch.
 If the selected prior run has explicit intent, rerun inherits it exactly by default;
@@ -337,7 +345,8 @@ records the transcript source. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome, or after you have committed a separate fix outside
 an active run; do not use it to bypass a gate.
-When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. Retargeting remains base-only; body updates independently replace only verified owned sections.
+The effective-config publication flags are mutually exclusive and override every configured layer for the new rerun. When both are omitted, the rerun resolves the current global, trusted repository, and machine-override settings; it does not inherit the prior run's flag.
+When `--stacked-on` changes, the PR step may retarget an existing pull request to the new base. It validates the complete owned-body candidate first and requests the base and body change together; only verified owned sections are replaced.
 
 ## no-mistakes sync
 
@@ -441,7 +450,7 @@ Repository, time, step, agent, model, purpose, and status selectors combine with
 
 Rich run rows, logs, findings, and evidence follow the [`test.evidence` retention policy](/no-mistakes/reference/global-config/#local-storage-and-cleanup), which protects active and pinned runs and enforces minimum age and newest-run floors. Older runs continue to appear through immutable content-free metric receipts with `rich_data_retained: false`; the [environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) owns the archived field and privacy boundary.
 
-The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body publishes only a bounded subset of it.
+The full performance timeline stays local in `state.sqlite`; it is not sent to telemetry, and the generated PR body normally publishes only a bounded subset of it. Explicitly enabling [`effective_config.publish`](/no-mistakes/reference/repo-config/#effective_configpublish) is the documented exact-disclosure exception.
 The field definitions and their local/remote split are owned by [the environment reference](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
 ## no-mistakes pr-body

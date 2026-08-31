@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -92,6 +94,58 @@ func TestStartRunPersistsExactEffectiveConfigArtifactsBeforeWorktreeExecution(t 
 	}
 	if got, want := sortedMapKeys(evidence), []string{"local_root", "max_runs", "retention"}; !slices.Equal(got, want) {
 		t.Fatalf("test.evidence fields = %v, want %v", got, want)
+	}
+}
+
+func TestPushEffectiveConfigPublicationOverrideWinsBeforePolicyAndArtifactPersistence(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured bool
+		override   bool
+	}{
+		{name: "positive override", configured: false, override: true},
+		{name: "negative override", configured: true, override: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("NM_DEMO", "1")
+			p, database, repo, _ := newPolicyResolutionFixture(t, "effective-config-publish-"+strings.ReplaceAll(tt.name, " ", "-"))
+			if err := os.WriteFile(p.ConfigFile(), []byte(fmt.Sprintf("effective_config:\n  publish: %t\n", tt.configured)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			manager := NewRunManager(database, p, func() []pipeline.Step {
+				return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+			})
+			t.Cleanup(manager.Shutdown)
+			setSafeBareRepositoryExplicitForDaemonTest(t)
+
+			runID, err := manager.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{
+				Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: refreshTestZeroSHA, New: head,
+				Intent: "publication override", EffectiveConfigPublish: &tt.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+				t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+			}
+
+			yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+			assertEffectiveConfigScalar(t, yamlBytes, []string{"effective_config", "publish"}, fmt.Sprint(tt.override), "source=run-request; is_default=false")
+			run, err := database.GetRun(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+			if err != nil || legacy {
+				t.Fatalf("decode policy = legacy %t error %v", legacy, err)
+			}
+			if policy.EffectiveConfig.Publish != tt.override {
+				t.Fatalf("persisted publication = %t, want %t", policy.EffectiveConfig.Publish, tt.override)
+			}
+		})
 	}
 }
 

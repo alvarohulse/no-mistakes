@@ -83,6 +83,9 @@ type PushReceivedParams struct {
 	Intent          string                `json:"intent,omitempty"`
 	PRNote          string                `json:"pr_note,omitempty"`
 	Metadata        *string               `json:"metadata,omitempty"`
+	// EffectiveConfigPublish distinguishes no run override from an explicit
+	// false value that must win over trusted configuration.
+	EffectiveConfigPublish *bool `json:"effective_config_publish,omitempty"`
 }
 
 // GetRunParams requests a single run by ID.
@@ -151,6 +154,9 @@ type RerunParams struct {
 	Intent          string                `json:"intent,omitempty"`
 	PRNote          string                `json:"pr_note,omitempty"`
 	Metadata        *string               `json:"metadata,omitempty"`
+	// EffectiveConfigPublish stays nil when the rerun should resolve current
+	// trusted configuration normally.
+	EffectiveConfigPublish *bool `json:"effective_config_publish,omitempty"`
 }
 
 // SubscribeParams starts an event stream for a run.

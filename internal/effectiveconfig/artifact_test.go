@@ -13,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"gopkg.in/yaml.v3"
 )
 
 func TestReadReturnsOnlyAnIntactSupportedArtifact(t *testing.T) {
@@ -186,6 +187,36 @@ func TestReadRejectsIdentityAndCompletenessMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommentFreeYAMLPreservesValuesWhileRemovingProvenance(t *testing.T) {
+	stored := []byte("command: 'echo # literal' # source=trusted; is_default=false\nscript: |- # source=global; is_default=true\n  echo \"# still data\"\n")
+
+	rendered, err := effectiveconfig.CommentFreeYAML(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]string
+	if err := yaml.Unmarshal(rendered, &values); err != nil {
+		t.Fatalf("rendered YAML is invalid: %v", err)
+	}
+	if values["command"] != "echo # literal" || values["script"] != "echo \"# still data\"" {
+		t.Fatalf("rendered values changed: %#v\n%s", values, rendered)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(rendered, &root); err != nil {
+		t.Fatal(err)
+	}
+	var assertNoComments func(*yaml.Node)
+	assertNoComments = func(node *yaml.Node) {
+		if node.HeadComment != "" || node.LineComment != "" || node.FootComment != "" {
+			t.Fatalf("rendered YAML retained a comment at %q: %s", node.Value, rendered)
+		}
+		for _, child := range node.Content {
+			assertNoComments(child)
+		}
+	}
+	assertNoComments(&root)
 }
 
 func writeArtifact(t *testing.T, p *paths.Paths, runID, policyDigest string, yamlBytes []byte, schemaVersion int) {

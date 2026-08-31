@@ -94,16 +94,18 @@ func (d *DB) ListNewestTerminalUnpinned(limit int) ([]string, error) {
 }
 
 // ArchiveRunWithMetricReceipt stores one immutable receipt and deletes the
-// matching terminal rich run in the same transaction. A receipt with pending
-// cleanup is the durable owner for filesystem deletion after commit, so a
-// crash or cleanup failure can be retried without retaining the rich row.
-// When requireUnpinned is true, a pin that committed first turns the operation
-// into a no-op.
-func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinned bool, beforeDelete func() error) (bool, error) {
-	return d.archiveRunWithMetricReceipt(receipt, requireUnpinned, nil, beforeDelete)
+// matching terminal rich run in the same transaction.
+func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinned bool) (bool, error) {
+	return d.archiveRunWithMetricReceipt(receipt, requireUnpinned, nil, nil)
 }
 
+// ArchiveRunWithMetricReceiptAndTargets also records the exact filesystem
+// cleanup targets before deleting the rich row. A crash or cleanup failure can
+// then be retried without resolving paths from mutable configuration.
 func (d *DB) ArchiveRunWithMetricReceiptAndTargets(receipt RunMetricReceipt, requireUnpinned bool, targets []string, beforeDelete func() error) (bool, error) {
+	if beforeDelete != nil && len(targets) == 0 {
+		return false, fmt.Errorf("archive run metric receipt: artifact cleanup targets are required")
+	}
 	return d.archiveRunWithMetricReceipt(receipt, requireUnpinned, targets, beforeDelete)
 }
 
@@ -233,16 +235,9 @@ func (d *DB) archiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 	return true, nil
 }
 
-// CleanupPendingRunArtifacts retries filesystem cleanup durably owned by
-// archived metric receipts. A successful callback is marked only afterward,
-// so crashes and partial cleanup remain safely retryable.
-func (d *DB) CleanupPendingRunArtifacts(repoID string, cleanup func(string) error) (int, error) {
-	if cleanup == nil {
-		return 0, nil
-	}
-	return d.cleanupPendingRunArtifacts(repoID, func(runID string, _ []string) error { return cleanup(runID) })
-}
-
+// CleanupPendingRunArtifactsWithTargets retries filesystem cleanup durably
+// owned by archived metric receipts. A successful callback is marked only
+// afterward, so crashes and partial cleanup remain safely retryable.
 func (d *DB) CleanupPendingRunArtifactsWithTargets(repoID string, cleanup func(string, []string) error) (int, error) {
 	return d.cleanupPendingRunArtifacts(repoID, cleanup)
 }
@@ -279,6 +274,10 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 			rows.Close()
 			return 0, fmt.Errorf("decode pending run artifact cleanup: %w", err)
 		}
+		if len(targets) == 0 {
+			rows.Close()
+			return 0, fmt.Errorf("pending run artifact cleanup %q has no targets", runID)
+		}
 		pendingRuns = append(pendingRuns, pending{runID, targets})
 	}
 	if err := rows.Err(); err != nil {
@@ -306,10 +305,20 @@ func (d *DB) cleanupPendingRunArtifacts(repoID string, cleanup func(string, []st
 }
 
 func (d *DB) markRunArtifactCleanupComplete(runID string) error {
-	if _, err := d.sql.Exec(`UPDATE run_metric_receipts SET artifact_cleanup_pending = 0 WHERE run_id = ?`, runID); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin run %s artifact cleanup completion: %w", runID, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE run_metric_receipts SET artifact_cleanup_pending = 0 WHERE run_id = ?`, runID); err != nil {
 		return fmt.Errorf("mark run %s artifact cleanup complete: %w", runID, err)
 	}
-	_, _ = d.sql.Exec(`DELETE FROM run_artifact_cleanup_journal WHERE run_id = ?`, runID)
+	if _, err := tx.Exec(`DELETE FROM run_artifact_cleanup_journal WHERE run_id = ?`, runID); err != nil {
+		return fmt.Errorf("delete run %s artifact cleanup journal: %w", runID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit run %s artifact cleanup completion: %w", runID, err)
+	}
 	return nil
 }
 

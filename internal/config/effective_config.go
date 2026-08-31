@@ -72,6 +72,19 @@ func ResolveEffectiveConfig(global *GlobalConfig, pushed, trusted, override *Rep
 	}
 }
 
+// ApplyEffectiveConfigPublishOverride applies an explicit per-run publication
+// choice after all persisted configuration layers. A nil choice leaves both
+// the resolved value and its provenance unchanged.
+func (r *EffectiveConfigResolution) ApplyEffectiveConfigPublishOverride(publish *bool) {
+	if r == nil || r.Config == nil || publish == nil {
+		return
+	}
+	r.Config.EffectiveConfig.Publish = *publish
+	if r.Provenance != nil {
+		r.Provenance.setSubtree("effective_config.publish", EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRunRequest})
+	}
+}
+
 // ResolveAgent resolves runtime routing and records only selections that
 // actually changed as runtime-derived. Explicit routes that survive resolution
 // unchanged retain the layer that configured them.
@@ -350,6 +363,7 @@ func globalEffectiveConfigAppliedPaths(raw *globalConfigRaw, cfg *GlobalConfig) 
 	mark("runner.executable", strings.TrimSpace(cfg.Runner.Executable) != "")
 	mark("runner.args", len(cfg.Runner.Args) > 0)
 	mark("hooks.pr_body", strings.TrimSpace(cfg.Hooks.PRBody) != "")
+	mark("effective_config.publish", raw.EffectiveConfig.Publish != nil)
 	mark("acpx_path", raw.ACPXPath != "")
 	mark("acp_registry_overrides", raw.ACPRegistryOverrides != nil)
 	mark("agent_path_override", raw.AgentPathOverride != nil)
@@ -689,7 +703,7 @@ func normalizeEffectiveConfigPresence(paths map[string]bool) {
 func effectiveConfigKnownInputPaths() []string {
 	paths := []string{
 		"managed", "agent", "runner.executable", "runner.args", "preflight", "pipeline.skip_steps",
-		"hooks.post_worktree", "hooks.pr_body", "allow_repo_commands", "acpx_path", "acp_registry_overrides",
+		"hooks.post_worktree", "hooks.pr_body", "effective_config.publish", "allow_repo_commands", "acpx_path", "acp_registry_overrides",
 		"agent_path_override", "agent_args_override", "ci_timeout", "step_quiet_warning", "process_termination_grace",
 		"log_level", "session_reuse", "ignore_patterns", "ci.rerun_transient", "commit.fix_message",
 		"intent.enabled", "intent.threshold", "intent.slack_days", "intent.disabled_readers",

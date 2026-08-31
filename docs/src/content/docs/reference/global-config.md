@@ -65,6 +65,9 @@ session_reuse: true
 hooks:
   pr_body: "~/scripts/format-pr --auto-linear"
 
+effective_config:
+  publish: false
+
 auto_fix:
   refresh: 3
   review: 0
@@ -590,6 +593,19 @@ This is the only hook accepted here. One formatter usually serves every repo on 
 
 A repo's own `hooks.pr_body` overrides this value. The field's behavior, contract, and failure handling are owned by [the repo config reference](/no-mistakes/reference/repo-config/#hookspr_body); iterate on a formatter with [`no-mistakes pr-body`](/no-mistakes/reference/cli/#no-mistakes-pr-body).
 
+### effective_config.publish
+
+Publish the complete stored effective configuration in the built-in GitHub pull request body.
+
+|         |         |
+| ------- | ------- |
+| Type    | `bool`  |
+| Default | `false` |
+
+Resolution order is global config, trusted default-branch repo config, a matching machine-local `overrides` entry, then an explicit `--publish-effective-config` or `--no-publish-effective-config` run flag. Each later present value replaces the earlier value, including an explicit `false`. A pushed-branch value is ignored.
+
+Enabling this is an explicit operator-owned disclosure. The published YAML contains exact values and may expose commands, hooks, prompts, paths, or credentials; it carries no confidentiality guarantee. The [repo field reference](/no-mistakes/reference/repo-config/#effective_configpublish) owns the trust and formatter boundaries, and the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) owns the rendered section and failure behavior.
+
 ### prompts
 
 Global prompt additions appended to no-mistakes' built-in pipeline prompts.
@@ -633,7 +649,7 @@ overrides:
 
 **Precedence.** A matching entry overlays the effective committed config after the [default-branch trust rules](/no-mistakes/reference/repo-config/) are applied: only fields explicitly present in the entry apply, and explicitly present empty values clear the committed value (for example `commands.test: ""` disables a committed test command). Fields absent from the entry keep the committed/trusted resolution, and the result then merges over this file's global defaults as usual.
 
-**Trust model.** Entries live in this machine-local file, which only the machine owner edits, so they sit on the trusted side of the pushed-branch boundary - a contributor's branch can neither add nor disturb them. Runs with a matching entry record their contributing config sources: the PR Pipeline section shows only generic source labels (including `global-override`) with 12-character digest prefixes, while the full digest, the matched key, and this file's path stay in the local state database. Recovery requires the launch-time global config digest and re-reads committed inputs from their launch-time Git refs, refusing drift instead of silently changing a run's config.
+**Trust model.** Entries live in this machine-local file, which only the machine owner edits, so they sit on the trusted side of the pushed-branch boundary - a contributor's branch can neither add nor disturb them. Runs with a matching entry record their contributing config sources: the PR Pipeline section shows only generic source labels (including `global-override`) with 12-character digest prefixes, while the full source digest, the matched key, and this file's path stay in the local state database. Recovery requires the launch-time global config digest and re-reads committed inputs from their launch-time Git refs, refusing drift instead of silently changing a run's config.
 
 #### `overrides.<owner>/<repo>.pipeline.skip_steps`
 

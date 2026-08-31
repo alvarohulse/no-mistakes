@@ -162,6 +162,47 @@ func ValidateWithBinary(yamlBytes, metaBytes []byte, runID, policyDigest, binary
 	return &Artifact{YAML: append([]byte(nil), yamlBytes...), Metadata: metadata}, nil
 }
 
+// CommentFreeYAML renders the complete stored value tree without its
+// provenance comments. Scalar styles are retained so characters such as '#'
+// inside configured strings remain data rather than becoming YAML comments.
+func CommentFreeYAML(yamlBytes []byte) ([]byte, error) {
+	var root yaml.Node
+	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes))
+	if err := decoder.Decode(&root); err != nil {
+		return nil, fmt.Errorf("render comment-free effective config: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("render comment-free effective config: multiple YAML documents")
+		}
+		return nil, fmt.Errorf("render comment-free effective config: %w", err)
+	}
+	clearComments(&root)
+	var rendered bytes.Buffer
+	encoder := yaml.NewEncoder(&rendered)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&root); err != nil {
+		return nil, fmt.Errorf("render comment-free effective config: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, fmt.Errorf("render comment-free effective config: %w", err)
+	}
+	return rendered.Bytes(), nil
+}
+
+func clearComments(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	node.HeadComment = ""
+	node.LineComment = ""
+	node.FootComment = ""
+	for _, child := range node.Content {
+		clearComments(child)
+	}
+}
+
 func validateAnnotations(node *yaml.Node, path string) error {
 	if node == nil {
 		return fmt.Errorf("missing YAML node at %s", path)

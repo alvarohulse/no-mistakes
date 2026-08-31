@@ -9,7 +9,7 @@ Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository 
 `commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` only from that trusted copy.
+The daemon also reads `refresh.strategy`, `effective_config.publish`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
@@ -61,6 +61,9 @@ commands:
 hooks:
   post_worktree: "yarn install --immutable"
   pr_body: "~/scripts/format-pr --auto-linear"
+
+effective_config:
+  publish: false
 
 ignore_patterns:
   - "*.generated.go"
@@ -226,7 +229,24 @@ Opt in to honoring the code-executing and agent-steering fields (`commands.{buil
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `effective_config.publish`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+
+### effective_config.publish
+
+Publish the complete stored effective configuration in the built-in GitHub pull request body.
+
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `bool`                           |
+| Default | Inherits global config (`false`) |
+
+This field is always read from the pinned trusted default-branch config, even when [`allow_repo_commands`](#allow_repo_commands) is enabled. A pushed branch cannot enable or disable publication. A matching machine-local override replaces the trusted value, and the mutually exclusive `--publish-effective-config` and `--no-publish-effective-config` flags replace every configured value for that run.
+
+:::caution[Exact public disclosure]
+Enabling publication authorizes no-mistakes to send the stored values to GitHub. The section may contain commands, hooks, prompts, paths, credentials, or any other resolved configuration value, and no-mistakes makes no confidentiality guarantee for it. Inspect the owner-local snapshot with [`no-mistakes config explain --run <id>`](/no-mistakes/reference/cli/#no-mistakes-config-explain) when deciding whether to publish.
+:::
+
+This setting affects only the built-in GitHub renderer. A successful `hooks.pr_body` formatter still uses contract v5, receives no effective-config field, and omits the built-in disclosure; if the formatter fails and no-mistakes safely falls back to the built-in body, the enabled disclosure is included. The [PR step reference](/no-mistakes/reference/pipeline-steps/#pr) owns the exact rendered content and failure behavior.
 
 ### hooks.post_worktree
 
@@ -252,7 +272,7 @@ External pull request section formatter. Receives the PR body contract as JSON o
 | Type | `string` |
 | Default | Empty (use the built-in body) |
 
-Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v5 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, raw per-invocation meters and optional CLI-reported cost, plus distinct `static_tests`, `review_evidence`, and `user_testing` records. User Testing is an instruction unless `attested` is explicitly true. The formatter owns public pricing data, harness profiles, and estimation; no-mistakes never synthesizes reported cost. Formatters should accept v2 through v5 during rollout, including immutable v4 producer-calculated receipts.
+Use this when your host's pull request template, issue-linking conventions, or section ordering differ from the built-in body. Contract v5 carries separate heading-free GFM `summary` and `what_changed` fragments, opaque optional `metadata`, the Intent step's provenance/absence result, risk fields, raw per-invocation meters and optional CLI-reported cost, plus distinct `static_tests`, `review_evidence`, and `user_testing` records. It does not carry effective-configuration publication data; that future contract migration is intentionally deferred. User Testing is an instruction unless `attested` is explicitly true. The formatter owns public pricing data, harness profiles, and estimation; no-mistakes never synthesizes reported cost. Formatters should accept v2 through v5 during rollout, including immutable v4 producer-calculated receipts.
 
 Successful stdout is strict JSON. It has no full-body field:
 
