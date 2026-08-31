@@ -656,7 +656,7 @@ func writePrivateFile(path string, data []byte) error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replacePrivateFile(tmpName, path); err != nil {
 		return err
 	}
 	keepTemp = false
