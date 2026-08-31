@@ -316,6 +316,8 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		if err != nil {
 			return nil, err
 		}
+		normalizeResolvedPolicyForComparison(resolvedPolicy)
+		cfg.EffectiveConfig.Publish = resolvedPolicy.EffectiveConfig.Publish
 		cfg.TrustedConfigSHA = resolvedPolicy.TrustedConfigSHA
 		if cfg.Eval.CaptureProvenance {
 			replayConfig, err := config.MarshalEvalReplayConfig(cfg)
@@ -1016,22 +1018,28 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	}
 
 	branch := branchFromRef(params.Ref)
-	return m.startRunWithMetadata(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, params.PRNote, params.Metadata, params.RefreshStrategy, params.StackedOn)
+	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent, db.RunIntentSourceAgent, params.PRNote, params.Metadata, params.EffectiveConfigPublish, params.RefreshStrategy, params.StackedOn)
 }
 
 // HandleRerun creates a new run for the latest gate head on a branch. Optional
 // intent and PR-note values are stamped onto the new run.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent, prNote string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.handleRerun(ctx, repoID, branch, "", skipSteps, intent, prNote, nil, refreshStrategy, stackedOn)
+	return m.handleRerun(ctx, repoID, branch, "", skipSteps, intent, prNote, nil, nil, refreshStrategy, stackedOn)
 }
 
 // HandleRerunWithMetadata creates a rerun while distinguishing absent metadata
 // (inherit) from an explicitly supplied empty string (clear).
 func (m *RunManager) HandleRerunWithMetadata(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.handleRerun(ctx, repoID, branch, previousRunID, skipSteps, intent, prNote, metadata, refreshStrategy, stackedOn)
+	return m.handleRerun(ctx, repoID, branch, previousRunID, skipSteps, intent, prNote, metadata, nil, refreshStrategy, stackedOn)
 }
 
-func (m *RunManager) handleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+// HandleRerunWithOverrides creates a rerun while preserving explicit false
+// values for optional run-scoped overrides.
+func (m *RunManager) HandleRerunWithOverrides(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, effectiveConfigPublish *bool, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+	return m.handleRerun(ctx, repoID, branch, previousRunID, skipSteps, intent, prNote, metadata, effectiveConfigPublish, refreshStrategy, stackedOn)
+}
+
+func (m *RunManager) handleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prNote string, metadata *string, effectiveConfigPublish *bool, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1107,7 +1115,7 @@ func (m *RunManager) handleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 
-	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, prNote, metadata, refreshStrategy, stackedOn)
+	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, prNote, metadata, effectiveConfigPublish, refreshStrategy, stackedOn)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
@@ -1153,13 +1161,13 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 }
 
 func (m *RunManager) startRunWithMetadata(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
-	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prNote, metadata, refreshStrategy, stackedOn)
+	return m.startRunWithMetadataAndIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prNote, metadata, nil, refreshStrategy, stackedOn)
 }
 
 // startRunWithMetadataAndIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prNote string, metadata *string, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
+func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prNote string, metadata *string, effectiveConfigPublish *bool, refreshStrategy types.RefreshStrategy, stackedOn string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1211,7 +1219,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	} else {
 		repo = refreshed
 	}
-	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipSteps, refreshStrategy)
+	resolved, err := m.resolveRunPolicyFromBareGate(ctx, repo, headSHA, skipSteps, refreshStrategy, effectiveConfigPublish)
 	if err != nil {
 		trackStartFailure("resolve_policy")
 		var routeErr *agentRouteResolutionError

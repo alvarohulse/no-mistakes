@@ -14,6 +14,7 @@ import (
 
 func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testing.T) {
 	cfg := resolvedRoutingTestConfig()
+	cfg.EffectiveConfig.Publish = true
 	cfg.Commands = config.Commands{Build: "make build", Test: "make test", Lint: "make lint", Format: "make fmt"}
 	cfg.Hooks = config.Hooks{PostWorktree: "./setup", PRBody: "format-pr"}
 	cfg.AutoFix = config.AutoFix{Review: 2, Build: 1, Test: 3}
@@ -44,7 +45,7 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	if encoded != encodedAgain || digest != digestAgain {
 		t.Fatalf("resolved policy is not canonical:\n%s\n%s\n%s\n%s", encoded, encodedAgain, digest, digestAgain)
 	}
-	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"retention_ns":1209600000000000`} {
+	for _, required := range []string{"make build", "make test", "make lint", "make fmt", "./setup", "format-pr", `"name":"build","status":"skipped","skip_source":"run-request"`, `"refresh_strategy":"merge"`, `"effective_config":{"publish":true}`, `"retention_ns":1209600000000000`} {
 		if !strings.Contains(encoded, required) {
 			t.Errorf("resolved policy omitted %q:\n%s", required, encoded)
 		}
@@ -66,6 +67,31 @@ func TestResolvedPolicyCanonicalRoundTripExcludesPrivateLaunchMaterial(t *testin
 	}
 	if decoded.Steps[1].SkipSource != types.SkipSourceRunRequest {
 		t.Fatalf("decoded skip source = %q", decoded.Steps[1].SkipSource)
+	}
+}
+
+func TestNormalizeResolvedPolicyDefaultsPreVersionTenPublicationToFalse(t *testing.T) {
+	policy, err := resolvedPolicyFromConfig(
+		resolvedRoutingTestConfig(),
+		nil,
+		[]pipeline.Step{policyTestStep{name: types.StepReview}},
+		nil,
+		types.RefreshStrategyRebase,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 9
+	policy.EffectiveConfig.Publish = true
+
+	normalizeResolvedPolicyForComparison(policy)
+
+	if policy.Version != 10 {
+		t.Fatalf("normalized version = %d, want 10", policy.Version)
+	}
+	if policy.EffectiveConfig.Publish {
+		t.Fatal("version-nine policy retained a publication value that did not exist at launch")
 	}
 }
 

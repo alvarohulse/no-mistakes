@@ -16,12 +16,18 @@ func newRerunCmd() *cobra.Command {
 	var stackedOn string
 	var metadata string
 	var intent string
+	var publishEffectiveConfig bool
+	var noPublishEffectiveConfig bool
 	cmd := &cobra.Command{
 		Use:   "rerun",
 		Short: "Rerun the pipeline for the current branch",
 		Long:  "Rerun the pipeline for the current branch. By default, an explicit intent from the selected prior run is inherited; otherwise intent is inferred afresh. Use --intent to replace either with a new explicit intent.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			effectiveConfigPublish, err := effectiveConfigPublishOverride(cmd, publishEffectiveConfig, noPublishEffectiveConfig)
+			if err != nil {
+				return err
+			}
 			if cmd.Flags().Changed("intent") && strings.TrimSpace(intent) == "" {
 				return fmt.Errorf("--intent must not be empty")
 			}
@@ -83,12 +89,13 @@ func newRerunCmd() *cobra.Command {
 
 				var result ipc.RerunResult
 				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
-					RepoID:          repo.ID,
-					Branch:          branch,
-					RefreshStrategy: strategy,
-					StackedOn:       stackedOn,
-					Intent:          intent,
-					Metadata:        metadataValue,
+					RepoID:                 repo.ID,
+					Branch:                 branch,
+					RefreshStrategy:        strategy,
+					StackedOn:              stackedOn,
+					Intent:                 intent,
+					Metadata:               metadataValue,
+					EffectiveConfigPublish: effectiveConfigPublish,
 				}, &result); err != nil {
 					return fmt.Errorf("rerun pipeline: %w", err)
 				}
@@ -102,5 +109,7 @@ func newRerunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; inherited from the prior run when omitted")
 	cmd.Flags().StringVar(&metadata, "metadata", "", "replace inherited opaque run metadata; pass an empty value to clear it")
 	cmd.Flags().StringVar(&intent, "intent", "", "explicit intent for this rerun (overrides inherited intent or fresh inference)")
+	cmd.Flags().BoolVar(&publishEffectiveConfig, "publish-effective-config", false, "publish the complete stored effective configuration in the built-in GitHub PR body for this rerun")
+	cmd.Flags().BoolVar(&noPublishEffectiveConfig, "no-publish-effective-config", false, "do not publish the stored effective configuration in the built-in GitHub PR body for this rerun")
 	return cmd
 }

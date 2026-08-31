@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 9
+	resolvedPolicyVersion     = 10
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -48,6 +48,7 @@ type resolvedPolicy struct {
 	Intent                 resolvedPolicyIntent   `json:"intent"`
 	Eval                   resolvedPolicyEval     `json:"eval"`
 	TestEvidence           resolvedPolicyEvidence `json:"test_evidence"`
+	EffectiveConfig        resolvedPolicyPublish  `json:"effective_config"`
 	LegacyPricing          *resolvedPolicyPricing `json:"pricing,omitempty"`
 }
 
@@ -106,6 +107,10 @@ type resolvedPolicyEvidence struct {
 	LegacyStoreInRepo bool  `json:"store_in_repo,omitempty"`
 	RetentionNS       int64 `json:"retention_ns"`
 	MaxRuns           int   `json:"max_runs"`
+}
+
+type resolvedPolicyPublish struct {
+	Publish bool `json:"publish"`
 }
 
 type resolvedPolicyIntent struct {
@@ -280,7 +285,8 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	if policy.Version >= 1 && policy.Version <= 7 {
 		policy.TestEvidence.LegacyStoreInRepo = false
 	}
-	if policy.Version >= 1 && policy.Version <= 8 {
+	if policy.Version >= 1 && policy.Version <= 9 {
+		policy.EffectiveConfig.Publish = false
 		policy.Version = resolvedPolicyVersion
 	}
 }
@@ -367,6 +373,7 @@ func resolvedPolicyFromConfigWithSkips(cfg *config.Config, sources []db.ConfigSo
 			RetentionNS: int64(cfg.Test.Evidence.Retention),
 			MaxRuns:     cfg.Test.Evidence.MaxRuns,
 		},
+		EffectiveConfig: resolvedPolicyPublish{Publish: cfg.EffectiveConfig.Publish},
 	}
 	if policy.Sources == nil {
 		policy.Sources = []db.ConfigSource{}

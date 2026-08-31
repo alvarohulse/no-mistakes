@@ -87,6 +87,8 @@ func newAxiRunCmd() *cobra.Command {
 	var metadata string
 	var refreshStrategyValue string
 	var stackedOn string
+	var publishEffectiveConfig bool
+	var noPublishEffectiveConfig bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -117,6 +119,10 @@ func newAxiRunCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			effectiveConfigPublish, err := effectiveConfigPublishOverride(cmd, publishEffectiveConfig, noPublishEffectiveConfig)
+			if err != nil {
+				return emitError(cmd, 2, err.Error())
+			}
 			refreshStrategy, err := types.ParseRefreshStrategy(refreshStrategyValue)
 			if err != nil {
 				return emitError(cmd, 2, err.Error(), "Use --refresh-strategy rebase or --refresh-strategy merge")
@@ -153,7 +159,7 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, "--pr-note and --pr-note-file are mutually exclusive",
 						`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 				}
-				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided, metadataValue, selection, selectionProvided)
+				return runAxiRun(cmd, autoYes, skipSteps, intent, prNote, prNoteFile, noteProvided, metadataValue, effectiveConfigPublish, selection, selectionProvided)
 			})
 		},
 	}
@@ -163,6 +169,8 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&prNote, "pr-note", "", "author-supplied text added to the PR Notes section (maximum 16 KiB; applies only to a new run)")
 	cmd.Flags().StringVar(&prNoteFile, "pr-note-file", "", "read the PR note from this file instead of --pr-note (maximum 16 KiB)")
 	cmd.Flags().StringVar(&metadata, "metadata", "", "opaque run metadata exposed to subprocesses and PR formatters (maximum 16 KiB; empty clears on rerun)")
+	cmd.Flags().BoolVar(&publishEffectiveConfig, "publish-effective-config", false, "publish the complete stored effective configuration in the built-in GitHub PR body for this run")
+	cmd.Flags().BoolVar(&noPublishEffectiveConfig, "no-publish-effective-config", false, "do not publish the stored effective configuration in the built-in GitHub PR body for this run")
 	cmd.Flags().StringVar(&refreshStrategyValue, "refresh-strategy", "", "refresh strategy for a new run: rebase or merge (default: trusted config, then rebase)")
 	cmd.Flags().StringVar(&stackedOn, "stacked-on", "", "branch this change is stacked on; used as the refresh and pull-request base")
 	return cmd
@@ -217,7 +225,7 @@ func validateMetadata(metadata string) error {
 	return nil
 }
 
-func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool, metadata *string, selection refreshSelection, selectionProvided bool) error {
+func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, prNote, prNoteFile string, noteProvided bool, metadata *string, effectiveConfigPublish *bool, selection refreshSelection, selectionProvided bool) error {
 	ctx := cmd.Context()
 	env, err := openAxiRunEnv()
 	if err != nil {
@@ -270,6 +278,10 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 		return emitError(cmd, 2, "a run is already active for this branch; --metadata applies only when starting a new run",
 			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with metadata")
 	}
+	if runID != "" && effectiveConfigPublish != nil {
+		return emitError(cmd, 2, "a run is already active for this branch; effective-config publication flags apply only when starting a new run",
+			"Let the active run finish (or `no-mistakes axi abort`), then start a fresh run with the publication override")
+	}
 	if runID == "" {
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
@@ -295,7 +307,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 				`Pass either --pr-note "<text>" or --pr-note-file <path>, not both`)
 		}
 		var err error
-		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note, metadata, selection)
+		runID, err = triggerRun(ctx, env, branch, headSHA, skipSteps, intent, note, metadata, effectiveConfigPublish, selection)
 		if err != nil {
 			if ownershipErr, ok := err.(*branchOwnershipError); ok {
 				return emitBranchOwnershipError(cmd, ownershipErr)
@@ -446,7 +458,7 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string, metadata *string, selection refreshSelection) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, prNote string, metadata *string, effectiveConfigPublish *bool, selection refreshSelection) (string, error) {
 	pushOptions := formatSkipPushOptions(skipSteps)
 	pushOptions = append(pushOptions, formatRefreshSelectionPushOptions(selection.Strategy, selection.StackedOn)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
@@ -458,7 +470,10 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	if metadata != nil {
 		pushOptions = append(pushOptions, formatMetadataPushOption(metadata))
 	}
-	if (strings.TrimSpace(prNote) != "" || metadata != nil) && !pushOptionsWithinTransport(pushOptions) {
+	if option := formatEffectiveConfigPublishPushOption(effectiveConfigPublish); option != "" {
+		pushOptions = append(pushOptions, option)
+	}
+	if (strings.TrimSpace(prNote) != "" || metadata != nil || effectiveConfigPublish != nil) && !pushOptionsWithinTransport(pushOptions) {
 		return "", fmt.Errorf("combined --intent, --pr-note, and --metadata are too large for the git push-option transport (maximum %d bytes encoded); shorten the supplied values", maxAggregatePushOptionBytes)
 	}
 	priorRunIDs, err := runIDsForHead(env.client, env.repo.ID, branch, headSHA)
@@ -490,7 +505,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSt
 	// No run appeared: the push was likely up-to-date. Rerun the latest gate
 	// head so `axi run` is still useful when there are no new commits.
 	var rr ipc.RerunResult
-	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote, metadata, selection), &rr); err != nil {
+	if err := env.client.Call(ipc.MethodRerun, rerunParams(env.repo.ID, branch, skipSteps, intent, prNote, metadata, effectiveConfigPublish, selection), &rr); err != nil {
 		return "", fmt.Errorf("no run started for %q: %v", branch, err)
 	}
 	return rr.RunID, nil
@@ -574,16 +589,17 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 	return &ipc.GetActiveRunParams{RepoID: repoID, Branch: branch}
 }
 
-func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, selection refreshSelection) *ipc.RerunParams {
+func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, prNote string, metadata *string, effectiveConfigPublish *bool, selection refreshSelection) *ipc.RerunParams {
 	return &ipc.RerunParams{
-		RepoID:          repoID,
-		Branch:          branch,
-		SkipSteps:       skipSteps,
-		RefreshStrategy: selection.Strategy,
-		StackedOn:       selection.StackedOn,
-		Intent:          intent,
-		PRNote:          prNote,
-		Metadata:        metadata,
+		RepoID:                 repoID,
+		Branch:                 branch,
+		SkipSteps:              skipSteps,
+		RefreshStrategy:        selection.Strategy,
+		StackedOn:              selection.StackedOn,
+		Intent:                 intent,
+		PRNote:                 prNote,
+		Metadata:               metadata,
+		EffectiveConfigPublish: effectiveConfigPublish,
 	}
 }
 

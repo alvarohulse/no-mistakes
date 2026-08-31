@@ -119,6 +119,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			effectiveConfigPublish, err := parseEffectiveConfigPublishPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			gatePath, err := normalizeNotifyGatePath(gate)
 			if err != nil {
 				return err
@@ -137,16 +141,17 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
-				Gate:            gatePath,
-				Ref:             ref,
-				Old:             oldSHA,
-				New:             newSHA,
-				SkipSteps:       skipSteps,
-				RefreshStrategy: refreshStrategy,
-				StackedOn:       stackedOn,
-				Intent:          intent,
-				PRNote:          prNote,
-				Metadata:        metadata,
+				Gate:                   gatePath,
+				Ref:                    ref,
+				Old:                    oldSHA,
+				New:                    newSHA,
+				SkipSteps:              skipSteps,
+				RefreshStrategy:        refreshStrategy,
+				StackedOn:              stackedOn,
+				Intent:                 intent,
+				PRNote:                 prNote,
+				Metadata:               metadata,
+				EffectiveConfigPublish: effectiveConfigPublish,
 			}, &result)
 		},
 	}
@@ -360,6 +365,56 @@ func parseMetadataPushOptions(options []string) (*string, error) {
 		metadata = &value
 	}
 	return metadata, nil
+}
+
+const effectiveConfigPublishPushOptionPrefix = "no-mistakes.publish-effective-config="
+
+func formatEffectiveConfigPublishPushOption(publish *bool) string {
+	if publish == nil {
+		return ""
+	}
+	if *publish {
+		return effectiveConfigPublishPushOptionPrefix + "true"
+	}
+	return effectiveConfigPublishPushOptionPrefix + "false"
+}
+
+func parseEffectiveConfigPublishPushOptions(options []string) (*bool, error) {
+	var publish *bool
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, effectiveConfigPublishPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		var parsed bool
+		switch value {
+		case "true":
+			parsed = true
+		case "false":
+			parsed = false
+		default:
+			return nil, fmt.Errorf("effective-config publication push option must be true or false")
+		}
+		publish = &parsed
+	}
+	return publish, nil
+}
+
+func effectiveConfigPublishOverride(cmd *cobra.Command, publish, noPublish bool) (*bool, error) {
+	publishChanged := cmd.Flags().Changed("publish-effective-config")
+	noPublishChanged := cmd.Flags().Changed("no-publish-effective-config")
+	if publishChanged && noPublishChanged {
+		return nil, fmt.Errorf("--publish-effective-config and --no-publish-effective-config are mutually exclusive")
+	}
+	if publishChanged {
+		value := publish
+		return &value, nil
+	}
+	if noPublishChanged {
+		value := !noPublish
+		return &value, nil
+	}
+	return nil, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {
