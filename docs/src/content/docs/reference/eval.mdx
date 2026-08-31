@@ -12,7 +12,7 @@ The `eval` commands do not start or use the shared daemon, alter a gate, emit re
 
 Replay does invoke the selected agent normally, so that agent may send the restored code and review context to its configured model provider. The local-only guarantee concerns eval storage and transport added by no-mistakes, not the selected agent's ordinary provider traffic.
 
-When `eval sets`, `eval report`, or `eval run` resolves repository fingerprints into display names, it consults `state.sqlite` only when that pipeline database already exists and opens it read-only. Display lookup never creates or migrates pipeline state; without a readable database, dashboards fall back to short fingerprints.
+`eval sets`, `eval report`, and `eval run` consult `state.sqlite` only when that pipeline database already exists, and open it read-only. Repository names in set composition are resolved from locally registered repositories; display lookup never creates or migrates pipeline state, and unresolved cases fall back to short fingerprints.
 
 ## How cases are collected
 
@@ -141,7 +141,7 @@ Matching is a documented cascade of strengths: the same finding ID, the same fil
 
 The report prints recall, precision bounds (adjudicated vs pending-as-FP), and F1 as the headline metric **only when false-positive gold exists** so precision is real. Otherwise F1 is withheld rather than reported as recall-in-disguise.
 
-`--repeats` defaults to `3` and must be at least `1`. Candidates must use an agent that can enforce the requested route. Native `cursor` and explicit `acp:<target>` candidates accept a bare model; ACP targets reject effort, while native Cursor accepts effort only with an unparameterized model so no-mistakes can add one unambiguous `[effort=...]` override. Rovo Dev rejects explicit model and effort because it exposes no verified selection mechanism. Replays are intentionally isolated from the production `NM_HOME`; they do not contact the shared no-mistakes daemon. The selected agent still communicates with its configured model provider in the normal way.
+`--repeats` defaults to `3` and must be at least `1`. Candidates must use an agent that can enforce the requested route. Native `cursor` and explicit `acp:<target>` candidates accept a bare model name (still supplied with `vendor`); ACP targets reject effort, while native Cursor accepts effort only with an unparameterized model so no-mistakes can add one unambiguous `[effort=...]` override. Rovo Dev rejects explicit model and effort because it exposes no verified selection mechanism. Replays are intentionally isolated from the production `NM_HOME`; they do not contact the shared no-mistakes daemon. The selected agent still communicates with its configured model provider in the normal way.
 
 ## Report results
 
