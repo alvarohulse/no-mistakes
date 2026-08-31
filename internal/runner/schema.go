@@ -276,9 +276,6 @@ func appliedOverridePaths(prefix string, override *Override) []string {
 	if override.present["runner"] {
 		paths = append(paths, appliedSpecPaths(prefix+".runner", override.Runner)...)
 	}
-	if len(paths) == 0 {
-		return []string{prefix}
-	}
 	return paths
 }
 

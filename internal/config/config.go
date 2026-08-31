@@ -4052,9 +4052,7 @@ func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMe
 	for _, prefix := range []string{"commands", "preflight", "pipeline.skip_steps", "ignore_patterns", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci", "allow_repo_commands"} {
 		provenance.applyPrefix(prefix)
 	}
-	if repo.has("refresh.strategy") {
-		provenance.apply("refresh.strategy")
-	}
+	provenance.apply("refresh.strategy")
 	provenance.applyPrompts(global.Prompts, repo.Prompts)
 	if repo.Agent != "" {
 		cfg.Agent = repo.Agent

@@ -801,7 +801,14 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	if err != nil {
 		return fmt.Errorf("persist effective config: create staging directory: %w", err)
 	}
+	renamed := false
 	defer func() {
+		if renamed {
+			if err != nil {
+				_ = os.RemoveAll(p.RunDir(runID))
+			}
+			return
+		}
 		if cleanupErr := os.RemoveAll(tempDir); err == nil && cleanupErr != nil {
 			err = fmt.Errorf("persist effective config: clean staging directory: %w", cleanupErr)
 		}
@@ -818,6 +825,9 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	if err := validatePersistedEffectiveConfig(tempDir, runID, artifacts.PolicyDigest); err != nil {
 		return err
 	}
+	if err := syncEffectiveConfigDirectory(tempDir); err != nil {
+		return fmt.Errorf("persist effective config: sync staging directory: %w", err)
+	}
 	if _, statErr := os.Stat(p.RunDir(runID)); statErr == nil {
 		return fmt.Errorf("persist effective config: run artifact directory already exists")
 	} else if !os.IsNotExist(statErr) {
@@ -826,16 +836,9 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	if err := os.Rename(tempDir, p.RunDir(runID)); err != nil {
 		return fmt.Errorf("persist effective config atomically: %w", err)
 	}
-	runsDir, err := os.Open(p.RunsDir())
-	if err != nil {
-		return fmt.Errorf("persist effective config: open runs directory: %w", err)
-	}
-	if err := runsDir.Sync(); err != nil {
-		_ = runsDir.Close()
+	renamed = true
+	if err := syncEffectiveConfigDirectory(p.RunsDir()); err != nil {
 		return fmt.Errorf("persist effective config: sync runs directory: %w", err)
-	}
-	if err := runsDir.Close(); err != nil {
-		return fmt.Errorf("persist effective config: close runs directory: %w", err)
 	}
 	return nil
 }
