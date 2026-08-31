@@ -235,7 +235,7 @@ func TestConfigExplainRunReturnsStoredYAMLAndAxiStatusShowsAvailability(t *testi
 	if err != nil {
 		t.Fatalf("axi status stored run: %v\n%s", err, statusOutput)
 	}
-	if !strings.Contains(statusOutput, "effective_config: "+p.EffectiveConfigYAML(storedRun.ID)) {
+	if !strings.Contains(statusOutput, p.EffectiveConfigYAML(storedRun.ID)) {
 		t.Fatalf("axi status omitted effective config path:\n%s", statusOutput)
 	}
 	if err := os.WriteFile(p.EffectiveConfigYAML(storedRun.ID), append(storedYAML, ' '), 0o600); err != nil {

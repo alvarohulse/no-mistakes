@@ -1051,16 +1051,6 @@ func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	evidenceRoot := filepath.Join(blockedParent, "evidence")
-	configBody := fmt.Sprintf("test:\n  evidence:\n    local_root: %q\n", evidenceRoot)
-	if err := os.WriteFile(p.ConfigFile(), []byte(configBody), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	pending, err := d.InsertRun(repo.ID, "feature/pending-cleanup", "head", "base")
 	if err != nil {
 		t.Fatal(err)
@@ -1072,9 +1062,9 @@ func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(evidenceRoot, pending.ID)
+	target := filepath.Join(t.TempDir(), pending.ID)
 	archived, err := d.ArchiveRunWithMetricReceiptAndTargets(record, false, []string{target}, func() error {
-		return os.RemoveAll(target)
+		return fmt.Errorf("leave archived artifact cleanup pending")
 	})
 	if !archived || err == nil {
 		t.Fatalf("seed pending cleanup = archived %t, error %v", archived, err)
