@@ -42,10 +42,14 @@ func (a *cursorAgent) buildArgs(workspace, repo, resumeID string) []string {
 	args := make([]string, 0, len(extraArgs)+14)
 	args = append(args, extraArgs...)
 	if a.model != "" {
-		args = append(args, "--model", a.model)
-	}
-	if a.effort != "" {
-		args = append(args, "--effort", string(a.effort))
+		model := a.model
+		if a.effort != "" {
+			// Cursor Agent exposes reasoning effort only through its
+			// parameterized --model value; it rejects a standalone --effort.
+			// Route validation guarantees model is bare before this append.
+			model += "[effort=" + string(a.effort) + "]"
+		}
+		args = append(args, "--model", model)
 	}
 	args = append(args,
 		"-p",

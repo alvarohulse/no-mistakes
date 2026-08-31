@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCursorAgent_RunUsesStdinAndContainedWorkspace(t *testing.T) {
@@ -103,6 +105,49 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 		if !strings.Contains(string(prompt), want) {
 			t.Fatalf("stdin prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestCursorAgent_RunEncodesEffortInParameterizedModel(t *testing.T) {
+	dir := t.TempDir()
+	modelFile := filepath.Join(dir, "model.txt")
+	t.Setenv("NM_CURSOR_MODEL", modelFile)
+	script := filepath.Join(dir, "cursor-agent")
+	contents := `#!/bin/sh
+previous=""
+model=""
+for arg in "$@"; do
+  case "$arg" in
+    --effort|--effort=*) echo "unknown option --effort" >&2; exit 64 ;;
+  esac
+  if [ "$previous" = "--model" ]; then model="$arg"; fi
+  previous="$arg"
+done
+printf '%s' "$model" > "$NM_CURSOR_MODEL"
+cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"cursor-session"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"cursor-session"}'
+`
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := NewWithOptions(types.AgentCursor, script, nil, Options{
+		Model: "gpt-5.6-sol", Vendor: "openai", Effort: EffortHigh,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err := a.Run(context.Background(), RunOpts{Prompt: "review", CWD: dir}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	model, err := os.ReadFile(modelFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(model); got != "gpt-5.6-sol[effort=high]" {
+		t.Fatalf("cursor model = %q, want parameterized effort", got)
 	}
 }
 

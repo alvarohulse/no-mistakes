@@ -52,7 +52,7 @@ func TestReplayReportsPlanAndPerResultProgress(t *testing.T) {
 	var results []progress
 	_, evaluations, err := Replay(ctx, store, ReplayOptions{
 		Set:       "labeled",
-		Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"},
+		Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "anthropic"},
 		Repeats:   2,
 		OnPlan: func(session Session, cases []Case) {
 			plannedCases = len(cases)

@@ -348,7 +348,7 @@ func TestReplayRestoresCaseIntoAnIsolatedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	session, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1})
+	session, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "anthropic"}, Repeats: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +885,7 @@ func TestCaptureAndReportScoresMatchingCandidateAsTruePositive(t *testing.T) {
 	if _, err := Capture(ctx, store, p, sourceDB, run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1}); err != nil {
+	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "labeled", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "anthropic"}, Repeats: 1}); err != nil {
 		t.Fatal(err)
 	} else if len(evaluations) != 1 || evaluations[0].TruePositive != 1 || evaluations[0].FalseNegative != 0 || evaluations[0].Pending != 0 {
 		t.Fatalf("replay scores = %#v, want true-positive match on the same issue", evaluations)
@@ -931,7 +931,7 @@ func TestCaptureAndReportLeavesUnmatchedCandidateFindingsPending(t *testing.T) {
 	if len(cases) != 1 || cases[0].Labels.HasGold() {
 		t.Fatalf("approve capture = %#v, want unlabeled gold", cases)
 	}
-	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "test"}, Repeats: 1}); err != nil {
+	if _, evaluations, err := Replay(ctx, store, ReplayOptions{Set: "all", Candidate: Candidate{Agent: types.AgentClaude, Model: "test", Vendor: "anthropic"}, Repeats: 1}); err != nil {
 		t.Fatal(err)
 	} else if len(evaluations) != 1 || evaluations[0].FalsePositive != 0 || evaluations[0].Pending != 1 {
 		t.Fatalf("replay scores = %#v, want unmatched finding queued, not a false-positive", evaluations)
@@ -957,6 +957,7 @@ func TestParseCandidateRequiresExplicitModelAndVendor(t *testing.T) {
 		"claude,vendor=anthropic",
 		"claude,model=opus,vendor=anthropic,model=sonnet",
 		"claude,model=opus,vendor=anthropic,unknown=value",
+		"pi,model=gemini,vendor=Google",
 	} {
 		if _, err := ParseCandidate(input); err == nil {
 			t.Errorf("ParseCandidate(%q) succeeded, want error", input)
@@ -1018,6 +1019,13 @@ func TestParseCandidateAcceptsACPModelButRejectsACPEffort(t *testing.T) {
 	}
 	if _, err := ParseCandidate("acp:custom,model=gpt-5,vendor=openai,effort=high"); err == nil || !strings.Contains(err.Error(), "effort") {
 		t.Fatalf("ParseCandidate(ACP effort) error = %v, want unsupported effort", err)
+	}
+}
+
+func TestParseCandidateRejectsAgentVendorMismatch(t *testing.T) {
+	_, err := ParseCandidate("claude,model=gpt-5.4,vendor=openai")
+	if err == nil || !strings.Contains(err.Error(), "cannot serve") {
+		t.Fatalf("ParseCandidate() error = %v, want agent/model/vendor compatibility failure", err)
 	}
 }
 

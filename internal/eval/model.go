@@ -82,7 +82,7 @@ func (c Candidate) Validate() error {
 	if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.Vendor) == "" {
 		return fmt.Errorf("candidate must set both model=<model> and vendor=<vendor>; an implicit route is not reproducible")
 	}
-	return agent.ValidateModelEffort(c.Agent, c.Model, c.Effort)
+	return types.ValidateAgentRoute(c.Agent, c.Model, c.Vendor, string(c.Effort))
 }
 
 // ParseCandidate accepts the explicit, harness-neutral candidate spelling.

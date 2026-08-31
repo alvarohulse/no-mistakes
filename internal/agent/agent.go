@@ -900,7 +900,7 @@ func New(name types.AgentName, bin string, extraArgs []string) (Agent, error) {
 
 // NewWithOptions creates an agent by name with additional backend-specific options.
 func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts Options) (Agent, error) {
-	if err := ValidateModelEffort(name, opts.Model, opts.Effort); err != nil {
+	if err := types.ValidateAgentRoute(name, opts.Model, opts.Vendor, string(opts.Effort)); err != nil {
 		return nil, err
 	}
 	var created Agent

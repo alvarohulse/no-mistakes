@@ -122,7 +122,7 @@ no-mistakes eval run \
   --repeats 3
 ```
 
-A candidate is `agent,model=<model>,vendor=<vendor>[,effort=<level>]`. `model` and `vendor` are mandatory so the stored route is reproducible; `effort` is optional and accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. The route uses the same typed model/vendor and harness-specific effort mapping as a pipeline agent: Claude, Cursor, and Copilot use `--effort`, Codex uses `model_reasoning_effort`, Pi uses `--thinking`, and OpenCode carries the variant in its request. ACP targets and Rovo Dev reject effort because no verified mechanism exists.
+A candidate is `agent,model=<model>,vendor=<vendor>[,effort=<level>]`. `model` and `vendor` are mandatory so the stored route is reproducible; `effort` is optional and accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. The route uses the same typed model/vendor and harness-specific effort mapping as a pipeline agent: Claude and Copilot use `--effort`, Codex uses `model_reasoning_effort`, Pi uses `--thinking`, OpenCode carries the variant in its request, and native Cursor encodes it in the parameterized model name its CLI supports. ACP targets and Rovo Dev reject effort because no verified mechanism exists.
 
 The earlier `agent+model` spelling is no longer accepted and reports the replacement syntax. Historical evaluation rows keep their original candidate identity and measurements; reports never rewrite, reprice, or recompute them.
 
@@ -141,7 +141,7 @@ Matching is a documented cascade of strengths: the same finding ID, the same fil
 
 The report prints recall, precision bounds (adjudicated vs pending-as-FP), and F1 as the headline metric **only when false-positive gold exists** so precision is real. Otherwise F1 is withheld rather than reported as recall-in-disguise.
 
-`--repeats` defaults to `3` and must be at least `1`. Candidates must use an agent that can enforce an explicit model; ACP targets such as `cursor` and `acp:<target>` are rejected. Replays are intentionally isolated from the production `NM_HOME`; they do not contact the shared no-mistakes daemon. The selected agent still communicates with its configured model provider in the normal way.
+`--repeats` defaults to `3` and must be at least `1`. Candidates must use an agent that can enforce the requested route. Native `cursor` and explicit `acp:<target>` candidates accept a bare model; ACP targets reject effort, while native Cursor accepts effort only with an unparameterized model so no-mistakes can add one unambiguous `[effort=...]` override. Rovo Dev rejects explicit model and effort because it exposes no verified selection mechanism. Replays are intentionally isolated from the production `NM_HOME`; they do not contact the shared no-mistakes daemon. The selected agent still communicates with its configured model provider in the normal way.
 
 ## Report results
 
