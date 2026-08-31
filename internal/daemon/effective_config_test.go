@@ -37,6 +37,8 @@ func TestStartRunPersistsExactEffectiveConfigArtifactsBeforeWorktreeExecution(t 
 	}
 
 	runDir := filepath.Join(p.Root(), "runs", runID)
+	assertOwnerOnlyDirectory(t, p.RunsDir())
+	assertOwnerOnlyDirectory(t, runDir)
 	yamlBytes := readOwnerOnlyArtifact(t, filepath.Join(runDir, "effective-config.yaml"))
 	metaBytes := readOwnerOnlyArtifact(t, filepath.Join(runDir, "effective-config.meta.json"))
 
@@ -311,6 +313,17 @@ func readOwnerOnlyArtifact(t *testing.T, path string) []byte {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return data
+}
+
+func assertOwnerOnlyDirectory(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Fatalf("%s mode = %#o, want 0700", path, info.Mode().Perm())
+	}
 }
 
 func assertNoEffectiveConfigArtifacts(t *testing.T, p *paths.Paths) {

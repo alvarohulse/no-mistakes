@@ -848,8 +848,11 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 	if p == nil || artifacts == nil {
 		return fmt.Errorf("persist effective config: artifacts are incomplete")
 	}
-	if err := os.MkdirAll(p.RunsDir(), 0o755); err != nil {
+	if err := os.MkdirAll(p.RunsDir(), 0o700); err != nil {
 		return fmt.Errorf("persist effective config: create runs directory: %w", err)
+	}
+	if err := protectEffectiveConfigDirectory(p.RunsDir()); err != nil {
+		return fmt.Errorf("persist effective config: protect runs directory: %w", err)
 	}
 	tempDir, err := os.MkdirTemp(p.RunsDir(), "."+runID+"-")
 	if err != nil {
@@ -860,7 +863,7 @@ func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *ef
 			err = fmt.Errorf("persist effective config: clean staging directory: %w", cleanupErr)
 		}
 	}()
-	if err := os.Chmod(tempDir, 0o700); err != nil {
+	if err := protectEffectiveConfigDirectory(tempDir); err != nil {
 		return fmt.Errorf("persist effective config: protect staging directory: %w", err)
 	}
 	if err := writeOwnerOnlyFile(filepath.Join(tempDir, "effective-config.yaml"), artifacts.YAML); err != nil {
@@ -888,6 +891,11 @@ func writeOwnerOnlyFile(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	if err := protectEffectiveConfigFile(path); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		return err
@@ -899,7 +907,7 @@ func writeOwnerOnlyFile(path string, data []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	return nil
 }
 
 func validatePersistedEffectiveConfig(dir, runID, policyDigest string) error {
