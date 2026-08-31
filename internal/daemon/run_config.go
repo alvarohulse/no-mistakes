@@ -70,9 +70,9 @@ type runPolicyResolution struct {
 	TrustedSHA           string
 	GateDir              string
 	TrustedRef           string
-	Provenance           *effectiveConfigProvenance
-	RefreshProvenance    effectiveConfigProvenanceValue
-	SkipProvenance       effectiveConfigProvenanceValue
+	Provenance           *config.EffectiveConfigProvenance
+	RefreshProvenance    config.EffectiveConfigProvenanceValue
+	SkipProvenance       config.EffectiveConfigProvenanceValue
 }
 
 type agentRouteResolutionError struct {
@@ -137,19 +137,19 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, err
 	}
 	override := resolveGlobalOverride(globalInput, repo)
-	effectiveRepoConfig, sources := effectiveRepoConfigAndSources(globalInput, pushedInput, trustedInput, override)
+	effectiveResolution, sources := effectiveConfigResolutionAndSources(globalInput, pushedInput, trustedInput, override)
+	effectiveRepoConfig := effectiveResolution.Repo
 	if override != nil {
 		slog.Warn("global config override is active: honoring machine-local repository configuration", "repo_id", repo.ID, "override", override.Key)
 	}
-	allowRepoCommands := trustedInput != nil && trustedInput.Config.AllowRepoCommands
-	provenance := captureEffectiveConfigProvenance(globalInput, pushedInput, trustedInput, override, effectiveRepoConfig, allowRepoCommands)
+	allowRepoCommands := effectiveResolution.AllowRepoCommands
 	if allowRepoCommands {
 		slog.Warn("allow_repo_commands is enabled on the default branch: honoring commands/hooks/agent routes from pushed branch", "repo_id", repo.ID)
 	} else if pushedConfigUsesDifferentTrustedControls(pushedInput.Config, effectiveRepoConfig) {
 		slog.Info("repo commands/hooks/agent/model routes loaded from default branch, not pushed branch", "repo_id", repo.ID, "default_branch", repo.DefaultBranch)
 	}
 
-	cfg := config.Merge(globalInput.Config, effectiveRepoConfig)
+	cfg := effectiveResolution.Config
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 		return nil, err
 	}
@@ -172,9 +172,9 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, fmt.Errorf("resolve managed step plan: %w", err)
 	}
 	resolvedSkips := resolveRunStepSkips(skipped, cfg.ConfiguredSkipSteps)
-	skipProvenance := provenance.value("pipeline.skip_steps")
+	skipProvenance := effectiveResolution.Provenance.Value("pipeline.skip_steps")
 	if skipped != nil {
-		skipProvenance = effectiveConfigProvenanceValue{Source: effectiveConfigSourceRunRequest}
+		skipProvenance = config.EffectiveConfigProvenanceValue{Source: config.EffectiveConfigSourceRunRequest}
 	}
 	if err := validateRunStepSkips(resolvedSkips, execSteps); err != nil {
 		return nil, err
@@ -185,7 +185,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 	}
 	cfg.ResolvedRunner = &resolvedRunner
 	if !demo {
-		if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
+		if err := effectiveResolution.ResolveAgent(ctx, exec.LookPath); err != nil {
 			return nil, &agentRouteResolutionError{err: fmt.Errorf("resolve agent routes: %w", err)}
 		}
 	}
@@ -198,9 +198,9 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		return nil, err
 	}
 	resolvedRefreshStrategy := resolveRefreshStrategy(refreshStrategy, cfg.RefreshStrategy)
-	refreshProvenance := provenance.value("refresh.strategy")
+	refreshProvenance := effectiveResolution.Provenance.Value("refresh.strategy")
 	if refreshStrategy != "" {
-		refreshProvenance = effectiveConfigProvenanceValue{Source: effectiveConfigSourceRunRequest}
+		refreshProvenance = config.EffectiveConfigProvenanceValue{Source: config.EffectiveConfigSourceRunRequest}
 	}
 	policy, err := resolvedPolicyFromConfigWithSkips(cfg, sources, execSteps, resolvedSkips, resolvedRefreshStrategy, demo)
 	if err != nil {
@@ -225,7 +225,7 @@ func (m *RunManager) resolveRunPolicyFromBareGate(ctx context.Context, repo *db.
 		TrustedSHA:           trustedSHA,
 		GateDir:              gateDir,
 		TrustedRef:           trustedRef,
-		Provenance:           provenance,
+		Provenance:           effectiveResolution.Provenance,
 		RefreshProvenance:    refreshProvenance,
 		SkipProvenance:       skipProvenance,
 	}
@@ -508,6 +508,11 @@ func repoConfigInputFromBytes(repoConfig *config.RepoConfig, data []byte, kind, 
 }
 
 func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *repoConfigInput, override *globalOverrideInput) (*config.RepoConfig, []db.ConfigSource) {
+	resolved, sources := effectiveConfigResolutionAndSources(global, pushed, trusted, override)
+	return resolved.Repo, sources
+}
+
+func effectiveConfigResolutionAndSources(global *globalConfigInput, pushed, trusted *repoConfigInput, override *globalOverrideInput) (*config.EffectiveConfigResolution, []db.ConfigSource) {
 	if global == nil {
 		global = &globalConfigInput{Config: config.DefaultGlobalConfig()}
 	}
@@ -520,17 +525,21 @@ func effectiveRepoConfigAndSources(global *globalConfigInput, pushed, trusted *r
 	}
 	allowRepoCommands := trustedConfig != nil && trustedConfig.AllowRepoCommands
 	resolve := func(pushedConfig, trustedConfig *config.RepoConfig, allow bool) *config.RepoConfig {
-		effective := config.EffectiveRepoConfig(pushedConfig, trustedConfig, allow)
+		var overrideConfig *config.RepoConfig
 		if override != nil {
-			effective = config.OverlayRepoConfig(effective, override.Config)
+			overrideConfig = override.Config
 		}
-		return effective
+		return config.ResolveEffectiveConfig(global.Config, pushedConfig, trustedConfig, overrideConfig, allow).Repo
 	}
-	effective := resolve(pushed.Config, trustedConfig, allowRepoCommands)
-	resolved := config.Merge(global.Config, effective)
+	var overrideConfig *config.RepoConfig
+	if override != nil {
+		overrideConfig = override.Config
+	}
+	effective := config.ResolveEffectiveConfig(global.Config, pushed.Config, trustedConfig, overrideConfig, allowRepoCommands)
+	resolved := effective.Config
 
 	var sources []db.ConfigSource
-	if global.Source != nil && !reflect.DeepEqual(resolved, config.Merge(config.DefaultGlobalConfig(), effective)) {
+	if global.Source != nil && !reflect.DeepEqual(resolved, config.Merge(config.DefaultGlobalConfig(), effective.Repo)) {
 		sources = append(sources, *global.Source)
 	}
 	if pushed.Source != nil {

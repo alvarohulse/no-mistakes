@@ -532,3 +532,35 @@ windows:
 		t.Fatalf("equivalent scalar and mapping commands differ: %+v / %+v", mapping, legacy)
 	}
 }
+
+func TestCommandOverlayReportsOnlyAppliedNestedLeaves(t *testing.T) {
+	decode := func(input string) Command {
+		t.Helper()
+		var command Command
+		if err := yaml.Unmarshal([]byte(input), &command); err != nil {
+			t.Fatal(err)
+		}
+		return command
+	}
+	base := decode(`
+run: make build
+windows:
+  run: make build-windows
+  runner:
+    executable: pwsh
+    args: [-NoLogo, -NoProfile, -NonInteractive, -Command]
+`)
+	override := decode(`
+windows:
+  runner:
+    executable: powershell
+`)
+
+	merged, applied := base.OverlayWithAppliedPaths(override)
+	if merged.Windows == nil || merged.Windows.Run == nil || *merged.Windows.Run != "make build-windows" || merged.Windows.Runner == nil {
+		t.Fatalf("merged Windows command = %#v", merged.Windows)
+	}
+	if got, want := applied, []string{"windows.runner.executable"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("applied paths = %v, want %v", got, want)
+	}
+}

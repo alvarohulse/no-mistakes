@@ -27,12 +27,10 @@ const (
 )
 
 const (
-	effectiveConfigSourceGlobal         = "global"
-	effectiveConfigSourceGlobalOverride = "global-override"
-	effectiveConfigSourceTrusted        = "trusted"
-	effectiveConfigSourcePushed         = "pushed"
-	effectiveConfigSourceRunRequest     = "run-request"
-	effectiveConfigSourceRuntime        = "runtime"
+	effectiveConfigSourceGlobal         = config.EffectiveConfigSourceGlobal
+	effectiveConfigSourceGlobalOverride = config.EffectiveConfigSourceGlobalOverride
+	effectiveConfigSourceRunRequest     = config.EffectiveConfigSourceRunRequest
+	effectiveConfigSourceRuntime        = config.EffectiveConfigSourceRuntime
 )
 
 type effectiveConfigProvenanceValue struct {
@@ -47,235 +45,6 @@ func (p effectiveConfigProvenanceValue) comment() string {
 		comment += "; qualifier=" + strings.Join(p.Qualifiers, ",")
 	}
 	return comment
-}
-
-type effectiveConfigProvenance struct {
-	values          map[string]effectiveConfigProvenanceValue
-	disabledReaders map[string]effectiveConfigProvenanceValue
-}
-
-func captureEffectiveConfigProvenance(global *globalConfigInput, pushed, trusted *repoConfigInput, override *globalOverrideInput, effectiveRepo *config.RepoConfig, allow bool) *effectiveConfigProvenance {
-	globalPaths := map[string]bool(nil)
-	pushedPaths := map[string]bool(nil)
-	trustedPaths := map[string]bool(nil)
-	overridePaths := map[string]bool(nil)
-	if global != nil && global.Config != nil {
-		globalPaths = global.Config.DeclaredPaths()
-	}
-	if pushed != nil && pushed.Config != nil {
-		pushedPaths = pushed.Config.DeclaredPaths()
-	}
-	if trusted != nil && trusted.Config != nil {
-		trustedPaths = trusted.Config.DeclaredPaths()
-	}
-	if override != nil && override.Config != nil {
-		overridePaths = override.Config.DeclaredPaths()
-	}
-	for _, paths := range []map[string]bool{globalPaths, pushedPaths, trustedPaths, overridePaths} {
-		normalizeEffectiveConfigPresence(paths)
-	}
-	ledger := &effectiveConfigProvenance{values: make(map[string]effectiveConfigProvenanceValue)}
-	allPaths := make(map[string]bool)
-	for _, declaredPaths := range []map[string]bool{globalPaths, pushedPaths, trustedPaths, overridePaths} {
-		for path := range declaredPaths {
-			allPaths[path] = true
-		}
-	}
-	for _, path := range effectiveConfigKnownInputPaths() {
-		allPaths[path] = true
-	}
-	for path := range allPaths {
-		value := effectiveConfigProvenanceValue{Source: effectiveConfigSourceGlobal, IsDefault: !declaresEffectiveConfigPath(globalPaths, path)}
-		selection := effectiveRepoSelectionForPath(path)
-		if selection != effectiveRepoNone {
-			declared := false
-			source := ""
-			switch selection {
-			case effectiveRepoPushed:
-				declared, source = declaresEffectiveConfigPath(pushedPaths, path), effectiveConfigSourcePushed
-			case effectiveRepoTrusted:
-				declared, source = declaresEffectiveConfigPath(trustedPaths, path), effectiveConfigSourceTrusted
-			case effectiveRepoRouted:
-				if allow {
-					declared, source = declaresEffectiveConfigPath(pushedPaths, path), effectiveConfigSourcePushed
-				} else {
-					declared, source = declaresEffectiveConfigPath(trustedPaths, path), effectiveConfigSourceTrusted
-				}
-			}
-			if declared {
-				value = effectiveConfigProvenanceValue{Source: source}
-			}
-			if declaresEffectiveConfigPath(overridePaths, path) {
-				value = effectiveConfigProvenanceValue{Source: effectiveConfigSourceGlobalOverride}
-			}
-		}
-		ledger.values[path] = value
-	}
-	for _, field := range []string{"shared", "intent", "refresh", "review", "build", "test", "document", "lint", "pr", "ci"} {
-		path := "prompts." + field
-		selectedRepo := pushedPaths[path] && allow || trustedPaths[path] && !allow || overridePaths[path]
-		if globalPaths[path] && selectedRepo {
-			value := ledger.value(path)
-			value.Qualifiers = append(value.Qualifiers, "append")
-			ledger.values[path] = value
-		}
-	}
-	ledger.disabledReaders = captureDisabledReaderProvenance(global, effectiveRepo, ledger.value("intent.disabled_readers"))
-	return ledger
-}
-
-func normalizeEffectiveConfigPresence(paths map[string]bool) {
-	if len(paths) == 0 {
-		return
-	}
-	aliases := map[string]string{
-		"babysit_timeout":  "ci_timeout",
-		"auto_fix.babysit": "auto_fix.ci",
-		"auto_fix.rebase":  "auto_fix.refresh",
-	}
-	for legacy, canonical := range aliases {
-		if paths[legacy] {
-			paths[canonical] = true
-		}
-	}
-	for path := range paths {
-		if path == "rebase" || strings.HasPrefix(path, "rebase.") {
-			paths["refresh"+strings.TrimPrefix(path, "rebase")] = true
-		}
-	}
-}
-
-// declaresEffectiveConfigPath reports whether a layer supplied the exact
-// value. A declared scalar or sequence owns its descendants in the rendered
-// explanatory projection; a mapping parent does not, because a later overlay
-// may have changed only one of its child fields.
-func declaresEffectiveConfigPath(paths map[string]bool, path string) bool {
-	if paths[path] {
-		return true
-	}
-	for candidate := path; ; {
-		index := strings.LastIndex(candidate, ".")
-		if index < 0 {
-			return false
-		}
-		candidate = candidate[:index]
-		if !paths[candidate] {
-			continue
-		}
-		prefix := candidate + "."
-		for declared := range paths {
-			if strings.HasPrefix(declared, prefix) {
-				return false
-			}
-		}
-		return true
-	}
-}
-
-type effectiveRepoSource int
-
-const (
-	effectiveRepoNone effectiveRepoSource = iota
-	effectiveRepoPushed
-	effectiveRepoTrusted
-	effectiveRepoRouted
-)
-
-func (p *effectiveConfigProvenance) value(path string) effectiveConfigProvenanceValue {
-	if p != nil {
-		if value, ok := p.values[path]; ok {
-			return value
-		}
-	}
-	return effectiveConfigProvenanceValue{Source: effectiveConfigSourceGlobal, IsDefault: true}
-}
-
-func effectiveRepoSelectionForPath(path string) effectiveRepoSource {
-	globalOnly := []string{
-		"managed", "runner", "acpx_path", "acp_registry_overrides", "agent_path_override", "agent_args_override",
-		"ci_timeout", "step_quiet_warning", "process_termination_grace", "log_level", "session_reuse", "eval",
-		"test.evidence.local_root", "test.evidence.retention", "test.evidence.max_runs",
-	}
-	for _, prefix := range globalOnly {
-		if path == prefix || strings.HasPrefix(path, prefix+".") {
-			return effectiveRepoNone
-		}
-	}
-	trustedOnly := []string{
-		"refresh.strategy", "document.instructions", "review.path_instructions", "disable_project_settings", "no_ci",
-		"ci.rerun_transient", "pipeline.skip_steps", "allow_repo_commands",
-	}
-	for _, prefix := range trustedOnly {
-		if path == prefix || strings.HasPrefix(path, prefix+".") {
-			return effectiveRepoTrusted
-		}
-	}
-	routed := []string{
-		"agent", "commands", "preflight", "hooks", "prompts", "intent.agent", "intent.model", "refresh.agent", "refresh.model",
-		"review.agent", "review.model", "review.candidates", "build.agent", "build.model", "test.agent", "test.model",
-		"document.agent", "document.model", "lint.agent", "lint.model", "pr.agent", "pr.model", "ci.agent", "ci.model",
-	}
-	for _, prefix := range routed {
-		if path == prefix || strings.HasPrefix(path, prefix+".") {
-			return effectiveRepoRouted
-		}
-	}
-	return effectiveRepoPushed
-}
-
-func effectiveConfigKnownInputPaths() []string {
-	paths := []string{
-		"managed", "runner.executable", "runner.args", "agent", "preflight", "hooks.post_worktree", "hooks.pr_body",
-		"acpx_path", "acp_registry_overrides", "agent_path_override", "agent_args_override", "ci_timeout", "step_quiet_warning",
-		"process_termination_grace", "log_level", "session_reuse", "ignore_patterns", "ci.rerun_transient", "commit.fix_message",
-		"intent.enabled", "intent.threshold", "intent.slack_days", "intent.disabled_readers", "test.evidence.local_root",
-		"test.evidence.retention", "test.evidence.max_runs",
-		"document.instructions", "review.path_instructions", "refresh.strategy", "pipeline.skip_steps", "disable_project_settings", "no_ci",
-	}
-	for _, prefix := range []string{"auto_fix", "eval", "prompts"} {
-		var fields []string
-		switch prefix {
-		case "auto_fix":
-			fields = []string{"refresh", "review", "build", "test", "document", "lint", "ci"}
-		case "eval":
-			fields = []string{"capture_provenance", "auto_capture", "max_cases", "diversified_size"}
-		case "prompts":
-			fields = []string{"shared", "intent", "refresh", "review", "build", "test", "document", "lint", "pr", "ci"}
-		}
-		for _, field := range fields {
-			paths = append(paths, prefix+"."+field)
-		}
-	}
-	for _, command := range []string{"build", "test", "lint", "format"} {
-		paths = append(paths, "commands."+command)
-		for _, suffix := range []string{"run", "runner", "runner.executable", "runner.args", "linux", "macos", "windows"} {
-			paths = append(paths, "commands."+command+"."+suffix)
-		}
-	}
-	return paths
-}
-
-func captureDisabledReaderProvenance(global *globalConfigInput, effectiveRepo *config.RepoConfig, repoValue effectiveConfigProvenanceValue) map[string]effectiveConfigProvenanceValue {
-	values := make(map[string]effectiveConfigProvenanceValue)
-	globalReaders := make(map[string]bool)
-	if global != nil && global.Config != nil {
-		for _, reader := range global.Config.Intent.DisabledReaders {
-			reader = strings.ToLower(strings.TrimSpace(reader))
-			globalReaders[reader] = true
-			values[reader] = effectiveConfigProvenanceValue{Source: effectiveConfigSourceGlobal}
-		}
-	}
-	if effectiveRepo != nil {
-		for _, reader := range effectiveRepo.Intent.DisabledReaders {
-			reader = strings.ToLower(strings.TrimSpace(reader))
-			value := repoValue
-			if globalReaders[reader] {
-				value.Qualifiers = append(value.Qualifiers, "merge")
-			}
-			values[reader] = value
-		}
-	}
-	return values
 }
 
 type effectiveConfigArtifacts struct {
@@ -304,6 +73,7 @@ type effectiveConfigDocument struct {
 	Commands                effectiveCommandsDocument `yaml:"commands"`
 	Preflight               []runner.Command          `yaml:"preflight"`
 	Hooks                   config.Hooks              `yaml:"hooks"`
+	AllowRepoCommands       bool                      `yaml:"allow_repo_commands"`
 	ACPXPath                string                    `yaml:"acpx_path"`
 	ACPRegistryOverrides    map[string]string         `yaml:"acp_registry_overrides"`
 	AgentPathOverride       map[string]string         `yaml:"agent_path_override"`
@@ -530,6 +300,7 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		},
 		Preflight:               canonicalResolvedCommands(cfg.Preflight),
 		Hooks:                   cfg.Hooks,
+		AllowRepoCommands:       cfg.AllowRepoCommands,
 		ACPXPath:                cfg.ACPXPath,
 		ACPRegistryOverrides:    copyStringMap(cfg.ACPRegistryOverrides),
 		AgentPathOverride:       copyStringMap(cfg.AgentPathOverride),
@@ -577,22 +348,52 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 	ledger := resolved.Provenance
 	annotations := make(map[string]effectiveConfigProvenanceValue)
 	set := func(artifactPath, configPath string) {
-		annotations[artifactPath] = ledger.value(configPath)
+		annotations[artifactPath] = effectiveConfigProvenanceFromConfig(ledger.Value(configPath))
 	}
-	setGlobal := func(path string) { annotations[path] = ledger.value(path) }
+	setGlobal := func(path string) { annotations[path] = effectiveConfigProvenanceFromConfig(ledger.Value(path)) }
 	runtimeValue := effectiveConfigProvenanceValue{Source: effectiveConfigSourceRuntime}
-	for _, path := range []string{"agent", "runner.resolved", "pipeline.steps"} {
+	for _, path := range []string{"agent.demo", "runner.resolved", "pipeline.steps"} {
 		annotations[path] = runtimeValue
 	}
+	if document.Agent.Demo {
+		annotations["agent.default"] = runtimeValue
+		annotations["agent.step_routes"] = runtimeValue
+		annotations["agent.review_candidates"] = runtimeValue
+	} else {
+		set("agent.default", "resolved.agent.default")
+		for i := range document.Agent.Default {
+			set(fmt.Sprintf("agent.default[%d]", i), fmt.Sprintf("resolved.agent.default[%d]", i))
+		}
+		annotations["agent.step_routes"] = runtimeValue
+		annotations["agent.review_candidates"] = runtimeValue
+		for step := range document.Agent.StepRoutes {
+			prefix := "agent.step_routes." + string(step)
+			resolvedPrefix := "resolved." + prefix
+			set(prefix+".agents", resolvedPrefix+".agents")
+			for i := range document.Agent.StepRoutes[step].Agents {
+				set(fmt.Sprintf("%s.agents[%d]", prefix, i), fmt.Sprintf("%s.agents[%d]", resolvedPrefix, i))
+			}
+			set(prefix+".model.name", resolvedPrefix+".model.name")
+			set(prefix+".model.vendor", resolvedPrefix+".model.vendor")
+		}
+		for i := range document.Agent.ReviewCandidates {
+			prefix := fmt.Sprintf("agent.review_candidates[%d]", i)
+			resolvedPrefix := "resolved." + prefix
+			set(prefix+".agent", resolvedPrefix+".agent")
+			set(prefix+".model.name", resolvedPrefix+".model.name")
+			set(prefix+".model.vendor", resolvedPrefix+".model.vendor")
+			set(prefix+".optional", resolvedPrefix+".optional")
+		}
+	}
 	setGlobal("managed")
-	annotations["runner.configured.executable"] = ledger.value("runner.executable")
-	annotations["runner.configured.args"] = ledger.value("runner.args")
-	annotations["run.refresh_strategy"] = resolved.RefreshProvenance
+	annotations["runner.configured.executable"] = effectiveConfigProvenanceFromConfig(ledger.Value("runner.executable"))
+	annotations["runner.configured.args"] = effectiveConfigProvenanceFromConfig(ledger.Value("runner.args"))
+	annotations["run.refresh_strategy"] = effectiveConfigProvenanceFromConfig(resolved.RefreshProvenance)
 	annotations["run.stacked_on"] = effectiveConfigProvenanceValue{Source: effectiveConfigSourceGlobal, IsDefault: true}
 	if strings.TrimSpace(document.Run.StackedOn) != "" {
 		annotations["run.stacked_on"] = effectiveConfigProvenanceValue{Source: effectiveConfigSourceRunRequest}
 	}
-	annotations["run.skip_steps"] = resolved.SkipProvenance
+	annotations["run.skip_steps"] = effectiveConfigProvenanceFromConfig(resolved.SkipProvenance)
 	for i, skip := range document.Run.SkipSteps {
 		source := effectiveConfigSourceRuntime
 		if skip.Source == types.SkipSourceRunRequest {
@@ -604,14 +405,22 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 	}
 	set("pipeline.configured_skip_steps", "pipeline.skip_steps")
 	for _, command := range []string{"build", "test", "lint", "format"} {
-		set("commands."+command, "commands."+command)
-		for _, suffix := range []string{"run", "runner", "runner.executable", "runner.args", "linux", "macos", "windows"} {
+		// A scalar command is the shorthand form of its run leaf. Mapping
+		// commands annotate their individual leaves below.
+		set("commands."+command, "commands."+command+".run")
+		for _, suffix := range []string{
+			"run", "runner", "runner.executable", "runner.args",
+			"linux", "linux.run", "linux.runner", "linux.runner.executable", "linux.runner.args",
+			"macos", "macos.run", "macos.runner", "macos.runner.executable", "macos.runner.args",
+			"windows", "windows.run", "windows.runner", "windows.runner.executable", "windows.runner.args",
+		} {
 			set("commands."+command+"."+suffix, "commands."+command+"."+suffix)
 		}
 	}
 	set("preflight", "preflight")
 	set("hooks.post_worktree", "hooks.post_worktree")
 	set("hooks.pr_body", "hooks.pr_body")
+	set("allow_repo_commands", "allow_repo_commands")
 	for _, path := range []string{"acpx_path", "acp_registry_overrides", "agent_path_override", "agent_args_override", "ci_timeout", "step_quiet_warning", "process_termination_grace", "log_level", "session_reuse"} {
 		setGlobal(path)
 	}
@@ -643,16 +452,24 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 	return annotations
 }
 
-func annotateDisabledReaderSources(annotations map[string]effectiveConfigProvenanceValue, ledger *effectiveConfigProvenance, readers []string) {
+func annotateDisabledReaderSources(annotations map[string]effectiveConfigProvenanceValue, ledger *config.EffectiveConfigProvenance, readers []string) {
 	if ledger == nil {
 		return
 	}
 	for i, reader := range readers {
-		value, ok := ledger.disabledReaders[reader]
+		value, ok := ledger.DisabledReaderValue(reader)
 		if !ok {
-			value = ledger.value("intent.disabled_readers")
+			value = ledger.Value("intent.disabled_readers")
 		}
-		annotations[fmt.Sprintf("intent.disabled_readers[%d]", i)] = value
+		annotations[fmt.Sprintf("intent.disabled_readers[%d]", i)] = effectiveConfigProvenanceFromConfig(value)
+	}
+}
+
+func effectiveConfigProvenanceFromConfig(value config.EffectiveConfigProvenanceValue) effectiveConfigProvenanceValue {
+	return effectiveConfigProvenanceValue{
+		Source:     value.Source,
+		IsDefault:  value.IsDefault,
+		Qualifiers: append([]string(nil), value.Qualifiers...),
 	}
 }
 
@@ -660,20 +477,22 @@ var effectiveConfigIndexPattern = regexp.MustCompile(`\[[0-9]+\]`)
 var effectiveConfigCommentPattern = regexp.MustCompile(`^#?\s*source=(global|global-override|trusted|pushed|run-request|runtime); is_default=(true|false)(; qualifier=(clear|append|merge)(,(clear|append|merge))*)?$`)
 
 func annotationForEffectiveConfigPath(path string, annotations map[string]effectiveConfigProvenanceValue) effectiveConfigProvenanceValue {
-	for _, initial := range []string{path, effectiveConfigIndexPattern.ReplaceAllString(path, "[]")} {
-		for candidate := initial; candidate != ""; {
-			if value, ok := annotations[candidate]; ok {
-				return value
-			}
-			if strings.HasSuffix(candidate, "[]") {
-				candidate = strings.TrimSuffix(candidate, "[]")
-				continue
-			}
-			if index := strings.LastIndex(candidate, "."); index >= 0 {
-				candidate = candidate[:index]
-			} else {
-				break
-			}
+	if value, ok := annotations[path]; ok {
+		return value
+	}
+	normalized := effectiveConfigIndexPattern.ReplaceAllString(path, "[]")
+	for candidate := normalized; candidate != ""; {
+		if value, ok := annotations[candidate]; ok {
+			return value
+		}
+		if strings.HasSuffix(candidate, "[]") {
+			candidate = strings.TrimSuffix(candidate, "[]")
+			continue
+		}
+		if index := strings.LastIndex(candidate, "."); index >= 0 {
+			candidate = candidate[:index]
+		} else {
+			break
 		}
 	}
 	return effectiveConfigProvenanceValue{}
