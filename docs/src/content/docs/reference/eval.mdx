@@ -12,6 +12,8 @@ The `eval` commands do not start or use the shared daemon, alter a gate, emit re
 
 Replay does invoke the selected agent normally, so that agent may send the restored code and review context to its configured model provider. The local-only guarantee concerns eval storage and transport added by no-mistakes, not the selected agent's ordinary provider traffic.
 
+When `eval sets`, `eval report`, or `eval run` resolves repository fingerprints into display names, it consults `state.sqlite` only when that pipeline database already exists and opens it read-only. Display lookup never creates or migrates pipeline state; without a readable database, dashboards fall back to short fingerprints.
+
 ## How cases are collected
 
 Cases arrive on their own. When an eligible run finishes, its decided Review passes are frozen into the local corpus - one case per pass. Collection happens after the pipeline has already reported its outcome, so it can never change or fail the run; a problem is logged and nothing else.
@@ -88,7 +90,9 @@ Finding-level gold uses `labels.json` schema version 2. There is no migration fr
 no-mistakes eval sets
 ```
 
-The command shows counts, finding-level gold coverage, unlabeled / pending cases, queued candidate findings, and composition by repository fingerprint, dominant language, change-size bucket, source severity, and finding type.
+The command renders a dashboard headlined by the **diversified holdout**, including its size and pin/cap state, a finding-level confusion matrix, and composition by repository, dominant language, change-size bucket, source severity, and finding type. Repository names are resolved from locally registered repositories; unresolved cases keep a short fingerprint.
+
+The headline also includes an instant **self-score**: the recorded source reviews scored against their own gold with the same matcher used for candidates. This reads frozen case files only and never invokes an agent or reaches the network. The other sets appear as compact counts beneath the holdout.
 
 ### Evaluation corpus index by change size and highest severity
 
@@ -114,13 +118,17 @@ Do not fit matcher thresholds or review product prompts against `diversified`. T
 ```sh
 no-mistakes eval run \
   --cases diversified \
-  --candidate codex+gpt-5.4 \
+  --candidate codex,model=gpt-5.4,vendor=openai,effort=low \
   --repeats 3
 ```
 
-A candidate is always explicit: `agent+model`. The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
+A candidate is `agent,model=<model>,vendor=<vendor>[,effort=<level>]`. `model` and `vendor` are mandatory so the stored route is reproducible; `effort` is optional and accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. The route uses the same typed model/vendor and harness-specific effort mapping as a pipeline agent: Claude, Cursor, and Copilot use `--effort`, Codex uses `model_reasoning_effort`, Pi uses `--thinking`, and OpenCode carries the variant in its request. ACP targets and Rovo Dev reject effort because no verified mechanism exists.
 
-Repeating a replay creates a new measurement session, but the same case IDs and repeat count produce the same cohort. Replay never mutates the frozen case manifest, labels, or replay configuration. Set inspection, diversified refresh, and report reads likewise stabilize when repeated.
+The earlier `agent+model` spelling is no longer accepted and reports the replacement syntax. Historical evaluation rows keep their original candidate identity and measurements; reports never rewrite, reprice, or recompute them.
+
+The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test. The captured allowlisted replay configuration excludes the source machine's agent arguments and routes, so the explicit candidate is the only route applied.
+
+Repeating a replay creates a new measurement session, but the same case IDs and repeat count produce the same cohort. Replay never mutates the frozen case manifest, labels, or replay configuration. Set inspection, diversified refresh, and report reads likewise stabilize when repeated. During a replay, the command prints the immutable plan, one scored progress line after each persisted result, and a summary dashboard.
 
 Replay scores each candidate finding against that gold:
 
@@ -153,7 +161,7 @@ The report groups local replays by candidate and cohort. A cohort pins the selec
 - a finite-sample case-level recall range, with repeats averaged inside each case
 - whether a candidate lies on the observed recall-versus-token-cost frontier
 
-The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token instrumentation from a real zero.
+The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token or cost instrumentation from a real zero. Stored historical evaluations remain immutable inputs: reporting never replays, reprices, or recomputes them.
 
 ## Current boundary
 

@@ -2432,7 +2432,7 @@ intent:
 #         Repo-specific testing guidance.
 
 # Local review evaluation corpus, used by "no-mistakes eval" to compare
-# agent+model candidates against review passes your own pipeline already made.
+# explicit agent/model/vendor candidates against review passes your own pipeline already made.
 # capture_provenance records, on every review round, the exact commits and
 # configuration a replay needs; it cannot be added afterwards, so a round
 # recorded without it is never replayable. auto_capture freezes each finished

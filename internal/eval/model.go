@@ -59,6 +59,12 @@ type Candidate struct {
 	Effort agent.Effort    `json:"effort,omitempty"`
 }
 
+var candidateUsage = "candidate must be agent,model=<model>,vendor=<vendor>[,effort=<minimal|low|medium|high|xhigh|max>] (for example codex,model=gpt-5.4,vendor=openai,effort=low)"
+
+// CandidateUsage returns the canonical CLI spelling and supported effort
+// vocabulary.
+func CandidateUsage() string { return candidateUsage }
+
 func (c Candidate) String() string {
 	value := string(c.Agent) + ",model=" + c.Model + ",vendor=" + c.Vendor
 	if c.Effort != "" {
@@ -67,14 +73,26 @@ func (c Candidate) String() string {
 	return value
 }
 
+// Validate rejects incomplete or unsupported routes before a replay reserves
+// cases or records a measurement session.
+func (c Candidate) Validate() error {
+	if strings.TrimSpace(string(c.Agent)) == "" {
+		return fmt.Errorf("candidate must name an agent")
+	}
+	if strings.TrimSpace(c.Model) == "" || strings.TrimSpace(c.Vendor) == "" {
+		return fmt.Errorf("candidate must set both model=<model> and vendor=<vendor>; an implicit route is not reproducible")
+	}
+	return agent.ValidateModelEffort(c.Agent, c.Model, c.Effort)
+}
+
 // ParseCandidate accepts the explicit, harness-neutral candidate spelling.
 func ParseCandidate(raw string) (Candidate, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return Candidate{}, fmt.Errorf("candidate must be agent,model=<model>,vendor=<vendor>[,effort=<level>]")
+		return Candidate{}, fmt.Errorf("%s", candidateUsage)
 	}
 	if !strings.Contains(value, ",") && strings.Contains(value, "+") {
-		return Candidate{}, fmt.Errorf("candidate agent+model spelling was replaced; use agent,model=<model>,vendor=<vendor>[,effort=<level>]")
+		return Candidate{}, fmt.Errorf("candidate agent+model spelling was replaced; %s", candidateUsage)
 	}
 	parts := strings.Split(value, ",")
 	candidate := Candidate{Agent: types.AgentName(strings.TrimSpace(parts[0]))}
@@ -102,10 +120,7 @@ func ParseCandidate(raw string) (Candidate, error) {
 			return Candidate{}, fmt.Errorf("unknown candidate field %q", key)
 		}
 	}
-	if candidate.Agent == "" || candidate.Model == "" || candidate.Vendor == "" {
-		return Candidate{}, fmt.Errorf("candidate must include agent, model, and vendor")
-	}
-	if err := agent.ValidateModelEffort(candidate.Agent, candidate.Model, candidate.Effort); err != nil {
+	if err := candidate.Validate(); err != nil {
 		return Candidate{}, err
 	}
 	return candidate, nil

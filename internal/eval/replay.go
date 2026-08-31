@@ -26,11 +26,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// ReplayOptions controls one isolated candidate comparison.
+// ReplayOptions controls one isolated candidate comparison. Optional callbacks
+// observe the immutable plan and each result after it has been persisted.
 type ReplayOptions struct {
 	Set       string
 	Candidate Candidate
 	Repeats   int
+	OnPlan    func(session Session, cases []Case)
+	OnResult  func(evaluation Evaluation, completed, total int)
 }
 
 // Session records the immutable local plan used for one replay batch.
@@ -60,10 +63,7 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 	if opts.Repeats <= 0 {
 		return Session{}, nil, fmt.Errorf("repeats must be at least 1")
 	}
-	if opts.Candidate.Model == "" || opts.Candidate.Vendor == "" {
-		return Session{}, nil, fmt.Errorf("candidate must include model and vendor")
-	}
-	if err := agent.ValidateModelEffort(opts.Candidate.Agent, opts.Candidate.Model, opts.Candidate.Effort); err != nil {
+	if err := opts.Candidate.Validate(); err != nil {
 		return Session{}, nil, err
 	}
 	cases, session, err := store.prepareReplay(ctx, opts)
@@ -78,7 +78,11 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 		store.releaseReplayReservation(session.ID)
 	}()
 
-	evaluations := make([]Evaluation, 0, len(cases)*opts.Repeats)
+	if opts.OnPlan != nil {
+		opts.OnPlan(session, cases)
+	}
+	total := len(cases) * opts.Repeats
+	evaluations := make([]Evaluation, 0, total)
 	var failed int
 	for repeat := 1; repeat <= opts.Repeats; repeat++ {
 		for _, c := range cases {
@@ -90,6 +94,9 @@ func Replay(ctx context.Context, store *Store, opts ReplayOptions) (Session, []E
 				return session, evaluations, err
 			}
 			evaluations = append(evaluations, evaluation)
+			if opts.OnResult != nil {
+				opts.OnResult(evaluation, len(evaluations), total)
+			}
 		}
 	}
 	if failed > 0 {
