@@ -482,16 +482,16 @@ func TestPersistEvaluationQueuesEveryUnexpectedCandidateFinding(t *testing.T) {
 	}
 	defer store.Close()
 
-	caseDir := store.caseDir("candidate-findings")
-	if err := os.MkdirAll(caseDir, 0o755); err != nil {
+	c := writeSyntheticCase(t, store, syntheticCaseSpec{
+		id: "candidate-findings", fingerprint: "repo", capturedAt: 1, changedLines: 10,
+		changedFiles: []string{"main.go"},
+	})
+	c.Labels.QueuedCandidateFindings = 7
+	if err := writeJSON(filepath.Join(c.Dir, "labels.json"), c.Labels); err != nil {
 		t.Fatal(err)
 	}
-	labels := Labels{Version: labelsVersion}
-	if err := writeJSON(filepath.Join(caseDir, "labels.json"), labels); err != nil {
-		t.Fatal(err)
-	}
-	c := Case{Manifest: Manifest{ID: "candidate-findings", SourceRunID: "run", SourceRoundID: "round"}, Labels: labels, Dir: caseDir}
-	if err := store.registerCase(c); err != nil {
+	labelsBefore, err := os.ReadFile(filepath.Join(c.Dir, "labels.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.persistEvaluation(c, Evaluation{
@@ -506,12 +506,39 @@ func TestPersistEvaluationQueuesEveryUnexpectedCandidateFinding(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := readJSON(filepath.Join(caseDir, "labels.json"), &labels); err != nil {
+	if err := store.persistEvaluation(c, Evaluation{
+		ID:           "failed-evaluation",
+		SessionID:    "session",
+		CaseID:       c.ID,
+		Candidate:    "claude+test",
+		Repeat:       2,
+		Status:       "failed",
+		Pending:      5,
+		FindingCount: 5,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if labels.QueuedCandidateFindings != 3 {
-		t.Fatalf("queued candidate findings = %d, want 3", labels.QueuedCandidateFindings)
+
+	queued, err := store.pendingFindingCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued[c.ID] != 3 {
+		t.Fatalf("queued candidate findings = %d, want 3 from completed evaluations", queued[c.ID])
+	}
+	labelsAfter, err := os.ReadFile(filepath.Join(c.Dir, "labels.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(labelsBefore) != string(labelsAfter) {
+		t.Fatalf("persisting evaluations changed labels.json:\nbefore: %s\nafter: %s", labelsBefore, labelsAfter)
+	}
+	summaries, err := InspectSets(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaries[0].Name != "all" || summaries[0].QueuedFindings != 3 {
+		t.Fatalf("all-set queued findings = %#v, want 3 from completed evaluations and no legacy counter", summaries[0])
 	}
 }
 

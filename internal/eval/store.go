@@ -423,6 +423,33 @@ func (s *Store) updateCaseGoldCount(id string, n int) error {
 	return nil
 }
 
+// pendingFindingCounts derives queued unmatched findings from completed replay
+// results. Evaluation rows own this state; labels.json retains its historical
+// counter only for backward-compatible round trips.
+func (s *Store) pendingFindingCounts() (map[string]int, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("eval registry is closed")
+	}
+	rows, err := s.db.Query(`SELECT case_id, COALESCE(SUM(pending), 0) FROM evaluations WHERE status = 'completed' GROUP BY case_id`)
+	if err != nil {
+		return nil, fmt.Errorf("sum queued candidate findings: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var caseID string
+		var pending int
+		if err := rows.Scan(&caseID, &pending); err != nil {
+			return nil, fmt.Errorf("scan queued candidate findings: %w", err)
+		}
+		out[caseID] = pending
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sum queued candidate findings: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) pinCount() (int, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("eval registry is closed")

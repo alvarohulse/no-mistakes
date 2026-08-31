@@ -598,26 +598,6 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return fmt.Errorf("record eval result: %w", err)
 	}
-	if evaluation.Status == "completed" && evaluation.Pending > 0 {
-		if err := incrementQueuedFindings(c.Dir, evaluation.Pending); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func incrementQueuedFindings(caseDir string, count int) error {
-	if count <= 0 {
-		return nil
-	}
-	var labels Labels
-	if err := readJSON(filepath.Join(caseDir, "labels.json"), &labels); err != nil {
-		return fmt.Errorf("read local labels queue: %w", err)
-	}
-	labels.QueuedCandidateFindings += count
-	if err := writeJSON(filepath.Join(caseDir, "labels.json"), labels); err != nil {
-		return fmt.Errorf("update local labels queue: %w", err)
-	}
 	return nil
 }
 
