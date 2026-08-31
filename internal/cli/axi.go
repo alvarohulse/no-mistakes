@@ -210,7 +210,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
 		rv := runViewFromDB(currentActive, steps)
-		annotateRunView(env, &rv)
+		annotateRunView(env, &rv, currentActive)
 		fields = append(fields, runObjectFieldWithKey("active_run", rv))
 		if syncField := cachedBranchSyncField(cmd, currentActive.ID); syncField != nil {
 			fields = append(fields, *syncField)
@@ -228,7 +228,7 @@ func runAxiHome(cmd *cobra.Command) (string, error) {
 	} else if otherActive != nil {
 		steps, _ := env.d.GetStepsByRun(otherActive.ID)
 		rv := runViewFromDB(otherActive, steps)
-		annotateRunView(env, &rv)
+		annotateRunView(env, &rv, otherActive)
 		fields = append(fields, runObjectFieldWithKey("other_branch_active_run", rv))
 		fingerprint += "|other:" + runStateFingerprint(rv)
 	} else {

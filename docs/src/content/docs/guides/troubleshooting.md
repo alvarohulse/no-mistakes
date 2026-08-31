@@ -161,6 +161,10 @@ Symptom: a run stops with a failed step.
 Check the per-step log at `~/.no-mistakes/logs/<runID>/<step>.log`.
 Fatal step errors are appended to that log, so failures such as rejected pushes include the returned error output there instead of only appearing in `daemon.log`.
 
+### Recovery reports an invalid effective-config artifact
+
+Runs launched with the effective-config recovery contract require both `<NM_HOME>/runs/<runID>/effective-config.yaml` and `effective-config.meta.json` to remain present, supported, and integrity-matched. A missing, corrupt, or mismatched file makes restart recovery fail closed before the daemon reads configuration that may have changed. Inspect the durable reason with `no-mistakes axi status --run <id>` and the owner-local files with `no-mistakes config explain --run <id>` when validation still succeeds. Do not recreate or edit the files: start a new run from the intended branch state. Older runs that predate the requirement report the artifact unavailable instead of inventing provenance.
+
 ### Push fails with `refusing to force-push`
 
 This means the live remote branch changed after the pipeline's last observed head and contains commit(s) the validated worktree did not incorporate.

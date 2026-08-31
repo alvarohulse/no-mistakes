@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +14,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -21,10 +23,12 @@ import (
 )
 
 const (
-	effectiveConfigSchemaVersion = 1
-	effectiveConfigYAMLMaxBytes  = 256 * 1024
-	effectiveConfigGenerator     = "no-mistakes/effective-config"
+	effectiveConfigSchemaVersion = effectiveconfig.SchemaVersion
+	effectiveConfigYAMLMaxBytes  = effectiveconfig.YAMLMaxBytes
+	effectiveConfigGenerator     = effectiveconfig.Generator
 )
+
+const effectiveConfigRequiredPolicyVersion = 9
 
 const (
 	effectiveConfigSourceGlobal         = config.EffectiveConfigSourceGlobal
@@ -53,16 +57,7 @@ type effectiveConfigArtifacts struct {
 	PolicyDigest string
 }
 
-type effectiveConfigMetadata struct {
-	SchemaVersion   int    `json:"schema_version"`
-	RunID           string `json:"run_id"`
-	PolicyDigest    string `json:"policy_digest"`
-	YAMLSHA256      string `json:"yaml_sha256"`
-	BinaryVersion   string `json:"binary_version"`
-	BinaryBuildSHA  string `json:"binary_build_sha"`
-	Generator       string `json:"generator"`
-	GeneratorSchema int    `json:"generator_schema"`
-}
+type effectiveConfigMetadata = effectiveconfig.Metadata
 
 type effectiveConfigDocument struct {
 	Managed                 bool                      `yaml:"managed"`
@@ -223,9 +218,6 @@ func renderEffectiveConfigArtifacts(runID, stackedOn string, resolved *runPolicy
 	}
 	annotations := effectiveConfigAnnotations(resolved, document)
 	annotateEffectiveConfigNode(&root, "", annotations)
-	if err := validateEffectiveConfigAnnotations(&root, ""); err != nil {
-		return nil, fmt.Errorf("effective config is incomplete: %w", err)
-	}
 	var rendered bytes.Buffer
 	encoder := yaml.NewEncoder(&rendered)
 	encoder.SetIndent(2)
@@ -598,7 +590,6 @@ func effectiveConfigProvenanceFromConfig(value config.EffectiveConfigProvenanceV
 }
 
 var effectiveConfigIndexPattern = regexp.MustCompile(`\[[0-9]+\]`)
-var effectiveConfigCommentPattern = regexp.MustCompile(`^#?\s*source=(global|global-override|trusted|pushed|run-request|runtime); is_default=(true|false)(; qualifier=(clear|append|merge)(,(clear|append|merge))*)?$`)
 
 func annotationForEffectiveConfigPath(path string, annotations map[string]effectiveConfigProvenanceValue) effectiveConfigProvenanceValue {
 	if value, ok := annotations[path]; ok {
@@ -691,100 +682,14 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func validateEffectiveConfigAnnotations(node *yaml.Node, path string) error {
-	if node == nil {
-		return fmt.Errorf("missing YAML node at %s", path)
-	}
-	if node.Kind == yaml.DocumentNode {
-		if len(node.Content) != 1 {
-			return fmt.Errorf("document has %d roots", len(node.Content))
-		}
-		return validateEffectiveConfigAnnotations(node.Content[0], path)
-	}
-	switch node.Kind {
-	case yaml.MappingNode:
-		if len(node.Content) == 0 {
-			if err := validateEffectiveConfigComment(node, path); err != nil {
-				return err
-			}
-		}
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			childPath := node.Content[i].Value
-			if path != "" {
-				childPath = path + "." + childPath
-			}
-			if err := validateEffectiveConfigAnnotations(node.Content[i+1], childPath); err != nil {
-				return err
-			}
-		}
-	case yaml.SequenceNode:
-		if len(node.Content) == 0 {
-			if err := validateEffectiveConfigComment(node, path); err != nil {
-				return err
-			}
-		}
-		for i, item := range node.Content {
-			if err := validateEffectiveConfigComment(item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
-				return err
-			}
-			if err := validateEffectiveConfigAnnotations(item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
-				return err
-			}
-		}
-	case yaml.ScalarNode:
-		if err := validateEffectiveConfigComment(node, path); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported YAML node kind %d at %s", node.Kind, path)
-	}
-	return nil
-}
-
-func validateEffectiveConfigComment(node *yaml.Node, path string) error {
-	comment := node.LineComment
-	if comment == "" {
-		comment = node.HeadComment
-	}
-	if !effectiveConfigCommentPattern.MatchString(comment) {
-		return fmt.Errorf("value %s has invalid or missing provenance", path)
-	}
-	return nil
-}
-
 func validSHA256Hex(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
 }
 
 func validateEffectiveConfigArtifacts(yamlBytes, metaBytes []byte, runID, policyDigest string) error {
-	if len(yamlBytes) == 0 || len(yamlBytes) > effectiveConfigYAMLMaxBytes {
-		return fmt.Errorf("effective config YAML completeness or size validation failed")
-	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(yamlBytes, &root); err != nil {
-		return fmt.Errorf("validate effective config YAML: %w", err)
-	}
-	if err := validateEffectiveConfigAnnotations(&root, ""); err != nil {
-		return fmt.Errorf("effective config is incomplete: %w", err)
-	}
-	var metadata effectiveConfigMetadata
-	decoder := json.NewDecoder(bytes.NewReader(metaBytes))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&metadata); err != nil {
-		return fmt.Errorf("validate effective config sidecar: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("validate effective config sidecar: trailing content")
-	}
-	digest := sha256.Sum256(yamlBytes)
-	if !validSHA256Hex(policyDigest) || !validSHA256Hex(metadata.PolicyDigest) || metadata.SchemaVersion != effectiveConfigSchemaVersion || metadata.GeneratorSchema != effectiveConfigSchemaVersion || metadata.Generator != effectiveConfigGenerator || metadata.RunID != runID || metadata.PolicyDigest != policyDigest || metadata.YAMLSHA256 != hex.EncodeToString(digest[:]) {
-		return fmt.Errorf("effective config sidecar integrity does not match rendered YAML")
-	}
-	if strings.TrimSpace(metadata.BinaryVersion) == "" || strings.TrimSpace(metadata.BinaryBuildSHA) == "" {
-		return fmt.Errorf("effective config sidecar binary identity is incomplete")
-	}
-	return nil
+	_, err := effectiveconfig.Validate(yamlBytes, metaBytes, runID, policyDigest)
+	return err
 }
 
 func persistEffectiveConfigArtifacts(p *paths.Paths, runID string, artifacts *effectiveConfigArtifacts) (err error) {
@@ -877,6 +782,37 @@ func validatePersistedEffectiveConfig(dir, runID, policyDigest string) error {
 		return fmt.Errorf("verify effective config sidecar: %w", err)
 	}
 	return validateEffectiveConfigArtifacts(yamlBytes, metaBytes, runID, policyDigest)
+}
+
+// ReadEffectiveConfigForRun returns a validated immutable artifact when one is
+// available. required reports whether this run's policy version makes any read
+// failure a recovery blocker. Pre-v9 runs may expose a real intact artifact,
+// but a missing artifact remains an explicit legacy-unavailable state.
+func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Artifact, bool, error) {
+	if run == nil {
+		return nil, true, fmt.Errorf("effective config run is nil")
+	}
+	policy, legacy, err := decodeResolvedPolicy(run.ResolvedPolicy, run.ResolvedPolicyDigest)
+	if err != nil {
+		return nil, true, fmt.Errorf("resolve effective config requirement: %w", err)
+	}
+	if legacy {
+		return nil, false, nil
+	}
+	required := policy.Version >= effectiveConfigRequiredPolicyVersion
+	var artifact *effectiveconfig.Artifact
+	if required {
+		artifact, err = effectiveconfig.ReadWithBinary(p, run.ID, *run.ResolvedPolicyDigest, policy.Binary.Version, policy.Binary.BuildSHA)
+	} else {
+		artifact, err = effectiveconfig.Read(p, run.ID, *run.ResolvedPolicyDigest)
+	}
+	if err != nil {
+		if !required && errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, required, err
+	}
+	return artifact, required, nil
 }
 
 func removeEffectiveConfigArtifacts(p *paths.Paths, runID string) {

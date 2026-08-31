@@ -20,12 +20,48 @@ func newConfigCmd() *cobra.Command {
 }
 
 func newConfigExplainCmd() *cobra.Command {
-	var format string
+	var format, runID string
 	cmd := &cobra.Command{
 		Use:   "explain",
-		Short: "Resolve the policy for the current gate branch",
+		Short: "Resolve current policy or read a stored run configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			runID = strings.TrimSpace(runID)
+			if runID != "" {
+				if cmd.Flags().Changed("format") {
+					return fmt.Errorf("--format cannot be used with --run; stored run configuration is YAML")
+				}
+				return trackCommand("config-explain", func() error {
+					p, database, err := openResources()
+					if err != nil {
+						return err
+					}
+					defer database.Close()
+					run, err := database.GetRun(runID)
+					if err != nil {
+						return fmt.Errorf("get run %q: %w", runID, err)
+					}
+					if run == nil {
+						receipt, receiptErr := database.GetRunMetricReceipt(runID)
+						if receiptErr != nil {
+							return fmt.Errorf("get archived run %q: %w", runID, receiptErr)
+						}
+						if receipt != nil {
+							return fmt.Errorf("effective config unavailable for archived run %q", runID)
+						}
+						return fmt.Errorf("run %q not found", runID)
+					}
+					artifact, _, err := daemon.ReadEffectiveConfigForRun(p, run)
+					if err != nil {
+						return fmt.Errorf("read stored effective config for run %q: %w", runID, err)
+					}
+					if artifact == nil {
+						return fmt.Errorf("effective config unavailable for legacy run %q", runID)
+					}
+					_, err = cmd.OutOrStdout().Write(artifact.YAML)
+					return err
+				})
+			}
 			format = strings.ToLower(strings.TrimSpace(format))
 			if format != "text" && format != "json" {
 				return fmt.Errorf("unsupported config explain format %q (expected text or json)", format)
@@ -66,5 +102,6 @@ func newConfigExplainCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
+	cmd.Flags().StringVar(&runID, "run", "", "read the immutable YAML stored for a run ID")
 	return cmd
 }

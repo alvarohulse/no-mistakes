@@ -94,9 +94,10 @@ func (d *DB) ListNewestTerminalUnpinned(limit int) ([]string, error) {
 
 // ArchiveRunWithMetricReceipt stores one immutable receipt and deletes the
 // matching terminal rich run in the same transaction. The transaction takes a
-// write lock before beforeDelete runs, so a concurrent pin cannot succeed
-// during destructive artifact cleanup. When requireUnpinned is true, a pin
-// that committed first turns the operation into a no-op.
+// write lock before the rich run is deleted, so a concurrent pin cannot
+// succeed during archival. Filesystem cleanup runs only after the transaction
+// commits. When requireUnpinned is true, a pin that committed first turns the
+// operation into a no-op.
 func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinned bool, beforeDelete func() error) (bool, error) {
 	if strings.TrimSpace(receipt.RunID) == "" || strings.TrimSpace(receipt.RepoID) == "" {
 		return false, fmt.Errorf("archive run metric receipt: run and repository IDs are required")
@@ -180,11 +181,6 @@ func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 			return false, fmt.Errorf("insert run metric receipt: %w", err)
 		}
 	}
-	if beforeDelete != nil {
-		if err := beforeDelete(); err != nil {
-			return false, fmt.Errorf("clean rich run artifacts: %w", err)
-		}
-	}
 	deleteSQL := `DELETE FROM runs WHERE id = ? AND status IN ('completed', 'failed', 'cancelled')`
 	if requireUnpinned {
 		deleteSQL += ` AND pinned_at IS NULL`
@@ -202,6 +198,11 @@ func (d *DB) ArchiveRunWithMetricReceipt(receipt RunMetricReceipt, requireUnpinn
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit run metric archival: %w", err)
+	}
+	if beforeDelete != nil {
+		if err := beforeDelete(); err != nil {
+			return true, fmt.Errorf("clean rich run artifacts after archival: %w", err)
+		}
 	}
 	return true, nil
 }

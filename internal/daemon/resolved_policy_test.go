@@ -153,6 +153,24 @@ func TestValidateResolvedPolicyNormalizesVersionSevenLocalEvidencePolicy(t *test
 	}
 }
 
+func TestValidateResolvedPolicyNormalizesVersionEightBeforeArtifactsWereRequired(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	steps := []pipeline.Step{policyTestStep{name: types.StepReview}}
+	policy, err := resolvedPolicyFromConfig(cfg, nil, steps, nil, types.RefreshStrategyRebase, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Version = 8
+	encoded, digest, err := marshalResolvedPolicyDTO(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &db.Run{ResolvedPolicy: &encoded, ResolvedPolicyDigest: &digest, RefreshStrategy: types.RefreshStrategyRebase}
+	if err := validateResolvedPolicy(cfg, run, steps); err != nil {
+		t.Fatalf("version-eight policy rejected: %v", err)
+	}
+}
+
 func TestValidateResolvedPolicyNormalizesVersionFourSkippedStepsToRunRequest(t *testing.T) {
 	cfg := resolvedRoutingTestConfig()
 	policySteps := []pipeline.Step{policyTestStep{name: types.StepBuild}}

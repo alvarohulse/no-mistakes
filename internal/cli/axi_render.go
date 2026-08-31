@@ -108,6 +108,7 @@ type runView struct {
 	Branch          string
 	Status          string
 	HeadSHA         string
+	EffectiveConfig string
 	RefreshStrategy types.RefreshStrategy
 	PRURL           string
 	Error           string
@@ -469,6 +470,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
+	if rv.EffectiveConfig != "" {
+		fields = append(fields, toon.Field{Key: "effective_config", Value: rv.EffectiveConfig})
+	}
 	if rv.PRURL != "" {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}

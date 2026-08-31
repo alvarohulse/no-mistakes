@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,7 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	artifact := map[string]string{"screenshot.png": "not really a png"}
 
 	stale := f.seed("stale", types.RunCompleted, 30*24*time.Hour, artifact)
+	writeRunArtifactFiles(t, f.p, stale, "PRIVATE-EFFECTIVE-CONFIG", "PRIVATE-EFFECTIVE-CONFIG-DIGEST")
 	activePending := f.seed("active-pending", types.RunPending, 30*24*time.Hour, artifact)
 	activeRunning := f.seed("active-running", types.RunRunning, 30*24*time.Hour, artifact)
 	for index := 0; index < 50; index++ {
@@ -112,6 +114,16 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 	if f.exists(stale) {
 		t.Error("evidence older than the retention window survived")
+	}
+	if _, err := os.Stat(f.p.RunDir(stale)); !os.IsNotExist(err) {
+		t.Fatalf("effective config artifacts survived rich-run archival: %v", err)
+	}
+	receipt, err := f.db.GetRunMetricReceipt(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt == nil || strings.Contains(receipt.PayloadJSON, "PRIVATE-EFFECTIVE-CONFIG") {
+		t.Fatalf("metric receipt retained effective config content or digest: %+v", receipt)
 	}
 	if !f.exists(activePending) {
 		t.Error("a pending run's evidence was removed while the run is still in flight")
@@ -173,6 +185,7 @@ func TestReapEvidenceRetainsPinnedAndNewestFiftyOldRuns(t *testing.T) {
 		old = append(old, f.seed("old", types.RunCompleted, 30*24*time.Hour, artifact))
 	}
 	pinned := f.seed("pinned", types.RunCompleted, 30*24*time.Hour, artifact)
+	writeRunArtifactFiles(t, f.p, pinned, "pinned-yaml", "pinned-meta")
 	if _, err := f.db.SetRunPinned(pinned, true); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +204,24 @@ func TestReapEvidenceRetainsPinnedAndNewestFiftyOldRuns(t *testing.T) {
 	}
 	if !f.exists(pinned) {
 		t.Error("pinned evidence was removed")
+	}
+	for _, path := range []string{f.p.EffectiveConfigYAML(pinned), f.p.EffectiveConfigMeta(pinned)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("pinned effective config artifact was removed: %v", err)
+		}
+	}
+}
+
+func writeRunArtifactFiles(t *testing.T, p *paths.Paths, runID, yamlBody, metaBody string) {
+	t.Helper()
+	if err := os.MkdirAll(p.RunDir(runID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.EffectiveConfigYAML(runID), []byte(yamlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.EffectiveConfigMeta(runID), []byte(metaBody), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

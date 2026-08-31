@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	resolvedPolicyVersion     = 8
+	resolvedPolicyVersion     = 9
 	resolvedPolicyStepEnabled = "enabled"
 	resolvedPolicyStepSkipped = "skipped"
 )
@@ -279,6 +279,8 @@ func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
 	}
 	if policy.Version >= 1 && policy.Version <= 7 {
 		policy.TestEvidence.LegacyStoreInRepo = false
+	}
+	if policy.Version >= 1 && policy.Version <= 8 {
 		policy.Version = resolvedPolicyVersion
 	}
 }
