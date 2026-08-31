@@ -134,12 +134,12 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 	}
 	for _, run := range runs {
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
-			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
+			m.rejectRecoveredRun(run, fmt.Errorf("conflicting active run for branch"))
 			continue
 		}
 		plan, err := m.prepareRecoveredRun(ctx, run)
 		if err != nil {
-			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
+			m.rejectRecoveredRun(run, err)
 			continue
 		}
 		plans = append(plans, *plan)
@@ -147,9 +147,37 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 	return plans
 }
 
+func (m *RunManager) rejectRecoveredRun(run *db.Run, cause error) {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+		runID := ""
+		if run != nil {
+			runID = run.ID
+		}
+		slog.Warn("active run cannot be safely resumed", "run_id", runID, "error", cause)
+		return
+	}
+	runID := run.ID
+	failure := fmt.Sprintf("cannot safely resume after daemon restart: %v", cause)
+	failed, err := m.db.RecoverStaleRun(runID, failure)
+	if err != nil {
+		slog.Warn("active run cannot be safely resumed and its failure could not be persisted", "run_id", runID, "error", cause, "persist_error", err)
+		return
+	}
+	if !failed {
+		slog.Warn("active run changed state before rejected recovery could be persisted", "run_id", runID, "error", cause)
+		return
+	}
+	slog.Warn("active run cannot be safely resumed", "run_id", runID, "error", cause)
+}
+
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
+	}
+	if _, required, err := ReadEffectiveConfigForRun(m.paths, run); required && err != nil {
+		return nil, fmt.Errorf("validate required effective config artifact: %w", err)
+	} else if err != nil {
+		slog.Debug("ignoring invalid optional legacy effective config artifact during recovery", "run_id", run.ID, "error", err)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {

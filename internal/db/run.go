@@ -842,6 +842,52 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 	return d.RecoverStaleRunsExcept(errMsg, nil)
 }
 
+// RecoverStaleRun atomically fails one active run and its in-progress steps
+// with the specific reason that made safe restart recovery impossible.
+func (d *DB) RecoverStaleRun(id, errMsg string) (bool, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(errMsg) == "" {
+		return false, fmt.Errorf("recover stale run: run ID and error are required")
+	}
+	ts := now()
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
+		 WHERE run_id = ? AND status IN (?, ?, ?, ?) AND EXISTS (
+			SELECT 1 FROM runs WHERE id = ? AND status IN (?, ?)
+		 )`,
+		types.StepStatusFailed, errMsg, ts, id,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
+		id, types.RunPending, types.RunRunning,
+	)
+	if err != nil {
+		return false, fmt.Errorf("recover stale run steps: %w", err)
+	}
+	result, err := tx.Exec(
+		`UPDATE runs SET status = ?, error = ?, push_active = 0,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = NULL, updated_at = ?
+		 WHERE id = ? AND status IN (?, ?)`,
+		types.RunFailed, errMsg, ts, ts, ts, id, types.RunPending, types.RunRunning,
+	)
+	if err != nil {
+		return false, fmt.Errorf("recover stale run: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("recover stale run rows affected: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit recovered stale run: %w", err)
+	}
+	return count == 1, nil
+}
+
 // RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
 // in preserved. Callers use preserved only after independently proving a run
 // can be reconstructed safely.
