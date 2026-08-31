@@ -1062,9 +1062,9 @@ func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(t.TempDir(), pending.ID)
+	target := filepath.Join(t.TempDir(), "not-"+pending.ID)
 	archived, err := d.ArchiveRunWithMetricReceiptAndTargets(record, false, []string{target}, func() error {
-		return fmt.Errorf("leave archived artifact cleanup pending")
+		return runstats.RemoveRunArtifactTargets(pending.ID, []string{target})
 	})
 	if !archived || err == nil {
 		t.Fatalf("seed pending cleanup = archived %t, error %v", archived, err)
@@ -1086,6 +1086,9 @@ func TestEjectContinuesWhenArchivedArtifactCleanupRemainsPending(t *testing.T) {
 	}
 	if receipt, err := d.GetRunMetricReceipt(remaining.ID); err != nil || receipt == nil {
 		t.Fatalf("remaining terminal run was not archived: %+v, %v", receipt, err)
+	}
+	if _, err := d.CleanupPendingRunArtifactsWithTargets("", runstats.RemoveRunArtifactTargets); err == nil || !strings.Contains(err.Error(), pending.ID) {
+		t.Fatalf("pending cleanup retry error = %v; want invalid target for run %s", err, pending.ID)
 	}
 }
 
