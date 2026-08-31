@@ -804,6 +804,9 @@ func ReadEffectiveConfigForRun(p *paths.Paths, run *db.Run) (*effectiveconfig.Ar
 		return nil, true, fmt.Errorf("resolve effective config requirement: %w", err)
 	}
 	if legacy {
+		if !effectiveConfigPairAbsent(p, run.ID) {
+			return nil, false, fmt.Errorf("effective config artifact is present for legacy run")
+		}
 		return nil, false, nil
 	}
 	required := policy.Version >= effectiveConfigRequiredPolicyVersion
