@@ -260,6 +260,55 @@ func TestStartRunEffectiveConfigMarksAutoDerivedAgentAsRuntime(t *testing.T) {
 	}
 }
 
+func TestStartRunEffectiveConfigPreservesExplicitFallbackBesideAuto(t *testing.T) {
+	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-mixed-routing")
+	agentDir := t.TempDir()
+	mockCursor := writeRunnableMockAgent(t, agentDir, "cursor-agent")
+	mockACPX := writeRunnableMockAgent(t, agentDir, "acpx")
+	missing := func(name string) string { return filepath.Join(agentDir, "missing-"+name) }
+	globalYAML := "acpx_path: " + yamlDoubleQuoted(mockACPX) + "\n" +
+		"acp_registry_overrides:\n  cursor: " + yamlDoubleQuoted(mockCursor) + "\n" +
+		"agent_path_override:\n" +
+		"  claude: " + yamlDoubleQuoted(missing("claude")) + "\n" +
+		"  codex: " + yamlDoubleQuoted(missing("codex")) + "\n" +
+		"  opencode: " + yamlDoubleQuoted(missing("opencode")) + "\n" +
+		"  rovodev: " + yamlDoubleQuoted(missing("rovodev")) + "\n" +
+		"  pi: " + yamlDoubleQuoted(missing("pi")) + "\n" +
+		"  copilot: " + yamlDoubleQuoted(missing("copilot")) + "\n" +
+		"  cursor: " + yamlDoubleQuoted(mockCursor) + "\n"
+	if err := os.WriteFile(p.ConfigFile(), []byte(globalYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trustedYAML := "allow_repo_commands: true\nauto_fix:\n  review: 0\n" +
+		"hooks:\n  post_worktree: " + yamlDoubleQuoted("echo ran > "+marker) + "\n"
+	writePolicyConfigCommit(t, repo, trustedYAML, "allow pushed routing", "refs/heads/main")
+	writePolicyConfigCommit(t, repo, "agent: [auto, acp:cursor]\nauto_fix:\n  review: 0\n", "configure mixed routing", "refs/heads/feature/mixed-routing")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	step := &mockPassStep{name: types.StepReview}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "feature/mixed-routing", head, refreshTestZeroSHA, "test", nil, "mixed routing provenance", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+	yamlBytes := readOwnerOnlyArtifact(t, p.EffectiveConfigYAML(runID))
+	defaultAgents := effectiveConfigNode(t, yamlBytes, "agent", "default")
+	if len(defaultAgents.Content) != 2 || defaultAgents.Content[0].Value != "cursor" || defaultAgents.Content[1].Value != "acp:cursor" {
+		t.Fatalf("agent.default = %#v, want [cursor, acp:cursor]", defaultAgents)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[0]); got != "source=runtime; is_default=false" {
+		t.Fatalf("auto-derived agent provenance = %q, want runtime", got)
+	}
+	if got := effectiveConfigNodeComment(defaultAgents.Content[1]); got != "source=pushed; is_default=false" {
+		t.Fatalf("explicit fallback provenance = %q, want pushed", got)
+	}
+}
+
 func TestStartRunEffectiveConfigRecordsLayeredProvenance(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database, repo, marker := newPolicyResolutionFixture(t, "effective-config-provenance")

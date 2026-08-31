@@ -152,11 +152,16 @@ func (p *EffectiveConfigProvenance) recordResolvedAgents(path, sourcePath string
 		listValue = EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
 	}
 	p.setSubtree(path, listValue)
-	hasAuto := slices.Contains(configured, types.AgentAuto)
+	usedConfigured := make([]bool, len(configured))
 	for i, agent := range resolved {
 		value := EffectiveConfigProvenanceValue{Source: EffectiveConfigSourceRuntime}
-		if !hasAuto && slices.Contains(configured, agent) {
+		for j, candidate := range configured {
+			if usedConfigured[j] || candidate == types.AgentAuto || candidate != agent {
+				continue
+			}
+			usedConfigured[j] = true
 			value = configuredValue
+			break
 		}
 		p.setSubtree(path+"["+strconv.Itoa(i)+"]", value)
 	}
