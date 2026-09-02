@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -99,6 +100,7 @@ type Invocation struct {
 	Round                int                       `json:"round"`
 	Purpose              string                    `json:"purpose"`
 	Agent                string                    `json:"agent"`
+	UsageCoverage        agent.UsageCoverage       `json:"usage_coverage"`
 	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
 	NestedAgentsReported bool                      `json:"nested_agents_reported"`
 	NestedAgentCount     *int                      `json:"nested_agent_count"`
@@ -387,6 +389,7 @@ func cloneRunnerProvenance(value *runner.Provenance) *runner.Provenance {
 func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
+		UsageCoverage:  row.UsageCoverage,
 		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported, NestedAgentCount: cloneInt(row.NestedAgentCount),
 		NestedAgents: append([]types.AgentObservation(nil), row.AgentObservations...),
 		Model:        nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),

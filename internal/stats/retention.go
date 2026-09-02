@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -68,6 +69,7 @@ type MetricInvocation struct {
 	Round                int                       `json:"round"`
 	Purpose              string                    `json:"purpose"`
 	Agent                string                    `json:"agent"`
+	UsageCoverage        agent.UsageCoverage       `json:"usage_coverage"`
 	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
 	NestedAgentsReported bool                      `json:"nested_agents_reported"`
 	NestedAgentCount     *int                      `json:"nested_agent_count"`
@@ -328,6 +330,7 @@ func metricInvocation(invocation Invocation) MetricInvocation {
 	}
 	return MetricInvocation{
 		ID: invocation.ID, Step: invocation.Step, Round: invocation.Round, Purpose: invocation.Purpose, Agent: invocation.Agent,
+		UsageCoverage:  invocation.UsageCoverage,
 		InvocationMode: invocation.InvocationMode, NestedAgentsReported: invocation.NestedAgentsReported, NestedAgentCount: cloneInt(count),
 		Model: cloneString(invocation.Model), Provider: cloneString(invocation.Provider), SessionMode: invocation.SessionMode,
 		FallbackReason: cloneString(invocation.FallbackReason), StartedAt: invocation.StartedAt, CompletedAt: invocation.CompletedAt,
@@ -366,6 +369,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 	for _, stored := range receipt.Invocations {
 		audit.Invocations = append(audit.Invocations, Invocation{
 			ID: stored.ID, Step: stored.Step, Round: stored.Round, Purpose: stored.Purpose, Agent: stored.Agent,
+			UsageCoverage:  stored.UsageCoverage,
 			InvocationMode: stored.InvocationMode, NestedAgentsReported: stored.NestedAgentsReported, NestedAgentCount: cloneInt(stored.NestedAgentCount), NestedAgents: []types.AgentObservation{},
 			Model: cloneString(stored.Model), Provider: cloneString(stored.Provider), SessionMode: stored.SessionMode, SessionKey: "",
 			FallbackReason: cloneString(stored.FallbackReason), StartedAt: stored.StartedAt, CompletedAt: stored.CompletedAt,
@@ -387,6 +391,14 @@ func decodeMetricReceipt(record *db.RunMetricReceipt) (*MetricReceipt, error) {
 	}
 	if receipt.SchemaVersion != MetricReceiptSchemaVersion || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
 		return nil, fmt.Errorf("run metric receipt %q identity mismatch", record.RunID)
+	}
+	for i := range receipt.Invocations {
+		if receipt.Invocations[i].UsageCoverage == "" {
+			receipt.Invocations[i].UsageCoverage = agent.UsageCoverageUnknown
+		}
+		if !receipt.Invocations[i].UsageCoverage.Valid() {
+			return nil, fmt.Errorf("run metric receipt %q invocation %q has invalid usage coverage %q", record.RunID, receipt.Invocations[i].ID, receipt.Invocations[i].UsageCoverage)
+		}
 	}
 	receipt.Steps = nonNilMetricSteps(receipt.Steps)
 	receipt.Invocations = nonNilMetricInvocations(receipt.Invocations)

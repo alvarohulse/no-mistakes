@@ -481,6 +481,9 @@ func TestOpencodeAgent_EventStreamFailureRetainsCompletedMessageResult(t *testin
 	if !result.AgentObservationsReported || result.NestedAgentCount != 1 || len(result.AgentObservations) != 1 || result.AgentObservations[0].Identity != "explore" {
 		t.Fatalf("partial nested-agent telemetry = %+v", result)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("partial usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 }
 
 // TestOpencodeAgent_FinalAnswerPreferred tests that final_answer phase text is preferred.

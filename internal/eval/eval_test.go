@@ -641,6 +641,7 @@ func TestSourceInvocationsPreserveBoundedTelemetry(t *testing.T) {
 	provider := "anthropic"
 	got := sourceInvocationsFor([]db.AgentInvocation{{
 		StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude",
+		UsageCoverage:             agent.UsageCoverageComplete,
 		InvocationMode:            types.AgentInvocationModeHarnessCLI,
 		AgentObservations:         []types.AgentObservation{{Identity: "worker", InvocationMode: types.AgentInvocationModeSubagentTool}},
 		AgentObservationsReported: true, NestedAgentCount: &nested, ModelProvider: &provider,
@@ -648,6 +649,7 @@ func TestSourceInvocationsPreserveBoundedTelemetry(t *testing.T) {
 		ReportedCostUSD: &reportedCost, ToolCalls: &toolCalls,
 	}})
 	if len(got) != 1 || got[0].InvocationMode != types.AgentInvocationModeHarnessCLI ||
+		got[0].UsageCoverage != agent.UsageCoverageComplete ||
 		!got[0].AgentObservationsReported || got[0].NestedAgentCount == nil || *got[0].NestedAgentCount != nested ||
 		got[0].ModelProvider == nil || *got[0].ModelProvider != provider ||
 		got[0].DeltaCacheCreationTokens == nil || *got[0].DeltaCacheCreationTokens != deltaCacheCreation ||

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -55,11 +56,11 @@ func TestDetailedTextRendersPerPurposeAggregateTablesBeforeInvocationDetail(t *t
 			Started: 1, Resumed: 1, InputTokens: &input, CacheWriteTokens: &cacheWrite,
 			ModelRoundtrips: &roundtrips, MetricsRows: 2,
 		}},
-		Agents: []ReportAgent{{RunID: "run-1", Invocation: Invocation{ID: "inv-1", Step: types.StepReview, Purpose: "review", Agent: "codex", ExitStatus: "ok"}}},
+		Agents: []ReportAgent{{RunID: "run-1", Invocation: Invocation{ID: "inv-1", Step: types.StepReview, Purpose: "review", Agent: "codex", UsageCoverage: agent.UsageCoverageUnknown, ExitStatus: "ok"}}},
 	}
 
 	output := RenderDetailedText(report)
-	for _, want := range []string{"PURPOSE", "COUNT", "CACHE WRITE TOK", "review", "45", "METRICS", "2/2", "ROUNDTRIPS", "agent run-1/inv-1"} {
+	for _, want := range []string{"PURPOSE", "COUNT", "CACHE WRITE TOK", "review", "45", "METRICS", "2/2", "ROUNDTRIPS", "agent run-1/inv-1", "usage_coverage=unknown"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("detailed text omitted %q:\n%s", want, output)
 		}

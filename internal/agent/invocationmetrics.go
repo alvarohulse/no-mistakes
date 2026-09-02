@@ -29,6 +29,16 @@ func (c UsageCoverage) Valid() bool {
 	return c == UsageCoverageComplete || c == UsageCoverageUnknown
 }
 
+// usageCoverageForCompleteStream converts adapter-owned stream evidence into
+// the persisted coverage state. A terminal aggregate is complete only when it
+// reported usage and the adapter observed no work outside that aggregate.
+func usageCoverageForCompleteStream(usageReported, unaccountedWork bool) UsageCoverage {
+	if usageReported && !unaccountedWork {
+		return UsageCoverageComplete
+	}
+	return UsageCoverageUnknown
+}
+
 // ToolCategory is a bounded bucket for a single tool sub-command. The set is
 // fixed and low-cardinality so the histogram stays bounded and privacy-safe:
 // we categorize a command's intent by its leading verb and never store the

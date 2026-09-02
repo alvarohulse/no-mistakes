@@ -78,6 +78,7 @@ type sourceInvocation struct {
 	Round                     int                       `json:"round"`
 	Purpose                   string                    `json:"purpose"`
 	Agent                     string                    `json:"agent"`
+	UsageCoverage             agent.UsageCoverage       `json:"usage_coverage"`
 	InvocationMode            types.AgentInvocationMode `json:"invocation_mode,omitempty"`
 	AgentObservations         []types.AgentObservation  `json:"agent_observations,omitempty"`
 	AgentObservationsReported bool                      `json:"agent_observations_reported,omitempty"`
@@ -462,6 +463,7 @@ func sourceInvocationsFor(invocations []db.AgentInvocation) []sourceInvocation {
 	for _, inv := range invocations {
 		out = append(out, sourceInvocation{
 			StepName: inv.StepName, Round: inv.Round, Purpose: inv.Purpose, Agent: inv.Agent,
+			UsageCoverage:  inv.UsageCoverage,
 			InvocationMode: inv.InvocationMode, AgentObservations: inv.AgentObservations,
 			AgentObservationsReported: inv.AgentObservationsReported, NestedAgentCount: inv.NestedAgentCount,
 			Model: inv.Model, ModelProvider: inv.ModelProvider, SessionMode: inv.SessionMode,

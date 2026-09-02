@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -48,7 +49,8 @@ func TestBuildRunAuditPreservesZeroAndRejectsPartialTotals(t *testing.T) {
 	five := 5
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
-		SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok",
+		UsageCoverage: agent.UsageCoverageComplete,
+		SessionMode:   db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok",
 		DeltaInputTokens: &zeroInt, DeltaOutputTokens: &zeroInt, DeltaCacheReadTokens: &zeroInt,
 		DeltaCacheCreationTokens: &zeroInt, ReportedCostUSD: &zeroCost,
 	})
@@ -73,6 +75,9 @@ func TestBuildRunAuditPreservesZeroAndRejectsPartialTotals(t *testing.T) {
 	}
 	if audit.Invocations[0].DeltaUsage.OutputTokens == nil || *audit.Invocations[0].DeltaUsage.OutputTokens != 0 {
 		t.Fatalf("reported zero became unknown: %+v", audit.Invocations[0].DeltaUsage)
+	}
+	if audit.Invocations[0].UsageCoverage != agent.UsageCoverageComplete || audit.Invocations[1].UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q/%q, want complete/unknown", audit.Invocations[0].UsageCoverage, audit.Invocations[1].UsageCoverage)
 	}
 	if audit.Invocations[1].DeltaUsage.OutputTokens != nil {
 		t.Fatalf("missing output became zero: %+v", audit.Invocations[1].DeltaUsage)

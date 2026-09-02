@@ -125,7 +125,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
 	if res != nil {
-		res.UsageCoverage = UsageCoverageUnknown
+		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd, false)
 	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
@@ -231,6 +231,7 @@ type piParser struct {
 	usage          TokenUsage
 	seenUsage      map[string]struct{}
 	assistantError string
+	sawAgentEnd    bool
 }
 
 func (p *piParser) parse(ctx context.Context, r io.Reader) error {
@@ -273,6 +274,7 @@ func (p *piParser) handleEvent(event map[string]any) {
 		p.rememberAssistant(event["message"])
 		p.recordAssistantUsage(event["message"])
 	case "agent_end":
+		p.sawAgentEnd = true
 		p.rememberAgentEnd(event["messages"])
 	}
 }

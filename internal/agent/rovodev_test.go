@@ -496,6 +496,9 @@ func TestRovodevAgent_FullFlow(t *testing.T) {
 	if result.Usage.OutputTokens != 50 {
 		t.Errorf("expected output tokens 50, got %d", result.Usage.OutputTokens)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 	// Streamed as part_start + part_delta, so onChunk fires twice.
 	if len(chunks) != 2 {
 		t.Errorf("expected 2 streamed chunks (part_start + part_delta), got %d: %v", len(chunks), chunks)

@@ -121,6 +121,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
 		result := opencodePartialResult(state)
 		result.Output = mr.resp.Info.Structured
+		result.UsageCoverage = opencodeUsageCoverage(state)
 		return result, nil
 	}
 
@@ -146,12 +147,19 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	}
 	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
 	if result != nil {
-		result.UsageCoverage = UsageCoverageUnknown
+		result.UsageCoverage = opencodeUsageCoverage(state)
 		result.AgentObservations = state.observations.observations
 		result.AgentObservationsReported = true
 		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
+}
+
+func opencodeUsageCoverage(state *opencodeStreamState) UsageCoverage {
+	if state == nil {
+		return UsageCoverageUnknown
+	}
+	return usageCoverageForCompleteStream(state.usage.Reported, state.observations.uniqueCount() > 0)
 }
 
 func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {

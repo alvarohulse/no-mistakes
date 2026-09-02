@@ -214,6 +214,9 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 		result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 1 {
 		t.Fatalf("unexpected usage: %+v", result.Usage)
 	}
+	if result.UsageCoverage != UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete", result.UsageCoverage)
+	}
 	if len(chunks) == 0 {
 		t.Fatal("expected onChunk to receive streaming text")
 	}
@@ -376,6 +379,9 @@ exit 2
 	}
 	if result == nil || !result.UsageReported || result.Usage.InputTokens != 19 || result.Usage.OutputTokens != 7 || result.Usage.CacheReadTokens != 4 || result.Usage.CacheCreationTokens != 3 {
 		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("partial usage coverage = %q, want unknown", result.UsageCoverage)
 	}
 }
 

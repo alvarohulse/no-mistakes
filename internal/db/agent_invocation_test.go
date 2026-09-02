@@ -295,6 +295,58 @@ func TestAgentInvocations_PrivacySafeShape(t *testing.T) {
 			}
 		}
 	}
+	if !containsString(columns, "usage_coverage") {
+		t.Fatalf("agent_invocations columns = %v, want usage_coverage", columns)
+	}
+}
+
+func TestOpenMigratesUsageCoverageAsUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := d.InsertRepo("/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN usage_coverage`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
+		(id, run_id, step_name, round, purpose, agent, invocation_mode, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
+		VALUES ('legacy-coverage', ?, 'review', 1, 'review', 'codex', 'harness_cli', '', 'cold', '', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	got, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("migrated invocation = %+v, want unknown usage coverage", got)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAgentInvocations_HasRunTimelineIndex(t *testing.T) {

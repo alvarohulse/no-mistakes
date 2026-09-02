@@ -495,6 +495,23 @@ func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testin
 	if result == nil || result.ReportedCostUSD == nil || *result.ReportedCostUSD != reportedCost || result.Usage.InputTokens != 100 {
 		t.Fatalf("partial result = %+v, want incurred usage and reported cost", result)
 	}
+	if result.UsageCoverage != UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_NestedWorkMakesUsageCoverageUnknown(t *testing.T) {
+	result, err := finalizeClaudeResult(
+		&claudeResult{Subtype: "success", text: "done", agentObservationsReported: true, nestedAgentCount: 1},
+		nil,
+		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 }
 
 func TestClaudeAgent_FinalizeResult_ErrorSubtypeNotRetryable(t *testing.T) {

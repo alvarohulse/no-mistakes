@@ -169,12 +169,13 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
+	coverage := usageCoverageForCompleteStream(usage.Reported, result.nestedAgentCount > 0)
 	finalized := &Result{
 		Output:                    result.StructuredOutput,
 		Text:                      result.text,
 		Usage:                     usage,
 		UsageReported:             usage.Reported,
-		UsageCoverage:             UsageCoverageComplete,
+		UsageCoverage:             coverage,
 		CacheCreationReported:     usage.CacheCreationReported,
 		AgentObservations:         result.agentObservations,
 		AgentObservationsReported: result.agentObservationsReported,
