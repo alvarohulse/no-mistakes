@@ -46,9 +46,9 @@ type Contract struct {
 	// candidate rather than truncating section content after hashing it.
 	BodyLimit int `json:"body_limit"`
 
-	// Title is the drafted conventional-commit PR title. The formatter owns
-	// section content and the optional bootstrap layout only; returning a title
-	// has no effect.
+	// Title is the title that will be hosted for the PR, including a preserved
+	// existing title when updating an existing PR. The formatter owns section
+	// content and the optional bootstrap layout only; returning a title has no effect.
 	Title string `json:"title"`
 	// Metadata is opaque operator-supplied context. no-mistakes does not parse
 	// or assign structure to it; formatters may interpret it for their own use.

@@ -379,6 +379,7 @@ Final diff paths and statuses:
 	var draftingInvocationID *string
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
+		sctx.Log("PR drafting failed; using the deterministic fallback")
 		content = fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
 		source = db.NarrativeSourceFallback
 	} else if result.Output != nil {
@@ -405,6 +406,7 @@ Final diff paths and statuses:
 				}
 				if draftingInvocationID == nil {
 					slog.Warn("PR drafting invocation was not recorded, using fallback")
+					sctx.Log("PR drafting invocation was not recorded; using the deterministic fallback")
 					content = prContent{}
 				} else {
 					validDraft = true
@@ -420,17 +422,23 @@ Final diff paths and statuses:
 		draftingInvocationID = nil
 	}
 
-	titleMode := db.NarrativeTitleModeAgent
+	titleMode := db.NarrativeTitleModeFallback
+	if source == db.NarrativeSourceAgent {
+		titleMode = db.NarrativeTitleModeAgent
+	}
 	if existing != nil {
 		if hostedTitle := strings.TrimSpace(existing.Title); hostedTitle != "" {
 			content.Title = hostedTitle
+			titleMode = db.NarrativeTitleModePreserved
 		}
-		titleMode = db.NarrativeTitleModePreserved
 	}
+	titleText := intent.RedactSecrets(content.Title)
+	summary := intent.RedactSecrets(content.Summary)
+	whatChanged := intent.RedactSecrets(content.WhatChanged)
 	narrative := db.RunNarrative{
 		RunID: sctx.Run.ID, Source: source, DraftingInvocationID: draftingInvocationID,
 		DraftedAt: time.Now().Unix(), BaseSHA: baseSHA, HeadSHA: sctx.Run.HeadSHA,
-		TitleMode: titleMode, TitleText: content.Title, Summary: content.Summary, WhatChanged: content.WhatChanged,
+		TitleMode: titleMode, TitleText: titleText, Summary: summary, WhatChanged: whatChanged,
 	}
 	if err := sctx.DB.InsertRunNarrative(narrative); err != nil {
 		return prContent{}, fmt.Errorf("persist run PR narrative: %w", err)

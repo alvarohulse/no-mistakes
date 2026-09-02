@@ -1433,7 +1433,7 @@ func TestPRStep_PersistsFallbackNarrativeAndReusesItWithinRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil || narrative.TitleMode != db.NarrativeTitleModeAgent || narrative.TitleText != "chore: update pull request" {
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil || narrative.TitleMode != db.NarrativeTitleModeFallback || narrative.TitleText != "chore: update pull request" {
 		t.Fatalf("fallback provenance = %#v", narrative)
 	}
 }
@@ -1533,6 +1533,9 @@ func TestPRStep_ExistingPRPersistsHostedTitleWithoutUpdatingIt(t *testing.T) {
 	logData, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "pr edit 42") {
+		t.Fatalf("expected existing pull request body update:\n%s", logData)
 	}
 	if strings.Contains(lineContaining(string(logData), "pr edit 42"), "--title") {
 		t.Fatalf("existing hosted title was overwritten:\n%s", logData)

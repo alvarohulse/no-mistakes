@@ -11,8 +11,8 @@ const (
 	NarrativeSourceAgent    = "agent"
 	NarrativeSourceFallback = "fallback"
 
-	NarrativeTitleModeCLI       = "cli"
 	NarrativeTitleModeAgent     = "agent"
+	NarrativeTitleModeFallback  = "fallback"
 	NarrativeTitleModePreserved = "preserved"
 )
 
@@ -99,7 +99,7 @@ func validateRunNarrative(n RunNarrative) error {
 	if n.DraftedAt <= 0 || strings.TrimSpace(n.BaseSHA) == "" || strings.TrimSpace(n.HeadSHA) == "" {
 		return fmt.Errorf("insert run narrative: draft time, base SHA, and head SHA are required")
 	}
-	if n.TitleMode != NarrativeTitleModeCLI && n.TitleMode != NarrativeTitleModeAgent && n.TitleMode != NarrativeTitleModePreserved {
+	if n.TitleMode != NarrativeTitleModeAgent && n.TitleMode != NarrativeTitleModeFallback && n.TitleMode != NarrativeTitleModePreserved {
 		return fmt.Errorf("insert run narrative: invalid title mode %q", n.TitleMode)
 	}
 	if strings.TrimSpace(n.TitleText) == "" || strings.TrimSpace(n.WhatChanged) == "" {
