@@ -953,7 +953,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
-			if dbErr := e.db.CompleteStepRound(currentRoundID, nil, nil, roundDuration); dbErr != nil {
+			if dbErr := e.db.FailStepRound(currentRoundID, roundDuration); dbErr != nil {
 				slog.Warn("failed to complete errored step round", "step", stepName, "round", roundNum, "error", dbErr)
 			}
 			// Persist the failure reason to the step's own log file. The error

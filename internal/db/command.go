@@ -109,7 +109,31 @@ func (d *DB) EnsureCommandDefinition(runID string, resolved runner.Resolved) (*C
 	if err != nil {
 		return nil, fmt.Errorf("ensure command definition: %w", err)
 	}
-	return d.getCommandDefinition(runID, id)
+	definition, err := d.getCommandDefinition(runID, id)
+	if err != nil {
+		return nil, err
+	}
+	if definition.Source != resolved.CommandSource ||
+		definition.RunnerSchemaVersion != resolved.Provenance.SchemaVersion ||
+		definition.RunnerSource != resolved.Provenance.Source ||
+		definition.RunnerExecutable != resolved.Provenance.Executable ||
+		!sameStrings(definition.RunnerArgs, resolved.Provenance.Args) ||
+		!sameOptionalString(definition.RunnerVersion, resolved.Provenance.Version) {
+		return nil, fmt.Errorf("command definition identity has conflicting provenance")
+	}
+	return definition, nil
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *DB) getCommandDefinition(runID, id string) (*CommandDefinition, error) {
@@ -277,6 +301,23 @@ func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal *s
 	}
 	if rows != 1 {
 		return fmt.Errorf("complete command attempt: attempt is missing or already complete")
+	}
+	return nil
+}
+
+func (d *DB) SetCommandAttemptTestedSHA(id, sha string) error {
+	if sha == "" {
+		return nil
+	}
+	result, err := d.sql.Exec(`UPDATE command_attempts SET tested_sha = ? WHERE id = ? AND completed_at IS NULL`, sha, id)
+	if err != nil {
+		return fmt.Errorf("set command attempt tested sha: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		if err != nil {
+			return fmt.Errorf("set command attempt tested sha rows: %w", err)
+		}
+		return fmt.Errorf("set command attempt tested sha: attempt is missing or complete")
 	}
 	return nil
 }

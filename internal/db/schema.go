@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     step_result_id       TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
     round                INTEGER NOT NULL,
     trigger_type         TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'active',
     findings_json        TEXT,
     reviewed_head_sha    TEXT,
     starting_head_sha    TEXT,
@@ -363,6 +364,7 @@ var migrationStatements = []string{
 	// prompts, output, diffs, paths, and tool arguments stay out of this table.
 	`ALTER TABLE step_rounds ADD COLUMN repair_failure_fingerprint TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN repair_result TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
 	`ALTER TABLE runs ADD COLUMN intent TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,

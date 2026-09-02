@@ -296,11 +296,6 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if headErr != nil {
 			return "", -1, fmt.Errorf("resolve command subject: %w", headErr)
 		}
-		var testedSHA *string
-		if commandEstablishesTestedHead(purpose) {
-			tested := beforeSHA
-			testedSHA = &tested
-		}
 		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
 			RunID:     sctx.Run.ID,
 			CommandID: definition.ID,
@@ -311,7 +306,6 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			Observer:  db.CommandObserverController,
 			Trigger:   sctx.RoundTrigger,
 			BeforeSHA: beforeSHA,
-			TestedSHA: testedSHA,
 		})
 		if persistErr != nil {
 			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
@@ -327,6 +321,13 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		recordedExitCode = &result.ExitCode
 	}
 	if attempt != nil {
+		if commandEstablishesTestedHead(purpose) && err == nil && result.ExitCode == 0 {
+			if tested, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir); headErr == nil {
+				if persistErr := sctx.DB.SetCommandAttemptTestedSHA(attempt.ID, tested); persistErr != nil {
+					return result.Output, result.ExitCode, persistErr
+				}
+			}
+		}
 		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
 		attemptExitCode := recordedExitCode
 		if result.Signal != nil {

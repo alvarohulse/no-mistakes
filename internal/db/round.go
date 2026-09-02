@@ -21,7 +21,8 @@ type StepRound struct {
 	ID               string
 	StepResultID     string
 	Round            int
-	Trigger          string  // "initial", "auto_fix"; legacy "user_fix" is treated as "auto_fix"
+	Trigger          string // "initial", "auto_fix"; legacy "user_fix" is treated as "auto_fix"
+	Status           string
 	FindingsJSON     *string // nullable - findings produced by this round
 	ReviewedHeadSHA  *string // non-authoritative commit candidate captured by a review round
 	StartingHeadSHA  *string
@@ -153,7 +154,15 @@ func hasSelectedFinding(raw *string) bool {
 // InsertStepRound creates a new round record for a step result. fixSummary may
 // be nil for non-fix rounds or when the agent produced no summary.
 func (d *DB) InsertStepRound(stepResultID string, round int, trigger string, findingsJSON *string, fixSummary *string, durationMS int64) (*StepRound, error) {
-	return d.insertStepRound(stepResultID, round, trigger, findingsJSON, fixSummary, nil, nil, nil, nil, nil, nil, durationMS)
+	r, err := d.insertStepRound(stepResultID, round, trigger, findingsJSON, fixSummary, nil, nil, nil, nil, nil, nil, durationMS)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := d.sql.Exec(`UPDATE step_rounds SET status = 'completed' WHERE id = ?`, r.ID); err != nil {
+		return nil, fmt.Errorf("complete inserted step round: %w", err)
+	}
+	r.Status = "completed"
+	return r, nil
 }
 
 // BeginStepRound creates the durable round identity before its work starts so
@@ -187,7 +196,7 @@ func (d *DB) CompleteReviewStepRound(id string, findingsJSON *string, fixSummary
 
 func (d *DB) completeStepRound(id string, findingsJSON *string, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA *string, replayConfigJSON, globalConfigYAML, repoConfigYAML []byte, durationMS int64) error {
 	result, err := d.sql.Exec(
-		`UPDATE step_rounds SET findings_json = ?, fix_summary = ?, reviewed_head_sha = ?, starting_head_sha = ?, trusted_config_sha = ?, replay_config_json = ?, global_config_yaml = ?, repo_config_yaml = ?, duration_ms = ? WHERE id = ?`,
+		`UPDATE step_rounds SET findings_json = ?, fix_summary = ?, reviewed_head_sha = ?, starting_head_sha = ?, trusted_config_sha = ?, replay_config_json = ?, global_config_yaml = ?, repo_config_yaml = ?, duration_ms = ?, status = 'completed' WHERE id = ?`,
 		findingsJSON, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA,
 		replayConfigJSON, globalConfigYAML, repoConfigYAML, durationMS, id,
 	)
@@ -202,6 +211,11 @@ func (d *DB) completeStepRound(id string, findingsJSON *string, fixSummary, revi
 		return fmt.Errorf("complete step round: round %q not found", id)
 	}
 	return nil
+}
+
+func (d *DB) FailStepRound(id string, durationMS int64) error {
+	_, err := d.sql.Exec(`UPDATE step_rounds SET duration_ms = ?, status = 'failed' WHERE id = ? AND status = 'active'`, durationMS, id)
+	return err
 }
 
 // InsertReviewStepRound persists a review round's examined commit as a
@@ -254,7 +268,7 @@ func (d *DB) insertStepRound(stepResultID string, round int, trigger string, fin
 		CreatedAt:        now(),
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, status, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.StepResultID, r.Round, r.Trigger, r.FindingsJSON, r.ReviewedHeadSHA, r.StartingHeadSHA, r.TrustedConfigSHA, r.ReplayConfigJSON, r.GlobalConfigYAML, r.RepoConfigYAML, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixSummary, r.DurationMS, r.CreatedAt,
 	)
 	if err != nil {
@@ -352,7 +366,7 @@ func (d *DB) SetStepRoundRepairAudit(id, failureFingerprint, result string) erro
 // GetRoundsByStep returns all rounds for a step result, ordered by round number.
 func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_failure_fingerprint, repair_result, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
+		`SELECT id, step_result_id, round, trigger_type, status, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_failure_fingerprint, repair_result, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
 		stepResultID,
 	)
 	if err != nil {
@@ -362,7 +376,7 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}
-		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairFailureFingerprint, &r.RepairResult, &r.DurationMS, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.Status, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairFailureFingerprint, &r.RepairResult, &r.DurationMS, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan step round: %w", err)
 		}
 		rounds = append(rounds, r)
