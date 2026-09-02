@@ -147,6 +147,7 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 		Round:               a.round(),
 		Purpose:             purpose,
 		Agent:               agentName,
+		UsageCoverage:       agent.UsageCoverageUnknown,
 		InvocationMode:      types.AgentInvocationModeHarnessCLI,
 		SessionMode:         invocationSessionMode(opts),
 		SessionKey:          sessionKey,
@@ -191,6 +192,10 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey string, result *agent.Result) {
 	if result == nil {
 		return
+	}
+	inv.UsageCoverage = result.UsageCoverage
+	if inv.UsageCoverage == "" {
+		inv.UsageCoverage = agent.UsageCoverageUnknown
 	}
 	if result.Model != "" {
 		inv.Model = result.Model

@@ -13,6 +13,22 @@ import (
 // these definitions. Nothing here reads or stores prompts, outputs, diffs, or
 // raw command arguments - only bounded counts, categories, and durations.
 
+// UsageCoverage states whether an adapter can prove that its top-level usage
+// totals account for all work performed during the invocation. It is recorded
+// independently from nullable meters: missing meters are not inferred as
+// incomplete usage, and present meters are not inferred as complete usage.
+type UsageCoverage string
+
+const (
+	UsageCoverageComplete UsageCoverage = "complete"
+	UsageCoverageUnknown  UsageCoverage = "unknown"
+)
+
+// Valid reports whether coverage is one of the closed persisted states.
+func (c UsageCoverage) Valid() bool {
+	return c == UsageCoverageComplete || c == UsageCoverageUnknown
+}
+
 // ToolCategory is a bounded bucket for a single tool sub-command. The set is
 // fixed and low-cardinality so the histogram stays bounded and privacy-safe:
 // we categorize a command's intent by its leading verb and never store the

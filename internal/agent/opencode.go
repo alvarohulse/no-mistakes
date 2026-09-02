@@ -146,6 +146,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	}
 	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
 	if result != nil {
+		result.UsageCoverage = UsageCoverageUnknown
 		result.AgentObservations = state.observations.observations
 		result.AgentObservationsReported = true
 		result.NestedAgentCount = state.observations.uniqueCount()
@@ -216,6 +217,7 @@ func opencodePartialResult(state *opencodeStreamState) *Result {
 		Text:                      state.lastText,
 		Usage:                     state.usage,
 		UsageReported:             state.usage.Reported,
+		UsageCoverage:             UsageCoverageUnknown,
 		CacheCreationReported:     state.usage.CacheCreationReported,
 		AgentObservations:         state.observations.observations,
 		AgentObservationsReported: true,

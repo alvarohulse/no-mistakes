@@ -106,6 +106,9 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 			resultUsage.OutputTokens = estimateAcpxTokens(len(text))
 		}
 		result, _ := finalizeTextResult(a.Name(), text, opts.JSONSchema, resultUsage)
+		if result != nil {
+			result.UsageCoverage = UsageCoverageUnknown
+		}
 		return result
 	}
 	if err != nil {
@@ -126,6 +129,9 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		usage.OutputTokens = estimateAcpxTokens(len(text))
 	}
 	res, err := finalizeTextResult(a.Name(), text, opts.JSONSchema, usage)
+	if res != nil {
+		res.UsageCoverage = UsageCoverageUnknown
+	}
 	emitAgentExited(opts, a.Name(), pid, err)
 	return res, err
 }

@@ -219,6 +219,9 @@ type Result struct {
 	// Usage tracks token consumption for the invocation.
 	Usage         TokenUsage
 	UsageReported bool
+	// UsageCoverage states whether the adapter can prove that its reported
+	// top-level usage totals include all work performed by this invocation.
+	UsageCoverage UsageCoverage
 	// SessionID is the adapter-native session identity of this invocation
 	// when the adapter reports one. Callers persist it to resume later.
 	SessionID string
@@ -997,6 +1000,8 @@ func NewNoop() Agent { return &noopAgent{} }
 
 type noopAgent struct{}
 
-func (n *noopAgent) Name() string                                      { return "noop" }
-func (n *noopAgent) Run(_ context.Context, _ RunOpts) (*Result, error) { return &Result{}, nil }
-func (n *noopAgent) Close() error                                      { return nil }
+func (n *noopAgent) Name() string { return "noop" }
+func (n *noopAgent) Run(_ context.Context, _ RunOpts) (*Result, error) {
+	return &Result{UsageCoverage: UsageCoverageUnknown}, nil
+}
+func (n *noopAgent) Close() error { return nil }

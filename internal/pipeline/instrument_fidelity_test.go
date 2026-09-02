@@ -54,6 +54,7 @@ func (a *cumulativeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*ag
 			ReasoningTokens:       5 * a.round,
 		},
 		UsageReported:   true,
+		UsageCoverage:   agent.UsageCoverageUnknown,
 		ReportedCostUSD: &reportedCost,
 		Metrics: &agent.InvocationMetrics{
 			ModelRoundtrips:  4,
@@ -141,6 +142,9 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	assertPtr(t, "r2 delta cache write", r2.DeltaCacheCreationTokens, 50)
 	if r2.ReportedCostUSD == nil || *r2.ReportedCostUSD != 2.5 {
 		t.Fatalf("r2 reported cost = %v, want 2.5", r2.ReportedCostUSD)
+	}
+	if r2.UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("r2 usage coverage = %q, want unknown", r2.UsageCoverage)
 	}
 	if r2.PricingReceiptJSON != nil {
 		t.Fatalf("new invocation carries legacy pricing receipt: %s", *r2.PricingReceiptJSON)

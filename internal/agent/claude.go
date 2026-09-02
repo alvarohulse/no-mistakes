@@ -111,6 +111,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 			return &Result{
 				Usage:                 usage,
 				UsageReported:         usage.Reported,
+				UsageCoverage:         UsageCoverageUnknown,
 				CacheCreationReported: usage.CacheCreationReported,
 			}, nil
 		}
@@ -173,6 +174,7 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 		Text:                      result.text,
 		Usage:                     usage,
 		UsageReported:             usage.Reported,
+		UsageCoverage:             UsageCoverageComplete,
 		CacheCreationReported:     usage.CacheCreationReported,
 		AgentObservations:         result.agentObservations,
 		AgentObservationsReported: result.agentObservationsReported,

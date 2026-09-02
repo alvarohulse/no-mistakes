@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -66,6 +67,9 @@ type AgentInvocation struct {
 	// `<step>-plan` read-only command plan, or a step-derived default.
 	Purpose string
 	Agent   string
+	// UsageCoverage is the adapter's explicit statement about whether its
+	// top-level usage totals account for all work in this invocation.
+	UsageCoverage agent.UsageCoverage
 	// InvocationMode is how the top-level adapter was invoked. Pipeline agent
 	// processes use harness_cli; nested event-stream observations use
 	// subagent_tool in AgentObservations.
@@ -157,7 +161,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider, review_candidate_pool_json,
+const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, usage_coverage, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider, review_candidate_pool_json,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -168,7 +172,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, in
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -183,6 +187,9 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 // UpdateAgentInvocation. Nil pointer fields are stored as SQL NULL
 // (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
+	if err := normalizeUsageCoverage(&inv); err != nil {
+		return nil, err
+	}
 	if inv.InvocationMode == "" {
 		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
 	}
@@ -198,7 +205,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	_, err = d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -220,6 +227,9 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if strings.TrimSpace(inv.ID) == "" {
 		return nil, fmt.Errorf("update agent invocation: id is required")
 	}
+	if err := normalizeUsageCoverage(&inv); err != nil {
+		return nil, err
+	}
 	if inv.InvocationMode == "" {
 		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
 	}
@@ -232,7 +242,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
 	}
 	result, err := d.sql.Exec(`UPDATE agent_invocations SET
-		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, invocation_mode = ?, agent_observations_json = ?, nested_agent_count = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, usage_coverage = ?, invocation_mode = ?, agent_observations_json = ?, nested_agent_count = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
 		session_mode = ?, session_key = ?, fallback_reason = ?,
 		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
@@ -243,7 +253,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
 		WHERE id = ?`,
-		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -341,7 +351,7 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var observationsJSON *string
 	var reviewCandidatePoolJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -368,6 +378,16 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 		}
 	}
 	return inv, nil
+}
+
+func normalizeUsageCoverage(inv *AgentInvocation) error {
+	if inv.UsageCoverage == "" {
+		inv.UsageCoverage = agent.UsageCoverageUnknown
+	}
+	if !inv.UsageCoverage.Valid() {
+		return fmt.Errorf("agent invocation usage coverage %q is invalid", inv.UsageCoverage)
+	}
+	return nil
 }
 
 func encodeReviewCandidatePool(pool []ReviewCandidateReceipt) (*string, error) {

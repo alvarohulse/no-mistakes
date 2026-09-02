@@ -123,14 +123,23 @@ func finalizeCopilotResult(messages []string, schema json.RawMessage, usage Toke
 		lastMessage = messages[len(messages)-1]
 	}
 	if len(schema) == 0 {
-		return finalizeTextResult("copilot", lastMessage, schema, usage)
+		result, err := finalizeTextResult("copilot", lastMessage, schema, usage)
+		return withUsageCoverage(result, UsageCoverageUnknown), err
 	}
 	for i := len(messages) - 1; i >= 0; i-- {
 		if result, err := finalizeTextResult("copilot", messages[i], schema, usage); err == nil {
-			return result, nil
+			return withUsageCoverage(result, UsageCoverageUnknown), nil
 		}
 	}
-	return finalizeTextResult("copilot", lastMessage, schema, usage)
+	result, err := finalizeTextResult("copilot", lastMessage, schema, usage)
+	return withUsageCoverage(result, UsageCoverageUnknown), err
+}
+
+func withUsageCoverage(result *Result, coverage UsageCoverage) *Result {
+	if result != nil {
+		result.UsageCoverage = coverage
+	}
+	return result
 }
 
 func copilotErrorDetail(copilotErr, stderr string) string {

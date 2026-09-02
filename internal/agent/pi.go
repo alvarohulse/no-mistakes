@@ -89,6 +89,9 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	pp := &piParser{onChunk: opts.OnChunk}
 	partialResult := func() *Result {
 		result, _ := finalizeTextResult("pi", pp.finalText(), opts.JSONSchema, pp.usage)
+		if result != nil {
+			result.UsageCoverage = UsageCoverageUnknown
+		}
 		return result
 	}
 	if err := pp.parse(ctx, started.stdout); err != nil {
@@ -121,6 +124,9 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	if res != nil {
+		res.UsageCoverage = UsageCoverageUnknown
+	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
 }

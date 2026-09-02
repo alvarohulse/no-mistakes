@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,6 +19,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		Round:          2,
 		Purpose:        "review-fix",
 		Agent:          "codex",
+		UsageCoverage:  agent.UsageCoverageComplete,
 		Model:          "gpt-5.2-codex",
 		InvocationMode: types.AgentInvocationModeHarnessCLI,
 		AgentObservations: []types.AgentObservation{
@@ -55,6 +57,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	if back.Purpose != "review-fix" || back.Round != 2 || back.SessionMode != InvocationModeResumed ||
 		back.DurationMS != 90_000 || back.InputTokens != 1000 || back.CacheReadTokens != 800 || back.Model != "gpt-5.2-codex" {
 		t.Fatalf("readback mismatch: %+v", back)
+	}
+	if back.UsageCoverage != agent.UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete", back.UsageCoverage)
 	}
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
@@ -564,6 +569,9 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("got %d rows, want 1", len(got))
 	}
 	legacy := got[0]
+	if legacy.UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("legacy usage coverage = %q, want unknown", legacy.UsageCoverage)
+	}
 	if legacy.InputTokens != 500 {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
