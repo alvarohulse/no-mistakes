@@ -312,11 +312,6 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		provider:   string(provider),
 		bodyLimit:  bodyLimit,
 	}
-	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
-	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
-	if err != nil {
-		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
-	}
 	// One load feeds both renderings: the built-in Pipeline markdown below and,
 	// when a formatter is configured, the contract that replaces it.
 	records := LoadRunRecords(sctx.DB, sctx.Run.ID)
@@ -329,6 +324,11 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		return renderRunNarrative(sctx, provider, records, scope, *persisted, riskLine, testingMD, pipelineMD, renderBodyLimit, bodyLimit)
 	}
 
+	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
+	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
+	if err != nil {
+		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
+	}
 	priorInvocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
 	if err != nil {
 		return prContent{}, fmt.Errorf("load PR drafting invocations: %w", err)
@@ -426,9 +426,7 @@ Final diff paths and statuses:
 		titleMode = db.NarrativeTitleModeAgent
 	}
 	if existing != nil {
-		if hostedTitle := strings.TrimSpace(existing.Title); hostedTitle != "" {
-			titleMode = db.NarrativeTitleModePreserved
-		}
+		titleMode = db.NarrativeTitleModePreserved
 	}
 	titleText := intent.RedactSecrets(content.Title)
 	summary := intent.RedactSecrets(content.Summary)

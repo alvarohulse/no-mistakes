@@ -1668,7 +1668,7 @@ func TestPRStep_UnwrapsNestedJSONBody(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## Summary\\n\\n- legacy body\"}"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## What Changed\\n\\n- keep branch status readable\"}"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
