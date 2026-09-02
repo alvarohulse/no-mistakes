@@ -747,7 +747,7 @@ data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info"
 	}
 }
 
-func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testing.T) {
+func TestParseOpencodeSSE_OtherSessionIdleDoesNotStopStream(t *testing.T) {
 	input := strings.Join([]string{
 		`data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg1","role":"assistant","tokens":{"input":17,"output":5}}}}}`,
 		``,
@@ -766,8 +766,8 @@ func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testi
 	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
 		t.Fatalf("parseOpencodeSSE() error = %v", err)
 	}
-	if state.reachedIdle {
-		t.Fatal("other session idle must stop the global stream without crediting top-level completion")
+	if !state.reachedIdle {
+		t.Fatal("top-level session idle after a foreign idle event must complete the stream")
 	}
 }
 

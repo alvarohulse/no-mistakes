@@ -335,7 +335,7 @@ func (p *piParser) rememberAgentEnd(raw any) {
 		total = piUsageAdd(total, usage)
 		coveredCount++
 	}
-	if total.Reported {
+	if total.Reported && !piUsageIsZero(total) {
 		p.usage = total
 		p.seenUsage = make(map[string]struct{}, len(seen))
 		for key := range seen {

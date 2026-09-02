@@ -330,7 +330,7 @@ func TestPiParser_UsesPartialAgentEndAggregateWithoutClaimingCompleteCoverage(t 
 	if err := pp.parse(context.Background(), strings.NewReader(stream)); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	want := TokenUsage{Reported: true}
+	want := TokenUsage{InputTokens: 99, OutputTokens: 9, Reported: true}
 	if pp.usage != want {
 		t.Fatalf("usage = %+v, want partial agent_end aggregate %+v", pp.usage, want)
 	}
