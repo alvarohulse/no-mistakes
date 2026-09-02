@@ -215,7 +215,7 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","responseId":
 		t.Fatalf("unexpected usage: %+v", result.Usage)
 	}
 	if result.UsageCoverage != UsageCoverageUnknown {
-		t.Fatalf("usage coverage = %q, want unknown because Pi cannot observe nested-agent usage", result.UsageCoverage)
+		t.Fatalf("usage coverage = %q, want unknown because Pi cannot prove complete invocation usage", result.UsageCoverage)
 	}
 	if len(chunks) == 0 {
 		t.Fatal("expected onChunk to receive streaming text")

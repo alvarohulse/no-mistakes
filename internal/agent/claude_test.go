@@ -11,14 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestClaudeAgent_BuildArgs(t *testing.T) {
@@ -186,10 +183,10 @@ func TestParseClaudeEvents_ResultEvent(t *testing.T) {
 	}
 }
 
-func TestParseClaudeEvents_CollectsNestedAgentInvocations(t *testing.T) {
+func TestParseClaudeEvents_MarksToolWorkOutsideTerminalUsage(t *testing.T) {
 	events := strings.Join([]string{
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-2","name":"Task","input":{"subagent_type":"general-purpose"}},{"type":"tool_use","id":"tool-3","name":"Agent","input":{"subagent_type":"Explore"}},{"type":"tool_use","id":"tool-4","name":"StructuredOutput","input":{}}],"usage":{}}}`,
-		`{"type":"result","subtype":"success","is_error":false}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Agent","input":{"subagent_type":"Explore"}}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":10,"output_tokens":5}}`,
 		"",
 	}, "\n")
 
@@ -198,16 +195,15 @@ func TestParseClaudeEvents_CollectsNestedAgentInvocations(t *testing.T) {
 	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result); err != nil {
 		t.Fatalf("parseClaudeEvents() error = %v", err)
 	}
-	if result == nil || !result.agentObservationsReported {
-		t.Fatalf("agent observations not reported: %+v", result)
+	if result == nil || !result.unaccountedWork {
+		t.Fatalf("tool work was not marked outside terminal usage: %+v", result)
 	}
-	want := []types.AgentObservation{
-		{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
-		{Identity: "general-purpose", InvocationMode: types.AgentInvocationModeSubagentTool},
-		{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
+	finalized, err := finalizeClaudeResult(result, nil, usage)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(result.agentObservations, want) {
-		t.Fatalf("agent observations = %+v, want %+v", result.agentObservations, want)
+	if finalized.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", finalized.UsageCoverage)
 	}
 }
 
@@ -502,7 +498,7 @@ func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testin
 
 func TestClaudeAgent_NestedWorkMakesUsageCoverageUnknown(t *testing.T) {
 	result, err := finalizeClaudeResult(
-		&claudeResult{Subtype: "success", text: "done", agentObservationsReported: true, nestedAgentCount: 1},
+		&claudeResult{Subtype: "success", text: "done", terminalUsageReported: true, unaccountedWork: true},
 		nil,
 		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
 	)

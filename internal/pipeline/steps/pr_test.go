@@ -278,17 +278,11 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
-		RunID:                     sctx.Run.ID,
-		StepName:                  string(types.StepReview),
-		Round:                     1,
-		Purpose:                   "review",
-		Agent:                     "codex",
-		InvocationMode:            types.AgentInvocationModeHarnessCLI,
-		AgentObservationsReported: true,
-		AgentObservations: []types.AgentObservation{{
-			Identity:       "Explore",
-			InvocationMode: types.AgentInvocationModeSubagentTool,
-		}},
+		RunID:       sctx.Run.ID,
+		StepName:    string(types.StepReview),
+		Round:       1,
+		Purpose:     "review",
+		Agent:       "codex",
 		SessionMode: db.InvocationModeStarted,
 		StartedAt:   1,
 		CompletedAt: 2,
@@ -299,9 +293,9 @@ func TestPRStep_BuildPipelineSectionIncludesAgentAttribution(t *testing.T) {
 	}
 
 	got, _, _ := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
-	want := "| Step | Agent (via) | Nested agents |\n" +
-		"| --- | --- | --- |\n" +
-		"| Review r1 | codex (harness_cli) | Explore (subagent_tool) |"
+	want := "| Step | Agent |\n" +
+		"| --- | --- |\n" +
+		"| Review r1 | codex |"
 	if !strings.Contains(got, want) {
 		t.Fatalf("pipeline agent telemetry table missing:\n%s", got)
 	}
@@ -390,22 +384,21 @@ func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
-		RunID:          sctx.Run.ID,
-		StepName:       "rebase",
-		Round:          1,
-		Agent:          "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
-		StartedAt:      1,
-		CompletedAt:    2,
-		DurationMS:     1,
-		ExitStatus:     "ok",
+		RunID:       sctx.Run.ID,
+		StepName:    "rebase",
+		Round:       1,
+		Agent:       "codex",
+		StartedAt:   1,
+		CompletedAt: 2,
+		DurationMS:  1,
+		ExitStatus:  "ok",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	got, _, _ := (&PRStep{}).buildPipelineSection(sctx, LoadRunRecords(sctx.DB, sctx.Run.ID))
 	for _, want := range []string{
-		"| Merge r1 | codex (harness_cli) | - |",
+		"| Merge r1 | codex |",
 		"<summary>✅ **Merge** - passed</summary>",
 	} {
 		if !strings.Contains(got, want) {
@@ -417,27 +410,24 @@ func TestPRStep_BuildPipelineSectionLabelsMergeRefresh(t *testing.T) {
 	}
 }
 
-func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
+func TestAgentTelemetryTableListsTopLevelInvocations(t *testing.T) {
 	t.Parallel()
 	got := agentTelemetryTable([]db.AgentInvocation{
 		{
-			StepName:       string(types.StepTest),
-			Round:          1,
-			Agent:          "claude",
-			InvocationMode: types.AgentInvocationModeHarnessCLI,
+			StepName: string(types.StepTest),
+			Round:    1,
+			Agent:    "claude",
 		},
 		{
-			StepName:                  string(types.StepDocument),
-			Round:                     1,
-			Agent:                     "codex",
-			InvocationMode:            types.AgentInvocationModeHarnessCLI,
-			AgentObservationsReported: true,
+			StepName: string(types.StepDocument),
+			Round:    1,
+			Agent:    "codex",
 		},
 	}, types.RefreshStrategyRebase)
 
 	for _, want := range []string{
-		"| Test r1 | claude (harness_cli) | - |",
-		"| Document r1 | codex (harness_cli) | none |",
+		"| Test r1 | claude |",
+		"| Document r1 | codex |",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agent telemetry table missing %q:\n%s", want, got)
@@ -448,13 +438,12 @@ func TestAgentTelemetryTableDistinguishesUnknownAndObservedNone(t *testing.T) {
 func TestAgentTelemetryTableNormalizesHistoricalRefreshInvocationForDisplay(t *testing.T) {
 	t.Parallel()
 	got := agentTelemetryTable([]db.AgentInvocation{{
-		StepName:       "rebase",
-		Round:          1,
-		Agent:          "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		StepName: "rebase",
+		Round:    1,
+		Agent:    "codex",
 	}}, types.RefreshStrategyMerge)
 
-	if !strings.Contains(got, "| Merge r1 | codex (harness_cli) | - |") {
+	if !strings.Contains(got, "| Merge r1 | codex |") {
 		t.Fatalf("historical rebase invocation did not use merge display label:\n%s", got)
 	}
 }
@@ -466,11 +455,9 @@ func TestTruncatePipelineSectionTreatsAgentTelemetryTableAsAtomic(t *testing.T) 
 		"review round 002 - newest update",
 	)
 	table := agentTelemetryTable([]db.AgentInvocation{{
-		StepName:                  string(types.StepReview),
-		Round:                     1,
-		Agent:                     "codex",
-		InvocationMode:            types.AgentInvocationModeHarnessCLI,
-		AgentObservationsReported: true,
+		StepName: string(types.StepReview),
+		Round:    1,
+		Agent:    "codex",
 	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
@@ -492,7 +479,7 @@ func TestTruncatePipelineSectionTreatsAgentTelemetryTableAsAtomic(t *testing.T) 
 	if got != want {
 		t.Fatalf("telemetry removal changed existing pipeline clamp priorities or markers\nwant:\n%s\n\ngot:\n%s", want, got)
 	}
-	for _, fragment := range []string{"| Step | Agent (via) | Nested agents |", "| --- | --- | --- |", "| Review r1 |"} {
+	for _, fragment := range []string{"| Step | Agent |", "| --- | --- |", "| Review r1 |"} {
 		if strings.Contains(got, fragment) {
 			t.Fatalf("clamped pipeline retained partial telemetry fragment %q:\n%s", fragment, got)
 		}
@@ -505,11 +492,9 @@ func TestAssemblePRBodyProviderClampTreatsAgentTelemetryTableAsAtomic(t *testing
 	whatChanged := "## What Changed\n\n- keep the reviewer summary"
 	withoutTelemetry := pipelineMarkdownForTest("review round 001 - latest update")
 	table := agentTelemetryTable([]db.AgentInvocation{{
-		StepName:                  string(types.StepReview),
-		Round:                     1,
-		Agent:                     "codex",
-		InvocationMode:            types.AgentInvocationModeHarnessCLI,
-		AgentObservationsReported: true,
+		StepName: string(types.StepReview),
+		Round:    1,
+		Agent:    "codex",
 	}}, types.RefreshStrategyRebase)
 	withTelemetry := strings.Replace(
 		withoutTelemetry,
@@ -2085,9 +2070,8 @@ func TestAppendGeneratedSections_RetainsPipelineAttestationWhenTruncated(t *test
 	}
 	attestation := buildPipelineAttestation(steps, testPipelineHeadSHA)
 	telemetry := agentTelemetryTable([]db.AgentInvocation{{
-		StepName:       string(types.StepReview),
-		Agent:          "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		StepName: string(types.StepReview),
+		Agent:    "codex",
 	}}, types.RefreshStrategyRebase)
 	pipelineMD := pipelineMarkdownForTest(strings.Repeat("review round - "+strings.Repeat("x", 1000), 100))
 	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n"+telemetry, 1)

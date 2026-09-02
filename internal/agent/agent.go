@@ -238,13 +238,6 @@ type Result struct {
 	// Provider is the adapter provider that served this invocation. It lets
 	// fallback wrappers persist a session against the provider that minted it.
 	Provider string
-	// AgentObservations is the ordered, bounded list of nested agent invocations
-	// exposed by this adapter's event stream. AgentObservationsReported
-	// distinguishes a supported stream with no nested invocations from an
-	// adapter that exposes no nested-agent evidence.
-	AgentObservations         []types.AgentObservation
-	AgentObservationsReported bool
-	NestedAgentCount          int
 	// Metrics is the bounded per-invocation activity evidence the adapter
 	// extracted from its event stream (round-trips, tool calls + categories,
 	// subprocess wait time). Nil means the adapter reported nothing, which is

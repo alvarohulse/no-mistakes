@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // claudeMaxRetries is the number of additional attempts past the initial
@@ -169,23 +168,17 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
-	coverage := UsageCoverageUnknown
 	terminalMetersComplete := usage.InputIsReported() && usage.OutputIsReported()
-	if result.terminalUsageReported && !result.unaccountedWork && !result.terminalUnderreports {
-		coverage = usageCoverageForCompleteStream(terminalMetersComplete, result.nestedAgentCount > 0)
-	}
+	coverage := usageCoverageForCompleteStream(result.terminalUsageReported && terminalMetersComplete && !result.terminalUnderreports, result.unaccountedWork)
 	finalized := &Result{
-		Output:                    result.StructuredOutput,
-		Text:                      result.text,
-		Usage:                     usage,
-		UsageReported:             usage.Reported,
-		UsageCoverage:             coverage,
-		CacheCreationReported:     usage.CacheCreationReported,
-		AgentObservations:         result.agentObservations,
-		AgentObservationsReported: result.agentObservationsReported,
-		NestedAgentCount:          result.nestedAgentCount,
-		Model:                     sanitizeModelToken(result.model),
-		ReportedCostUSD:           result.reportedCostUSD,
+		Output:                result.StructuredOutput,
+		Text:                  result.text,
+		Usage:                 usage,
+		UsageReported:         usage.Reported,
+		UsageCoverage:         coverage,
+		CacheCreationReported: usage.CacheCreationReported,
+		Model:                 sanitizeModelToken(result.model),
+		ReportedCostUSD:       result.reportedCostUSD,
 	}
 	if result.IsError || result.Subtype != "success" {
 		return finalized, fmt.Errorf("claude error: subtype=%s", result.Subtype)
@@ -322,22 +315,19 @@ type claudeEvent struct {
 
 // claudeResult captures the parsed result event.
 type claudeResult struct {
-	Subtype                   string
-	IsError                   bool
-	StructuredOutput          json.RawMessage
-	text                      string // accumulated text from assistant events
-	rawEvent                  json.RawMessage
-	sessionID                 string // durable session identity from the event stream
-	model                     string // model reported by assistant events
-	agentObservations         []types.AgentObservation
-	agentObservationsReported bool
-	nestedAgentCount          int
-	reportedCostUSD           *float64
-	assistantEvents           int
-	assistantUsageEvents      int
-	terminalUsageReported     bool
-	terminalUnderreports      bool
-	unaccountedWork           bool
+	Subtype               string
+	IsError               bool
+	StructuredOutput      json.RawMessage
+	text                  string // accumulated text from assistant events
+	rawEvent              json.RawMessage
+	sessionID             string // durable session identity from the event stream
+	model                 string // model reported by assistant events
+	reportedCostUSD       *float64
+	assistantEvents       int
+	assistantUsageEvents  int
+	terminalUsageReported bool
+	terminalUnderreports  bool
+	unaccountedWork       bool
 }
 
 type claudeUsage struct {
@@ -354,14 +344,8 @@ type claudeMessage struct {
 }
 
 type claudeContent struct {
-	Type  string `json:"type"`
-	Text  string `json:"text"`
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Input struct {
-		SubagentType string `json:"subagent_type"`
-		Name         string `json:"name"`
-	} `json:"input"`
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
@@ -372,7 +356,6 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var textBuf string
 	var lastSessionID string
 	var lastModel string
-	observations := newAgentObservationCollector(true)
 	assistantEvents := 0
 	assistantUsageEvents := 0
 	unaccountedWork := false
@@ -431,15 +414,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					}
 				}
 				if c.Type == "tool_use" {
-					if c.Name == "Agent" || c.Name == "Task" {
-						identity := c.Input.SubagentType
-						if identity == "" {
-							identity = c.Input.Name
-						}
-						observations.observe(c.ID, identity)
-					} else {
-						unaccountedWork = true
-					}
+					unaccountedWork = true
 				}
 			}
 
@@ -464,22 +439,19 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
 				*result = &claudeResult{
-					Subtype:                   event.Subtype,
-					IsError:                   event.IsError,
-					StructuredOutput:          event.StructuredOutput,
-					text:                      textBuf,
-					rawEvent:                  raw,
-					sessionID:                 lastSessionID,
-					model:                     lastModel,
-					agentObservations:         observations.observations,
-					agentObservationsReported: observations.reported,
-					nestedAgentCount:          observations.uniqueCount(),
-					reportedCostUSD:           event.TotalCostUSD,
-					assistantEvents:           assistantEvents,
-					assistantUsageEvents:      assistantUsageEvents,
-					terminalUsageReported:     terminalUsageReported,
-					terminalUnderreports:      terminalUnderreports,
-					unaccountedWork:           unaccountedWork,
+					Subtype:               event.Subtype,
+					IsError:               event.IsError,
+					StructuredOutput:      event.StructuredOutput,
+					text:                  textBuf,
+					rawEvent:              raw,
+					sessionID:             lastSessionID,
+					model:                 lastModel,
+					reportedCostUSD:       event.TotalCostUSD,
+					assistantEvents:       assistantEvents,
+					assistantUsageEvents:  assistantUsageEvents,
+					terminalUsageReported: terminalUsageReported,
+					terminalUnderreports:  terminalUnderreports,
+					unaccountedWork:       unaccountedWork,
 				}
 			}
 		}

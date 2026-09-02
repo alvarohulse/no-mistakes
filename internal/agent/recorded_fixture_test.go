@@ -29,7 +29,7 @@ func TestRecordedClaudeStreamTelemetry(t *testing.T) {
 	if err := parseClaudeEvents(context.Background(), strings.NewReader(stream), nil, &usage, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result == nil || result.model != "claude-opus-5" || result.nestedAgentCount != 0 || !result.agentObservationsReported {
+	if result == nil || result.model != "claude-opus-5" {
 		t.Fatalf("result = %+v", result)
 	}
 	if usage.InputTokens != 2 || usage.OutputTokens != 121 || usage.CacheReadTokens != 0 || usage.CacheCreationTokens != 35_241 {
@@ -51,8 +51,8 @@ func TestRecordedCodexStreamTelemetry(t *testing.T) {
 	if err := parseCodexEvents(context.Background(), strings.NewReader(stream), nil, &usage, &lastMessage, nil, &threadID, metrics); err != nil {
 		t.Fatal(err)
 	}
-	if threadID == "" || lastMessage == "" || metrics.nestedAgentCount() != 0 {
-		t.Fatalf("thread/message/nested = %q/%q/%d", threadID, lastMessage, metrics.nestedAgentCount())
+	if threadID == "" || lastMessage == "" {
+		t.Fatalf("thread/message = %q/%q", threadID, lastMessage)
 	}
 	if usage.InputTokens != 14_028 || usage.OutputTokens != 25 || usage.CacheReadTokens != 0 || usage.CacheCreationTokens != 14_025 {
 		t.Fatalf("usage = %+v", usage)

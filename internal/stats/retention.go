@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	MetricReceiptSchemaVersion = 3
+	MetricReceiptSchemaVersion = 4
 	RichRunRetentionAge        = 14 * 24 * time.Hour
 	RichRunRetentionFloor      = 50
 )
@@ -64,29 +64,26 @@ type MetricStep struct {
 }
 
 type MetricInvocation struct {
-	ID                   string                    `json:"id"`
-	Step                 types.StepName            `json:"step"`
-	Round                int                       `json:"round"`
-	Purpose              string                    `json:"purpose"`
-	Agent                string                    `json:"agent"`
-	UsageCoverage        agent.UsageCoverage       `json:"usage_coverage"`
-	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
-	NestedAgentsReported bool                      `json:"nested_agents_reported"`
-	NestedAgentCount     *int                      `json:"nested_agent_count"`
-	Model                *string                   `json:"model"`
-	Provider             *string                   `json:"provider"`
-	SessionMode          string                    `json:"session_mode"`
-	FallbackReason       *string                   `json:"fallback_reason"`
-	StartedAt            int64                     `json:"started_at"`
-	CompletedAt          int64                     `json:"completed_at"`
-	DurationMS           int64                     `json:"duration_ms"`
-	ExitStatus           string                    `json:"exit_status"`
-	FailureCategory      *string                   `json:"failure_category"`
-	RawUsage             TokenMeters               `json:"raw_usage"`
-	DeltaUsage           TokenMeters               `json:"delta_usage"`
-	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
-	Costs                legacycost.CostClasses    `json:"costs"`
-	Activity             Activity                  `json:"activity"`
+	ID              string                 `json:"id"`
+	Step            types.StepName         `json:"step"`
+	Round           int                    `json:"round"`
+	Purpose         string                 `json:"purpose"`
+	Agent           string                 `json:"agent"`
+	UsageCoverage   agent.UsageCoverage    `json:"usage_coverage"`
+	Model           *string                `json:"model"`
+	Provider        *string                `json:"provider"`
+	SessionMode     string                 `json:"session_mode"`
+	FallbackReason  *string                `json:"fallback_reason"`
+	StartedAt       int64                  `json:"started_at"`
+	CompletedAt     int64                  `json:"completed_at"`
+	DurationMS      int64                  `json:"duration_ms"`
+	ExitStatus      string                 `json:"exit_status"`
+	FailureCategory *string                `json:"failure_category"`
+	RawUsage        TokenMeters            `json:"raw_usage"`
+	DeltaUsage      TokenMeters            `json:"delta_usage"`
+	ReportedCostUSD *float64               `json:"reported_cost_usd"`
+	Costs           legacycost.CostClasses `json:"costs"`
+	Activity        Activity               `json:"activity"`
 }
 
 // RunArtifactCleanup binds the immutable filesystem targets selected at
@@ -323,16 +320,10 @@ func BuildMetricReceipt(database *db.DB, runID string, archivedAt time.Time) (*M
 }
 
 func metricInvocation(invocation Invocation) MetricInvocation {
-	count := invocation.NestedAgentCount
-	if count == nil && invocation.NestedAgentsReported {
-		value := len(invocation.NestedAgents)
-		count = &value
-	}
 	return MetricInvocation{
 		ID: invocation.ID, Step: invocation.Step, Round: invocation.Round, Purpose: invocation.Purpose, Agent: invocation.Agent,
-		UsageCoverage:  invocation.UsageCoverage,
-		InvocationMode: invocation.InvocationMode, NestedAgentsReported: invocation.NestedAgentsReported, NestedAgentCount: cloneInt(count),
-		Model: cloneString(invocation.Model), Provider: cloneString(invocation.Provider), SessionMode: invocation.SessionMode,
+		UsageCoverage: invocation.UsageCoverage,
+		Model:         cloneString(invocation.Model), Provider: cloneString(invocation.Provider), SessionMode: invocation.SessionMode,
 		FallbackReason: cloneString(invocation.FallbackReason), StartedAt: invocation.StartedAt, CompletedAt: invocation.CompletedAt,
 		DurationMS: invocation.DurationMS, ExitStatus: invocation.ExitStatus, FailureCategory: cloneString(invocation.FailureCategory),
 		RawUsage: cloneTokenMeters(invocation.RawUsage), DeltaUsage: cloneTokenMeters(invocation.DeltaUsage),
@@ -369,9 +360,8 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 	for _, stored := range receipt.Invocations {
 		audit.Invocations = append(audit.Invocations, Invocation{
 			ID: stored.ID, Step: stored.Step, Round: stored.Round, Purpose: stored.Purpose, Agent: stored.Agent,
-			UsageCoverage:  stored.UsageCoverage,
-			InvocationMode: stored.InvocationMode, NestedAgentsReported: stored.NestedAgentsReported, NestedAgentCount: cloneInt(stored.NestedAgentCount), NestedAgents: []types.AgentObservation{},
-			Model: cloneString(stored.Model), Provider: cloneString(stored.Provider), SessionMode: stored.SessionMode, SessionKey: "",
+			UsageCoverage: stored.UsageCoverage,
+			Model:         cloneString(stored.Model), Provider: cloneString(stored.Provider), SessionMode: stored.SessionMode, SessionKey: "",
 			FallbackReason: cloneString(stored.FallbackReason), StartedAt: stored.StartedAt, CompletedAt: stored.CompletedAt,
 			DurationMS: stored.DurationMS, ExitStatus: stored.ExitStatus, FailureCategory: cloneString(stored.FailureCategory),
 			RawUsage: cloneTokenMeters(stored.RawUsage), DeltaUsage: cloneTokenMeters(stored.DeltaUsage), ReportedCostUSD: cloneFloat64(stored.ReportedCostUSD),
@@ -389,7 +379,7 @@ func decodeMetricReceipt(record *db.RunMetricReceipt) (*MetricReceipt, error) {
 	if err := json.Unmarshal([]byte(record.PayloadJSON), &receipt); err != nil {
 		return nil, fmt.Errorf("decode run metric receipt: %w", err)
 	}
-	if (receipt.SchemaVersion != MetricReceiptSchemaVersion && receipt.SchemaVersion != 2) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
+	if (receipt.SchemaVersion != MetricReceiptSchemaVersion && receipt.SchemaVersion != 3 && receipt.SchemaVersion != 2) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
 		return nil, fmt.Errorf("run metric receipt %q identity mismatch", record.RunID)
 	}
 	for i := range receipt.Invocations {

@@ -114,9 +114,6 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     purpose               TEXT NOT NULL,
     agent                 TEXT NOT NULL,
 	usage_coverage        TEXT NOT NULL DEFAULT 'unknown',
-    invocation_mode       TEXT NOT NULL DEFAULT 'harness_cli',
-    agent_observations_json TEXT,
-	nested_agent_count      INTEGER,
     model                 TEXT,
     model_provider        TEXT,
 	review_candidate_pool_json TEXT,
@@ -363,11 +360,17 @@ var migrationStatements = []string{
 	// Historical rows predate adapter-authored coverage and therefore remain
 	// unknown; migration never infers completeness from their token values.
 	`ALTER TABLE agent_invocations ADD COLUMN usage_coverage TEXT NOT NULL DEFAULT 'unknown'`,
-	`ALTER TABLE agent_invocations ADD COLUMN invocation_mode TEXT NOT NULL DEFAULT 'harness_cli'`,
-	`ALTER TABLE agent_invocations ADD COLUMN agent_observations_json TEXT`,
-	`ALTER TABLE agent_invocations ADD COLUMN nested_agent_count INTEGER`,
 	`ALTER TABLE runs ADD COLUMN pr_note TEXT`,
 	`ALTER TABLE runs ADD COLUMN metadata TEXT`,
 	`ALTER TABLE step_results ADD COLUMN evidence_json TEXT`,
 	`ALTER TABLE step_results ADD COLUMN planned_command TEXT`,
+}
+
+// removalMigrationStatements delete telemetry fields that asserted nested
+// attribution the adapters cannot prove. Missing-column errors are expected on
+// fresh databases and subsequent opens.
+var removalMigrationStatements = []string{
+	`ALTER TABLE agent_invocations DROP COLUMN invocation_mode`,
+	`ALTER TABLE agent_invocations DROP COLUMN agent_observations_json`,
+	`ALTER TABLE agent_invocations DROP COLUMN nested_agent_count`,
 }

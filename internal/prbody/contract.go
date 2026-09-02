@@ -271,19 +271,5 @@ type AgentRun struct {
 	Costs *legacycost.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
-	Vendor         string `json:"vendor,omitempty"`
-	InvocationMode string `json:"invocation_mode,omitempty"`
-	// Nested lists sub-agents the adapter's event stream exposed.
-	// NestedReported separates "an adapter that reports nesting saw none" from
-	// "this adapter exposes no such evidence"; without it, an empty list reads
-	// as a claim the run made no sub-agent calls.
-	Nested         []NestedAgent `json:"nested,omitempty"`
-	NestedReported bool          `json:"nested_reported"`
-	NestedCount    *int          `json:"nested_count,omitempty"`
-}
-
-// NestedAgent is a sub-agent invocation observed inside an AgentRun.
-type NestedAgent struct {
-	Identity       string `json:"identity,omitempty"`
-	InvocationMode string `json:"invocation_mode,omitempty"`
+	Vendor string `json:"vendor,omitempty"`
 }

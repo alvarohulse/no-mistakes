@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -635,27 +636,31 @@ func TestApplyEvaluationUsageUsesProviderSpecificCanonicalFreshInput(t *testing.
 	}
 }
 
-func TestSourceInvocationsPreserveBoundedTelemetry(t *testing.T) {
-	cacheCreation, deltaCacheCreation, nested, toolCalls := 5, 3, 2, 7
+func TestSourceInvocationsPreserveTopLevelTelemetry(t *testing.T) {
+	cacheCreation, deltaCacheCreation, toolCalls := 5, 3, 7
 	reportedCost := 0.42
 	provider := "anthropic"
 	got := sourceInvocationsFor([]db.AgentInvocation{{
 		StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude",
-		UsageCoverage:             agent.UsageCoverageComplete,
-		InvocationMode:            types.AgentInvocationModeHarnessCLI,
-		AgentObservations:         []types.AgentObservation{{Identity: "worker", InvocationMode: types.AgentInvocationModeSubagentTool}},
-		AgentObservationsReported: true, NestedAgentCount: &nested, ModelProvider: &provider,
+		UsageCoverage: agent.UsageCoverageComplete, ModelProvider: &provider,
 		CacheCreationTokens: &cacheCreation, DeltaCacheCreationTokens: &deltaCacheCreation,
 		ReportedCostUSD: &reportedCost, ToolCalls: &toolCalls,
 	}})
-	if len(got) != 1 || got[0].InvocationMode != types.AgentInvocationModeHarnessCLI ||
-		got[0].UsageCoverage != agent.UsageCoverageComplete ||
-		!got[0].AgentObservationsReported || got[0].NestedAgentCount == nil || *got[0].NestedAgentCount != nested ||
+	if len(got) != 1 || got[0].UsageCoverage != agent.UsageCoverageComplete ||
 		got[0].ModelProvider == nil || *got[0].ModelProvider != provider ||
 		got[0].DeltaCacheCreationTokens == nil || *got[0].DeltaCacheCreationTokens != deltaCacheCreation ||
 		got[0].ReportedCostUSD == nil || *got[0].ReportedCostUSD != reportedCost ||
 		got[0].ToolCalls == nil || *got[0].ToolCalls != toolCalls {
 		t.Fatalf("source invocation = %#v, want bounded telemetry preserved", got)
+	}
+	raw, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"invocation_mode", "agent_observations", "agent_observations_reported", "nested_agent_count"} {
+		if bytes.Contains(raw, []byte(`"`+removed+`"`)) {
+			t.Fatalf("eval invocation retained removed field %q: %s", removed, raw)
+		}
 	}
 }
 

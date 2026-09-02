@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // codexMetricsAccumulator extracts bounded InvocationMetrics from the codex
@@ -24,14 +22,10 @@ type codexMetricsAccumulator struct {
 	categories       ToolCategoryCounts
 	subprocessWaitMS int64
 	starts           map[string]time.Time
-	observations     *agentObservationCollector
 }
 
 func newCodexMetricsAccumulator() *codexMetricsAccumulator {
-	return &codexMetricsAccumulator{
-		starts:       map[string]time.Time{},
-		observations: newAgentObservationCollector(true),
-	}
+	return &codexMetricsAccumulator{starts: map[string]time.Time{}}
 }
 
 // onItem folds one item.started/item.completed event into the accumulator,
@@ -39,11 +33,6 @@ func newCodexMetricsAccumulator() *codexMetricsAccumulator {
 func (m *codexMetricsAccumulator) onItem(eventType string, item *codexItem, at time.Time) {
 	if m == nil || item == nil {
 		return
-	}
-	if eventType == "item.completed" && item.Type == "collab_tool_call" && item.Tool == "spawn_agent" && item.Status == "completed" {
-		for _, threadID := range item.ReceiverThreadIDs {
-			m.observations.observe(item.ID+":"+threadID, fingerprintAgentIdentity("thread", threadID))
-		}
 	}
 	isTool, defaultCat, classify := codexToolItemKind(item.Type)
 	switch eventType {
@@ -78,20 +67,6 @@ func (m *codexMetricsAccumulator) onItem(eventType string, item *codexItem, at t
 			delete(m.starts, item.ID)
 		}
 	}
-}
-
-func (m *codexMetricsAccumulator) agentObservations() []types.AgentObservation {
-	if m == nil || m.observations == nil {
-		return nil
-	}
-	return m.observations.observations
-}
-
-func (m *codexMetricsAccumulator) nestedAgentCount() int {
-	if m == nil {
-		return 0
-	}
-	return m.observations.uniqueCount()
 }
 
 func (m *codexMetricsAccumulator) metrics() InvocationMetrics {

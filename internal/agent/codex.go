@@ -133,9 +133,6 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 			res.SessionUsageCumulative = true
 			m := metrics.metrics()
 			res.Metrics = &m
-			res.AgentObservations = metrics.agentObservations()
-			res.AgentObservationsReported = true
-			res.NestedAgentCount = metrics.nestedAgentCount()
 			res.Model, res.ModelProvider = resolveCodexModel(threadID, time.Now())
 		}
 		return res, err
@@ -328,13 +325,10 @@ type codexEvent struct {
 }
 
 type codexItem struct {
-	ID                string   `json:"id"`
-	Type              string   `json:"type"`
-	Text              string   `json:"text"`
-	Command           string   `json:"command"`
-	Tool              string   `json:"tool"`
-	ReceiverThreadIDs []string `json:"receiver_thread_ids"`
-	Status            string   `json:"status"`
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Text    string `json:"text"`
+	Command string `json:"command"`
 }
 
 type codexUsage struct {

@@ -687,7 +687,7 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // only section that embeds artifact and log file contents and is therefore
 // effectively unbounded, so an Azure DevOps PR sheds log dumps while keeping
 // its Summary, Notes, What Changed, Risk, and Pipeline narrative. The agent
-// attribution table goes next, as a complete unit rather than a ragged
+// Pipeline invocation table goes next, as a complete unit rather than a ragged
 // remnant. Only then does Pipeline evidence shrink, and it shrinks
 // structurally - whole update rounds omitted oldest-first at <details>
 // boundaries, newest evidence retained - because a blind tail cut through a

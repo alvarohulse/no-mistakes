@@ -35,7 +35,7 @@ func TestStatsAgentsReportsLocalPerformanceTelemetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := []db.AgentInvocation{
-		{RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", Model: "gpt-5.2", InvocationMode: types.AgentInvocationModeHarnessCLI, AgentObservationsReported: true, SessionMode: db.InvocationModeStarted, SessionKey: "deadbeef00000000", StartedAt: 1, CompletedAt: 2, DurationMS: 60_000, ExitStatus: "ok", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 40, CacheCreationTokens: statsIntPtr(20), DeltaInputTokens: statsIntPtr(100), DeltaOutputTokens: statsIntPtr(10), DeltaCacheReadTokens: statsIntPtr(40), DeltaCacheCreationTokens: statsIntPtr(20)},
+		{RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeStarted, SessionKey: "deadbeef00000000", StartedAt: 1, CompletedAt: 2, DurationMS: 60_000, ExitStatus: "ok", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 40, CacheCreationTokens: statsIntPtr(20), DeltaInputTokens: statsIntPtr(100), DeltaOutputTokens: statsIntPtr(10), DeltaCacheReadTokens: statsIntPtr(40), DeltaCacheCreationTokens: statsIntPtr(20)},
 		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeResumed, SessionKey: "deadbeef00000000", StartedAt: 3, CompletedAt: 4, DurationMS: 30_000, ExitStatus: "ok", InputTokens: 50, OutputTokens: 5, CacheReadTokens: 45, CacheCreationTokens: statsIntPtr(25), DeltaInputTokens: statsIntPtr(50), DeltaOutputTokens: statsIntPtr(5), DeltaCacheReadTokens: statsIntPtr(45), DeltaCacheCreationTokens: statsIntPtr(25)},
 		{RunID: run.ID, StepName: "review", Round: 2, Purpose: "review-fix", Agent: "codex", Model: "gpt-5.2", SessionMode: db.InvocationModeStarted, SessionKey: "feedface00000000", StartedAt: 5, CompletedAt: 6, DurationMS: 45_000, ExitStatus: "ok"},
 	}
@@ -63,9 +63,14 @@ func TestStatsAgentsReportsLocalPerformanceTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stats --run: %v\n%s", err, out)
 	}
-	for _, want := range []string{run.ID, "parked_ms=90000", "session=resumed", "gpt-5.2", "cache_write_tokens=20", "nested_agents=0"} {
+	for _, want := range []string{run.ID, "parked_ms=90000", "session=resumed", "gpt-5.2", "cache_write_tokens=20"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats --run missing %q in:\n%s", want, out)
+		}
+	}
+	for _, removed := range []string{"invoked_via=", "nested_agents="} {
+		if strings.Contains(out, removed) {
+			t.Fatalf("stats --run retained removed field %q in:\n%s", removed, out)
 		}
 	}
 	// The seeded rows carry no activity metrics, so those fields render as the
@@ -100,13 +105,7 @@ func TestStatsRendersPopulatedFidelityMetrics(t *testing.T) {
 	}
 	inv := db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 2, Purpose: "review-fix", Agent: "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
-		AgentObservations: []types.AgentObservation{{
-			Identity:       "Explore",
-			InvocationMode: types.AgentInvocationModeSubagentTool,
-		}},
-		AgentObservationsReported: true,
-		Model:                     "gpt-5.6-sol", ModelProvider: strPtrCLI("openai"),
+		Model: "gpt-5.6-sol", ModelProvider: strPtrCLI("openai"),
 		SessionMode: db.InvocationModeResumed, SessionKey: "deadbeef00000000",
 		StartedAt: 1, CompletedAt: 2, DurationMS: 10_000, SubprocessWaitMS: statsInt64Ptr(2_000),
 		ExitStatus: "ok", InputTokens: 2500, OutputTokens: 250, CacheReadTokens: 1800,
@@ -137,8 +136,8 @@ func TestStatsRendersPopulatedFidelityMetrics(t *testing.T) {
 		t.Fatalf("stats --run: %v\n%s", err, out)
 	}
 	// Per-round delta is shown distinctly from raw cumulative usage alongside
-	// activity, workload, invocation mode, and nested-agent facts.
-	for _, want := range []string{"delta_input_tokens=1500", "raw_input_tokens=2500", "tool_calls=7", "workload=12/1060", "harness=codex", "invoked_via=harness_cli", "Explore(subagent_tool)"} {
+	// activity, workload, and retained top-level invocation facts.
+	for _, want := range []string{"delta_input_tokens=1500", "raw_input_tokens=2500", "tool_calls=7", "workload=12/1060", "harness=codex"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stats --run missing %q in:\n%s", want, out)
 		}
@@ -163,17 +162,16 @@ func TestStatsRunLabelsHistoricalRefreshInvocationFromRunStrategy(t *testing.T) 
 		t.Fatal(err)
 	}
 	if _, err := d.InsertAgentInvocation(db.AgentInvocation{
-		RunID:          run.ID,
-		StepName:       "rebase",
-		Round:          1,
-		Purpose:        "refresh",
-		Agent:          "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
-		SessionMode:    db.InvocationModeCold,
-		StartedAt:      1,
-		CompletedAt:    2,
-		DurationMS:     1,
-		ExitStatus:     "ok",
+		RunID:       run.ID,
+		StepName:    "rebase",
+		Round:       1,
+		Purpose:     "refresh",
+		Agent:       "codex",
+		SessionMode: db.InvocationModeCold,
+		StartedAt:   1,
+		CompletedAt: 2,
+		DurationMS:  1,
+		ExitStatus:  "ok",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -206,8 +204,8 @@ func TestStatsRunJSONUsesSharedReportEnvelope(t *testing.T) {
 	zero := 0
 	if _, err := database.InsertAgentInvocation(db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI, SessionMode: db.InvocationModeCold,
-		StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+		SessionMode: db.InvocationModeCold,
+		StartedAt:   1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
 		DeltaInputTokens: &zero, DeltaOutputTokens: &zero, DeltaCacheReadTokens: &zero, DeltaCacheCreationTokens: &zero,
 	}); err != nil {
 		t.Fatal(err)
@@ -318,7 +316,7 @@ func TestStatsDirectFiltersUseOneReportForTextJSONAndCSV(t *testing.T) {
 	provider := "openai"
 	if _, err := database.InsertAgentInvocation(db.AgentInvocation{
 		RunID: run.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex",
-		Model: "gpt-5.6-sol", ModelProvider: &provider, InvocationMode: types.AgentInvocationModeHarnessCLI,
+		Model: "gpt-5.6-sol", ModelProvider: &provider,
 		SessionMode: db.InvocationModeCold, StartedAt: run.CreatedAt, CompletedAt: run.CreatedAt + 1, ExitStatus: "ok",
 	}); err != nil {
 		t.Fatal(err)

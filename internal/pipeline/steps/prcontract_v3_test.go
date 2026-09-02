@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -160,19 +161,21 @@ func TestContractV3ProjectsPerRoundTelemetryMetersAndReportedCost(t *testing.T) 
 	}
 }
 
-func TestContractV3ProjectsExactNestedAgentCount(t *testing.T) {
+func TestCurrentContractOmitsNestedAttributionAndInvocationMode(t *testing.T) {
 	t.Parallel()
-	count := 70
 	contract := BuildContract(ContractInput{
-		Steps: []*db.StepResult{{ID: "review", StepName: types.StepReview, StepOrder: 3, Status: types.StepStatusCompleted}},
-		Invocations: []db.AgentInvocation{{
-			StepName: string(types.StepReview), Round: 1, Agent: "codex",
-			AgentObservationsReported: true, NestedAgentCount: &count,
-		}},
+		Steps:       []*db.StepResult{{ID: "review", StepName: types.StepReview, StepOrder: 3, Status: types.StepStatusCompleted}},
+		Invocations: []db.AgentInvocation{{StepName: string(types.StepReview), Round: 1, Agent: "codex"}},
 	})
 	run := contract.Sections.Pipeline.Steps[0].Agents[0]
-	if run.NestedCount == nil || *run.NestedCount != count {
-		t.Fatalf("nested count = %v, want %d", run.NestedCount, count)
+	raw, err := json.Marshal(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"invocation_mode", "nested", "nested_reported", "nested_count"} {
+		if bytes.Contains(raw, []byte(`"`+removed+`"`)) {
+			t.Fatalf("formatter invocation retained removed field %q: %s", removed, raw)
+		}
 	}
 }
 

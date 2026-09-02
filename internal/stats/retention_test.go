@@ -41,6 +41,26 @@ func TestDecodeMetricReceiptVersion2DefaultsUsageCoverageToUnknown(t *testing.T)
 	}
 }
 
+func TestDecodeMetricReceiptVersion3DropsRemovedAttribution(t *testing.T) {
+	payload := `{"schema_version":3,"run":{"id":"run-1","repo_id":"repo-1","status":"completed","created_at":10},"steps":[],"invocations":[{"id":"inv-1","agent":"codex","usage_coverage":"complete","invocation_mode":"harness_cli","nested_agents_reported":true,"nested_agent_count":1}],"metrics":{"invocation_count":1},"costs":{},"integrity_error_count":0,"archived_at":20}`
+	decoded, err := decodeMetricReceipt(&db.RunMetricReceipt{
+		RunID: "run-1", RepoID: "repo-1", RunStatus: types.RunCompleted, RunCreatedAt: 10,
+		SchemaVersion: 3, PayloadJSON: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(decoded.RunAudit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"invocation_mode", "nested_agents_reported", "nested_agent_count", "nested_agents"} {
+		if strings.Contains(string(raw), `"`+removed+`"`) {
+			t.Fatalf("decoded historical receipt retained removed field %q: %s", removed, raw)
+		}
+	}
+}
+
 func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/retention.sqlite")
 	if err != nil {
@@ -138,9 +158,7 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 		Model:         "gpt-5.6-sol", ModelProvider: &provider, SessionMode: db.InvocationModeFallback,
 		SessionKey: privateMarker, FallbackReason: &fallback, StartedAt: oldest.CreatedAt, CompletedAt: oldest.CreatedAt + 1,
 		DurationMS: 1000, ExitStatus: "ok", DeltaInputTokens: &tokens, DeltaOutputTokens: &tokens,
-		PricingReceiptJSON:        &historicalReceipt,
-		AgentObservationsReported: true,
-		AgentObservations:         []types.AgentObservation{{Identity: privateMarker, InvocationMode: types.AgentInvocationModeSubagentTool}},
+		PricingReceiptJSON: &historicalReceipt,
 	})
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: oldest.ID, StepName: string(types.StepReview), Round: 1, Purpose: "legacy-raw", Agent: "codex",
@@ -207,7 +225,7 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if audit.Run.RichDataRetained || audit.Run.Branch != "" || audit.Run.HeadSHA != "" || audit.Invocations[0].SessionKey != "" || len(audit.Invocations[0].NestedAgents) != 0 {
+	if audit.Run.RichDataRetained || audit.Run.Branch != "" || audit.Run.HeadSHA != "" || audit.Invocations[0].SessionKey != "" {
 		t.Fatalf("archived audit retained rich identity: %+v", audit)
 	}
 	if !reflect.DeepEqual(audit.Steps, beforeAudit.Steps) {

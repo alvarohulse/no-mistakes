@@ -148,7 +148,6 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 		Purpose:             purpose,
 		Agent:               agentName,
 		UsageCoverage:       agent.UsageCoverageUnknown,
-		InvocationMode:      types.AgentInvocationModeHarnessCLI,
 		SessionMode:         invocationSessionMode(opts),
 		SessionKey:          sessionKey,
 		StartedAt:           startedAt.Unix(),
@@ -199,15 +198,6 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 	}
 	if result.Model != "" {
 		inv.Model = result.Model
-	}
-	inv.AgentObservationsReported = result.AgentObservationsReported
-	inv.AgentObservations = append([]types.AgentObservation(nil), result.AgentObservations...)
-	if result.AgentObservationsReported {
-		count := result.NestedAgentCount
-		if count == 0 && len(result.AgentObservations) > 0 {
-			count = len(result.AgentObservations)
-		}
-		inv.NestedAgentCount = &count
 	}
 	if result.ModelProvider != "" {
 		provider := result.ModelProvider

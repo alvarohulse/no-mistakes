@@ -5,12 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCodexAgent_BuildArgs(t *testing.T) {
@@ -422,28 +419,6 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 	}
 	if usage.CacheCreationTokens != 25 || !usage.CacheCreationReported {
 		t.Errorf("expected 25 reported cache write tokens, got %+v", usage)
-	}
-}
-
-func TestParseCodexEvents_CollectsNestedAgentInvocations(t *testing.T) {
-	events := strings.Join([]string{
-		`{"type":"item.completed","item":{"id":"collab-1","type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["thread-child"],"status":"completed"}}`,
-		`{"type":"item.completed","item":{"id":"collab-2","type":"collab_tool_call","tool":"send_input","receiver_thread_ids":["thread-child"],"status":"completed"}}`,
-		"",
-	}, "\n")
-
-	metrics := newCodexMetricsAccumulator()
-	var usage TokenUsage
-	var lastMessage string
-	if err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, nil, nil, metrics); err != nil {
-		t.Fatalf("parseCodexEvents() error = %v", err)
-	}
-	want := []types.AgentObservation{{
-		Identity:       "thread:d4711ca0b1124b54",
-		InvocationMode: types.AgentInvocationModeSubagentTool,
-	}}
-	if !reflect.DeepEqual(metrics.agentObservations(), want) {
-		t.Fatalf("agent observations = %+v, want %+v", metrics.agentObservations(), want)
 	}
 }
 

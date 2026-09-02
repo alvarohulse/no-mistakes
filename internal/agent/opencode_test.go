@@ -545,9 +545,6 @@ func TestOpencodeAgent_EventStreamFailureRetainsCompletedMessageResult(t *testin
 	if !result.UsageReported || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 5 || result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 2 {
 		t.Fatalf("partial result = %+v, want completed message usage", result)
 	}
-	if !result.AgentObservationsReported || result.NestedAgentCount != 1 || len(result.AgentObservations) != 1 || result.AgentObservations[0].Identity != "explore" {
-		t.Fatalf("partial nested-agent telemetry = %+v", result)
-	}
 	if result.UsageCoverage != UsageCoverageUnknown {
 		t.Fatalf("partial usage coverage = %q, want unknown", result.UsageCoverage)
 	}
@@ -655,9 +652,6 @@ func TestOpencodeAgent_StructuredOutputError(t *testing.T) {
 	}
 	if result == nil || !result.UsageReported || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 5 {
 		t.Fatalf("partial result = %+v, want incurred usage", result)
-	}
-	if !result.AgentObservationsReported || result.NestedAgentCount != 1 {
-		t.Fatalf("partial nested-agent telemetry = %+v", result)
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "structured output failed") {

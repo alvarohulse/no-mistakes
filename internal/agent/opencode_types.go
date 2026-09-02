@@ -33,12 +33,7 @@ type opencodeEventPart struct {
 	Metadata  *opencodeMetadata  `json:"metadata,omitempty"`
 }
 
-type opencodeToolState struct {
-	Input struct {
-		SubagentType string `json:"subagent_type,omitempty"`
-		Agent        string `json:"agent,omitempty"`
-	} `json:"input,omitempty"`
-}
+type opencodeToolState struct{}
 
 type opencodeEventInfo struct {
 	ID     string          `json:"id,omitempty"`
@@ -119,21 +114,21 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID           string
-	onChunk             func(string)
-	textParts           map[string]*opencodeTextPart
-	textPartOrder       []string
-	usageByMsg          map[string]TokenUsage
-	liveUsageByMsg      map[string]TokenUsage
-	usage               TokenUsage
-	lastText            string
-	lastFinalText       string
-	userMsgIDs          map[string]bool
-	assistantMsgIDs     map[string]bool
-	filteredPartIDs     map[string]bool
-	hasEmittedText      bool
-	hadToolActivity     bool
-	reachedIdle         bool
-	streamIntegrityLost bool
-	observations        *agentObservationCollector
+	sessionID            string
+	onChunk              func(string)
+	textParts            map[string]*opencodeTextPart
+	textPartOrder        []string
+	usageByMsg           map[string]TokenUsage
+	liveUsageByMsg       map[string]TokenUsage
+	usage                TokenUsage
+	lastText             string
+	lastFinalText        string
+	userMsgIDs           map[string]bool
+	assistantMsgIDs      map[string]bool
+	filteredPartIDs      map[string]bool
+	hasEmittedText       bool
+	hadToolActivity      bool
+	reachedIdle          bool
+	streamIntegrityLost  bool
+	subagentWorkObserved bool
 }

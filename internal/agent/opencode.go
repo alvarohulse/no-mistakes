@@ -91,7 +91,6 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		textParts:      make(map[string]*opencodeTextPart),
 		usageByMsg:     make(map[string]TokenUsage),
 		liveUsageByMsg: make(map[string]TokenUsage),
-		observations:   newAgentObservationCollector(true),
 	}
 	err = parseOpencodeSSE(eventBody, state)
 	streamCancel()
@@ -149,9 +148,6 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
 	if result != nil {
 		result.UsageCoverage = opencodeUsageCoverage(state)
-		result.AgentObservations = state.observations.observations
-		result.AgentObservationsReported = true
-		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
 }
@@ -169,7 +165,7 @@ func opencodeUsageCoverage(state *opencodeStreamState) UsageCoverage {
 			return UsageCoverageUnknown
 		}
 	}
-	return usageCoverageForCompleteStream(true, state.observations.uniqueCount() > 0)
+	return usageCoverageForCompleteStream(true, state.subagentWorkObserved)
 }
 
 func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {
@@ -232,14 +228,11 @@ func opencodePartialResult(state *opencodeStreamState) *Result {
 		return nil
 	}
 	return &Result{
-		Text:                      state.lastText,
-		Usage:                     state.usage,
-		UsageReported:             state.usage.Reported,
-		UsageCoverage:             UsageCoverageUnknown,
-		CacheCreationReported:     state.usage.CacheCreationReported,
-		AgentObservations:         state.observations.observations,
-		AgentObservationsReported: true,
-		NestedAgentCount:          state.observations.uniqueCount(),
+		Text:                  state.lastText,
+		Usage:                 state.usage,
+		UsageReported:         state.usage.Reported,
+		UsageCoverage:         UsageCoverageUnknown,
+		CacheCreationReported: state.usage.CacheCreationReported,
 	}
 }
 

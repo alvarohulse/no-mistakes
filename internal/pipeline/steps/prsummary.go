@@ -22,7 +22,7 @@ const (
 	maxEmbeddedArtifactBytes               = 16 * 1024
 	maxEmbeddedArtifactsTotalBytes         = 32 * 1024
 	noMistakesPRSignature                  = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
-	pipelineAgentTelemetryTableHeader      = "| Step | Agent (via) | Nested agents |\n| --- | --- | --- |\n"
+	pipelineAgentTelemetryTableHeader      = "| Step | Agent |\n| --- | --- |\n"
 	pipelineConfigSourcesPrefix            = "Config sources: "
 	pipelineAttestationCommentPrefix       = "<!-- no-mistakes-pipeline-attestation:v1 "
 	pipelineAttestationCommentClosingToken = " -->"
@@ -132,12 +132,9 @@ func agentTelemetryTable(invocations []db.AgentInvocation, strategy types.Refres
 			step += fmt.Sprintf(" r%d", invocation.Round)
 		}
 		agentName := valueOrUnreported(invocation.Agent)
-		invocationMode := valueOrUnreported(string(invocation.InvocationMode))
-		fmt.Fprintf(&b, "| %s | %s (%s) | %s |\n",
+		fmt.Fprintf(&b, "| %s | %s |\n",
 			markdownTableCell(step),
 			markdownTableCell(agentName),
-			markdownTableCell(invocationMode),
-			markdownTableCell(agentObservationsLabel(invocation)),
 		)
 	}
 	b.WriteString("\n")
@@ -169,24 +166,6 @@ func buildPipelineAttestation(steps []*db.StepResult, headSHA string) string {
 		return ""
 	}
 	return pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken
-}
-
-func agentObservationsLabel(invocation db.AgentInvocation) string {
-	if !invocation.AgentObservationsReported {
-		return "-"
-	}
-	if len(invocation.AgentObservations) == 0 {
-		return "none"
-	}
-
-	observations := make([]string, 0, len(invocation.AgentObservations))
-	for _, observation := range invocation.AgentObservations {
-		observations = append(observations, fmt.Sprintf("%s (%s)",
-			valueOrUnreported(observation.Identity),
-			valueOrUnreported(string(observation.InvocationMode)),
-		))
-	}
-	return strings.Join(observations, ", ")
 }
 
 func valueOrUnreported(value string) string {

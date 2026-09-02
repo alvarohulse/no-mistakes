@@ -354,9 +354,6 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			Purpose:             invocation.Purpose,
 			Agent:               invocation.Agent,
 			Model:               invocation.Model,
-			InvocationMode:      string(invocation.InvocationMode),
-			NestedReported:      invocation.AgentObservationsReported,
-			NestedCount:         invocation.NestedAgentCount,
 			StartedAt:           invocation.StartedAt,
 			DurationMS:          invocation.DurationMS,
 			InputTokens:         totalInput,
@@ -369,12 +366,6 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 		if invocation.ModelProvider != nil {
 			agentRun.Provider = *invocation.ModelProvider
 			agentRun.Vendor = *invocation.ModelProvider
-		}
-		for _, observation := range invocation.AgentObservations {
-			agentRun.Nested = append(agentRun.Nested, prbody.NestedAgent{
-				Identity:       observation.Identity,
-				InvocationMode: string(observation.InvocationMode),
-			})
 		}
 		byStep[invocation.StepName] = append(byStep[invocation.StepName], agentRun)
 	}
