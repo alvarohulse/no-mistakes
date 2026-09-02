@@ -3231,6 +3231,33 @@ func TestPRStep_FallsBackWhenLegacyBodyOmitsWhatChanged(t *testing.T) {
 	}
 }
 
+func TestPRStep_FallsBackWhenLegacyWhatChangedIsFollowedByHigherHeading(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete legacy draft","summary":"Structured summary.","body":"### What Changed\n\n## Summary\n\nDuplicate summary."}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Structured summary") || strings.Contains(body, "Duplicate summary") {
+		t.Fatalf("legacy body with a higher-level heading was accepted:\n%s", body)
+	}
+	if !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("legacy body with a higher-level heading did not use fallback:\n%s", body)
+	}
+}
+
 func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

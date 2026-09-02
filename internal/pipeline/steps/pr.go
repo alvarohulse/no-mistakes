@@ -562,7 +562,7 @@ func leadingSectionContent(text, heading string) (string, bool) {
 	}
 	end := len(lines)
 	for i := 1; i < len(lines); i++ {
-		if level, ok := markdownHeadingLevel(strings.TrimSpace(lines[i])); ok && level == hashes {
+		if level, ok := markdownHeadingLevel(strings.TrimSpace(lines[i])); ok && level <= hashes {
 			end = i
 			break
 		}
