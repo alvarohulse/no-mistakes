@@ -340,13 +340,13 @@ func TestPRBodyReconstructsAStackedRunsBaseBranch(t *testing.T) {
 func TestPRBodyReplaysStoredRunNarrative(t *testing.T) {
 	local := setupPRBodyRepo(t)
 
-	run, err := local.db.InsertRun(local.repo.ID, "feature/narrative", "head", "base")
+	run, err := local.db.InsertRun(local.repo.ID, "feature/narrative", "current-head", "current-base")
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
 	if err := local.db.InsertRunNarrative(db.RunNarrative{
 		RunID: run.ID, Source: db.NarrativeSourceFallback, DraftedAt: 123,
-		BaseSHA: "base", HeadSHA: "head", TitleMode: db.NarrativeTitleModeFallback,
+		BaseSHA: "draft-base", HeadSHA: "draft-head", TitleMode: db.NarrativeTitleModeFallback,
 		TitleText: "chore: replay narrative", Summary: "Stored summary.", WhatChanged: "- Stored change.",
 	}); err != nil {
 		t.Fatalf("insert narrative: %v", err)
@@ -362,6 +362,9 @@ func TestPRBodyReplaysStoredRunNarrative(t *testing.T) {
 	}
 	if contract.Title != "chore: replay narrative" {
 		t.Fatalf("title = %q, want stored title", contract.Title)
+	}
+	if contract.BaseSHA != "draft-base" || contract.HeadSHA != "draft-head" {
+		t.Fatalf("replay commits = %q..%q, want stored narrative commits", contract.BaseSHA, contract.HeadSHA)
 	}
 	if contract.Sections.Summary == nil || contract.Sections.Summary.Text != "Stored summary." {
 		t.Fatalf("summary = %#v, want stored summary", contract.Sections.Summary)

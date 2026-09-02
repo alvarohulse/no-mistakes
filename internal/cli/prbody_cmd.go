@@ -292,6 +292,9 @@ func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID str
 		return nil, fmt.Errorf("get run narrative: %w", err)
 	}
 	if narrative != nil {
+		replayRun := *run
+		replayRun.HeadSHA = narrative.HeadSHA
+		in.Run = &replayRun
 		in.BaseSHA = narrative.BaseSHA
 		in.Title = narrative.TitleText
 		in.Summary = narrative.Summary
