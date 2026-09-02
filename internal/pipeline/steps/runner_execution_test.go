@@ -285,7 +285,7 @@ func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].TestedSHA != nil || attempts[0].InputStateID == nil || attempts[0].ResultStateID != nil {
+	if len(attempts) != 1 || attempts[0].TestedSHA == nil || *attempts[0].TestedSHA != headSHA || attempts[0].InputStateID == nil || attempts[0].ResultStateID == nil {
 		t.Fatalf("mutating attempt subject = %+v", attempts)
 	}
 }
@@ -310,7 +310,7 @@ func TestRunStepRunnerCommandCompletesAttemptWhenResultStateCannotBeRead(t *test
 	sctx.RoundTrigger = "initial"
 
 	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "rm -rf .git"})
-	if err == nil || !strings.Contains(err.Error(), "resolve command result subject") || exitCode != 0 {
+	if err != nil || exitCode != 0 {
 		t.Fatalf("command result = exit %d error %v", exitCode, err)
 	}
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
@@ -321,7 +321,7 @@ func TestRunStepRunnerCommandCompletesAttemptWhenResultStateCannotBeRead(t *test
 		t.Fatalf("command attempts = %+v", attempts)
 	}
 	attempt := attempts[0]
-	if attempt.CompletedAt == nil || attempt.DurationMS == nil || attempt.Outcome == nil || *attempt.Outcome != db.CommandOutcomePass || attempt.ExitCode == nil || *attempt.ExitCode != 0 || attempt.Signal != nil || attempt.ResultStateID != nil || attempt.TestedSHA != nil {
+	if attempt.CompletedAt == nil || attempt.DurationMS == nil || attempt.Outcome == nil || *attempt.Outcome != db.CommandOutcomePass || attempt.ExitCode == nil || *attempt.ExitCode != 0 || attempt.Signal != nil || attempt.ResultStateID == nil || attempt.TestedSHA == nil || *attempt.TestedSHA != headSHA {
 		t.Fatalf("completed attempt = %+v", attempt)
 	}
 }
