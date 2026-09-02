@@ -393,7 +393,9 @@ Final diff paths and statuses:
 			legacyBody := stripGeneratedSections(unwrapNestedPRBody(strings.TrimSpace(content.Body)))
 			if content.WhatChanged == "" {
 				if whatChanged, ok := leadingSectionContent(legacyBody, "What Changed"); ok {
-					content.WhatChanged = whatChanged
+					if hasVisibleLegacyContent(whatChanged) {
+						content.WhatChanged = whatChanged
+					}
 				}
 			}
 			structuredContent := content.Summary != "" && content.WhatChanged != ""
@@ -580,6 +582,22 @@ func leadingSectionContent(text, heading string) (string, bool) {
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines[1:end], "\n")), true
+}
+
+func hasVisibleLegacyContent(text string) bool {
+	for {
+		start := strings.Index(text, "<!--")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(text[start+len("<!--"):], "-->")
+		if end < 0 {
+			break
+		}
+		end += start + len("<!--") + len("-->")
+		text = text[:start] + text[end:]
+	}
+	return strings.TrimSpace(text) != ""
 }
 
 func markdownHeadingLevel(line string) (int, bool) {
