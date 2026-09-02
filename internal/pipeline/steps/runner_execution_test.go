@@ -278,6 +278,56 @@ func TestRunStepRunnerCommandPersistsNonZeroExitAsFailure(t *testing.T) {
 	}
 }
 
+func TestRunStepRunnerCommandDoesNotRetryPastInterveningMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	command := runner.Command{Run: `if [ "$MUTATE" = 1 ]; then printf changed > intervening-mutation; fi; exit 1`}
+
+	runRound := func(roundNumber int, trigger, mutate string) {
+		t.Helper()
+		round, err := sctx.DB.InsertStepRound(step.ID, roundNumber, trigger, nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Round = roundNumber
+		sctx.RoundID = round.ID
+		sctx.RoundTrigger = trigger
+		sctx.Env = []string{"MUTATE=" + mutate}
+		if _, exitCode, err := runStepRunnerCommand(sctx, command, "test"); err != nil || exitCode != 1 {
+			t.Fatalf("round %d result = exit %d error %v, want exit 1", roundNumber, exitCode, err)
+		}
+	}
+
+	runRound(1, "initial", "0")
+	runRound(2, "auto_fix", "1")
+	if err := os.Remove(filepath.Join(dir, "intervening-mutation")); err != nil {
+		t.Fatal(err)
+	}
+	runRound(3, "auto_fix", "0")
+
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("attempts = %+v, want three attempts", attempts)
+	}
+	if attempts[1].RetryOfAttemptID == nil || *attempts[1].RetryOfAttemptID != attempts[0].ID || attempts[1].ResultStateID != nil {
+		t.Fatalf("mutating attempt = %+v, want retry of first with changed result state", attempts[1])
+	}
+	if attempts[2].RetryOfAttemptID != nil || attempts[2].RetryReason != nil {
+		t.Fatalf("post-mutation attempt = %+v, must not link past the newer mutating attempt", attempts[2])
+	}
+}
+
 func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX runner fixture")
