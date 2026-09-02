@@ -2,6 +2,7 @@ package db
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -162,12 +163,17 @@ func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, err
 // StartCommandAttempt persists the execution identity before launching the
 // command. Completion fields are filled exactly once by CompleteCommandAttempt.
 func (d *DB) StartCommandAttempt(attempt CommandAttempt) (*CommandAttempt, error) {
-	if err := validateCommandAttemptStart(d, attempt); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("start command attempt: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := validateCommandAttemptStart(tx, attempt); err != nil {
 		return nil, err
 	}
 	attempt.ID = newID()
 	attempt.StartedAt = time.Now().UnixMilli()
-	_, err := d.sql.Exec(
+	_, err = tx.Exec(
 		`INSERT INTO command_attempts
 		 (id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
 		  command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
@@ -182,10 +188,17 @@ func (d *DB) StartCommandAttempt(attempt CommandAttempt) (*CommandAttempt, error
 	if err != nil {
 		return nil, fmt.Errorf("start command attempt: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("start command attempt: commit: %w", err)
+	}
 	return &attempt, nil
 }
 
-func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
+type commandAttemptQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func validateCommandAttemptStart(q commandAttemptQuerier, attempt CommandAttempt) error {
 	if attempt.RunID == "" || attempt.CommandID == "" || attempt.StepID == "" || attempt.RoundID == "" || attempt.Sequence < 1 || strings.TrimSpace(attempt.Purpose) == "" || attempt.Observer == "" || attempt.Trigger == "" || attempt.BeforeSHA == "" || attempt.CommandSource == "" || attempt.RunnerSchemaVersion < 1 || attempt.RunnerSource == "" {
 		return fmt.Errorf("start command attempt: required identity is incomplete")
 	}
@@ -193,7 +206,7 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 		return fmt.Errorf("start command attempt: completion identity must be empty")
 	}
 	var owned int
-	if err := d.sql.QueryRow(
+	if err := q.QueryRow(
 		`SELECT count(*) FROM step_rounds sr
 		 JOIN step_results s ON s.id = sr.step_result_id
 		 WHERE sr.id = ? AND s.id = ? AND s.run_id = ?`,
@@ -213,7 +226,7 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if attempt.RetryReason == nil || strings.TrimSpace(*attempt.RetryReason) == "" {
 		return fmt.Errorf("start command attempt: retry attempt requires reason")
 	}
-	prior, err := d.getCommandAttempt(*attempt.RetryOfAttemptID)
+	prior, err := getCommandAttempt(q, *attempt.RetryOfAttemptID)
 	if err != nil {
 		return fmt.Errorf("start command attempt: load retry attempt: %w", err)
 	}
@@ -229,15 +242,35 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
-	var laterAttempts int
-	if err := d.sql.QueryRow(
-		`SELECT count(*) FROM command_attempts
-		 WHERE run_id = ? AND sequence > ?`, prior.RunID, prior.Sequence,
-	).Scan(&laterAttempts); err != nil {
-		return fmt.Errorf("start command attempt: validate retry order: %w", err)
+	var priorRound, currentRound int
+	if err := q.QueryRow(
+		`SELECT prior.round, current.round
+		 FROM step_rounds prior, step_rounds current
+		 WHERE prior.id = ? AND current.id = ?`, prior.RoundID, attempt.RoundID,
+	).Scan(&priorRound, &currentRound); err != nil {
+		return fmt.Errorf("start command attempt: validate retry round order: %w", err)
 	}
-	if laterAttempts != 0 {
-		return fmt.Errorf("start command attempt: retry must reference the immediate prior attempt")
+	if currentRound < priorRound || currentRound == priorRound && attempt.Sequence <= prior.Sequence {
+		return fmt.Errorf("start command attempt: retry must follow the prior attempt")
+	}
+	var latestMatchingID string
+	if err := q.QueryRow(
+		`SELECT ca.id
+		 FROM command_attempts ca
+		 JOIN step_rounds sr ON sr.id = ca.round_id
+		 WHERE ca.run_id = ? AND ca.command_id = ? AND ca.step_id = ? AND ca.purpose = ? AND ca.observer = ?
+		   AND ca.command_source = ? AND ca.runner_schema_version = ? AND ca.runner_source = ?
+		   AND ((ca.runner_version IS NULL AND ? IS NULL) OR ca.runner_version = ?)
+		 ORDER BY sr.round DESC, ca.sequence DESC
+		 LIMIT 1`,
+		attempt.RunID, attempt.CommandID, attempt.StepID, attempt.Purpose, attempt.Observer,
+		attempt.CommandSource, attempt.RunnerSchemaVersion, attempt.RunnerSource,
+		attempt.RunnerVersion, attempt.RunnerVersion,
+	).Scan(&latestMatchingID); err != nil {
+		return fmt.Errorf("start command attempt: validate latest matching attempt: %w", err)
+	}
+	if latestMatchingID != prior.ID {
+		return fmt.Errorf("start command attempt: retry must reference the immediate prior matching attempt")
 	}
 	if prior.BeforeSHA != attempt.BeforeSHA {
 		return fmt.Errorf("start command attempt: retry requires unchanged subject")
@@ -286,12 +319,12 @@ func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, r
 	if outcome == CommandOutcomeFail && (exitCode == nil || *exitCode == 0) && signal == nil {
 		return fmt.Errorf("complete command attempt: failing outcome requires non-zero exit code or signal")
 	}
-	if outcome == CommandOutcomeProcessError && exitCode != nil {
-		return fmt.Errorf("complete command attempt: process error cannot have an exit code")
-	}
 	attempt, err := d.getCommandAttempt(id)
 	if err != nil {
 		return fmt.Errorf("complete command attempt: %w", err)
+	}
+	if testedSHA != nil && outcome != CommandOutcomePass {
+		return fmt.Errorf("complete command attempt: tested commit requires passing outcome")
 	}
 	if testedSHA != nil {
 		if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != *resultStateID || *testedSHA != attempt.BeforeSHA {
@@ -328,8 +361,12 @@ func validCommandOutcome(outcome string) bool {
 }
 
 func (d *DB) getCommandAttempt(id string) (*CommandAttempt, error) {
+	return getCommandAttempt(d.sql, id)
+}
+
+func getCommandAttempt(q commandAttemptQuerier, id string) (*CommandAttempt, error) {
 	attempt := &CommandAttempt{}
-	if err := scanCommandAttempt(d.sql.QueryRow(
+	if err := scanCommandAttempt(q.QueryRow(
 		`SELECT id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
 		        command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
 		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason

@@ -461,10 +461,6 @@ var migrationStatements = []string{
 // attribution the adapters cannot prove. Missing-column errors are expected on
 // fresh databases and subsequent opens.
 var removalMigrationStatements = []string{
-	`ALTER TABLE command_definitions DROP COLUMN source`,
-	`ALTER TABLE command_definitions DROP COLUMN runner_schema_version`,
-	`ALTER TABLE command_definitions DROP COLUMN runner_source`,
-	`ALTER TABLE command_definitions DROP COLUMN runner_version`,
 	`ALTER TABLE agent_invocations DROP COLUMN invocation_mode`,
 	`ALTER TABLE agent_invocations DROP COLUMN agent_observations_json`,
 	`ALTER TABLE agent_invocations DROP COLUMN nested_agent_count`,

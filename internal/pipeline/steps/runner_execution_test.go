@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -273,8 +274,14 @@ func TestRunStepRunnerCommandPersistsNonZeroExitAsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode == nil || *attempts[0].ExitCode != 7 || attempts[0].Signal != nil || attempts[0].TestedSHA == nil || *attempts[0].TestedSHA != headSHA {
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode == nil || *attempts[0].ExitCode != 7 || attempts[0].Signal != nil || attempts[0].TestedSHA != nil {
 		t.Fatalf("failed attempt = %+v", attempts)
+	}
+}
+
+func TestCommandAttemptOutcomeKeepsObservedExitAsProcessError(t *testing.T) {
+	if got := commandAttemptOutcome(context.Background(), 0, errors.New("post-process wait failed")); got != db.CommandOutcomeProcessError {
+		t.Fatalf("command attempt outcome = %q, want process_error", got)
 	}
 }
 
