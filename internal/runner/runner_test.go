@@ -139,6 +139,48 @@ func TestResolveCanonicalizesPowerShellIdentityWithoutChangingExecutionArgv(t *t
 	}
 }
 
+func TestResolveCanonicalizesRunnerIdentityByPlatform(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		spec     Spec
+		wantExec string
+		wantArgs []string
+	}{
+		{
+			name:     "powershell on POSIX",
+			platform: "linux",
+			spec:     Spec{Executable: "PoWeRsHeLl", Args: []string{"-NOLOGO", "-noprofile", "-NONINTERACTIVE", "-cOMMAND"}},
+			wantExec: "PoWeRsHeLl",
+			wantArgs: []string{"-nologo", "-noprofile", "-noninteractive", "-command"},
+		},
+		{
+			name:     "shell executable on Windows",
+			platform: "windows",
+			spec:     Spec{Executable: "SH", Args: []string{"-c"}},
+			wantExec: "sh",
+			wantArgs: []string{"-c"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved, err := resolve(context.Background(), Command{Run: "echo ready"}, tt.spec, resolverDeps{
+				platform: tt.platform,
+				lookPath: func(name string) (string, error) { return "/resolved/" + name, nil },
+				probeVersion: func(context.Context, shellKind, string) (*string, error) {
+					return stringPointer("1.0"), nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.Provenance.Executable != tt.wantExec || !reflect.DeepEqual(resolved.Provenance.Args, tt.wantArgs) {
+				t.Fatalf("provenance = %+v, want %q/%q", resolved.Provenance, tt.wantExec, tt.wantArgs)
+			}
+		})
+	}
+}
+
 func TestResolveRejectsInvalidCommandAndRunnerArgv(t *testing.T) {
 	tests := []struct {
 		name    string

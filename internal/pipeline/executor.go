@@ -941,6 +941,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		sctx.commandSequence = 0
 		startedRound, beginErr := e.db.BeginStepRound(sr.ID, sctx.Round, nextTrigger)
 		if beginErr != nil {
+			if failErr := e.db.FailStep(sr.ID, beginErr.Error(), executionMS); failErr != nil {
+				beginErr = errors.Join(beginErr, fmt.Errorf("mark step failed: %w", failErr))
+			}
 			return false, fmt.Errorf("begin %s round %d: %w", stepName, sctx.Round, beginErr)
 		}
 		currentRoundID = startedRound.ID

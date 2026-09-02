@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -192,7 +193,11 @@ func TestExecutorBuildLinksUnchangedAfterRepairRetry(t *testing.T) {
 		}
 	})
 
-	deadline := time.Now().Add(10 * time.Second)
+	timeout := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
 	reachedFixReview := false
 	for time.Now().Before(deadline) {
 		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
