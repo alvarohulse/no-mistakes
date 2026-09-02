@@ -121,8 +121,8 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 	if staticTests == nil {
 		t.Fatal("static_tests omitted; want an explicit empty section")
 	}
-	if staticTests.Summary != "tests completed" || len(staticTests.Commands) != 0 || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0 {
-		t.Fatalf("static_tests = %+v, want summary without failed command evidence", staticTests)
+	if staticTests.Summary != "" || len(staticTests.Commands) != 0 || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0 {
+		t.Fatalf("static_tests = %+v, want no passing evidence", staticTests)
 	}
 	pipelineCommands := contract.Sections.Pipeline.Steps[0].Commands
 	if len(pipelineCommands) != 2 {
