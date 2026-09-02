@@ -1,14 +1,99 @@
 package steps
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type roundHistoryExecutorProbe struct {
+	calls []roundHistoryPromptCalls
+}
+
+type roundHistoryPromptCalls struct {
+	fix      string
+	reassess string
+}
+
+func (*roundHistoryExecutorProbe) Name() types.StepName { return types.StepBuild }
+
+func (s *roundHistoryExecutorProbe) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	s.calls = append(s.calls, roundHistoryPromptCalls{
+		fix:      "fix prompt" + roundHistoryPromptSection(sctx),
+		reassess: "reassessment prompt" + roundHistoryPromptSection(sctx),
+	})
+	if len(s.calls) == 1 {
+		return &pipeline.StepOutcome{
+			NeedsApproval: true,
+			AutoFixable:   true,
+			Findings:      `{"findings":[{"id":"build-1","severity":"error","description":"compile failed","action":"auto-fix"}],"summary":"failed"}`,
+		}, nil
+	}
+	return &pipeline.StepOutcome{}, nil
+}
+
+func TestRoundHistoryPromptSection_ExecutorExcludesCurrentPreinsertedRound(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.AutoFix.Build = 1
+	probe := &roundHistoryExecutorProbe{}
+	executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, nil, []pipeline.Step{probe}, nil)
+
+	if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(probe.calls) != 2 {
+		t.Fatalf("execution calls = %d, want initial plus fix/reassessment", len(probe.calls))
+	}
+	for name, prompt := range map[string]string{
+		"initial fix":          probe.calls[0].fix,
+		"initial reassessment": probe.calls[0].reassess,
+	} {
+		if strings.Contains(prompt, "Round 1 (initial)") {
+			t.Fatalf("%s prompt includes its own preinserted round:\n%s", name, prompt)
+		}
+	}
+	for name, prompt := range map[string]string{
+		"fix":          probe.calls[1].fix,
+		"reassessment": probe.calls[1].reassess,
+	} {
+		if !strings.Contains(prompt, "Round 1 (initial)") {
+			t.Errorf("%s prompt omitted prior round:\n%s", name, prompt)
+		}
+		if strings.Contains(prompt, "Round 2 (auto_fix)") {
+			t.Errorf("%s prompt includes its own preinserted round:\n%s", name, prompt)
+		}
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(stepIDForName(t, sctx.DB, sctx.Run.ID, types.StepBuild))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 {
+		t.Fatalf("persisted rounds = %d, want 2", len(rounds))
+	}
+}
+
+func stepIDForName(t *testing.T, database *db.DB, runID string, name types.StepName) string {
+	t.Helper()
+	steps, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.StepName == name {
+			return step.ID
+		}
+	}
+	t.Fatal(fmt.Sprintf("step %s not found", name))
+	return ""
+}
 
 func newRoundHistoryContext(t *testing.T) (*pipeline.StepContext, string) {
 	t.Helper()

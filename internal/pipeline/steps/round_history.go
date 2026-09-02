@@ -29,6 +29,13 @@ func roundHistoryPromptSection(sctx *pipeline.StepContext) string {
 
 	var blocks []string
 	for _, r := range rounds {
+		// The executor persists the current round before invoking the step so
+		// command attempts can reference it while they run. That incomplete row
+		// is ownership state, not prior history, and must never steer the agent
+		// currently producing the round.
+		if sctx.RoundID != "" && r.ID == sctx.RoundID {
+			continue
+		}
 		block := renderRoundHistoryEntry(r)
 		if block != "" {
 			blocks = append(blocks, block)
