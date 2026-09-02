@@ -309,6 +309,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		branch:     branch,
 		baseBranch: baseBranch,
 		baseSHA:    baseSHA,
+		headSHA:    sctx.Run.HeadSHA,
 		provider:   string(provider),
 		bodyLimit:  bodyLimit,
 	}
@@ -321,6 +322,8 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		return prContent{}, fmt.Errorf("load run PR narrative: %w", err)
 	}
 	if persisted != nil {
+		scope.baseSHA = persisted.BaseSHA
+		scope.headSHA = persisted.HeadSHA
 		return renderRunNarrative(sctx, provider, records, scope, *persisted, riskLine, testingMD, pipelineMD, renderBodyLimit, bodyLimit)
 	}
 
@@ -390,7 +393,6 @@ Final diff paths and statuses:
 			legacyBody := stripGeneratedSections(unwrapNestedPRBody(strings.TrimSpace(content.Body)))
 			if content.WhatChanged == "" {
 				content.WhatChanged = stripLeadingSectionHeading(legacyBody, "What Changed")
-				content.WhatChanged = stripLeadingSectionHeading(content.WhatChanged, "Summary")
 			}
 			structuredContent := content.Summary != "" && content.WhatChanged != ""
 			if content.Title != "" && structuredContent {
