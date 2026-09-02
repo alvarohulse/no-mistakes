@@ -381,13 +381,13 @@ func TestGeneratedFileGuard(t *testing.T) {
 			head = strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", head, "-m", fmt.Sprintf("chore: PR history %d", i)))
 		}
 
-		output, err := runGeneratedGuardWithTimeout(t, repo, script, guardBootstrapBase, head, upstream, 90*time.Second, upstream)
+		output, err := runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
 		if err != nil {
 			t.Fatalf("guard should accept PR history at the audit limit: %v\n%s", err, output)
 		}
 
 		head = strings.TrimSpace(guardGit(t, repo, "commit-tree", tree, "-p", head, "-m", "chore: exceed PR history limit"))
-		output, err = runGeneratedGuardWithTimeout(t, repo, script, guardBootstrapBase, head, upstream, 90*time.Second, upstream)
+		output, err = runGeneratedGuard(t, repo, script, guardBootstrapBase, head, upstream)
 		if err == nil {
 			t.Fatalf("guard should reject PR history above the audit limit\n%s", output)
 		}
@@ -946,15 +946,10 @@ func runGeneratedGuard(t *testing.T, repo, script, base, head, upstream string, 
 
 func runGeneratedGuardWithAttestations(t *testing.T, repo, script, base, head, upstream, attestations string, pending ...string) (string, error) {
 	t.Helper()
-	return runGeneratedGuardWithTimeout(t, repo, script, base, head, upstream, 30*time.Second, attestations, pending...)
-}
-
-func runGeneratedGuardWithTimeout(t *testing.T, repo, script, base, head, upstream string, timeout time.Duration, attestations string, pending ...string) (string, error) {
-	t.Helper()
 	if len(pending) > 1 {
 		t.Fatalf("run generated-file guard with %d pending release SHAs", len(pending))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	args := []string{script, base, head, upstream, attestations}
 	if len(pending) == 1 && pending[0] != "" {
