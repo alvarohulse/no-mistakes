@@ -66,7 +66,7 @@ func TestCommandDefinitionsUseExactPortableIdentity(t *testing.T) {
 	if len(definitions) != 2 {
 		t.Fatalf("definitions = %d, want 2", len(definitions))
 	}
-	if !reflect.DeepEqual(definitionA.RunnerArgs, []string{"-lc"}) || definitionA.RunnerExecutable != "zsh" || definitionA.Platform != "linux" || definitionA.Source != runner.SourceLinux {
+	if !reflect.DeepEqual(definitionA.RunnerArgs, []string{"-lc"}) || definitionA.RunnerExecutable != "zsh" || definitionA.Platform != "linux" {
 		t.Fatalf("definition provenance = %+v", definitionA)
 	}
 }
@@ -99,8 +99,19 @@ func TestCommandAttemptsPreserveOccurrenceProvenanceForSharedDefinition(t *testi
 	planned.CommandSource = CommandDefinitionSourcePlanned
 	planned.Provenance.Source = runner.SourcePortableDefault
 	planned.Provenance.Version = &versionB
-	if _, err := d.EnsureCommandDefinition(run.ID, planned); err != nil {
+	plannedDefinition, err := d.EnsureCommandDefinition(run.ID, planned)
+	if err != nil {
 		t.Fatalf("reuse semantic definition with different occurrence provenance: %v", err)
+	}
+	if plannedDefinition.ID != definition.ID {
+		t.Fatalf("definition IDs differ by occurrence provenance: %q != %q", plannedDefinition.ID, definition.ID)
+	}
+	definitions, err := d.GetCommandDefinitionsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 {
+		t.Fatalf("definitions = %d, want one shared definition", len(definitions))
 	}
 
 	state := "git:head"

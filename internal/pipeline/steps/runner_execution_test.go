@@ -69,7 +69,7 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions) != 1 || definitions[0].Script != platformScript || definitions[0].Source != wantSource || definitions[0].RunnerExecutable != "bash" {
+	if len(definitions) != 1 || definitions[0].Script != platformScript || definitions[0].RunnerExecutable != "bash" {
 		t.Fatalf("command definitions = %+v", definitions)
 	}
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
@@ -129,7 +129,7 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions) != 1 || definitions[0].Script != command.Run || definitions[0].Source != runner.SourceBase || definitions[0].RunnerExecutable != "bash" {
+	if len(definitions) != 1 || definitions[0].Script != command.Run || definitions[0].RunnerExecutable != "bash" {
 		t.Fatalf("syntax-error definitions = %+v", definitions)
 	}
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)

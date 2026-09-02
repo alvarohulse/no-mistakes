@@ -111,13 +111,9 @@ CREATE TABLE IF NOT EXISTS command_definitions (
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     id                    TEXT NOT NULL,
     script                TEXT NOT NULL,
-    source                TEXT NOT NULL,
     platform              TEXT NOT NULL,
-    runner_schema_version INTEGER NOT NULL,
-    runner_source         TEXT NOT NULL,
     runner_executable     TEXT NOT NULL,
     runner_args_json      TEXT NOT NULL,
-    runner_version        TEXT,
     PRIMARY KEY (run_id, id)
 );
 
@@ -308,13 +304,9 @@ var migrationStatements = []string{
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 		id TEXT NOT NULL,
 		script TEXT NOT NULL,
-		source TEXT NOT NULL,
 		platform TEXT NOT NULL,
-		runner_schema_version INTEGER NOT NULL,
-		runner_source TEXT NOT NULL,
 		runner_executable TEXT NOT NULL,
 		runner_args_json TEXT NOT NULL,
-		runner_version TEXT,
 		PRIMARY KEY (run_id, id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS command_attempts (

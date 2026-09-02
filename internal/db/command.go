@@ -28,16 +28,12 @@ const (
 // used by a run. ID excludes the resolved executable path and runner version so
 // the same portable command retains one identity across machines.
 type CommandDefinition struct {
-	ID                  string
-	RunID               string
-	Script              string
-	Source              string
-	Platform            string
-	RunnerSchemaVersion int
-	RunnerSource        string
-	RunnerExecutable    string
-	RunnerArgs          []string
-	RunnerVersion       *string
+	ID               string
+	RunID            string
+	Script           string
+	Platform         string
+	RunnerExecutable string
+	RunnerArgs       []string
 }
 
 // CommandAttempt is one controller-observed execution of a command definition.
@@ -106,11 +102,10 @@ func (d *DB) EnsureCommandDefinition(runID string, resolved runner.Resolved) (*C
 	}
 	_, err = d.sql.Exec(
 		`INSERT OR IGNORE INTO command_definitions
-		 (run_id, id, script, source, platform, runner_schema_version, runner_source, runner_executable, runner_args_json, runner_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		runID, id, resolved.Script, resolved.CommandSource, resolved.Provenance.Platform,
-		resolved.Provenance.SchemaVersion, resolved.Provenance.Source,
-		resolved.Provenance.Executable, string(argsJSON), resolved.Provenance.Version,
+		 (run_id, id, script, platform, runner_executable, runner_args_json)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		runID, id, resolved.Script, resolved.Provenance.Platform,
+		resolved.Provenance.Executable, string(argsJSON),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("ensure command definition: %w", err)
@@ -122,12 +117,11 @@ func (d *DB) getCommandDefinition(runID, id string) (*CommandDefinition, error) 
 	definition := &CommandDefinition{}
 	var argsJSON string
 	if err := d.sql.QueryRow(
-		`SELECT id, run_id, script, source, platform, runner_schema_version, runner_source, runner_executable, runner_args_json, runner_version
+		`SELECT id, run_id, script, platform, runner_executable, runner_args_json
 		 FROM command_definitions WHERE run_id = ? AND id = ?`, runID, id,
 	).Scan(
-		&definition.ID, &definition.RunID, &definition.Script, &definition.Source,
-		&definition.Platform, &definition.RunnerSchemaVersion, &definition.RunnerSource,
-		&definition.RunnerExecutable, &argsJSON, &definition.RunnerVersion,
+		&definition.ID, &definition.RunID, &definition.Script, &definition.Platform,
+		&definition.RunnerExecutable, &argsJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get command definition: %w", err)
 	}
@@ -140,7 +134,7 @@ func (d *DB) getCommandDefinition(runID, id string) (*CommandDefinition, error) 
 // GetCommandDefinitionsByRun returns definitions in stable identity order.
 func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, run_id, script, source, platform, runner_schema_version, runner_source, runner_executable, runner_args_json, runner_version
+		`SELECT id, run_id, script, platform, runner_executable, runner_args_json
 		 FROM command_definitions WHERE run_id = ? ORDER BY id`, runID,
 	)
 	if err != nil {
@@ -152,9 +146,8 @@ func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, err
 		definition := &CommandDefinition{}
 		var argsJSON string
 		if err := rows.Scan(
-			&definition.ID, &definition.RunID, &definition.Script, &definition.Source,
-			&definition.Platform, &definition.RunnerSchemaVersion, &definition.RunnerSource,
-			&definition.RunnerExecutable, &argsJSON, &definition.RunnerVersion,
+			&definition.ID, &definition.RunID, &definition.Script, &definition.Platform,
+			&definition.RunnerExecutable, &argsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan command definition: %w", err)
 		}

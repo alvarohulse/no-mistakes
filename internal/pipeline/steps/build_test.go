@@ -121,7 +121,7 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions) != 1 || definitions[0].Script != "go env GOVERSION" || definitions[0].Source != "planned" {
+	if len(definitions) != 1 || definitions[0].Script != "go env GOVERSION" {
 		t.Fatalf("planned command definitions = %+v", definitions)
 	}
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
