@@ -766,8 +766,8 @@ func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testi
 	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
 		t.Fatalf("parseOpencodeSSE() error = %v", err)
 	}
-	if state.reachedIdle {
-		t.Fatal("other session idle must stop the global stream without crediting top-level completion")
+	if !state.reachedIdle {
+		t.Fatal("foreign session idle must not stop the stream before the top-level idle")
 	}
 }
 

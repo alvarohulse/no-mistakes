@@ -482,7 +482,7 @@ func TestClaudeAgent_FinalizeResult_NoSchemaAllowsTextOnly(t *testing.T) {
 func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testing.T) {
 	reportedCost := 1.25
 	result, err := finalizeClaudeResult(
-		&claudeResult{Subtype: "success", text: "plain text", reportedCostUSD: &reportedCost},
+		&claudeResult{Subtype: "success", text: "plain text", reportedCostUSD: &reportedCost, terminalUsageReported: true},
 		json.RawMessage(`{"type":"object"}`),
 		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
 	)

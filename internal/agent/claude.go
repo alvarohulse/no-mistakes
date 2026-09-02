@@ -170,8 +170,7 @@ func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	coverage := UsageCoverageUnknown
-	if result.terminalUsageReported || (result.assistantEvents > 0 && result.assistantUsageEvents == result.assistantEvents) ||
-		(result.assistantEvents == 0 && usage.Reported) {
+	if result.terminalUsageReported && !result.unaccountedWork {
 		coverage = usageCoverageForCompleteStream(usage.Reported, result.nestedAgentCount > 0)
 	}
 	finalized := &Result{
@@ -336,6 +335,7 @@ type claudeResult struct {
 	assistantEvents           int
 	assistantUsageEvents      int
 	terminalUsageReported     bool
+	unaccountedWork           bool
 }
 
 type claudeUsage struct {
@@ -373,6 +373,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	observations := newAgentObservationCollector(true)
 	assistantEvents := 0
 	assistantUsageEvents := 0
+	unaccountedWork := false
 
 	for scanner.Scan() {
 		select {
@@ -396,11 +397,12 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 
 		switch event.Type {
 		case "assistant":
+			assistantEvents++
 			var msg claudeMessage
 			if err := json.Unmarshal(event.Message, &msg); err != nil {
+				unaccountedWork = true
 				continue
 			}
-			assistantEvents++
 			if msg.Usage.InputTokens != nil || msg.Usage.OutputTokens != nil ||
 				msg.Usage.CacheReadInputTokens != nil || msg.Usage.CacheCreationInputTokens != nil {
 				assistantUsageEvents++
@@ -422,12 +424,17 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 						onChunk(c.Text)
 					}
 				}
-				if c.Type == "tool_use" && (c.Name == "Agent" || c.Name == "Task") {
-					identity := c.Input.SubagentType
-					if identity == "" {
-						identity = c.Input.Name
+				if c.Type == "tool_use" {
+					name := strings.ToLower(c.Name)
+					if c.Name == "Agent" || c.Name == "Task" {
+						identity := c.Input.SubagentType
+						if identity == "" {
+							identity = c.Input.Name
+						}
+						observations.observe(c.ID, identity)
+					} else if strings.Contains(name, "agent") || strings.Contains(name, "spawn") {
+						unaccountedWork = true
 					}
-					observations.observe(c.ID, identity)
 				}
 			}
 
@@ -460,6 +467,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					assistantEvents:           assistantEvents,
 					assistantUsageEvents:      assistantUsageEvents,
 					terminalUsageReported:     terminalUsageReported,
+					unaccountedWork:           unaccountedWork,
 				}
 			}
 		}

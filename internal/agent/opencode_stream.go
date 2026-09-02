@@ -45,15 +45,16 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 			return true
 		}
 		props := payload.Properties
+		// Filter by session ID
+		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
+			return true
+		}
+
 		if payload.Type == "session.idle" {
 			if props != nil && props.SessionID == state.sessionID {
 				state.reachedIdle = true
+				return false
 			}
-			return false
-		}
-
-		// Filter by session ID
-		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
 			return true
 		}
 
