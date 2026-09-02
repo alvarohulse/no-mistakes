@@ -91,12 +91,12 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd", "pricing_receipt_json"} {
+	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd"} {
 		if !hasColumn(t, d, "agent_invocations", column) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
 		}
 	}
-	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {
 		if hasColumn(t, d, "agent_invocations", removed) {
 			t.Fatalf("agent_invocations.%s should be absent from fresh schema", removed)
 		}
@@ -208,7 +208,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 	for table, columns := range map[string][]string{
 		"runs":              {"metadata"},
 		"step_results":      {"evidence_json", "planned_command", "skip_source"},
-		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd", "pricing_receipt_json"},
+		"agent_invocations": {"delta_cache_creation_tokens", "reported_cost_usd"},
 	} {
 		for _, column := range columns {
 			if !hasColumn(t, database, table, column) {
@@ -216,7 +216,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 			}
 		}
 	}
-	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {
 		if hasColumn(t, database, "agent_invocations", removed) {
 			t.Fatalf("agent_invocations.%s was not removed", removed)
 		}
