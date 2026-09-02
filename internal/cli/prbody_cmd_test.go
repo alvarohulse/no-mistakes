@@ -293,6 +293,38 @@ func TestPRBodyRejectsAContractFromAnotherVersion(t *testing.T) {
 	}
 }
 
+func TestPRBodyRejectsProducerPricedContractV4(t *testing.T) {
+	setupPRBodyRepo(t)
+
+	path := filepath.Join(t.TempDir(), "contract.json")
+	if err := os.WriteFile(path, []byte(`{"version":4}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := runPRBody(t, "", "--contract-file", path, "--hook", "cat > /dev/null; echo body")
+	if err == nil || !strings.Contains(err.Error(), "contract version 4") || !strings.Contains(err.Error(), "5, 3, 2") {
+		t.Fatalf("err = %v, want v4 rejection listing v5, v3, and v2", err)
+	}
+
+	_, _, err = runPRBody(t, "", "--sample", "--sample-version", "4", "--print-contract")
+	if err == nil || !strings.Contains(err.Error(), "unsupported --sample-version 4") || !strings.Contains(err.Error(), "5, 3, 2") {
+		t.Fatalf("sample err = %v, want v4 rejection listing v5, v3, and v2", err)
+	}
+}
+
+func TestPRBodyHelpListsOnlySupportedSampleVersions(t *testing.T) {
+	cmd := newPRBodyCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	help := out.String()
+	if !strings.Contains(help, "(2, 3, or 5)") || strings.Contains(help, "(2, 3, 4, or 5)") {
+		t.Fatalf("pr-body help lists the wrong sample versions:\n%s", help)
+	}
+}
+
 // A run id from another repository would otherwise render a contract whose repo
 // block is this directory and whose run data belongs somewhere else.
 func TestPRBodyRejectsARunFromAnotherRepository(t *testing.T) {

@@ -8,8 +8,6 @@
 // tests, review evidence, and user-testing instructions remain distinct.
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/legacycost"
-
 // Version is the contract version emitted by this build. A formatter that
 // does not recognize the version should exit non-zero rather than guess; the
 // pipeline reports that failure and may fall back to built-in section content,
@@ -25,7 +23,7 @@ const Version = 5
 //     anything was actually reported or supplied. Their absence is itself
 //     information a reader needs ("no risk assessment ran", "the author left
 //     no note"), so it is stated rather than implied.
-//   - Version 4 and 5 producers always emit UserTesting so its attestation state is
+//   - Version 5 producers always emit UserTesting so its attestation state is
 //     explicit; version 2 and 3 contracts omit that unsupported field.
 //   - Every other optional section is absent when there is nothing to say.
 type Contract struct {
@@ -81,7 +79,7 @@ type Sections struct {
 	WhatChanged *TextSection   `json:"what_changed,omitempty"`
 	Risk        RiskSection    `json:"risk"`
 	// Testing is retained only so callers can decode version 2 and 3
-	// contracts. Version 4 and 5 producers use the three distinct fields below.
+	// contracts. Version 5 producers use the three distinct fields below.
 	Testing        *TestingSection        `json:"testing,omitempty"`
 	StaticTests    *StaticTestsSection    `json:"static_tests,omitempty"`
 	ReviewEvidence *ReviewEvidenceSection `json:"review_evidence,omitempty"`
@@ -266,9 +264,6 @@ type AgentRun struct {
 	CacheReadTokens     *int     `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens    *int     `json:"cache_write_tokens,omitempty"`
 	ReportedCostUSD     *float64 `json:"reported_cost_usd,omitempty"`
-	// Costs is retained only to decode legacy version 4 contracts. Version 5
-	// producers emit raw meters and optional reported cost, never estimates.
-	Costs *legacycost.CostClasses `json:"costs,omitempty"`
 	// Vendor is the provider that served the model (anthropic, openai, ...).
 	// Empty when the adapter does not report one.
 	Vendor string `json:"vendor,omitempty"`

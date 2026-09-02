@@ -1,10 +1,8 @@
 package prbody
 
-import "github.com/kunchenguid/no-mistakes/internal/legacycost"
-
 // SampleForVersion returns the sample contract for one supported version, or
 // nil when the version is not supported. Formatter authors are told to accept
-// v2 through v5 during a producer rollout, so every shape has to be
+// v2, v3, and v5 during a producer rollout, so every shape has to be
 // reachable from a single command rather than only the newest one.
 func SampleForVersion(version int) *Contract {
 	switch version {
@@ -12,8 +10,6 @@ func SampleForVersion(version int) *Contract {
 		return SampleV2()
 	case 3:
 		return SampleV3()
-	case 4:
-		return SampleV4()
 	case Version:
 		return Sample()
 	default:
@@ -23,7 +19,7 @@ func SampleForVersion(version int) *Contract {
 
 // SupportedVersions lists the contract versions this build can emit and read,
 // newest first.
-func SupportedVersions() []int { return []int{Version, 4, 3, 2} }
+func SupportedVersions() []int { return []int{Version, 3, 2} }
 
 // IsSupportedVersion reports whether a decoded contract's version is one this
 // build understands.
@@ -77,11 +73,11 @@ func SampleV2() *Contract {
 	return contract
 }
 
-// SampleV3 returns the pre-v4 contract shape. Static test evidence is projected
-// back into the legacy testing field, and v4-only review, user-testing, and cost
-// receipt fields are absent.
+// SampleV3 returns the version 3 contract shape. Static test evidence is
+// projected back into the legacy testing field, and current review and
+// user-testing fields are absent.
 func SampleV3() *Contract {
-	contract := SampleV4()
+	contract := Sample()
 	contract.Version = 3
 	if static := contract.Sections.StaticTests; static != nil {
 		contract.Sections.Testing = &TestingSection{
@@ -93,13 +89,6 @@ func SampleV3() *Contract {
 	contract.Sections.StaticTests = nil
 	contract.Sections.ReviewEvidence = nil
 	contract.Sections.UserTesting = nil
-	if pipeline := contract.Sections.Pipeline; pipeline != nil {
-		for i := range pipeline.Steps {
-			for j := range pipeline.Steps[i].Agents {
-				pipeline.Steps[i].Agents[j].Costs = nil
-			}
-		}
-	}
 	return contract
 }
 
@@ -112,47 +101,11 @@ func SampleV3() *Contract {
 // for reviewing the shape. Fidelity to a run and coverage of a contract are
 // different jobs. This one covers the contract.
 func Sample() *Contract {
-	contract := sampleWithLegacyCosts()
-	for i := range contract.Sections.Pipeline.Steps {
-		for j := range contract.Sections.Pipeline.Steps[i].Agents {
-			contract.Sections.Pipeline.Steps[i].Agents[j].Costs = nil
-		}
-	}
-	return contract
-}
-
-// SampleV4 returns the last producer-owned-pricing shape for formatter
-// compatibility tests. Its receipts are immutable sample data, never repriced.
-func SampleV4() *Contract {
-	contract := sampleWithLegacyCosts()
-	contract.Version = 4
-	return contract
-}
-
-func sampleWithLegacyCosts() *Contract {
 	exit := 0
 	failExit := 1
 	ms := func(v int64) *int64 { return &v }
 	integer := func(v int) *int { return &v }
 	usd := func(v float64) *float64 { return &v }
-	costs := func(reported, list, adjusted float64) *legacycost.CostClasses {
-		return &legacycost.CostClasses{
-			HarnessReported: legacycost.CostEstimate{
-				ValueUSD: usd(reported), Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true,
-				Basis: "agent_invocations.reported_cost_usd",
-			},
-			APIListEstimate: legacycost.CostEstimate{
-				ValueUSD: usd(list), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
-				Basis:      "canonical_delta_token_meters_x_public_list_rate",
-				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", PriceSourceURL: "https://example.com/public-pricing"},
-			},
-			HarnessAdjustedEstimate: legacycost.CostEstimate{
-				ValueUSD: usd(adjusted), Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true,
-				Basis:      "public_list_estimate_plus_harness_profile",
-				Provenance: legacycost.Provenance{CatalogVersion: 1, CatalogSHA256: "sha256:sample", ProfileID: "sample-profile", ProfileVersion: 1},
-			},
-		}
-	}
 	command := func(round, sequence int, text, outcome string, exitCode *int) PipelineCommand {
 		return PipelineCommand{Round: round, Sequence: sequence, Command: text, Outcome: outcome, ExitCode: exitCode}
 	}
@@ -235,7 +188,6 @@ func sampleWithLegacyCosts() *Contract {
 							StartedAt: 1786500000, DurationMS: 2140,
 							InputTokens: integer(1400), OutputTokens: integer(180), UncachedInputTokens: integer(700),
 							CacheReadTokens: integer(500), CacheWriteTokens: integer(200), ReportedCostUSD: usd(0.08),
-							Costs: costs(0.08, 0.09, 0.09),
 						}},
 					},
 					{
