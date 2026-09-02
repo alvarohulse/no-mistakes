@@ -186,9 +186,9 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 }
 
 // recordResult folds a successful (or partially successful) result's identity,
-// usage, per-round token deltas, and bounded activity metrics into inv. Every
-// field the adapter did not report is left nil so it is stored as unknown
-// rather than a fabricated zero.
+// usage, per-round token deltas, and bounded activity metrics into inv.
+// Unreported nullable metrics stay nil rather than becoming fabricated zeros;
+// usage coverage is always persisted and defaults to unknown.
 func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey string, result *agent.Result) {
 	if result == nil {
 		return
