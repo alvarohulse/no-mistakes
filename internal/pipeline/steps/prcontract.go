@@ -248,20 +248,38 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			continue
 		}
 		section := &prbody.StaticTestsSection{}
-		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
-			section.Summary = strings.TrimSpace(findings.TestingSummary)
-			section.Reported = append(section.Reported, findings.Tested...)
-			for _, artifact := range findings.Artifacts {
-				section.Artifacts = append(section.Artifacts, prbody.Artifact{
-					Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL,
-				})
+		hadCommands := false
+		if sr.EvidenceJSON != nil && strings.TrimSpace(*sr.EvidenceJSON) != "" {
+			evidence, err := sr.Evidence()
+			if err != nil {
+				return section
 			}
-		}
-		if evidence, err := sr.Evidence(); err == nil {
+			hadCommands = len(evidence.Commands) > 0
+			// CommandEvidence rows are independent attempts in v5. Preserve
+			// their recorded order and duplicates; do not infer supersession.
 			for _, command := range evidence.Commands {
+				if command.Outcome != db.CommandOutcomePassed || command.ExitCode == nil || *command.ExitCode != 0 {
+					continue
+				}
 				section.Commands = append(section.Commands, prbody.PipelineCommand{
 					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
 					Outcome: command.Outcome, ExitCode: command.ExitCode,
+				})
+			}
+		}
+		// An approved failed step stays explicit but empty; its free-form
+		// summary, reported lines, and artifacts are not passing evidence.
+		if hadCommands && len(section.Commands) == 0 {
+			return section
+		}
+		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
+			section.Summary = strings.TrimSpace(findings.TestingSummary)
+			if !hadCommands {
+				section.Reported = append(section.Reported, findings.Tested...)
+			}
+			for _, artifact := range findings.Artifacts {
+				section.Artifacts = append(section.Artifacts, prbody.Artifact{
+					Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL,
 				})
 			}
 		}
