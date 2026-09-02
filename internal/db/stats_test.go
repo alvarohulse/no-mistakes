@@ -175,7 +175,7 @@ func TestStepFindingStatsIgnoresActiveAndFailedRounds(t *testing.T) {
 	assertStats(0)
 }
 
-func TestStepFindingStatsDoesNotFallbackWhenOnlyRoundFailed(t *testing.T) {
+func TestStepFindingStatsFallsBackWhenOnlyRoundFailed(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/failed-only-round", "git@example.com:failed-only.git", "main")
 	run, _ := d.InsertRun(repo.ID, "failed-only", "head", "base")
@@ -200,8 +200,8 @@ func TestStepFindingStatsDoesNotFallbackWhenOnlyRoundFailed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.ReportedFindings != 0 || stats.FixedFindings != 0 {
-		t.Fatalf("stats = %+v, want no findings from failed round", stats)
+	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
+		t.Fatalf("stats = %+v, want fallback finding from failed round", stats)
 	}
 }
 

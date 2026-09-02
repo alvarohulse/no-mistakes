@@ -151,7 +151,7 @@ func TestResolveCanonicalizesRunnerIdentityByPlatform(t *testing.T) {
 			name:     "powershell on POSIX",
 			platform: "linux",
 			spec:     Spec{Executable: "PoWeRsHeLl", Args: []string{"-NOLOGO", "-noprofile", "-NONINTERACTIVE", "-cOMMAND"}},
-			wantExec: "PoWeRsHeLl",
+			wantExec: "powershell",
 			wantArgs: []string{"-nologo", "-noprofile", "-noninteractive", "-command"},
 		},
 		{

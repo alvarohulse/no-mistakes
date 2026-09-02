@@ -161,11 +161,8 @@ func resolveSpec(ctx context.Context, spec Spec, source, platform string, deps r
 		SchemaVersion: SchemaVersion,
 		Platform:      platform,
 		Source:        source,
-		Executable:    spec.Executable,
+		Executable:    strings.ToLower(spec.Executable),
 		Args:          append([]string(nil), spec.Args...),
-	}
-	if platform == "windows" {
-		provenance.Executable = strings.ToLower(provenance.Executable)
 	}
 	if kind == shellPowerShell {
 		for i := range provenance.Args {

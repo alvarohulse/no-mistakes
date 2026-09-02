@@ -175,23 +175,23 @@ func stepFindingCounts(step *StepResult, rounds []*StepRound) (reported int, fin
 
 func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
 	stats := StepStats{StepName: step.StepName}
-	if len(rounds) == 0 {
-		count := findingsCount(step.FindingsJSON)
-		stats.ReportedFindings = count
-		return stats
-	}
-
 	reported := make(map[types.Finding]bool)
 	var current []types.Finding
+	hasCompletedRound := false
 	for _, round := range rounds {
 		if round.Status != "" && round.Status != RoundStatusCompleted {
 			continue
 		}
+		hasCompletedRound = true
 		items := findingItems(round.FindingsJSON)
 		for _, item := range items {
 			reported[findingStatsKey(item)] = true
 		}
 		current = items
+	}
+	if !hasCompletedRound {
+		stats.ReportedFindings = findingsCount(step.FindingsJSON)
+		return stats
 	}
 
 	stats.ReportedFindings = len(reported)
