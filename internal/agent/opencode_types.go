@@ -132,5 +132,6 @@ type opencodeStreamState struct {
 	filteredPartIDs map[string]bool
 	hasEmittedText  bool
 	hadToolActivity bool
+	reachedIdle     bool
 	observations    *agentObservationCollector
 }
