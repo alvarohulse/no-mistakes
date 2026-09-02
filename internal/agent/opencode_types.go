@@ -119,18 +119,21 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID       string
-	onChunk         func(string)
-	textParts       map[string]*opencodeTextPart
-	textPartOrder   []string
-	usageByMsg      map[string]TokenUsage
-	usage           TokenUsage
-	lastText        string
-	lastFinalText   string
-	userMsgIDs      map[string]bool
-	assistantMsgIDs map[string]bool
-	filteredPartIDs map[string]bool
-	hasEmittedText  bool
-	hadToolActivity bool
-	observations    *agentObservationCollector
+	sessionID           string
+	onChunk             func(string)
+	textParts           map[string]*opencodeTextPart
+	textPartOrder       []string
+	usageByMsg          map[string]TokenUsage
+	liveUsageByMsg      map[string]TokenUsage
+	usage               TokenUsage
+	lastText            string
+	lastFinalText       string
+	userMsgIDs          map[string]bool
+	assistantMsgIDs     map[string]bool
+	filteredPartIDs     map[string]bool
+	hasEmittedText      bool
+	hadToolActivity     bool
+	reachedIdle         bool
+	streamIntegrityLost bool
+	observations        *agentObservationCollector
 }

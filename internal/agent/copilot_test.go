@@ -325,6 +325,9 @@ func TestCopilotAgent_RunParsesJSONOutput(t *testing.T) {
 	if result.Usage.OutputTokens != 4 {
 		t.Errorf("output tokens = %d, want 4", result.Usage.OutputTokens)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 	if len(chunks) != 1 || chunks[0] != `{"ok":true}` {
 		t.Errorf("chunks = %q", chunks)
 	}
@@ -355,6 +358,9 @@ func TestCopilotAgent_RunReportsErrorOnNonZeroExit(t *testing.T) {
 	}
 	if result == nil || !result.UsageReported || result.Usage.OutputTokens != 9 {
 		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("partial usage coverage = %q, want unknown", result.UsageCoverage)
 	}
 }
 

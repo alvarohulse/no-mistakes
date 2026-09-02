@@ -161,7 +161,7 @@ The report groups local replays by candidate and cohort. A cohort pins the selec
 - a finite-sample case-level recall range, with repeats averaged inside each case
 - whether a candidate lies on the observed recall-versus-token-cost frontier
 
-The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token or cost instrumentation from a real zero. Stored historical evaluations remain immutable inputs: reporting never replays, reprices, or recomputes them.
+The report is deliberately cautious. It never treats an unadjudicated candidate finding as a false positive, excludes candidates with failed replays from the frontier, and distinguishes missing token or cost instrumentation from a real zero. Captured source invocation records also preserve the adapter's explicit `complete` or `unknown` usage coverage; capture does not infer coverage from token presence. Stored historical evaluations remain immutable inputs: reporting never replays, reprices, or recomputes them.
 
 ## Current boundary
 

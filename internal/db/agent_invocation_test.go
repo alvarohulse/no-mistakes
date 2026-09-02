@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,6 +19,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		Round:          2,
 		Purpose:        "review-fix",
 		Agent:          "codex",
+		UsageCoverage:  agent.UsageCoverageComplete,
 		Model:          "gpt-5.2-codex",
 		InvocationMode: types.AgentInvocationModeHarnessCLI,
 		AgentObservations: []types.AgentObservation{
@@ -55,6 +57,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	if back.Purpose != "review-fix" || back.Round != 2 || back.SessionMode != InvocationModeResumed ||
 		back.DurationMS != 90_000 || back.InputTokens != 1000 || back.CacheReadTokens != 800 || back.Model != "gpt-5.2-codex" {
 		t.Fatalf("readback mismatch: %+v", back)
+	}
+	if back.UsageCoverage != agent.UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete", back.UsageCoverage)
 	}
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
@@ -290,6 +295,58 @@ func TestAgentInvocations_PrivacySafeShape(t *testing.T) {
 			}
 		}
 	}
+	if !containsString(columns, "usage_coverage") {
+		t.Fatalf("agent_invocations columns = %v, want usage_coverage", columns)
+	}
+}
+
+func TestOpenMigratesUsageCoverageAsUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := d.InsertRepo("/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN usage_coverage`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
+		(id, run_id, step_name, round, purpose, agent, invocation_mode, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
+		VALUES ('legacy-coverage', ?, 'review', 1, 'review', 'codex', 'harness_cli', '', 'cold', '', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	got, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("migrated invocation = %+v, want unknown usage coverage", got)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAgentInvocations_HasRunTimelineIndex(t *testing.T) {
@@ -564,6 +621,9 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("got %d rows, want 1", len(got))
 	}
 	legacy := got[0]
+	if legacy.UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("legacy usage coverage = %q, want unknown", legacy.UsageCoverage)
+	}
 	if legacy.InputTokens != 500 {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}

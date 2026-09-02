@@ -184,14 +184,14 @@ cat > /dev/null
 printf '%s\n' '{"type":"message_update","message":{"role":"assistant","responseId":"r1"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"{\"ok"}}'
 printf '%s\n' '{"type":"message_update","message":{"role":"assistant","responseId":"r1"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"\":true}"}}'
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input":11,"output":7,"cacheRead":3,"cacheWrite":1}}}'
-printf '%s\n' '{"type":"agent_end","messages":[]}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input":11,"output":7,"cacheRead":3,"cacheWrite":1}}]}'
 `, strings.Join([]string{
 		"@echo off",
 		"more > nul",
 		"echo {\"type\":\"message_update\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\"},\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"{\\\"ok\"}}",
 		"echo {\"type\":\"message_update\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\"},\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"\\\":true}\"}}",
 		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":11,\"output\":7,\"cacheRead\":3,\"cacheWrite\":1}}}",
-		"echo {\"type\":\"agent_end\",\"messages\":[]}",
+		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":11,\"output\":7,\"cacheRead\":3,\"cacheWrite\":1}}]}",
 	}, "\r\n"))
 
 	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
@@ -214,6 +214,9 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 		result.Usage.CacheReadTokens != 3 || result.Usage.CacheCreationTokens != 1 {
 		t.Fatalf("unexpected usage: %+v", result.Usage)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown because Pi cannot observe nested-agent usage", result.UsageCoverage)
+	}
 	if len(chunks) == 0 {
 		t.Fatal("expected onChunk to receive streaming text")
 	}
@@ -228,6 +231,28 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 		if chunks[i] != want {
 			t.Errorf("chunk[%d] = %q, want %q", i, chunks[i], want)
 		}
+	}
+}
+
+func TestPiAgent_AgentEndWithoutUsageLeavesCoverageUnknown(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakePi(t, dir, `#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"done"}],"usage":{"input":11,"output":7}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"done"}]}]}'
+`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"input\":11,\"output\":7}}}",
+		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}]}",
+	}, "\r\n"))
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown when agent_end omits usage", result.UsageCoverage)
 	}
 }
 
@@ -292,6 +317,25 @@ func TestPiParser_SumsUniqueAssistantUsageAcrossTurns(t *testing.T) {
 	want := TokenUsage{InputTokens: 11, OutputTokens: 7, CacheReadTokens: 9, CacheCreationTokens: 11, Reported: true, CacheCreationReported: true}
 	if pp.usage != want {
 		t.Fatalf("usage = %+v, want %+v", pp.usage, want)
+	}
+}
+
+func TestPiParser_UsesPartialAgentEndAggregateWithoutClaimingCompleteCoverage(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"message_end","message":{"role":"assistant","responseId":"r1","usage":{"input":99,"output":9}}}`,
+		`{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","usage":{"input":0,"output":0}},{"role":"assistant","responseId":"r2","content":[{"type":"text","text":"done"}]}]}`,
+	}, "\n")
+
+	pp := &piParser{}
+	if err := pp.parse(context.Background(), strings.NewReader(stream)); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := TokenUsage{InputTokens: 99, OutputTokens: 9, Reported: true}
+	if pp.usage != want {
+		t.Fatalf("usage = %+v, want partial agent_end aggregate %+v", pp.usage, want)
+	}
+	if pp.agentEndUsageComplete {
+		t.Fatal("partial agent_end usage must not claim complete coverage")
 	}
 }
 
@@ -376,6 +420,9 @@ exit 2
 	}
 	if result == nil || !result.UsageReported || result.Usage.InputTokens != 19 || result.Usage.OutputTokens != 7 || result.Usage.CacheReadTokens != 4 || result.Usage.CacheCreationTokens != 3 {
 		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("partial usage coverage = %q, want unknown", result.UsageCoverage)
 	}
 }
 

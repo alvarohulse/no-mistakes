@@ -78,10 +78,17 @@ func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		// Best-effort cancel on error
 		a.cancelSession(baseURL, sessionID)
 		result, _ := finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
+		if result != nil {
+			result.UsageCoverage = UsageCoverageUnknown
+		}
 		return result, err
 	}
 
-	return finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
+	result, err := finalizeTextResult("rovodev", text, opts.JSONSchema, usage)
+	if result != nil {
+		result.UsageCoverage = UsageCoverageUnknown
+	}
+	return result, err
 }
 
 func (a *rovodevAgent) ensureServer(ctx context.Context, cwd string, env []string) (string, error) {

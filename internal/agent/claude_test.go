@@ -482,7 +482,7 @@ func TestClaudeAgent_FinalizeResult_NoSchemaAllowsTextOnly(t *testing.T) {
 func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testing.T) {
 	reportedCost := 1.25
 	result, err := finalizeClaudeResult(
-		&claudeResult{Subtype: "success", text: "plain text", reportedCostUSD: &reportedCost},
+		&claudeResult{Subtype: "success", text: "plain text", reportedCostUSD: &reportedCost, terminalUsageReported: true},
 		json.RawMessage(`{"type":"object"}`),
 		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
 	)
@@ -494,6 +494,126 @@ func TestClaudeAgent_FinalizeResult_WithSchemaRequiresStructuredOutput(t *testin
 	}
 	if result == nil || result.ReportedCostUSD == nil || *result.ReportedCostUSD != reportedCost || result.Usage.InputTokens != 100 {
 		t.Fatalf("partial result = %+v, want incurred usage and reported cost", result)
+	}
+	if result.UsageCoverage != UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_NestedWorkMakesUsageCoverageUnknown(t *testing.T) {
+	result, err := finalizeClaudeResult(
+		&claudeResult{Subtype: "success", text: "done", agentObservationsReported: true, nestedAgentCount: 1},
+		nil,
+		TokenUsage{InputTokens: 100, OutputTokens: 20, Reported: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_EmptyTerminalUsageLeavesCoverageUnknown(t *testing.T) {
+	result, err := finalizeClaudeResult(
+		&claudeResult{Subtype: "success", text: "done", terminalUsageReported: true},
+		nil,
+		TokenUsage{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for an empty terminal usage object", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_AssistantUsageWithoutTerminalAggregateLeavesCoverageUnknown(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"done"}]}}`,
+		`{"type":"result","subtype":"success"}`,
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalizeClaudeResult(parsed, nil, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown without terminal aggregate", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_UnrecognizedToolUseLeavesCoverageUnknown(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"tool_use","id":"t1","name":"mcp__agents__spawn","input":{"subagent_type":"worker"}}]}}`,
+		`{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5}}`,
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalizeClaudeResult(parsed, nil, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for unaccounted tool work", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_PartialTerminalMetersLeaveCoverageUnknown(t *testing.T) {
+	events := `{"type":"result","subtype":"success","usage":{"output_tokens":50}}` + "\n"
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalizeClaudeResult(parsed, nil, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for partial terminal meters", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_UnparseableAssistantEventLeavesCoverageUnknown(t *testing.T) {
+	events := strings.Join([]string{
+		`{"type":"assistant"}`,
+		`{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5}}`,
+	}, "\n")
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalizeClaudeResult(parsed, nil, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown after an unparseable assistant event", result.UsageCoverage)
+	}
+}
+
+func TestClaudeAgent_CompleteTerminalAggregateHasCompleteCoverage(t *testing.T) {
+	events := `{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5}}` + "\n"
+	var usage TokenUsage
+	var parsed *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	result, err := finalizeClaudeResult(parsed, nil, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageComplete {
+		t.Fatalf("usage coverage = %q, want complete for a full terminal aggregate", result.UsageCoverage)
 	}
 }
 

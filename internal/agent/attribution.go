@@ -11,16 +11,18 @@ import (
 const maxAgentObservations = 64
 
 type agentObservationCollector struct {
-	reported     bool
-	observations []types.AgentObservation
-	seen         map[string]struct{}
-	count        int
+	reported              bool
+	observations          []types.AgentObservation
+	seen                  map[string]struct{}
+	observationIndexByKey map[string]int
+	count                 int
 }
 
 func newAgentObservationCollector(reported bool) *agentObservationCollector {
 	return &agentObservationCollector{
-		reported: reported,
-		seen:     make(map[string]struct{}),
+		reported:              reported,
+		seen:                  make(map[string]struct{}),
+		observationIndexByKey: make(map[string]int),
 	}
 }
 
@@ -29,16 +31,29 @@ func (c *agentObservationCollector) observe(key, identity string) {
 		return
 	}
 	identity = sanitizeAgentIdentity(identity)
-	if identity == "" {
-		return
-	}
 	if key != "" {
 		if _, ok := c.seen[key]; ok {
+			if identity == "" {
+				return
+			}
+			if index, ok := c.observationIndexByKey[key]; ok {
+				c.observations[index].Identity = identity
+				return
+			}
+			if len(c.observations) < maxAgentObservations {
+				c.observationIndexByKey[key] = len(c.observations)
+				c.observations = append(c.observations, types.AgentObservation{
+					Identity: identity, InvocationMode: types.AgentInvocationModeSubagentTool,
+				})
+			}
 			return
 		}
 		c.seen[key] = struct{}{}
 	}
 	c.count++
+	if identity == "" {
+		return
+	}
 	if len(c.observations) >= maxAgentObservations {
 		return
 	}
@@ -46,6 +61,9 @@ func (c *agentObservationCollector) observe(key, identity string) {
 		Identity:       identity,
 		InvocationMode: types.AgentInvocationModeSubagentTool,
 	})
+	if key != "" {
+		c.observationIndexByKey[key] = len(c.observations) - 1
+	}
 }
 
 func (c *agentObservationCollector) uniqueCount() int {

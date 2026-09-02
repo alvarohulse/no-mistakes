@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -35,7 +36,7 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":5,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
+	want := `{"schema_version":6,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -48,7 +49,8 @@ func TestBuildRunAuditPreservesZeroAndRejectsPartialTotals(t *testing.T) {
 	five := 5
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
-		SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok",
+		UsageCoverage: agent.UsageCoverageComplete,
+		SessionMode:   db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 100, ExitStatus: "ok",
 		DeltaInputTokens: &zeroInt, DeltaOutputTokens: &zeroInt, DeltaCacheReadTokens: &zeroInt,
 		DeltaCacheCreationTokens: &zeroInt, ReportedCostUSD: &zeroCost,
 	})
@@ -73,6 +75,9 @@ func TestBuildRunAuditPreservesZeroAndRejectsPartialTotals(t *testing.T) {
 	}
 	if audit.Invocations[0].DeltaUsage.OutputTokens == nil || *audit.Invocations[0].DeltaUsage.OutputTokens != 0 {
 		t.Fatalf("reported zero became unknown: %+v", audit.Invocations[0].DeltaUsage)
+	}
+	if audit.Invocations[0].UsageCoverage != agent.UsageCoverageComplete || audit.Invocations[1].UsageCoverage != agent.UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q/%q, want complete/unknown", audit.Invocations[0].UsageCoverage, audit.Invocations[1].UsageCoverage)
 	}
 	if audit.Invocations[1].DeltaUsage.OutputTokens != nil {
 		t.Fatalf("missing output became zero: %+v", audit.Invocations[1].DeltaUsage)

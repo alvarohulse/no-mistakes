@@ -380,10 +380,10 @@ func renderRunAudit(w io.Writer, audit *runstats.RunAudit) error {
 	// sessions) counters, so a cumulative counter cannot be misread as per-round.
 	fmt.Fprintln(w)
 	tw = tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tSESSION\tΔ IN (round)\tΔ OUT\tΔ CACHE RD\tIN (raw)\tOUT (raw)\tCACHE RD (raw)\tCACHE WR\tFRESH IN\tREASON\tREPORTED COST")
+	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tSESSION\tUSAGE COVERAGE\tΔ IN (round)\tΔ OUT\tΔ CACHE RD\tIN (raw)\tOUT (raw)\tCACHE RD (raw)\tCACHE WR\tFRESH IN\tREASON\tREPORTED COST")
 	for _, inv := range audit.Invocations {
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.SessionMode,
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.SessionMode, inv.UsageCoverage,
 			optInt(inv.DeltaUsage.InputTokens), optInt(inv.DeltaUsage.OutputTokens), optInt(inv.DeltaUsage.CacheReadTokens),
 			optInt(inv.RawUsage.InputTokens), optInt(inv.RawUsage.OutputTokens), optInt(inv.RawUsage.CacheReadTokens),
 			optInt(inv.RawUsage.CacheWriteTokens), optInt(inv.RawUsage.FreshInputTokens), optInt(inv.RawUsage.ReasoningTokens), optFloat(inv.ReportedCostUSD),

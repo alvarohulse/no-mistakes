@@ -67,6 +67,9 @@ func TestAcpxAgent_ExitFailureRetainsParsedUsage(t *testing.T) {
 	if result == nil || !result.UsageReported || result.Usage.InputTokens != 31 || result.Usage.OutputTokens != 9 || result.Usage.CacheReadTokens != 6 || result.Usage.CacheCreationTokens != 2 {
 		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 }
 
 // TestAcpxAgent_Run_CursorSpawnsContainedDefaultCommand proves the explicit

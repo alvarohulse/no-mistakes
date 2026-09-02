@@ -123,6 +123,9 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	finalize := func() (*Result, error) {
 		res, err := finalizeTextResult("codex", lastMessage, validationSchema, usage)
 		if res != nil {
+			// Codex's event stream is cumulative across resumed sessions and does
+			// not expose every internal model request, so completeness is unproven.
+			res.UsageCoverage = UsageCoverageUnknown
 			res.SessionID = threadID
 			res.Resumed = resumeID != ""
 			// Codex reports usage cumulatively across a resumed thread, so the

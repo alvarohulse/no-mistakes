@@ -86,11 +86,12 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 
 	// Process SSE events until session.idle
 	state := &opencodeStreamState{
-		sessionID:    sessionID,
-		onChunk:      opts.OnChunk,
-		textParts:    make(map[string]*opencodeTextPart),
-		usageByMsg:   make(map[string]TokenUsage),
-		observations: newAgentObservationCollector(true),
+		sessionID:      sessionID,
+		onChunk:        opts.OnChunk,
+		textParts:      make(map[string]*opencodeTextPart),
+		usageByMsg:     make(map[string]TokenUsage),
+		liveUsageByMsg: make(map[string]TokenUsage),
+		observations:   newAgentObservationCollector(true),
 	}
 	err = parseOpencodeSSE(eventBody, state)
 	streamCancel()
@@ -121,6 +122,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	if mr.resp != nil && mr.resp.Info != nil && mr.resp.Info.Structured != nil {
 		result := opencodePartialResult(state)
 		result.Output = mr.resp.Info.Structured
+		result.UsageCoverage = opencodeUsageCoverage(state)
 		return result, nil
 	}
 
@@ -146,11 +148,28 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	}
 	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
 	if result != nil {
+		result.UsageCoverage = opencodeUsageCoverage(state)
 		result.AgentObservations = state.observations.observations
 		result.AgentObservationsReported = true
 		result.NestedAgentCount = state.observations.uniqueCount()
 	}
 	return result, err
+}
+
+func opencodeUsageCoverage(state *opencodeStreamState) UsageCoverage {
+	if state == nil {
+		return UsageCoverageUnknown
+	}
+	if !state.reachedIdle || state.streamIntegrityLost || len(state.assistantMsgIDs) == 0 {
+		return UsageCoverageUnknown
+	}
+	for messageID := range state.assistantMsgIDs {
+		usage, ok := state.liveUsageByMsg[messageID]
+		if !ok || !usage.Reported {
+			return UsageCoverageUnknown
+		}
+	}
+	return usageCoverageForCompleteStream(true, state.observations.uniqueCount() > 0)
 }
 
 func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {
@@ -216,6 +235,7 @@ func opencodePartialResult(state *opencodeStreamState) *Result {
 		Text:                      state.lastText,
 		Usage:                     state.usage,
 		UsageReported:             state.usage.Reported,
+		UsageCoverage:             UsageCoverageUnknown,
 		CacheCreationReported:     state.usage.CacheCreationReported,
 		AgentObservations:         state.observations.observations,
 		AgentObservationsReported: true,

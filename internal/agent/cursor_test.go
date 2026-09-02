@@ -119,6 +119,9 @@ func TestCursorAgent_ExitFailureRetainsParsedUsage(t *testing.T) {
 	if result == nil || !result.UsageReported || result.Usage.InputTokens != 120 || result.Usage.OutputTokens != 30 || result.Usage.CacheReadTokens != 80 || result.Usage.CacheCreationTokens != 5 {
 		t.Fatalf("partial result = %+v, want parsed usage from failed invocation", result)
 	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown", result.UsageCoverage)
+	}
 }
 
 func TestCursorFailureHelper(t *testing.T) {

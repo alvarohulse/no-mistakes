@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,10 +10,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestDecodeMetricReceiptVersion2DefaultsUsageCoverageToUnknown(t *testing.T) {
+	receipt := MetricReceipt{
+		SchemaVersion: 2,
+		Run: MetricRun{
+			ID: "run-1", RepoID: "repo-1", Status: types.RunCompleted, CreatedAt: 10,
+		},
+		Invocations: []MetricInvocation{{ID: "inv-1", Agent: "codex"}},
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := decodeMetricReceipt(&db.RunMetricReceipt{
+		RunID: "run-1", RepoID: "repo-1", RunStatus: types.RunCompleted, RunCreatedAt: 10,
+		SchemaVersion: 2, PayloadJSON: string(payload),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Invocations[0].UsageCoverage; got != agent.UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for version 2 receipt", got)
+	}
+}
 
 func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/retention.sqlite")
@@ -107,7 +134,8 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	historicalReceipt := `{"api_list_estimate":{"value_usd":1,"coverage":{"reported":2,"eligible":2},"complete":true,"basis":"historical"}}`
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: oldest.ID, StepName: string(types.StepReview), Round: 2, Purpose: "review-fix", Agent: "codex",
-		Model: "gpt-5.6-sol", ModelProvider: &provider, SessionMode: db.InvocationModeFallback,
+		UsageCoverage: agent.UsageCoverageComplete,
+		Model:         "gpt-5.6-sol", ModelProvider: &provider, SessionMode: db.InvocationModeFallback,
 		SessionKey: privateMarker, FallbackReason: &fallback, StartedAt: oldest.CreatedAt, CompletedAt: oldest.CreatedAt + 1,
 		DurationMS: 1000, ExitStatus: "ok", DeltaInputTokens: &tokens, DeltaOutputTokens: &tokens,
 		PricingReceiptJSON:        &historicalReceipt,
@@ -187,6 +215,9 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	}
 	if !beforeAudit.Invocations[0].HistoricalCosts || !audit.Invocations[0].HistoricalCosts {
 		t.Fatalf("historical cost label was lost during pruning: before=%t after=%t", beforeAudit.Invocations[0].HistoricalCosts, audit.Invocations[0].HistoricalCosts)
+	}
+	if audit.Invocations[0].UsageCoverage != agent.UsageCoverageComplete {
+		t.Fatalf("archived usage coverage = %q, want complete", audit.Invocations[0].UsageCoverage)
 	}
 	if got := audit.Steps[0].Commands; len(got) != 2 || got[0].Runner == nil || got[0].Runner.Executable != "zsh" || got[1].Runner != nil {
 		t.Fatalf("archived command receipts = %+v", got)

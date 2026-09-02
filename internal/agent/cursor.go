@@ -145,6 +145,9 @@ func (a *cursorAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 		}
 		res, err := finalizeTextResult("cursor", parsed.Text, opts.JSONSchema, parsed.Usage)
 		if res != nil {
+			// The terminal Cursor result reports aggregate usage for the completed
+			// top-level invocation. A partial stream cannot make that claim.
+			res.UsageCoverage = usageCoverageForCompleteStream(parsed.Terminal && parsed.Usage.Reported, true)
 			res.SessionID = parsed.SessionID
 			res.Resumed = resumeID != ""
 			res.Model = a.model
