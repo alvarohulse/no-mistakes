@@ -283,8 +283,6 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	}
 
 	var attempt *db.CommandAttempt
-	executionDir := sctx.WorkDir
-	var validationWorktree string
 	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
 		definitionResolution := resolved
 		if definitionSource != "" {
@@ -321,29 +319,9 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if persistErr != nil {
 			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
 		}
-		if commandEstablishesTestedHead(purpose) && inputStateID != nil {
-			validationWorktree, persistErr = os.MkdirTemp(sctx.WorkDir, ".no-mistakes-command-")
-			if persistErr != nil {
-				return "", -1, fmt.Errorf("create command validation worktree: %w", persistErr)
-			}
-			if removeErr := os.Remove(validationWorktree); removeErr != nil {
-				return "", -1, fmt.Errorf("prepare command validation worktree: %w", removeErr)
-			}
-			if worktreeErr := git.WorktreeAdd(sctx.Ctx, sctx.WorkDir, validationWorktree, beforeSHA); worktreeErr != nil {
-				return "", -1, fmt.Errorf("create command validation worktree: %w", worktreeErr)
-			}
-			executionDir = validationWorktree
-		}
 	}
 
-	options.Dir = executionDir
 	result, err := prepared.Execute(sctx.Ctx, options)
-	if validationWorktree != "" {
-		removeErr := git.WorktreeRemove(sctx.Ctx, sctx.WorkDir, validationWorktree)
-		if removeErr != nil {
-			_ = os.RemoveAll(validationWorktree)
-		}
-	}
 	if err != nil {
 		err = fmt.Errorf("run command %q: %w", resolved.Script, err)
 	}
@@ -367,7 +345,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			}
 		}
 		var testedSHA *string
-		if commandEstablishesTestedHead(purpose) && outcome != db.CommandOutcomeProcessError && validationWorktree != "" && sameStateID(attempt.InputStateID, resultStateID) {
+		if commandEstablishesTestedHead(purpose) && outcome != db.CommandOutcomeProcessError && sameStateID(attempt.InputStateID, resultStateID) {
 			tested := attempt.BeforeSHA
 			testedSHA = &tested
 		}
