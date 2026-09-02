@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -39,6 +40,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if formatCommand := sctx.Config.Commands.FormatCommand(); !formatCommand.IsZero() {
 		sctx.Log(fmt.Sprintf("running formatter: %s", formatCommand.Run))
 		output, exitCode, err := runStepRunnerCommand(sctx, formatCommand, "format")
+		if err != nil {
+			if (errors.Is(err, errCommandPreparation) || errors.Is(err, errCommandExecution)) &&
+				!errors.Is(err, errCommandPersistence) {
+				sctx.Log(fmt.Sprintf("warning: format command failed: %v", err))
+				err = nil
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("run formatter: %w", err)
 		} else if exitCode != 0 {

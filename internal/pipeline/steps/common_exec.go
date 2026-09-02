@@ -22,6 +22,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
+var (
+	errCommandPreparation = errors.New("command preparation failed")
+	errCommandPersistence = errors.New("command provenance persistence failed")
+	errCommandExecution   = errors.New("command execution failed")
+)
+
 func envValue(env []string, key string) (string, bool) {
 	return envValueForOS(env, key, runtime.GOOS)
 }
@@ -277,7 +283,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	prepared, err := runner.Prepare(sctx.Ctx, command, defaultRunner, options)
 	resolved := prepared.Resolution()
 	if err != nil {
-		err = fmt.Errorf("prepare command %q: %w", command.Run, err)
+		err = fmt.Errorf("%w: prepare command %q: %w", errCommandPreparation, command.Run, err)
 		sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, err)
 		return "", -1, err
 	}
@@ -290,21 +296,21 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		}
 		definition, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution)
 		if persistErr != nil {
-			return "", -1, fmt.Errorf("persist command definition: %w", persistErr)
+			return "", -1, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr)
 		}
 		beforeSHA, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 		if headErr != nil {
-			return "", -1, fmt.Errorf("resolve command subject: %w", headErr)
+			return "", -1, fmt.Errorf("%w: resolve command subject: %w", errCommandPersistence, headErr)
 		}
 		inputStateID, stateErr := cleanCommandStateID(sctx.Ctx, sctx.WorkDir, beforeSHA)
 		if stateErr != nil {
-			return "", -1, fmt.Errorf("resolve command input state: %w", stateErr)
+			return "", -1, fmt.Errorf("%w: resolve command input state: %w", errCommandPersistence, stateErr)
 		}
 		var retryOf *string
 		var retryReason *string
 		priorAttempts, lookupErr := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
 		if lookupErr != nil {
-			return "", -1, fmt.Errorf("resolve command retry: %w", lookupErr)
+			return "", -1, fmt.Errorf("%w: resolve command retry: %w", errCommandPersistence, lookupErr)
 		}
 		for i := len(priorAttempts) - 1; i >= 0; i-- {
 			candidate := priorAttempts[i]
@@ -344,13 +350,13 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			RetryReason:         retryReason,
 		})
 		if persistErr != nil {
-			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
+			return "", -1, fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)
 		}
 	}
 
 	result, err := prepared.Execute(sctx.Ctx, options)
 	if err != nil {
-		err = fmt.Errorf("run command %q: %w", resolved.Script, err)
+		err = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, err)
 	}
 	var recordedExitCode *int
 	if err == nil {
@@ -383,7 +389,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			attemptExitCode = nil
 		}
 		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
-			completionErr = fmt.Errorf("persist command attempt completion: %w", persistErr)
+			completionErr = fmt.Errorf("%w: persist command attempt completion: %w", errCommandPersistence, persistErr)
 		}
 		if resultStateErr != nil {
 			err = errors.Join(err, resultStateErr)
