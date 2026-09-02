@@ -109,6 +109,7 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 		name               string
 		commands           []db.CommandEvidence
 		wantStaticCommands []string
+		wantReported       []string
 	}{
 		{
 			name: "all attempts lack passing evidence",
@@ -125,6 +126,7 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
 			},
 			wantStaticCommands: []string{"go test ./..."},
+			wantReported:       []string{"go test ./..."},
 		},
 	}
 
@@ -149,6 +151,14 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 			for i, want := range tt.wantStaticCommands {
 				if staticTests.Commands[i].Command != want {
 					t.Fatalf("static_tests commands = %+v, want %v", staticTests.Commands, tt.wantStaticCommands)
+				}
+			}
+			if len(staticTests.Reported) != len(tt.wantReported) {
+				t.Fatalf("static_tests reported = %+v, want %v", staticTests.Reported, tt.wantReported)
+			}
+			for i, want := range tt.wantReported {
+				if staticTests.Reported[i] != want {
+					t.Fatalf("static_tests reported = %+v, want %v", staticTests.Reported, tt.wantReported)
 				}
 			}
 			if len(tt.wantStaticCommands) == 0 && (staticTests.Summary != "" || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0) {
