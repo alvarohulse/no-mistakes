@@ -328,6 +328,56 @@ func TestRunStepRunnerCommandDoesNotRetryPastInterveningMutation(t *testing.T) {
 	}
 }
 
+func TestRunStepRunnerCommandDoesNotRetryPastInterveningInputChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	command := runner.Command{Run: `if [ "$RESTORE" = 1 ]; then rm intervening-input; fi; exit 1`}
+
+	runRound := func(roundNumber int, trigger, restore string) {
+		t.Helper()
+		round, err := sctx.DB.InsertStepRound(step.ID, roundNumber, trigger, nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Round = roundNumber
+		sctx.RoundID = round.ID
+		sctx.RoundTrigger = trigger
+		sctx.Env = []string{"RESTORE=" + restore}
+		if _, exitCode, err := runStepRunnerCommand(sctx, command, "test"); err != nil || exitCode != 1 {
+			t.Fatalf("round %d result = exit %d error %v, want exit 1", roundNumber, exitCode, err)
+		}
+	}
+
+	runRound(1, "initial", "0")
+	if err := os.WriteFile(filepath.Join(dir, "intervening-input"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRound(2, "auto_fix", "1")
+	runRound(3, "auto_fix", "0")
+
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("attempts = %+v, want three attempts", attempts)
+	}
+	if attempts[1].RetryOfAttemptID != nil || attempts[1].RetryReason != nil {
+		t.Fatalf("changed-input attempt = %+v, must not retry the first attempt", attempts[1])
+	}
+	if attempts[2].RetryOfAttemptID != nil || attempts[2].RetryReason != nil {
+		t.Fatalf("post-input-change attempt = %+v, must not link past the newer changed-input attempt", attempts[2])
+	}
+}
+
 func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX runner fixture")
