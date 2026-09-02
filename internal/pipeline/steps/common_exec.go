@@ -332,14 +332,16 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	if attempt != nil {
 		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
 		var resultStateID *string
+		var resultStateErr error
 		if sctx.Ctx.Err() == nil {
 			afterSHA, stateErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 			if stateErr != nil {
-				return result.Output, result.ExitCode, fmt.Errorf("resolve command result subject: %w", stateErr)
-			}
-			resultStateID, stateErr = cleanCommandStateID(sctx.Ctx, sctx.WorkDir, afterSHA)
-			if stateErr != nil {
-				return result.Output, result.ExitCode, fmt.Errorf("resolve command result state: %w", stateErr)
+				resultStateErr = fmt.Errorf("resolve command result subject: %w", stateErr)
+			} else {
+				resultStateID, stateErr = cleanCommandStateID(sctx.Ctx, sctx.WorkDir, afterSHA)
+				if stateErr != nil {
+					resultStateErr = fmt.Errorf("resolve command result state: %w", stateErr)
+				}
 			}
 		}
 		var testedSHA *string
@@ -353,6 +355,9 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		}
 		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
 			return result.Output, result.ExitCode, fmt.Errorf("persist command attempt completion: %w", persistErr)
+		}
+		if resultStateErr != nil {
+			return result.Output, result.ExitCode, resultStateErr
 		}
 	}
 	if resolved.Script != "" {

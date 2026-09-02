@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -286,5 +287,41 @@ func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *
 	}
 	if len(attempts) != 1 || attempts[0].TestedSHA != nil || attempts[0].InputStateID == nil || attempts[0].ResultStateID != nil {
 		t.Fatalf("mutating attempt subject = %+v", attempts)
+	}
+}
+
+func TestRunStepRunnerCommandCompletesAttemptWhenResultStateCannotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "rm -rf .git"})
+	if err == nil || !strings.Contains(err.Error(), "resolve command result subject") || exitCode != 0 {
+		t.Fatalf("command result = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("command attempts = %+v", attempts)
+	}
+	attempt := attempts[0]
+	if attempt.CompletedAt == nil || attempt.DurationMS == nil || attempt.Outcome == nil || *attempt.Outcome != db.CommandOutcomePass || attempt.ExitCode == nil || *attempt.ExitCode != 0 || attempt.Signal != nil || attempt.ResultStateID != nil || attempt.TestedSHA != nil {
+		t.Fatalf("completed attempt = %+v", attempt)
 	}
 }
