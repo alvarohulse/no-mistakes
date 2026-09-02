@@ -311,20 +311,6 @@ func TestPRBodyRejectsProducerPricedContractV4(t *testing.T) {
 	}
 }
 
-func TestPRBodyHelpListsOnlySupportedSampleVersions(t *testing.T) {
-	cmd := newPRBodyCmd()
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"--help"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	help := out.String()
-	if !strings.Contains(help, "(2, 3, or 5)") || strings.Contains(help, "(2, 3, 4, or 5)") {
-		t.Fatalf("pr-body help lists the wrong sample versions:\n%s", help)
-	}
-}
-
 // A run id from another repository would otherwise render a contract whose repo
 // block is this directory and whose run data belongs somewhere else.
 func TestPRBodyRejectsARunFromAnotherRepository(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	MetricReceiptSchemaVersion = 5
+	MetricReceiptSchemaVersion = db.RunMetricReceiptSchemaVersion
 	RichRunRetentionAge        = 14 * 24 * time.Hour
 	RichRunRetentionFloor      = 50
 )

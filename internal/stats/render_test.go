@@ -1,7 +1,9 @@
 package stats
 
 import (
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -225,6 +227,18 @@ func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
 
 func TestProjectionsCarryOnlyCLIReportedCost(t *testing.T) {
 	database, run := newAuditRun(t)
+	policy := `{"version":5,"managed":true,"steps":[{"name":"review","status":"enabled"}],"routing":{"review_candidates":[{"agent":"codex"}]}}`
+	digest := sha256.Sum256([]byte(policy))
+	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	review, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
 	reported := 9.25
 	provider := "anthropic"
