@@ -47,7 +47,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 ## Execution vocabulary
 
 - An **attempt** is one actual controller-launched execution of a resolved pipeline command. Repeated executions remain separate attempts even when the script and runner are identical.
-- A **retry** is a later attempt of the same operation, input, and target after a failure, with the same tested head and clean input state and no mutation visible in the controller's pre/post snapshots. When this happens after a repair round without a state change, it is recorded with the reason `unchanged_after_repair`; a changed state remains a new attempt.
+- A **retry** is a later controller-observed attempt of the same command definition, step, purpose, command source, and runner provenance after the immediately prior matching attempt ends in `fail`, `process_error`, `cancelled`, or `timeout`. It requires the same subject SHA and an unchanged clean input state (`input_state_id` equals the preceding attempt's `result_state_id`); otherwise it is a new attempt. A qualifying retry uses the durable reason `unchanged_after_repair`.
 
 ## The ten steps
 

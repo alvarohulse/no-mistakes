@@ -44,7 +44,7 @@ Automatic collection and `eval capture` do the same freeze, so a case is equally
 
 Capture and relabel are convergent: repeating either command does not create another case or another copy of the same gold finding. This also applies to human-added findings without IDs, which are matched by stable finding content; recapture repairs duplicates written by older versions.
 
-A run is skipped when there is nothing honest to freeze: no Review step, no finished pass, a gate decision the human has not made yet, or rounds recorded before provenance was on. An incomplete later review round (no recorded findings) is skipped so a completed sibling of the same run can still be captured. Capturing a run with nothing capturable reports the reason instead of freezing an incomplete label; for a parked Review, retry after the decision is recorded.
+A run is skipped when there is nothing honest to freeze: no Review step, no finished pass, a gate decision the human has not made yet, or rounds recorded before provenance was on. An `active`, failed, or otherwise incomplete later review round (including one with no recorded findings) is skipped so a completed sibling of the same run can still be captured. Capturing a run with nothing capturable reports the reason instead of freezing an incomplete label; for a parked Review, retry after the decision is recorded.
 
 A case includes:
 

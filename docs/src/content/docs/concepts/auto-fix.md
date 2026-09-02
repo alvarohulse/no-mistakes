@@ -85,7 +85,7 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 3. Optionally press `e` to attach a note to the current finding, or `+` to add your own finding to the fix request
 4. Press `f` to fix the selected findings
 
-The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and a sanitized history of previous rounds for that step.
+The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and a sanitized history of previous completed rounds for that step.
 That history includes which finding IDs were selected for a prior fix attempt, which findings were left unselected by the user, and any one-line summaries from earlier fix commits.
 On follow-up review passes, that history tells the agent not to re-report user-ignored findings unless the code now presents a materially different issue.
 
@@ -108,8 +108,8 @@ Push refuses unexplained uncommitted changes instead of assigning them to its ro
 
 ## Step rounds
 
-Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
-A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution.
+Each execution pass of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database. A round starts as `active` before its work begins and ends as `completed` or `failed`.
+A completed round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution. Sanitized prompt history includes completed rounds only, never the in-progress or failed round.
 Automatic repair also stores only a normalized failure hash and a low-cardinality progress result (`attempted`, `resolved`, repeated failure, no content progress, or attempt limit). It never duplicates prompts, outputs, diffs, paths, or tool arguments into that receipt.
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
