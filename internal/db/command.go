@@ -239,7 +239,8 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.BeforeSHA != attempt.BeforeSHA {
 		return fmt.Errorf("start command attempt: retry requires unchanged subject")
 	}
-	if prior.ResultStateID == nil || attempt.InputStateID == nil || *prior.ResultStateID != *attempt.InputStateID {
+	if prior.InputStateID == nil || prior.ResultStateID == nil || attempt.InputStateID == nil ||
+		*prior.InputStateID != *prior.ResultStateID || *prior.ResultStateID != *attempt.InputStateID {
 		return fmt.Errorf("start command attempt: retry requires unchanged input state")
 	}
 	return nil

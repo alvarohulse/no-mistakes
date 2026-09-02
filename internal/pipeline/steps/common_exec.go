@@ -315,6 +315,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 				candidate.RunnerSchemaVersion == definitionResolution.Provenance.SchemaVersion &&
 				candidate.RunnerSource == definitionResolution.Provenance.Source &&
 				db.OptionalStringsEqual(candidate.RunnerVersion, definitionResolution.Provenance.Version) &&
+				sameStateID(candidate.InputStateID, inputStateID) &&
 				sameStateID(candidate.ResultStateID, inputStateID) &&
 				candidate.CompletedAt != nil && candidate.Outcome != nil &&
 				db.RetryableCommandOutcome(*candidate.Outcome) {
@@ -355,8 +356,10 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	if err == nil {
 		recordedExitCode = &result.ExitCode
 	}
+	var completionErr error
+	var attemptOutcome string
 	if attempt != nil {
-		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		attemptOutcome = commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
 		var resultStateID *string
 		var resultStateErr error
 		if sctx.Ctx.Err() == nil {
@@ -371,7 +374,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			}
 		}
 		var testedSHA *string
-		if commandEstablishesTestedHead(purpose) && outcome != db.CommandOutcomeProcessError && sameStateID(attempt.InputStateID, resultStateID) {
+		if commandEstablishesTestedHead(purpose) && attemptOutcome != db.CommandOutcomeProcessError && sameStateID(attempt.InputStateID, resultStateID) {
 			tested := attempt.BeforeSHA
 			testedSHA = &tested
 		}
@@ -379,17 +382,26 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if result.Signal != nil {
 			attemptExitCode = nil
 		}
-		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
-			return result.Output, result.ExitCode, errors.Join(err, fmt.Errorf("persist command attempt completion: %w", persistErr))
+		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
+			completionErr = fmt.Errorf("persist command attempt completion: %w", persistErr)
 		}
 		if resultStateErr != nil {
-			return result.Output, result.ExitCode, resultStateErr
+			err = errors.Join(err, resultStateErr)
 		}
 	}
 	if resolved.Script != "" {
 		sctx.RecordResolvedCommandAtSequence(resolved, sequence, recordedExitCode, err)
 	} else {
 		sctx.RecordCommand(command.Run, recordedExitCode, err)
+	}
+	if attempt != nil {
+		if completionErr != nil {
+			outcomeErr := fmt.Errorf("command completed with outcome %s (exit code %d)", attemptOutcome, result.ExitCode)
+			if result.Signal != nil {
+				outcomeErr = fmt.Errorf("command completed with outcome %s (signal %s)", attemptOutcome, *result.Signal)
+			}
+			err = errors.Join(err, outcomeErr, completionErr)
+		}
 	}
 	return result.Output, result.ExitCode, err
 }

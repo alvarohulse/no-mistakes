@@ -40,7 +40,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		sctx.Log(fmt.Sprintf("running formatter: %s", formatCommand.Run))
 		output, exitCode, err := runStepRunnerCommand(sctx, formatCommand, "format")
 		if err != nil {
-			sctx.Log(fmt.Sprintf("warning: format command failed: %v", err))
+			return nil, fmt.Errorf("run formatter: %w", err)
 		} else if exitCode != 0 {
 			sctx.Log(fmt.Sprintf("warning: format command exited with code %d: %s", exitCode, output))
 		}
