@@ -537,11 +537,23 @@ func effectiveConfigMarkdownFence(yamlBytes []byte) string {
 }
 
 func stripLeadingSectionHeading(text, heading string) string {
-	content, ok := leadingSectionContent(text, heading)
+	trimmed := strings.TrimSpace(text)
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) == 0 {
+		return trimmed
+	}
+	first := strings.TrimSpace(lines[0])
+	hashes, ok := markdownHeadingLevel(first)
 	if !ok {
+		return trimmed
+	}
+	name := strings.TrimSpace(first[hashes:])
+	name = strings.TrimSpace(strings.TrimRight(name, "#"))
+	name = strings.TrimRight(name, ":.!? ")
+	if !strings.EqualFold(name, heading) {
 		return strings.TrimSpace(text)
 	}
-	return content
+	return strings.TrimSpace(strings.Join(lines[1:], "\n"))
 }
 
 func leadingSectionContent(text, heading string) (string, bool) {
