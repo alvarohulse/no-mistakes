@@ -246,16 +246,12 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 	return runShellCommandWithEnv(ctx, dir, nil, cmdStr, shellenv.DefaultProcessTerminationGrace)
 }
 
-func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string, purpose ...string) (string, int, error) {
-	resolvedPurpose := "command"
-	if len(purpose) > 0 {
-		resolvedPurpose = purpose[0]
-	}
-	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, resolvedPurpose)
+func runStepShellCommand(sctx *pipeline.StepContext, cmdStr, purpose string) (string, int, error) {
+	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, purpose)
 }
 
-func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, purpose ...string) (string, int, error) {
-	return runStepCommand(sctx, command, commandPurpose(sctx, purpose), "")
+func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
+	return runStepCommand(sctx, command, purpose, "")
 }
 
 func runStepPlannedCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
@@ -316,7 +312,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 				candidate.Purpose == purpose && candidate.BeforeSHA == beforeSHA &&
 				sameStateID(candidate.ResultStateID, inputStateID) &&
 				candidate.CompletedAt != nil && candidate.Outcome != nil &&
-				isRetryableCommandOutcome(*candidate.Outcome) {
+				db.RetryableCommandOutcome(*candidate.Outcome) {
 				retryOf = &candidate.ID
 				reason := db.CommandRetryReasonTransientFailure
 				retryReason = &reason
@@ -409,30 +405,9 @@ func sameStateID(left, right *string) bool {
 	return left != nil && right != nil && *left == *right
 }
 
-func commandPurpose(sctx *pipeline.StepContext, explicit []string) string {
-	if len(explicit) > 0 && strings.TrimSpace(explicit[0]) != "" {
-		return explicit[0]
-	}
-	if sctx != nil && sctx.DB != nil && sctx.StepResultID != "" {
-		if step, err := sctx.DB.GetStepResult(sctx.StepResultID); err == nil && step != nil {
-			return string(step.StepName)
-		}
-	}
-	return "command"
-}
-
 func commandEstablishesTestedHead(purpose string) bool {
 	switch purpose {
 	case string(types.StepBuild), string(types.StepTest), string(types.StepLint):
-		return true
-	default:
-		return false
-	}
-}
-
-func isRetryableCommandOutcome(outcome string) bool {
-	switch outcome {
-	case db.CommandOutcomeFail, db.CommandOutcomeProcessError, db.CommandOutcomeCancelled, db.CommandOutcomeTimeout:
 		return true
 	default:
 		return false

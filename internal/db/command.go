@@ -227,13 +227,13 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.CompletedAt == nil || prior.Outcome == nil {
 		return fmt.Errorf("start command attempt: retry attempt is incomplete")
 	}
-	if !retryableCommandOutcome(*prior.Outcome) {
+	if !RetryableCommandOutcome(*prior.Outcome) {
 		return fmt.Errorf("start command attempt: prior attempt outcome is not retryable: %q", *prior.Outcome)
 	}
 	if !validCommandRetryReason(*attempt.RetryReason) {
 		return fmt.Errorf("start command attempt: unsupported retry reason %q", *attempt.RetryReason)
 	}
-	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.Trigger != attempt.Trigger || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
+	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
 	if prior.BeforeSHA != attempt.BeforeSHA {
@@ -245,7 +245,7 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	return nil
 }
 
-func retryableCommandOutcome(outcome string) bool {
+func RetryableCommandOutcome(outcome string) bool {
 	switch outcome {
 	case CommandOutcomeFail, CommandOutcomeProcessError, CommandOutcomeCancelled, CommandOutcomeTimeout:
 		return true

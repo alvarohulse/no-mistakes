@@ -127,7 +127,7 @@ func TestRunStepShellCommand_UsesConfiguredProcessTerminationGrace(t *testing.T)
 	}
 
 	started := time.Now()
-	if _, _, err := runStepShellCommand(sctx, script); err != nil {
+	if _, _, err := runStepShellCommand(sctx, script, "test"); err != nil {
 		t.Fatalf("runStepShellCommand: %v", err)
 	}
 	elapsed := time.Since(started)

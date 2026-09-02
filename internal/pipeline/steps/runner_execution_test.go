@@ -46,7 +46,7 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	sctx.RoundID = round.ID
 	sctx.RoundTrigger = "initial"
 
-	output, exitCode, err := runStepRunnerCommand(sctx, command)
+	output, exitCode, err := runStepRunnerCommand(sctx, command, "build")
 	if err != nil || exitCode != 0 || output != "platform" {
 		t.Fatalf("command result = output %q exit %d error %v", output, exitCode, err)
 	}
@@ -101,7 +101,7 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	sctx.StepResultID = step.ID
 	sctx.Round = 1
 
-	_, _, err = runStepRunnerCommand(sctx, command)
+	_, _, err = runStepRunnerCommand(sctx, command, "test")
 	if err == nil || !errors.Is(err, runner.ErrInvalidSyntax) {
 		t.Fatalf("command error = %v, want invalid syntax", err)
 	}
@@ -152,7 +152,7 @@ func TestRunStepRunnerCommandPersistsPartialProvenanceOnPrepareErrors(t *testing
 			sctx.StepResultID = step.ID
 			sctx.Round = 1
 
-			_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf ready"})
+			_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf ready"}, "test")
 			if err == nil || exitCode != -1 {
 				t.Fatalf("prepare result = exit %d error %v, want -1/error", exitCode, err)
 			}
@@ -185,7 +185,7 @@ func TestRunStepRunnerCommandRetainsCompleteOutputForStepLogging(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
 
-	output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: `head -c 131072 /dev/zero`})
+	output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: `head -c 131072 /dev/zero`}, "test")
 	if err != nil || exitCode != 0 {
 		t.Fatalf("command exit = %d, error %v", exitCode, err)
 	}
@@ -213,7 +213,7 @@ func TestRunStepRunnerCommandPersistsSignalWithoutFabricatedExitCode(t *testing.
 	sctx.RoundID = round.ID
 	sctx.RoundTrigger = "initial"
 
-	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "kill -TERM $$"})
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "kill -TERM $$"}, "test")
 	if err != nil || exitCode != -1 {
 		t.Fatalf("signal command = exit %d error %v", exitCode, err)
 	}
@@ -245,7 +245,7 @@ func TestRunStepRunnerCommandPersistsNonZeroExitAsFailure(t *testing.T) {
 	sctx.RoundID = round.ID
 	sctx.RoundTrigger = "initial"
 
-	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "exit 7"})
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "exit 7"}, "test")
 	if err != nil || exitCode != 7 {
 		t.Fatalf("failing command = exit %d error %v", exitCode, err)
 	}
@@ -277,7 +277,7 @@ func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *
 	sctx.RoundID = round.ID
 	sctx.RoundTrigger = "initial"
 
-	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf changed >> feature.txt"})
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf changed >> feature.txt"}, "test")
 	if err != nil || exitCode != 0 {
 		t.Fatalf("mutating command = exit %d error %v", exitCode, err)
 	}
@@ -309,7 +309,7 @@ func TestRunStepRunnerCommandCompletesAttemptWhenResultStateCannotBeRead(t *test
 	sctx.RoundID = round.ID
 	sctx.RoundTrigger = "initial"
 
-	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "rm -rf .git"})
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "rm -rf .git"}, "test")
 	if err == nil || !strings.Contains(err.Error(), "resolve command result subject") || exitCode != 0 {
 		t.Fatalf("command result = exit %d error %v", exitCode, err)
 	}
