@@ -145,13 +145,15 @@ func LoadRunRecords(d *db.DB, runID string) RunRecords {
 
 // buildPRBodyContract assembles the contract for a live run.
 func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, summary, whatChanged, title string, scope prBodyScope) *prbody.Contract {
+	run := *sctx.Run
+	run.HeadSHA = scope.headSHA
 	return BuildContract(ContractInput{
-		Run:                 sctx.Run,
+		Run:                 &run,
 		Repo:                sctx.Repo,
 		Steps:               records.Steps,
 		Rounds:              records.Rounds,
 		Invocations:         records.Invocations,
-		Commits:             contractCommits(sctx, scope.baseSHA),
+		Commits:             contractCommits(sctx, scope.baseSHA, scope.headSHA),
 		Intent:              cleanedUserIntent(sctx),
 		IntentSource:        sctx.IntentSource,
 		IntentAuthoritative: intentSourceIsAuthoritative(sctx),
@@ -167,11 +169,11 @@ func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, summary
 	})
 }
 
-func contractCommits(sctx *pipeline.StepContext, baseSHA string) []prbody.Commit {
-	if strings.TrimSpace(baseSHA) == "" || strings.TrimSpace(sctx.Run.HeadSHA) == "" {
+func contractCommits(sctx *pipeline.StepContext, baseSHA, headSHA string) []prbody.Commit {
+	if strings.TrimSpace(baseSHA) == "" || strings.TrimSpace(headSHA) == "" {
 		return nil
 	}
-	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "log", "--format=%H%x00%s", baseSHA+".."+sctx.Run.HeadSHA)
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "log", "--format=%H%x00%s", baseSHA+".."+headSHA)
 	if err != nil {
 		slog.Warn("failed to read branch commits for pr body contract", "error", err)
 		return nil

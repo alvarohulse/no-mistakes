@@ -121,6 +121,7 @@ func fakeRecordSuccessHandler() {
 func fakeGHHandler(args []string) {
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
+	prTitle := os.Getenv("FAKE_CLI_PR_TITLE")
 	prBaseFile := os.Getenv("FAKE_CLI_PR_BASE_FILE")
 	if prBaseFile != "" {
 		if data, err := os.ReadFile(prBaseFile); err == nil {
@@ -136,7 +137,14 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		number := extractTrailingNumber(prURL)
-		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q}]\n", number, prURL, prBase)
+		if logFile := os.Getenv("FAKE_CLI_LOG"); logFile != "" {
+			f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if f != nil {
+				fmt.Fprintf(f, "pr list result title=%s\n", prTitle)
+				f.Close()
+			}
+		}
+		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q,\"title\":%q}]\n", number, prURL, prBase, prTitle)
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {

@@ -279,7 +279,7 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 
 	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
 		"glab mr list --source-branch feature/refactor --target-branch release/1.0 --output json": {
-			stdout: `[{"iid":42,"web_url":"https://gitlab.example.com/group/project/-/merge_requests/42","target_branch":"release/1.0"}]` + "\n",
+			stdout: `[{"iid":42,"web_url":"https://gitlab.example.com/group/project/-/merge_requests/42","target_branch":"release/1.0","title":"Keep this title"}]` + "\n",
 		},
 	}), nil, "", "")
 
@@ -298,6 +298,9 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	}
 	if pr.Base != "release/1.0" {
 		t.Fatalf("FindPR() base = %q, want release/1.0", pr.Base)
+	}
+	if pr.Title != "Keep this title" {
+		t.Fatalf("FindPR() title = %q, want hosted title", pr.Title)
 	}
 }
 

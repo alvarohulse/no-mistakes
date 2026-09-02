@@ -292,7 +292,7 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,6 +332,49 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 	}
 	if contract.Sections.Pipeline == nil || len(contract.Sections.Pipeline.Steps) == 0 {
 		t.Fatal("pipeline section should still carry the per-step records separately")
+	}
+}
+
+func TestBuildPRContentReplayUsesStoredCommitsWithoutMutatingRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-command fixtures are POSIX")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"fix: preserve replay provenance","summary":"Preserves replay provenance.","what_changed":"- Reuse stored commits."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	dump := filepath.Join(t.TempDir(), "contract.json")
+	sctx.Config.Hooks.PRBody = "cat > " + dump + `; printf '%s\n' '{"version":1,"sections":[{"id":"summary","content":"formatted body"}]}'`
+	step := &PRStep{}
+
+	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.HeadSHA = "advanced-head"
+	if _, err := step.buildPRContent(sctx, "feature", "main", "advanced-base", scm.ProviderGitHub, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract prbody.Contract
+	if err := json.Unmarshal(raw, &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract.BaseSHA != baseSHA || contract.HeadSHA != headSHA {
+		t.Fatalf("replay commits = %q..%q, want stored %q..%q", contract.BaseSHA, contract.HeadSHA, baseSHA, headSHA)
+	}
+	if sctx.Run.HeadSHA != "advanced-head" {
+		t.Fatalf("replay mutated run head to %q", sctx.Run.HeadSHA)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("drafting calls = %d, want one across replay", len(ag.calls))
 	}
 }
 

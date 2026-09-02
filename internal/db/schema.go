@@ -157,6 +157,23 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
 CREATE INDEX IF NOT EXISTS idx_agent_invocations_run_started_id
     ON agent_invocations (run_id, started_at, id);
 
+CREATE TABLE IF NOT EXISTS run_narratives (
+    run_id                  TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    source                  TEXT NOT NULL CHECK (source IN ('agent', 'fallback')),
+    drafting_invocation_id  TEXT REFERENCES agent_invocations(id),
+    drafted_at              INTEGER NOT NULL,
+    base_sha                TEXT NOT NULL,
+    head_sha                TEXT NOT NULL,
+    title_mode              TEXT NOT NULL CHECK (title_mode IN ('agent', 'fallback', 'preserved')),
+    title_text              TEXT NOT NULL,
+    summary                 TEXT NOT NULL,
+    what_changed            TEXT NOT NULL,
+    CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
+           (source = 'fallback' AND drafting_invocation_id IS NULL)),
+    CHECK ((source = 'agent' AND title_mode IN ('agent', 'preserved')) OR
+           (source = 'fallback' AND title_mode IN ('fallback', 'preserved')))
+);
+
 CREATE TABLE IF NOT EXISTS run_agent_sessions (
     run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     role       TEXT NOT NULL,
@@ -225,6 +242,20 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`CREATE TABLE IF NOT EXISTS run_narratives (
+		run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		source TEXT NOT NULL CHECK (source IN ('agent', 'fallback')),
+		drafting_invocation_id TEXT REFERENCES agent_invocations(id),
+		drafted_at INTEGER NOT NULL,
+		base_sha TEXT NOT NULL,
+		head_sha TEXT NOT NULL,
+		title_mode TEXT NOT NULL CHECK (title_mode IN ('agent', 'fallback', 'preserved')),
+		title_text TEXT NOT NULL,
+		summary TEXT NOT NULL,
+		what_changed TEXT NOT NULL,
+		CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
+		       (source = 'fallback' AND drafting_invocation_id IS NULL))
+	)`,
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,

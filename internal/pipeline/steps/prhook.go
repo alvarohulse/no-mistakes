@@ -20,6 +20,7 @@ type prBodyScope struct {
 	branch     string
 	baseBranch string
 	baseSHA    string
+	headSHA    string
 	provider   string
 	bodyLimit  int
 }

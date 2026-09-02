@@ -141,6 +141,7 @@ type PR struct {
 	Number string
 	URL    string
 	Base   string
+	Title  string
 }
 
 // PRContent is the title + body for creating or updating a PR.

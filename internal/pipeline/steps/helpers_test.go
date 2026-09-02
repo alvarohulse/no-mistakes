@@ -43,6 +43,40 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 
 func (m *mockAgent) Close() error { return nil }
 
+type recordingPRTestAgent struct {
+	inner    agent.Agent
+	database *db.DB
+	run      func() *db.Run
+}
+
+func (a *recordingPRTestAgent) Name() string { return a.inner.Name() }
+
+func (a *recordingPRTestAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	startedAt := time.Now()
+	result, runErr := a.inner.Run(ctx, opts)
+	if opts.Purpose != string(types.StepPR) || a.database == nil || a.run == nil || a.run() == nil {
+		return result, runErr
+	}
+	exitStatus := "ok"
+	failureCategory := ""
+	if runErr != nil {
+		exitStatus = "error"
+		failureCategory = "other"
+	}
+	completedAt := time.Now()
+	_, receiptErr := a.database.InsertAgentInvocation(db.AgentInvocation{
+		RunID: a.run().ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: a.inner.Name(),
+		SessionMode: db.InvocationModeCold, StartedAt: startedAt.Unix(), CompletedAt: completedAt.Unix(),
+		DurationMS: completedAt.Sub(startedAt).Milliseconds(), ExitStatus: exitStatus, FailureCategory: failureCategory,
+	})
+	if receiptErr != nil {
+		return result, fmt.Errorf("record test PR invocation: %w", receiptErr)
+	}
+	return result, runErr
+}
+
+func (a *recordingPRTestAgent) Close() error { return a.inner.Close() }
+
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -489,6 +523,9 @@ func newTestContextWithDBRecords(t *testing.T, ag agent.Agent, workDir, baseSHA,
 	}
 	sctx.Run = run
 	sctx.Repo = repo
+	if ag != nil {
+		sctx.Agent = &recordingPRTestAgent{inner: ag, database: sctx.DB, run: func() *db.Run { return sctx.Run }}
+	}
 	return sctx
 }
 

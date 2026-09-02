@@ -1077,7 +1077,7 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: route fork prs","body":"## Summary\n\n- open fork PR against parent"}`)
+			payload := json.RawMessage(`{"title":"fix: route fork prs","summary":"Routes fork pull requests to the parent.","what_changed":"- Open the fork pull request against the parent."}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1097,7 +1097,7 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr list --head feature --repo parent-owner/no-mistakes --state open --json number,url,baseRefName,headRefName,headRepositoryOwner") {
+	if !strings.Contains(ghLog, "pr list --head feature --repo parent-owner/no-mistakes --state open --json number,url,baseRefName,title,headRefName,headRepositoryOwner") {
 		t.Fatalf("expected PR lookup to use parent repo and bare head branch, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "pr list --head fork-owner:feature") {
@@ -1271,7 +1271,7 @@ func TestPRStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: process env bitbucket pr","body":"## Summary\n\n- create PR via process env"}`)
+			payload := json.RawMessage(`{"title":"fix: process env bitbucket pr","summary":"Uses process credentials for Bitbucket pull requests.","what_changed":"- Create the pull request via the process environment."}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1305,7 +1305,7 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"## Summary\n\n- keep branch status readable\n- fix footer truncation"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1349,6 +1349,247 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	}
 }
 
+func TestPRStep_PersistsAgentNarrativeAndReusesItWithinRun(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat(pipeline): save narrative","summary":"Saved agent summary.","what_changed":"- Persist the draft."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	first, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("run narrative was not persisted")
+	}
+	if first.Source != db.NarrativeSourceAgent || first.DraftingInvocationID == nil {
+		t.Fatalf("agent provenance = %#v, want recorded invocation", first)
+	}
+	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocations) != 1 || invocations[0].ID != *first.DraftingInvocationID || invocations[0].RunID != sctx.Run.ID {
+		t.Fatalf("drafting invocation = %v, narrative = %#v", invocations, first)
+	}
+	if first.BaseSHA != baseSHA || first.HeadSHA != headSHA || first.DraftedAt == 0 {
+		t.Fatalf("draft provenance = %#v", first)
+	}
+	if first.TitleMode != db.NarrativeTitleModeAgent || first.TitleText != "feat(pipeline): save narrative" || first.Summary != "Saved agent summary." || first.WhatChanged != "- Persist the draft." {
+		t.Fatalf("persisted narrative = %#v", first)
+	}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("retry Execute() error = %v", err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("drafting calls = %d, want 1 across same-run retry", len(ag.calls))
+	}
+	second, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil || second.DraftedAt != first.DraftedAt || second.Summary != first.Summary || second.WhatChanged != first.WhatChanged {
+		t.Fatalf("retry changed the persisted narrative: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestPRStep_PersistsFallbackNarrativeAndReusesItWithinRun(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return nil, fmt.Errorf("draft unavailable")
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("drafting calls = %d, want 1 across same-run fallback reuse", len(ag.calls))
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil || narrative.TitleMode != db.NarrativeTitleModeFallback || narrative.TitleText != "chore: update pull request" {
+		t.Fatalf("fallback provenance = %#v", narrative)
+	}
+}
+
+func TestPRStep_UnrecordedAgentDraftUsesFallbackProvenance(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: unrecorded agent draft","summary":"Unrecorded summary.","what_changed":"- Unrecorded change."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+		RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "stale",
+		SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	}); err != nil {
+		t.Fatalf("insert stale invocation: %v", err)
+	}
+	// Bypass the test invocation recorder to simulate the production recorder
+	// failing before the PR step tries to bind the narrative provenance. The
+	// earlier successful invocation must not be reused for this draft.
+	sctx.Agent = ag
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil {
+		t.Fatalf("unrecorded agent draft provenance = %#v, want deterministic fallback", narrative)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Unrecorded summary") || !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("unrecorded agent draft was published instead of fallback:\n%s", body)
+	}
+}
+
+func TestPRStep_FailedDraftingInvocationUsesFallbackProvenance(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	var sctx *pipeline.StepContext
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+				RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "test",
+				SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1,
+				ExitStatus: "error", FailureCategory: "other",
+			}); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: failed receipt","summary":"Failed receipt summary.","what_changed":"- Failed receipt change."}`)}, nil
+		},
+	}
+	sctx = newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Agent = ag
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil {
+		t.Fatalf("failed drafting invocation provenance = %#v, want deterministic fallback", narrative)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Failed receipt summary") || !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("failed drafting invocation was published instead of fallback:\n%s", body)
+	}
+}
+
+func TestPRStep_NewRunDraftsNewNarrativeAtSameHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(fmt.Sprintf(`{"title":"feat(pipeline): draft run %d","summary":"Summary %d.","what_changed":"- Change %d."}`, calls, calls, calls))}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	firstRunID := sctx.Run.ID
+	secondRun, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = secondRun
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("drafting calls = %d, want one per run", calls)
+	}
+	first, _ := sctx.DB.GetRunNarrative(firstRunID)
+	second, _ := sctx.DB.GetRunNarrative(secondRun.ID)
+	if first == nil || second == nil || first.Summary == second.Summary {
+		t.Fatalf("separate runs reused one narrative: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestPRStep_ExistingPRPreservesHostedTitleWithoutChangingDraftedTitle(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_TITLE=Keep the hosted title")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: replace the title","summary":"New run summary.","what_changed":"- New run changes."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.TitleMode != db.NarrativeTitleModePreserved || narrative.TitleText != "feat: replace the title" || narrative.Summary != "New run summary." || narrative.WhatChanged != "- New run changes." {
+		t.Fatalf("preserved title provenance = %#v", narrative)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "pr edit 42") {
+		t.Fatalf("expected existing pull request body update:\n%s", logData)
+	}
+	if !strings.Contains(string(logData), "Keep the hosted title") {
+		t.Fatalf("expected hosted title to be observed:\n%s", logData)
+	}
+	if strings.Contains(lineContaining(string(logData), "pr edit 42"), "--title") {
+		t.Fatalf("existing hosted title was overwritten:\n%s", logData)
+	}
+}
+
 func TestPRStep_AppendsDeterministicValidationSections(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -1361,7 +1602,7 @@ func TestPRStep_AppendsDeterministicValidationSections(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"## Summary\n\n- keep branch status readable\n- fix footer truncation"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1430,7 +1671,7 @@ func TestPRStep_UnwrapsNestedJSONBody(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## Summary\\n\\n- keep branch status readable\\n- fix footer truncation\"}"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## What Changed\\n\\n- keep branch status readable\"}"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2175,7 +2416,7 @@ func TestPRStep_CreateKeepsGeneratedSectionsWithoutRenderingIntent(t *testing.T)
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","body":"## What Changed\n\n- essential summary survives"}`)
+			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","summary":"Keeps generated pull request bodies postable.","what_changed":"- essential summary survives"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2246,7 +2487,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","body":"## What Changed\n\n- essential summary survives"}`)
+			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","summary":"Keeps generated pull request bodies postable.","what_changed":"- essential summary survives"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2271,7 +2512,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 		}
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2301,8 +2542,9 @@ func TestPRStep_CreateCapsBodyWithoutRenderingIntent(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			payload, err := json.Marshal(prContent{
-				Title: "fix: keep generated pr bodies postable",
-				Body:  "## What Changed\n\n- essential summary survives",
+				Title:       "fix: keep generated pr bodies postable",
+				Summary:     "Keeps generated pull request bodies postable.",
+				WhatChanged: "- essential summary survives",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -2533,7 +2775,7 @@ func TestPRStep_UsesIntentForDraftingWithoutRenderingIt(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2572,7 +2814,7 @@ func TestPRStep_OmitsIntentSectionWhenIntentEmpty(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2605,7 +2847,7 @@ func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## Intent\n\n- agent paraphrase\n\n## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","body":"## Intent\n\n- agent paraphrase\n\n## What Changed\n\n- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2627,6 +2869,9 @@ func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "agent paraphrase") {
 		t.Fatalf("expected agent-emitted Intent body to be stripped, got:\n%s", ghLog)
 	}
+	if !strings.Contains(ghLog, "## What Changed\n\n- add Bar()") {
+		t.Fatalf("expected the remaining legacy What Changed section to be retained, got:\n%s", ghLog)
+	}
 	if strings.Contains(ghLog, "real user intent string") {
 		t.Fatalf("stored intent leaked into PR body:\n%s", ghLog)
 	}
@@ -2641,7 +2886,7 @@ func TestPRStep_PrependsNotesSectionBeforeWhatChanged(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2686,7 +2931,7 @@ func TestPRStep_OmitsNotesSectionWhenPRNoteEmpty(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2720,7 +2965,7 @@ func TestPRStep_PromptIncludesAuthorNotesAsTrustedGuidance(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2834,7 +3079,7 @@ func TestPRStep_PromptRequestsDistinctHeadingFreeMarkdownSections(t *testing.T) 
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2936,7 +3181,7 @@ func TestPRStep_FallsBackWhenAgentOmitsSummary(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: incomplete draft","what_changed":"- agent-only change"}`)
+			payload := json.RawMessage(`{"title":"feat: incomplete draft","body":"## What Changed\n\n- agent-only change"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2959,6 +3204,87 @@ func TestPRStep_FallsBackWhenAgentOmitsSummary(t *testing.T) {
 	}
 }
 
+func TestPRStep_FallsBackWhenLegacyBodyOmitsWhatChanged(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete legacy draft","summary":"Structured summary.","body":"## Summary\n\nDuplicate summary."}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Structured summary") || strings.Contains(body, "Duplicate summary") {
+		t.Fatalf("legacy body without What Changed was accepted:\n%s", body)
+	}
+	if !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("legacy body without What Changed did not use fallback:\n%s", body)
+	}
+}
+
+func TestPRStep_FallsBackWhenLegacyWhatChangedIsFollowedByHigherHeading(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete legacy draft","summary":"Structured summary.","body":"### What Changed\n\n## Summary\n\nDuplicate summary."}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Structured summary") || strings.Contains(body, "Duplicate summary") {
+		t.Fatalf("legacy body with a higher-level heading was accepted:\n%s", body)
+	}
+	if !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("legacy body with a higher-level heading did not use fallback:\n%s", body)
+	}
+}
+
+func TestPRStep_FallsBackWhenLegacyWhatChangedContainsOnlyHTMLComment(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat: incomplete legacy draft","summary":"Structured summary.","body":"## What Changed\n\n<!-- describe changes -->\n\n## Summary\n\nDuplicate summary."}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Structured summary") || strings.Contains(body, "Duplicate summary") {
+		t.Fatalf("legacy body with comment-only What Changed was accepted:\n%s", body)
+	}
+	if !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("legacy body with comment-only What Changed did not use fallback:\n%s", body)
+	}
+}
+
 func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -2968,7 +3294,7 @@ func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: improve gitlab flow","body":"## Summary\n\n- add gitlab support\n\n## Testing\n\n- go test ./..."}`)
+			payload := json.RawMessage(`{"title":"feat: improve gitlab flow","summary":"Adds GitLab support.","what_changed":"- add gitlab support"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3146,7 +3472,7 @@ func TestPRStep_AgentScopedBreakingTitlePassesThrough(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat(api)!: require auth token","body":"## Summary\n\n- require auth token on all API requests"}`)
+			payload := json.RawMessage(`{"title":"feat(api)!: require auth token","summary":"Requires authentication for API requests.","what_changed":"- require auth token on all API requests"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3180,7 +3506,7 @@ func TestPRStep_AgentConventionalNonReleaseTitlePassesThrough(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"refactor(cli): improve CLI output","body":"## Summary\n\n- improve user-visible command output"}`)
+			payload := json.RawMessage(`{"title":"refactor(cli): improve CLI output","summary":"Improves user-visible CLI output.","what_changed":"- improve user-visible command output"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3209,14 +3535,14 @@ func TestPRStep_PromptRequiresReleaseTypesForProductImpact(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve CLI output","body":"## What Changed\n\n- improve output"}`)
+			payload := json.RawMessage(`{"title":"fix: improve CLI output","summary":"Improves CLI output.","what_changed":"- improve output"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	step := &PRStep{}
-	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err != nil {
+	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -3245,7 +3571,7 @@ func TestPRStep_PromptGuidesScopeToRealModule(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"fix(daemon): tidy logs","body":"## Summary\n\n- tidy"}`)
+			payload := json.RawMessage(`{"title":"fix(daemon): tidy logs","summary":"Tidies daemon logs.","what_changed":"- tidy logs"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
