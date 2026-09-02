@@ -550,11 +550,8 @@ func leadingSectionContent(text, heading string) (string, bool) {
 		return "", false
 	}
 	first := strings.TrimSpace(lines[0])
-	hashes := 0
-	for hashes < len(first) && hashes < 7 && first[hashes] == '#' {
-		hashes++
-	}
-	if hashes == 0 || hashes > 6 || hashes == len(first) || (first[hashes] != ' ' && first[hashes] != '\t') {
+	hashes, ok := markdownHeadingLevel(first)
+	if !ok {
 		return "", false
 	}
 	name := strings.TrimSpace(first[hashes:])
@@ -563,7 +560,25 @@ func leadingSectionContent(text, heading string) (string, bool) {
 	if !strings.EqualFold(name, heading) {
 		return "", false
 	}
-	return strings.TrimSpace(strings.Join(lines[1:], "\n")), true
+	end := len(lines)
+	for i := 1; i < len(lines); i++ {
+		if level, ok := markdownHeadingLevel(strings.TrimSpace(lines[i])); ok && level == hashes {
+			end = i
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines[1:end], "\n")), true
+}
+
+func markdownHeadingLevel(line string) (int, bool) {
+	hashes := 0
+	for hashes < len(line) && hashes < 7 && line[hashes] == '#' {
+		hashes++
+	}
+	if hashes == 0 || hashes > 6 || hashes == len(line) || (line[hashes] != ' ' && line[hashes] != '\t') {
+		return 0, false
+	}
+	return hashes, true
 }
 
 func buildPRNarrative(summary, whatChanged string) string {
