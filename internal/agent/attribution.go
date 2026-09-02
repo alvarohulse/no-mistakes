@@ -28,10 +28,6 @@ func (c *agentObservationCollector) observe(key, identity string) {
 	if c == nil {
 		return
 	}
-	identity = sanitizeAgentIdentity(identity)
-	if identity == "" {
-		return
-	}
 	if key != "" {
 		if _, ok := c.seen[key]; ok {
 			return
@@ -39,6 +35,10 @@ func (c *agentObservationCollector) observe(key, identity string) {
 		c.seen[key] = struct{}{}
 	}
 	c.count++
+	identity = sanitizeAgentIdentity(identity)
+	if identity == "" {
+		return
+	}
 	if len(c.observations) >= maxAgentObservations {
 		return
 	}

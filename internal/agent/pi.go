@@ -125,7 +125,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
 	if res != nil {
-		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd, false)
+		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd && pp.agentEndUsageReported, false)
 	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
@@ -225,13 +225,14 @@ func buildPiPrompt(prompt string, schema json.RawMessage) string {
 type piParser struct {
 	onChunk func(string)
 
-	streamText     map[int]string
-	completeText   map[int]string
-	finalAssistant map[string]any
-	usage          TokenUsage
-	seenUsage      map[string]struct{}
-	assistantError string
-	sawAgentEnd    bool
+	streamText            map[int]string
+	completeText          map[int]string
+	finalAssistant        map[string]any
+	usage                 TokenUsage
+	seenUsage             map[string]struct{}
+	assistantError        string
+	sawAgentEnd           bool
+	agentEndUsageReported bool
 }
 
 func (p *piParser) parse(ctx context.Context, r io.Reader) error {
@@ -333,6 +334,7 @@ func (p *piParser) rememberAgentEnd(raw any) {
 		hasUsage = true
 	}
 	if hasUsage {
+		p.agentEndUsageReported = true
 		p.usage = total
 		p.seenUsage = make(map[string]struct{}, len(seen))
 		for key := range seen {

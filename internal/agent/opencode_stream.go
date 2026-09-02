@@ -126,8 +126,10 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 			}
 
 		case "session.idle":
-			state.reachedIdle = true
-			return false
+			if props != nil && props.SessionID == state.sessionID {
+				state.reachedIdle = true
+				return false
+			}
 		}
 
 		return true
@@ -135,10 +137,6 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 
 	if err != nil {
 		return err
-	}
-	if !state.reachedIdle {
-		// Stream ended without session.idle — not an error if message response
-		// will provide the final result
 	}
 	return nil
 }
