@@ -145,10 +145,10 @@ func LoadRunRecords(d *db.DB, runID string) RunRecords {
 
 // buildPRBodyContract assembles the contract for a live run.
 func buildPRBodyContract(sctx *pipeline.StepContext, records RunRecords, summary, whatChanged, title string, scope prBodyScope) *prbody.Contract {
-	run := sctx.Run
+	run := *sctx.Run
 	run.HeadSHA = scope.headSHA
 	return BuildContract(ContractInput{
-		Run:                 run,
+		Run:                 &run,
 		Repo:                sctx.Repo,
 		Steps:               records.Steps,
 		Rounds:              records.Rounds,

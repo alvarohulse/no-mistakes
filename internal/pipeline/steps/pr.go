@@ -392,7 +392,9 @@ Final diff paths and statuses:
 			content.WhatChanged = stripLeadingSectionHeading(strings.TrimSpace(content.WhatChanged), "What Changed")
 			legacyBody := stripGeneratedSections(unwrapNestedPRBody(strings.TrimSpace(content.Body)))
 			if content.WhatChanged == "" {
-				content.WhatChanged = stripLeadingSectionHeading(legacyBody, "What Changed")
+				if whatChanged, ok := leadingSectionContent(legacyBody, "What Changed"); ok {
+					content.WhatChanged = whatChanged
+				}
 			}
 			structuredContent := content.Summary != "" && content.WhatChanged != ""
 			if content.Title != "" && structuredContent {
@@ -535,9 +537,17 @@ func effectiveConfigMarkdownFence(yamlBytes []byte) string {
 }
 
 func stripLeadingSectionHeading(text, heading string) string {
+	content, ok := leadingSectionContent(text, heading)
+	if !ok {
+		return strings.TrimSpace(text)
+	}
+	return content
+}
+
+func leadingSectionContent(text, heading string) (string, bool) {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 	if len(lines) == 0 {
-		return ""
+		return "", false
 	}
 	first := strings.TrimSpace(lines[0])
 	hashes := 0
@@ -545,15 +555,15 @@ func stripLeadingSectionHeading(text, heading string) string {
 		hashes++
 	}
 	if hashes == 0 || hashes > 6 || hashes == len(first) || (first[hashes] != ' ' && first[hashes] != '\t') {
-		return strings.TrimSpace(text)
+		return "", false
 	}
 	name := strings.TrimSpace(first[hashes:])
 	name = strings.TrimSpace(strings.TrimRight(name, "#"))
 	name = strings.TrimRight(name, ":.!? ")
 	if !strings.EqualFold(name, heading) {
-		return strings.TrimSpace(text)
+		return "", false
 	}
-	return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	return strings.TrimSpace(strings.Join(lines[1:], "\n")), true
 }
 
 func buildPRNarrative(summary, whatChanged string) string {
