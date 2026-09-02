@@ -104,30 +104,68 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 	t.Parallel()
 
 	testFindings := `{"findings":[],"summary":"","testing_summary":"tests completed","tested":["go test ./...","make e2e"]}`
-	firstExitCode, secondExitCode := 1, 2
-	testEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Commands: []db.CommandEvidence{
-		{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &firstExitCode},
-		{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &secondExitCode},
-	}})
-	if err != nil {
-		t.Fatal(err)
+	zero, one := 0, 1
+	tests := []struct {
+		name               string
+		commands           []db.CommandEvidence
+		wantStaticCommands []string
+	}{
+		{
+			name: "all attempts lack passing evidence",
+			commands: []db.CommandEvidence{
+				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
+				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomePassed},
+				{Round: 1, Sequence: 3, Command: "go vet ./...", Outcome: db.CommandOutcomePassed, ExitCode: &one},
+			},
+		},
+		{
+			name: "valid pass remains alongside failed history",
+			commands: []db.CommandEvidence{
+				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &zero},
+				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
+			},
+			wantStaticCommands: []string{"go test ./..."},
+		},
 	}
 
-	contract := BuildContract(ContractInput{Steps: []*db.StepResult{{
-		ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted,
-		FindingsJSON: &testFindings, EvidenceJSON: &testEvidence,
-	}}})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Commands: tt.commands})
+			if err != nil {
+				t.Fatal(err)
+			}
+			contract := BuildContract(ContractInput{Steps: []*db.StepResult{{
+				ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted,
+				FindingsJSON: &testFindings, EvidenceJSON: &testEvidence,
+			}}})
 
-	staticTests := contract.Sections.StaticTests
-	if staticTests == nil {
-		t.Fatal("static_tests omitted; want an explicit empty section")
-	}
-	if staticTests.Summary != "" || len(staticTests.Commands) != 0 || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0 {
-		t.Fatalf("static_tests = %+v, want no passing evidence", staticTests)
-	}
-	pipelineCommands := contract.Sections.Pipeline.Steps[0].Commands
-	if len(pipelineCommands) != 2 || pipelineCommands[0].Outcome != db.CommandOutcomeFailed || pipelineCommands[1].Outcome != db.CommandOutcomeFailed {
-		t.Fatalf("pipeline commands = %+v, want both failed attempts", pipelineCommands)
+			staticTests := contract.Sections.StaticTests
+			if staticTests == nil {
+				t.Fatal("static_tests omitted; want an explicit section")
+			}
+			if len(staticTests.Commands) != len(tt.wantStaticCommands) {
+				t.Fatalf("static_tests commands = %+v, want %v", staticTests.Commands, tt.wantStaticCommands)
+			}
+			for i, want := range tt.wantStaticCommands {
+				if staticTests.Commands[i].Command != want {
+					t.Fatalf("static_tests commands = %+v, want %v", staticTests.Commands, tt.wantStaticCommands)
+				}
+			}
+			if len(tt.wantStaticCommands) == 0 && (staticTests.Summary != "" || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0) {
+				t.Fatalf("static_tests = %+v, want explicit empty evidence", staticTests)
+			}
+
+			pipelineCommands := contract.Sections.Pipeline.Steps[0].Commands
+			if len(pipelineCommands) != len(tt.commands) {
+				t.Fatalf("pipeline commands = %+v, want all %d attempts", pipelineCommands, len(tt.commands))
+			}
+			for i, want := range tt.commands {
+				got := pipelineCommands[i]
+				if got.Command != want.Command || got.Outcome != want.Outcome || (got.ExitCode == nil) != (want.ExitCode == nil) || (got.ExitCode != nil && *got.ExitCode != *want.ExitCode) {
+					t.Fatalf("pipeline command %d = %+v, want %+v", i, pipelineCommands[i], want)
+				}
+			}
+		})
 	}
 }
 

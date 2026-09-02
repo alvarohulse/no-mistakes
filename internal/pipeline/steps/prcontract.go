@@ -252,7 +252,7 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		if evidence, err := sr.Evidence(); err == nil {
 			for _, command := range evidence.Commands {
 				hadCommands = true
-				if command.Outcome != db.CommandOutcomePassed || (command.ExitCode != nil && *command.ExitCode != 0) {
+				if command.Outcome != db.CommandOutcomePassed || command.ExitCode == nil || *command.ExitCode != 0 {
 					continue
 				}
 				section.Commands = append(section.Commands, prbody.PipelineCommand{
