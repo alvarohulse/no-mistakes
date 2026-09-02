@@ -218,6 +218,50 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsCorruptFutureReceiptDuringMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt-future-receipt.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/corrupt-future-receipt", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := before.InsertRunWithIDAndOptions("future-corrupt", repo.ID, "feature", "head", "base", RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	record := RunMetricReceipt{
+		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+		SchemaVersion: RunMetricReceiptSchemaVersion + 1,
+		PayloadJSON: fmt.Sprintf(`{"schema_version":%d}`, RunMetricReceiptSchemaVersion+1),
+		ArchivedAt: run.UpdatedAt,
+	}
+	if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+		t.Fatalf("archive future receipt = %t, %v", archived, err)
+	}
+	if _, err := before.sql.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if opened, err := Open(path); err == nil || !strings.Contains(err.Error(), "future-corrupt") || !strings.Contains(err.Error(), "SHA-256 verification") {
+		if opened != nil {
+			opened.Close()
+		}
+		t.Fatalf("corrupt future receipt open error = %v", err)
+	}
+}
+
 func TestOpenRejectsCorruptArchivedReceiptWithoutPartiallyMigratingSiblings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "corrupt-cost-receipt.sqlite")
 	before, err := Open(path)

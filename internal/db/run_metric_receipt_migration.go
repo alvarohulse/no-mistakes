@@ -51,8 +51,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		       payload_json, receipt_sha256, archived_at, pull_request,
 		       reported_findings, fixed_findings, step_stats_json, agent_aggregates_json
 		FROM run_metric_receipts
-		WHERE schema_version <= ?
-		ORDER BY run_id`, RunMetricReceiptSchemaVersion)
+		ORDER BY run_id`)
 	if err != nil {
 		return fmt.Errorf("read run metric receipts for migration: %w", err)
 	}
