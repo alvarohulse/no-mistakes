@@ -229,6 +229,18 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	if err := d.CompleteCommandAttempt(third.ID, CommandOutcomeTimeout, nil, nil, stringPointer("git:dirty"), nil); err != nil {
 		t.Fatalf("complete third attempt: %v", err)
 	}
+	if _, err := d.sql.Exec(`UPDATE command_attempts SET started_at = CASE sequence WHEN 1 THEN 300 WHEN 2 THEN 100 WHEN 3 THEN 200 END WHERE run_id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := d.GetCommandAttemptsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, wantSequence := range []int{1, 2, 3} {
+		if ordered[index].Sequence != wantSequence {
+			t.Fatalf("attempt order at %d = sequence %d, want %d", index, ordered[index].Sequence, wantSequence)
+		}
+	}
 
 	invalidReason := "operator_retry"
 	_, err = d.StartCommandAttempt(CommandAttempt{
@@ -287,9 +299,7 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, command_id TEXT NOT NULL,
 			step_id TEXT NOT NULL, round_id TEXT NOT NULL, sequence INTEGER NOT NULL,
 			purpose TEXT NOT NULL, observer TEXT NOT NULL, trigger_type TEXT NOT NULL,
-			before_sha TEXT NOT NULL, tested_sha TEXT, command_source TEXT NOT NULL,
-			runner_schema_version INTEGER NOT NULL, runner_source TEXT NOT NULL,
-			runner_version TEXT, input_state_id TEXT, result_state_id TEXT,
+			before_sha TEXT NOT NULL, tested_sha TEXT,
 			started_at INTEGER NOT NULL, completed_at INTEGER, duration_ms INTEGER,
 			outcome TEXT, exit_code INTEGER, signal TEXT, retry_of_attempt_id TEXT,
 			retry_reason TEXT,
@@ -300,7 +310,8 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 		INSERT INTO step_results VALUES ('step', 'run', 'test', 1, 'pending');
 		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', 1, 1);
 		INSERT INTO command_definitions VALUES ('run', 'definition', 'printf test', 'linux', 'sh', '["-c"]', 'base', 1, 'default', '5.9');
-		INSERT INTO command_attempts VALUES ('attempt', 'run', 'definition', 'step', 'round', 1, 'test', 'controller', 'initial', 'head', NULL, 'base', 1, 'default', '5.9', 'git:head', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+		INSERT INTO command_attempts (id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha, started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason)
+		VALUES ('attempt', 'run', 'definition', 'step', 'round', 1, 'test', 'controller', 'initial', 'head', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 	`); err != nil {
 		legacy.Close()
 		t.Fatal(err)

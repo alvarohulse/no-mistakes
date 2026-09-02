@@ -414,9 +414,13 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		}
 	}
 	if resolved.Script != "" {
-		sctx.RecordResolvedCommandAtSequence(resolved, sequence, recordedExitCode, err)
+		recordedResolution := resolved
+		if definitionSource != "" {
+			recordedResolution.CommandSource = definitionSource
+		}
+		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, err)
 	} else {
-		sctx.RecordCommand(command.Run, recordedExitCode, err)
+		sctx.RecordCommandAtSequence(command.Run, sequence, recordedExitCode, err)
 	}
 	if attempt != nil {
 		if completionErr != nil {

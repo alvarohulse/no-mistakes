@@ -327,14 +327,17 @@ func (d *DB) getCommandAttempt(id string) (*CommandAttempt, error) {
 	return attempt, nil
 }
 
-// GetCommandAttemptsByRun returns every execution in start order. Identical
-// commands are never collapsed.
+// GetCommandAttemptsByRun returns every execution in durable pipeline order.
+// Identical commands are never collapsed.
 func (d *DB) GetCommandAttemptsByRun(runID string) ([]*CommandAttempt, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
-		        command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
-		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason
-		 FROM command_attempts WHERE run_id = ? ORDER BY started_at, id`, runID,
+		`SELECT ca.id, ca.run_id, ca.command_id, ca.step_id, ca.round_id, ca.sequence, ca.purpose, ca.observer, ca.trigger_type, ca.before_sha, ca.tested_sha,
+		        ca.command_source, ca.runner_schema_version, ca.runner_source, ca.runner_version, ca.input_state_id, ca.result_state_id,
+		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason
+		 FROM command_attempts ca
+		 JOIN step_results sr ON sr.id = ca.step_id
+		 JOIN step_rounds r ON r.id = ca.round_id
+		 WHERE ca.run_id = ? ORDER BY sr.step_order, r.round, ca.sequence`, runID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get command attempts by run: %w", err)
