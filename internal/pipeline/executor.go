@@ -1013,7 +1013,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
 		}
 		if dbErr != nil {
-			slog.Warn("failed to complete step round", "step", stepName, "round", roundNum, "error", dbErr)
+			roundErr := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)
+			if failErr := e.db.FailStepRound(currentRoundID, roundDuration); failErr != nil {
+				roundErr = errors.Join(roundErr, fmt.Errorf("mark round failed: %w", failErr))
+			}
+			redactedErr := safeurl.RedactText(roundErr.Error())
+			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
+			touchLogActivity("error: "+redactedErr, true)
+			durationMS := executionMS + roundDuration
+			if failErr := e.db.FailStep(sr.ID, redactedErr, durationMS); failErr != nil {
+				roundErr = errors.Join(roundErr, fmt.Errorf("mark step failed: %w", failErr))
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
+			return false, roundErr
 		}
 		persistRepairAudit := func(audit RepairAudit) {
 			if currentRoundID == "" || (audit.FailureFingerprint == "" && audit.Result == "") {

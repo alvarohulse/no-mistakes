@@ -869,9 +869,11 @@ func (d *DB) RecoverStaleRun(id, errMsg string) (bool, error) {
 	if _, err = tx.Exec(
 		`UPDATE step_rounds SET status = ?, duration_ms = MAX(0, (? - created_at) * 1000)
 		 WHERE status = ? AND step_result_id IN (
-			SELECT id FROM step_results WHERE run_id = ?
+			SELECT id FROM step_results WHERE run_id = ? AND EXISTS (
+				SELECT 1 FROM runs WHERE id = ? AND status IN (?, ?)
+			)
 		 )`,
-		RoundStatusFailed, ts, RoundStatusActive, id,
+		RoundStatusFailed, ts, RoundStatusActive, id, id, types.RunPending, types.RunRunning,
 	); err != nil {
 		return false, fmt.Errorf("recover stale run rounds: %w", err)
 	}

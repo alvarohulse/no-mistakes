@@ -1064,6 +1064,14 @@ func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 	if err := d.StartStep(staleStep.ID); err != nil {
 		t.Fatal(err)
 	}
+	preservedRound, err := d.BeginStepRound(preservedStep.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRound, err := d.BeginStepRound(staleStep.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	count, err := d.RecoverStaleRunsExcept("daemon crashed", map[string]struct{}{preserved.ID: {}})
 	if err != nil {
@@ -1081,6 +1089,20 @@ func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 	gotStaleStep, _ := d.GetStepResult(staleStep.ID)
 	if gotPreservedStep.Status != types.StepStatusRunning || gotStaleStep.Status != types.StepStatusFailed {
 		t.Fatalf("step statuses = preserved %s stale %s, want running and failed", gotPreservedStep.Status, gotStaleStep.Status)
+	}
+	preservedRounds, err := d.GetRoundsByStep(preservedStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRounds, err := d.GetRoundsByStep(staleStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preservedRounds) != 1 || preservedRounds[0].ID != preservedRound.ID || preservedRounds[0].Status != RoundStatusActive {
+		t.Fatalf("preserved rounds = %+v, want active round", preservedRounds)
+	}
+	if len(staleRounds) != 1 || staleRounds[0].ID != staleRound.ID || staleRounds[0].Status != RoundStatusFailed {
+		t.Fatalf("stale rounds = %+v, want failed round", staleRounds)
 	}
 }
 
@@ -1138,6 +1160,35 @@ func TestRecoverStaleRunsNoStaleRuns(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("recovered count = %d, want 0", count)
+	}
+}
+
+func TestRecoverStaleRunDoesNotMutateTerminalRunRounds(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/terminal-round", "git@github.com:user/terminal-round.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	round, err := d.BeginStepRound(step.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := d.RecoverStaleRun(run.ID, "daemon crashed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered {
+		t.Fatal("terminal run reported recovered")
+	}
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].ID != round.ID || rounds[0].Status != RoundStatusActive {
+		t.Fatalf("terminal run round = %+v, want unchanged active round", rounds)
 	}
 }
 
