@@ -116,12 +116,6 @@ func (sctx *StepContext) RecordCommandAtSequence(command string, sequence int, e
 	sctx.recordCommand(command, sequence, exitCode, runErr, "", nil)
 }
 
-// RecordResolvedCommand records a configured or planned pipeline command with
-// the exact runner identity that parsed and executed it.
-func (sctx *StepContext) RecordResolvedCommand(resolved runner.Resolved, exitCode *int, runErr error) {
-	sctx.RecordResolvedCommandAtSequence(resolved, sctx.NextCommandSequence(), exitCode, runErr)
-}
-
 // NextCommandSequence allocates the next execution position within the current
 // round. Durable attempts and legacy step evidence share this sequence.
 func (sctx *StepContext) NextCommandSequence() int {

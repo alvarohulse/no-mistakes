@@ -319,6 +319,9 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 		if err := database.sql.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatalf("%s missing after migration: %v", table, err)
 		}
+		if count != 1 {
+			t.Fatalf("%s rows = %d, want 1", table, count)
+		}
 	}
 	var script string
 	if err := database.sql.QueryRow(`SELECT script FROM command_definitions WHERE id = 'definition'`).Scan(&script); err != nil {

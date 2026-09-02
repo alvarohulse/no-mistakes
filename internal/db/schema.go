@@ -339,12 +339,6 @@ var migrationStatements = []string{
 		UNIQUE (round_id, sequence)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id ON command_attempts (run_id, started_at, id)`,
-	`ALTER TABLE command_attempts ADD COLUMN command_source TEXT NOT NULL DEFAULT 'legacy'`,
-	`ALTER TABLE command_attempts ADD COLUMN runner_schema_version INTEGER NOT NULL DEFAULT 1`,
-	`ALTER TABLE command_attempts ADD COLUMN runner_source TEXT NOT NULL DEFAULT 'legacy'`,
-	`ALTER TABLE command_attempts ADD COLUMN runner_version TEXT`,
-	`ALTER TABLE command_attempts ADD COLUMN input_state_id TEXT`,
-	`ALTER TABLE command_attempts ADD COLUMN result_state_id TEXT`,
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
