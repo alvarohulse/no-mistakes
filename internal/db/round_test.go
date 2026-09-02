@@ -1,10 +1,56 @@
 package db
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-rounds.sqlite")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE, upstream_url TEXT NOT NULL, default_branch TEXT NOT NULL DEFAULT 'main', created_at INTEGER NOT NULL);
+		CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL, head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+		CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL, step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
+		CREATE TABLE step_rounds (id TEXT PRIMARY KEY, step_result_id TEXT NOT NULL, round INTEGER NOT NULL, trigger_type TEXT NOT NULL, findings_json TEXT, duration_ms INTEGER NOT NULL, created_at INTEGER NOT NULL);
+		INSERT INTO repos VALUES ('repo', '/tmp/legacy-rounds', 'https://example.com/repo.git', 'main', 1);
+		INSERT INTO runs VALUES ('run', 'repo', 'feature', 'head', 'base', 'completed', 1, 1);
+		INSERT INTO step_results VALUES ('step', 'run', 'review', 3, 'completed');
+		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', '{"findings":[{"id":"r1","severity":"warning","description":"legacy"}]}', 10, 1);
+	`); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	rounds, err := database.GetRoundsByStep("step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusCompleted {
+		t.Fatalf("migrated rounds = %+v", rounds)
+	}
+	stats, err := database.StepFindingStats(&StepResult{ID: "step", StepName: types.StepReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
+		t.Fatalf("migrated finding stats = %+v", stats)
+	}
+}
 
 func TestInsertReviewStepRoundPersistsNonAuthoritativeCandidate(t *testing.T) {
 	d := openTestDB(t)
@@ -19,7 +65,7 @@ func TestInsertReviewStepRoundPersistsNonAuthoritativeCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rounds) != 1 || rounds[0].ReviewedHeadSHA == nil || *rounds[0].ReviewedHeadSHA != reviewedHead {
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusCompleted || rounds[0].ReviewedHeadSHA == nil || *rounds[0].ReviewedHeadSHA != reviewedHead {
 		t.Fatalf("reviewed candidate round = %#v", rounds)
 	}
 	gotRun, _ := d.GetRun(run.ID)
@@ -92,6 +138,9 @@ func TestStepRoundInsertAndGet(t *testing.T) {
 	}
 	if r.Trigger != "initial" {
 		t.Errorf("trigger = %q, want %q", r.Trigger, "initial")
+	}
+	if r.Status != RoundStatusCompleted {
+		t.Fatalf("status = %q, want completed", r.Status)
 	}
 	if r.FindingsJSON == nil || *r.FindingsJSON != findings {
 		t.Errorf("findings = %v, want %q", r.FindingsJSON, findings)

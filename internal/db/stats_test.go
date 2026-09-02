@@ -144,6 +144,37 @@ func TestStepFindingStatsDoesNotCountSelectedFindingsAsFixed(t *testing.T) {
 	}
 }
 
+func TestStepFindingStatsIgnoresActiveAndFailedRounds(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/incomplete-round", "git@example.com:incomplete.git", "main")
+	run, _ := d.InsertRun(repo.ID, "incomplete", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	initial := `{"findings":[{"id":"r1","severity":"warning","description":"one"}],"summary":"one"}`
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", &initial, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+	active, err := d.BeginStepRound(step.ID, 2, "auto_fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertStats := func(wantFixed int) {
+		t.Helper()
+		stats, err := d.StepFindingStats(step)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.ReportedFindings != 1 || stats.FixedFindings != wantFixed {
+			t.Fatalf("stats = %+v, want reported 1 fixed %d", stats, wantFixed)
+		}
+	}
+	assertStats(0)
+	if err := d.FailStepRound(active.ID, 50); err != nil {
+		t.Fatal(err)
+	}
+	assertStats(0)
+}
+
 func TestStepFindingStatsAddsNewFindingsToTotal(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/new-findings", "git@example.com:new.git", "main")

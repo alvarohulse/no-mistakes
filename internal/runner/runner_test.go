@@ -119,6 +119,26 @@ func TestResolveBuildsNonInteractivePowerShellArgv(t *testing.T) {
 	}
 }
 
+func TestResolveCanonicalizesPowerShellIdentityWithoutChangingExecutionArgv(t *testing.T) {
+	args := []string{"-NoLogo", "-NOPROFILE", "-NonInteractive", "-COMMAND"}
+	resolved, err := resolve(context.Background(), Command{Run: "Write-Output ready"}, Spec{Executable: "PowerShell", Args: args}, resolverDeps{
+		platform:     "windows",
+		lookPath:     func(string) (string, error) { return `C:\\Tools\\PowerShell.exe`, nil },
+		probeVersion: func(context.Context, shellKind, string) (*string, error) { return stringPointer("7.5"), nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProvenanceArgs := []string{"-nologo", "-noprofile", "-noninteractive", "-command"}
+	if resolved.Provenance.Executable != "powershell" || !reflect.DeepEqual(resolved.Provenance.Args, wantProvenanceArgs) {
+		t.Fatalf("canonical provenance = %+v", resolved.Provenance)
+	}
+	wantArgv := []string{`C:\\Tools\\PowerShell.exe`, "-NoLogo", "-NOPROFILE", "-NonInteractive", "-COMMAND", "Write-Output ready"}
+	if !reflect.DeepEqual(resolved.Argv, wantArgv) {
+		t.Fatalf("execution argv = %#v, want %#v", resolved.Argv, wantArgv)
+	}
+}
+
 func TestResolveRejectsInvalidCommandAndRunnerArgv(t *testing.T) {
 	tests := []struct {
 		name    string

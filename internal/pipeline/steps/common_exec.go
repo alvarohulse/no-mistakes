@@ -296,16 +296,25 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if headErr != nil {
 			return "", -1, fmt.Errorf("resolve command subject: %w", headErr)
 		}
+		inputStateID, stateErr := cleanCommandStateID(sctx.Ctx, sctx.WorkDir, beforeSHA)
+		if stateErr != nil {
+			return "", -1, fmt.Errorf("resolve command input state: %w", stateErr)
+		}
 		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
-			RunID:     sctx.Run.ID,
-			CommandID: definition.ID,
-			StepID:    sctx.StepResultID,
-			RoundID:   sctx.RoundID,
-			Sequence:  sequence,
-			Purpose:   purpose,
-			Observer:  db.CommandObserverController,
-			Trigger:   sctx.RoundTrigger,
-			BeforeSHA: beforeSHA,
+			RunID:               sctx.Run.ID,
+			CommandID:           definition.ID,
+			StepID:              sctx.StepResultID,
+			RoundID:             sctx.RoundID,
+			Sequence:            sequence,
+			Purpose:             purpose,
+			Observer:            db.CommandObserverController,
+			Trigger:             sctx.RoundTrigger,
+			BeforeSHA:           beforeSHA,
+			CommandSource:       definitionResolution.CommandSource,
+			RunnerSchemaVersion: definitionResolution.Provenance.SchemaVersion,
+			RunnerSource:        definitionResolution.Provenance.Source,
+			RunnerVersion:       definitionResolution.Provenance.Version,
+			InputStateID:        inputStateID,
 		})
 		if persistErr != nil {
 			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
@@ -321,19 +330,28 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		recordedExitCode = &result.ExitCode
 	}
 	if attempt != nil {
-		if commandEstablishesTestedHead(purpose) && err == nil && result.ExitCode == 0 {
-			if tested, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir); headErr == nil {
-				if persistErr := sctx.DB.SetCommandAttemptTestedSHA(attempt.ID, tested); persistErr != nil {
-					return result.Output, result.ExitCode, persistErr
-				}
+		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		var resultStateID *string
+		if sctx.Ctx.Err() == nil {
+			afterSHA, stateErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+			if stateErr != nil {
+				return result.Output, result.ExitCode, fmt.Errorf("resolve command result subject: %w", stateErr)
+			}
+			resultStateID, stateErr = cleanCommandStateID(sctx.Ctx, sctx.WorkDir, afterSHA)
+			if stateErr != nil {
+				return result.Output, result.ExitCode, fmt.Errorf("resolve command result state: %w", stateErr)
 			}
 		}
-		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		var testedSHA *string
+		if commandEstablishesTestedHead(purpose) && outcome != db.CommandOutcomeProcessError && sameStateID(attempt.InputStateID, resultStateID) {
+			tested := attempt.BeforeSHA
+			testedSHA = &tested
+		}
 		attemptExitCode := recordedExitCode
 		if result.Signal != nil {
 			attemptExitCode = nil
 		}
-		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal); persistErr != nil {
+		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
 			return result.Output, result.ExitCode, fmt.Errorf("persist command attempt completion: %w", persistErr)
 		}
 	}
@@ -343,6 +361,22 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		sctx.RecordCommand(command.Run, recordedExitCode, err)
 	}
 	return result.Output, result.ExitCode, err
+}
+
+func cleanCommandStateID(ctx context.Context, dir, sha string) (*string, error) {
+	dirty, err := git.HasUncommittedChanges(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if dirty {
+		return nil, nil
+	}
+	state := "git:" + sha
+	return &state, nil
+}
+
+func sameStateID(left, right *string) bool {
+	return left != nil && right != nil && *left == *right
 }
 
 func commandPurpose(sctx *pipeline.StepContext, explicit []string) string {

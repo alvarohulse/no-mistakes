@@ -71,6 +71,65 @@ func TestCommandDefinitionsUseExactPortableIdentity(t *testing.T) {
 	}
 }
 
+func TestCommandAttemptsPreserveOccurrenceProvenanceForSharedDefinition(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/provenance", "git@github.com:user/provenance.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepTest)
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 10)
+	versionA := "5.9"
+	versionB := "5.10"
+	resolved := runner.Resolved{
+		Script:        "go test ./...",
+		CommandSource: runner.SourceBase,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      "linux",
+			Source:        runner.SourceDefault,
+			Executable:    "sh",
+			Args:          []string{"-c"},
+			Version:       &versionA,
+		},
+	}
+	definition, err := d.EnsureCommandDefinition(run.ID, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := resolved
+	planned.CommandSource = CommandDefinitionSourcePlanned
+	planned.Provenance.Source = runner.SourcePortableDefault
+	planned.Provenance.Version = &versionB
+	if _, err := d.EnsureCommandDefinition(run.ID, planned); err != nil {
+		t.Fatalf("reuse semantic definition with different occurrence provenance: %v", err)
+	}
+
+	state := "git:head"
+	for sequence, occurrence := range []runner.Resolved{resolved, planned} {
+		attempt, err := d.StartCommandAttempt(CommandAttempt{
+			RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+			Sequence: sequence + 1, Purpose: "test", Observer: CommandObserverController,
+			Trigger: "initial", BeforeSHA: "head", InputStateID: &state,
+			CommandSource: occurrence.CommandSource, RunnerSchemaVersion: occurrence.Provenance.SchemaVersion,
+			RunnerSource: occurrence.Provenance.Source, RunnerVersion: occurrence.Provenance.Version,
+		})
+		if err != nil {
+			t.Fatalf("start occurrence %d: %v", sequence+1, err)
+		}
+		exit := 0
+		if err := d.CompleteCommandAttempt(attempt.ID, CommandOutcomePass, &exit, nil, &state, stringPointer("head")); err != nil {
+			t.Fatalf("complete occurrence %d: %v", sequence+1, err)
+		}
+	}
+
+	attempts, err := d.GetCommandAttemptsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 || attempts[0].CommandSource != runner.SourceBase || attempts[1].CommandSource != CommandDefinitionSourcePlanned || attempts[0].RunnerVersion == nil || *attempts[0].RunnerVersion != versionA || attempts[1].RunnerVersion == nil || *attempts[1].RunnerVersion != versionB {
+		t.Fatalf("occurrence provenance = %+v", attempts)
+	}
+}
+
 func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/attempts", "git@github.com:user/attempts.git", "main")
@@ -89,13 +148,14 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	first, err := d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 1, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 	})
 	if err != nil {
 		t.Fatalf("start first attempt: %v", err)
 	}
 	exitOne := 1
-	if err := d.CompleteCommandAttempt(first.ID, CommandOutcomeFail, &exitOne, nil); err != nil {
+	if err := d.CompleteCommandAttempt(first.ID, CommandOutcomeFail, &exitOne, nil, stringPointer("git:head"), stringPointer("head")); err != nil {
 		t.Fatalf("complete first attempt: %v", err)
 	}
 
@@ -103,7 +163,8 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	second, err := d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 2, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 		RetryOfAttemptID: &first.ID, RetryReason: &retryReason,
 	})
 	if err != nil {
@@ -113,7 +174,7 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 		t.Fatal("identical executions were deduplicated")
 	}
 	exitZero := 0
-	if err := d.CompleteCommandAttempt(second.ID, CommandOutcomePass, &exitZero, nil); err != nil {
+	if err := d.CompleteCommandAttempt(second.ID, CommandOutcomePass, &exitZero, nil, stringPointer("git:head"), stringPointer("head")); err != nil {
 		t.Fatalf("complete retry: %v", err)
 	}
 
@@ -137,7 +198,8 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	_, err = d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 3, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 		RetryOfAttemptID: &second.ID, RetryReason: &retryReason,
 	})
 	if err == nil || !strings.Contains(err.Error(), "outcome is not retryable") {
@@ -147,12 +209,13 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	third, err := d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 3, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 	})
 	if err != nil {
 		t.Fatalf("start third attempt: %v", err)
 	}
-	if err := d.CompleteCommandAttempt(third.ID, CommandOutcomeTimeout, nil, nil); err != nil {
+	if err := d.CompleteCommandAttempt(third.ID, CommandOutcomeTimeout, nil, nil, stringPointer("git:dirty"), nil); err != nil {
 		t.Fatalf("complete third attempt: %v", err)
 	}
 
@@ -160,7 +223,8 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	_, err = d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 4, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 		RetryOfAttemptID: &third.ID, RetryReason: &invalidReason,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported retry reason") {
@@ -170,11 +234,23 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	_, err = d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 4, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "different-head", TestedSHA: stringPointer("different-head"),
+		Trigger: "initial", BeforeSHA: "different-head", InputStateID: stringPointer("git:different-head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
 		RetryOfAttemptID: &third.ID, RetryReason: &retryReason,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unchanged subject") {
 		t.Fatalf("changed-subject retry error = %v", err)
+	}
+
+	_, err = d.StartCommandAttempt(CommandAttempt{
+		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+		Sequence: 4, Purpose: "test", Observer: CommandObserverController,
+		Trigger: "initial", BeforeSHA: "head", InputStateID: stringPointer("git:head"),
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+		RetryOfAttemptID: &third.ID, RetryReason: &retryReason,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unchanged input state") {
+		t.Fatalf("mutated-input retry error = %v", err)
 	}
 }
 

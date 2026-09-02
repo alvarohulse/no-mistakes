@@ -184,7 +184,7 @@ func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
 	reported := make(map[types.Finding]bool)
 	var current []types.Finding
 	for _, round := range rounds {
-		if round.Status != "completed" {
+		if round.Status != "" && round.Status != RoundStatusCompleted {
 			continue
 		}
 		items := findingItems(round.FindingsJSON)
