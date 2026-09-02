@@ -48,6 +48,9 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
 	if err := before.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,13 +113,35 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { reopened.Close() })
 	again, err := reopened.GetRunMetricReceipt(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again.PayloadJSON != firstPayload || again.ReceiptSHA256 != firstDigest {
 		t.Fatalf("idempotent reopen changed receipt:\n first: %s / %s\n again: %s / %s", firstPayload, firstDigest, again.PayloadJSON, again.ReceiptSHA256)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = ?`, run.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	postMigration, err := Open(path)
+	if err != nil {
+		t.Fatalf("completed migration rescanned receipts: %v", err)
+	}
+	defer postMigration.Close()
+	if _, err := postMigration.GetRunMetricReceipt(run.ID); err == nil || !strings.Contains(err.Error(), "SHA-256 verification") {
+		t.Fatalf("corrupt migrated receipt read error = %v", err)
 	}
 }
 
@@ -154,6 +179,9 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 		}
 		want[run.ID] = *stored
 	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
 	if err := before.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +218,7 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 	}
 }
 
-func TestOpenSkipsCorruptArchivedReceiptAndMigratesSiblings(t *testing.T) {
+func TestOpenRejectsCorruptArchivedReceiptWithoutPartiallyMigratingSiblings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "corrupt-cost-receipt.sqlite")
 	before, err := Open(path)
 	if err != nil {
@@ -217,15 +245,19 @@ func TestOpenSkipsCorruptArchivedReceiptAndMigratesSiblings(t *testing.T) {
 	if _, err := before.sql.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = 'z-corrupt'`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
 	if err := before.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	opened, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
+	if opened, err := Open(path); err == nil || !strings.Contains(err.Error(), "z-corrupt") || !strings.Contains(err.Error(), "SHA-256 verification") {
+		if opened != nil {
+			opened.Close()
+		}
+		t.Fatalf("corrupt receipt open error = %v", err)
 	}
-	defer opened.Close()
 	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatal(err)
@@ -236,8 +268,8 @@ func TestOpenSkipsCorruptArchivedReceiptAndMigratesSiblings(t *testing.T) {
 	if err := raw.QueryRow(`SELECT schema_version, payload_json FROM run_metric_receipts WHERE run_id = 'a-valid'`).Scan(&version, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if version != RunMetricReceiptSchemaVersion || strings.Contains(payload, `"costs"`) {
-		t.Fatalf("valid sibling was not migrated: version=%d payload=%s", version, payload)
+	if version != 4 || !strings.Contains(payload, `"costs"`) {
+		t.Fatalf("valid sibling was partially migrated: version=%d payload=%s", version, payload)
 	}
 }
 

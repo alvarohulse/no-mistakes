@@ -206,6 +206,10 @@ CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
 CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_status_created
     ON run_metric_receipts (run_status, run_created_at DESC, run_id DESC);
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (
     run_id TEXT PRIMARY KEY,
     targets_json TEXT NOT NULL

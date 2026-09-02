@@ -13,23 +13,40 @@ type runMetricReceiptMigrationRow struct {
 	aggregatesJSON string
 }
 
+const runMetricReceiptCostSanitizerMigration = "run_metric_receipt_cost_sanitizer_v5"
+
 func migrateRunMetricReceipts(sqlDB *sql.DB) error {
-	conn, err := sqlDB.Conn(context.Background())
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("connect for run metric receipt migration: %w", err)
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("begin run metric receipt migration: %w", err)
 	}
 	rollback := true
 	defer func() {
 		if rollback {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
 		}
 	}()
+	var complete int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`,
+		runMetricReceiptCostSanitizerMigration,
+	).Scan(&complete); err != nil {
+		return fmt.Errorf("read run metric receipt migration marker: %w", err)
+	}
+	if complete != 0 {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("commit completed run metric receipt migration check: %w", err)
+		}
+		rollback = false
+		return nil
+	}
 
-	rows, err := conn.QueryContext(context.Background(), `
+	rows, err := conn.QueryContext(ctx, `
 		SELECT run_id, repo_id, run_created_at, run_status, schema_version,
 		       payload_json, receipt_sha256, archived_at, pull_request,
 		       reported_findings, fixed_findings, step_stats_json, agent_aggregates_json
@@ -68,7 +85,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 			return err
 		}
 		if digest != row.receipt.ReceiptSHA256 {
-			continue
+			return fmt.Errorf("run metric receipt %q failed SHA-256 verification", row.receipt.RunID)
 		}
 		targetVersion := row.receipt.SchemaVersion
 		switch {
@@ -98,7 +115,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		result, err := conn.ExecContext(context.Background(), `
+		result, err := conn.ExecContext(ctx, `
 			UPDATE run_metric_receipts
 			SET schema_version = ?, payload_json = ?, receipt_sha256 = ?
 			WHERE run_id = ? AND receipt_sha256 = ?`,
@@ -115,7 +132,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		if updated != 1 {
 			var version int
 			var digest string
-			if err := conn.QueryRowContext(context.Background(),
+			if err := conn.QueryRowContext(ctx,
 				`SELECT schema_version, receipt_sha256 FROM run_metric_receipts WHERE run_id = ?`,
 				migrated.RunID).Scan(&version, &digest); err != nil {
 				return fmt.Errorf("verify run metric receipt %q migration result: %w", migrated.RunID, err)
@@ -125,8 +142,14 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 			}
 		}
 	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO schema_migrations (name) VALUES (?)`,
+		runMetricReceiptCostSanitizerMigration,
+	); err != nil {
+		return fmt.Errorf("record run metric receipt migration: %w", err)
+	}
 
-	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit run metric receipt migration: %w", err)
 	}
 	rollback = false
