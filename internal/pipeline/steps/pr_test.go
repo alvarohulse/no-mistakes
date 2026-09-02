@@ -1354,23 +1354,13 @@ func TestPRStep_PersistsAgentNarrativeAndReusesItWithinRun(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "")
 
-	var sctx *pipeline.StepContext
-	var invocationID string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			invocation, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
-				RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "test",
-				SessionMode: db.InvocationModeCold, StartedAt: 10, CompletedAt: 11, DurationMS: 1000, ExitStatus: "ok",
-			})
-			if err != nil {
-				return nil, err
-			}
-			invocationID = invocation.ID
 			return &agent.Result{Output: json.RawMessage(`{"title":"feat(pipeline): save narrative","summary":"Saved agent summary.","what_changed":"- Persist the draft."}`)}, nil
 		},
 	}
-	sctx = newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	step := &PRStep{}
 
@@ -1384,8 +1374,15 @@ func TestPRStep_PersistsAgentNarrativeAndReusesItWithinRun(t *testing.T) {
 	if first == nil {
 		t.Fatal("run narrative was not persisted")
 	}
-	if first.Source != db.NarrativeSourceAgent || first.DraftingInvocationID == nil || *first.DraftingInvocationID != invocationID {
-		t.Fatalf("agent provenance = %#v, want invocation %q", first, invocationID)
+	if first.Source != db.NarrativeSourceAgent || first.DraftingInvocationID == nil {
+		t.Fatalf("agent provenance = %#v, want recorded invocation", first)
+	}
+	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocations) != 1 || invocations[0].ID != *first.DraftingInvocationID || invocations[0].RunID != sctx.Run.ID {
+		t.Fatalf("drafting invocation = %v, narrative = %#v", invocations, first)
 	}
 	if first.BaseSHA != baseSHA || first.HeadSHA != headSHA || first.DraftedAt == 0 {
 		t.Fatalf("draft provenance = %#v", first)
@@ -1438,6 +1435,38 @@ func TestPRStep_PersistsFallbackNarrativeAndReusesItWithinRun(t *testing.T) {
 	}
 	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil || narrative.TitleMode != db.NarrativeTitleModeAgent || narrative.TitleText != "chore: update pull request" {
 		t.Fatalf("fallback provenance = %#v", narrative)
+	}
+}
+
+func TestPRStep_UnrecordedAgentDraftUsesFallbackProvenance(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: unrecorded agent draft","summary":"Unrecorded summary.","what_changed":"- Unrecorded change."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	// Bypass the test invocation recorder to simulate the production recorder
+	// failing before the PR step tries to bind the narrative provenance.
+	sctx.Agent = ag
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil {
+		t.Fatalf("unrecorded agent draft provenance = %#v, want deterministic fallback", narrative)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Unrecorded summary") || !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("unrecorded agent draft was published instead of fallback:\n%s", body)
 	}
 }
 

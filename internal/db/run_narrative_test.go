@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,44 @@ func TestRunNarrativeFallbackProvenanceAndMissingRun(t *testing.T) {
 	missing, err := d.GetRunNarrative("missing-run")
 	if err != nil || missing != nil {
 		t.Fatalf("missing narrative = %#v, %v; want nil, nil", missing, err)
+	}
+}
+
+func TestRunNarrativeRejectsAgentSourceWithoutInvocation(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/missing-narrative-invocation", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base-1")
+
+	err := d.InsertRunNarrative(RunNarrative{
+		RunID: run.ID, Source: NarrativeSourceAgent, DraftedAt: 12,
+		BaseSHA: "base-1", HeadSHA: "head-1", TitleMode: NarrativeTitleModeAgent,
+		TitleText: "feat: unprovenanced draft", Summary: "Summary.", WhatChanged: "- Change.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "drafting invocation is required") {
+		t.Fatalf("InsertRunNarrative() error = %v, want missing invocation rejection", err)
+	}
+}
+
+func TestRunNarrativeRejectsAgentInvocationFromAnotherRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/cross-run-narrative", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base-1")
+	otherRun, _ := d.InsertRun(repo.ID, "other-feature", "head-2", "base-1")
+	invocation, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: otherRun.ID, StepName: "pr", Round: 1, Purpose: "pr", Agent: "codex",
+		SessionMode: InvocationModeCold, StartedAt: 10, CompletedAt: 11, DurationMS: 1000, ExitStatus: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = d.InsertRunNarrative(RunNarrative{
+		RunID: run.ID, Source: NarrativeSourceAgent, DraftingInvocationID: &invocation.ID, DraftedAt: 12,
+		BaseSHA: "base-1", HeadSHA: "head-1", TitleMode: NarrativeTitleModeAgent,
+		TitleText: "feat: cross-run draft", Summary: "Summary.", WhatChanged: "- Change.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not belong to run") {
+		t.Fatalf("InsertRunNarrative() error = %v, want cross-run invocation rejection", err)
 	}
 }
 

@@ -403,7 +403,12 @@ Final diff paths and statuses:
 				if err != nil {
 					return prContent{}, err
 				}
-				validDraft = true
+				if draftingInvocationID == nil {
+					slog.Warn("PR drafting invocation was not recorded, using fallback")
+					content = prContent{}
+				} else {
+					validDraft = true
+				}
 			} else {
 				content = prContent{}
 			}

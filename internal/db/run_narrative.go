@@ -36,6 +36,19 @@ func (d *DB) InsertRunNarrative(n RunNarrative) error {
 	if err := validateRunNarrative(n); err != nil {
 		return err
 	}
+	if n.Source == NarrativeSourceAgent {
+		var invocationRunID string
+		err := d.sql.QueryRow(`SELECT run_id FROM agent_invocations WHERE id = ?`, *n.DraftingInvocationID).Scan(&invocationRunID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("insert run narrative: drafting invocation %q does not exist", *n.DraftingInvocationID)
+		}
+		if err != nil {
+			return fmt.Errorf("insert run narrative: verify drafting invocation: %w", err)
+		}
+		if invocationRunID != n.RunID {
+			return fmt.Errorf("insert run narrative: drafting invocation %q does not belong to run %q", *n.DraftingInvocationID, n.RunID)
+		}
+	}
 	_, err := d.sql.Exec(`INSERT INTO run_narratives (
 		run_id, source, drafting_invocation_id, drafted_at, base_sha, head_sha,
 		title_mode, title_text, summary, what_changed
@@ -76,6 +89,9 @@ func validateRunNarrative(n RunNarrative) error {
 	}
 	if n.Source != NarrativeSourceAgent && n.Source != NarrativeSourceFallback {
 		return fmt.Errorf("insert run narrative: invalid source %q", n.Source)
+	}
+	if n.Source == NarrativeSourceAgent && (n.DraftingInvocationID == nil || strings.TrimSpace(*n.DraftingInvocationID) == "") {
+		return fmt.Errorf("insert run narrative: drafting invocation is required for agent source")
 	}
 	if n.Source == NarrativeSourceFallback && n.DraftingInvocationID != nil {
 		return fmt.Errorf("insert run narrative: fallback source cannot reference a drafting invocation")

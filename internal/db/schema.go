@@ -159,7 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_invocations_run_started_id
 CREATE TABLE IF NOT EXISTS run_narratives (
     run_id                  TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
     source                  TEXT NOT NULL CHECK (source IN ('agent', 'fallback')),
-    drafting_invocation_id  TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
+    drafting_invocation_id  TEXT REFERENCES agent_invocations(id),
     drafted_at              INTEGER NOT NULL,
     base_sha                TEXT NOT NULL,
     head_sha                TEXT NOT NULL,
@@ -167,7 +167,8 @@ CREATE TABLE IF NOT EXISTS run_narratives (
     title_text              TEXT NOT NULL,
     summary                 TEXT NOT NULL,
     what_changed            TEXT NOT NULL,
-    CHECK (source = 'agent' OR drafting_invocation_id IS NULL)
+    CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
+           (source = 'fallback' AND drafting_invocation_id IS NULL))
 );
 
 CREATE TABLE IF NOT EXISTS run_agent_sessions (
@@ -241,7 +242,7 @@ var migrationStatements = []string{
 	`CREATE TABLE IF NOT EXISTS run_narratives (
 		run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
 		source TEXT NOT NULL CHECK (source IN ('agent', 'fallback')),
-		drafting_invocation_id TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
+		drafting_invocation_id TEXT REFERENCES agent_invocations(id),
 		drafted_at INTEGER NOT NULL,
 		base_sha TEXT NOT NULL,
 		head_sha TEXT NOT NULL,
@@ -249,7 +250,8 @@ var migrationStatements = []string{
 		title_text TEXT NOT NULL,
 		summary TEXT NOT NULL,
 		what_changed TEXT NOT NULL,
-		CHECK (source = 'agent' OR drafting_invocation_id IS NULL)
+		CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
+		       (source = 'fallback' AND drafting_invocation_id IS NULL))
 	)`,
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
