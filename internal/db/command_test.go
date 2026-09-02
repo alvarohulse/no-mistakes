@@ -276,6 +276,31 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 		CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL, head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 		CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL, step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
 		CREATE TABLE step_rounds (id TEXT PRIMARY KEY, step_result_id TEXT NOT NULL, round INTEGER NOT NULL, trigger_type TEXT NOT NULL, duration_ms INTEGER NOT NULL, created_at INTEGER NOT NULL);
+		CREATE TABLE command_definitions (
+			run_id TEXT NOT NULL, id TEXT NOT NULL, script TEXT NOT NULL, platform TEXT NOT NULL,
+			runner_executable TEXT NOT NULL, runner_args_json TEXT NOT NULL,
+			source TEXT NOT NULL, runner_schema_version INTEGER NOT NULL,
+			runner_source TEXT NOT NULL, runner_version TEXT NOT NULL,
+			PRIMARY KEY (run_id, id)
+		);
+		CREATE TABLE command_attempts (
+			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, command_id TEXT NOT NULL,
+			step_id TEXT NOT NULL, round_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+			purpose TEXT NOT NULL, observer TEXT NOT NULL, trigger_type TEXT NOT NULL,
+			before_sha TEXT NOT NULL, tested_sha TEXT, command_source TEXT NOT NULL,
+			runner_schema_version INTEGER NOT NULL, runner_source TEXT NOT NULL,
+			runner_version TEXT, input_state_id TEXT, result_state_id TEXT,
+			started_at INTEGER NOT NULL, completed_at INTEGER, duration_ms INTEGER,
+			outcome TEXT, exit_code INTEGER, signal TEXT, retry_of_attempt_id TEXT,
+			retry_reason TEXT,
+			FOREIGN KEY (run_id, command_id) REFERENCES command_definitions(run_id, id)
+		);
+		INSERT INTO repos VALUES ('repo', '/tmp/legacy-command-repo', 'upstream', 'main', 1);
+		INSERT INTO runs VALUES ('run', 'repo', 'branch', 'head', 'base', 'pending', 1, 1);
+		INSERT INTO step_results VALUES ('step', 'run', 'test', 1, 'pending');
+		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', 1, 1);
+		INSERT INTO command_definitions VALUES ('run', 'definition', 'printf test', 'linux', 'sh', '["-c"]', 'base', 1, 'default', '5.9');
+		INSERT INTO command_attempts VALUES ('attempt', 'run', 'definition', 'step', 'round', 1, 'test', 'controller', 'initial', 'head', NULL, 'base', 1, 'default', '5.9', 'git:head', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 	`); err != nil {
 		legacy.Close()
 		t.Fatal(err)
@@ -294,9 +319,37 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 		if err := database.sql.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatalf("%s missing after migration: %v", table, err)
 		}
-		if count != 0 {
-			t.Fatalf("%s rows = %d, want no inferred legacy provenance", table, count)
-		}
+	}
+	var script string
+	if err := database.sql.QueryRow(`SELECT script FROM command_definitions WHERE id = 'definition'`).Scan(&script); err != nil {
+		t.Fatalf("migrated definition missing: %v", err)
+	}
+	if script != "printf test" {
+		t.Fatalf("migrated definition script = %q", script)
+	}
+	var attemptCount int
+	if err := database.sql.QueryRow(`SELECT count(*) FROM command_attempts WHERE command_id = 'definition'`).Scan(&attemptCount); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 1 {
+		t.Fatalf("migrated attempts = %d, want 1", attemptCount)
+	}
+	var obsoleteCount int
+	if err := database.sql.QueryRow(`SELECT count(*) FROM pragma_table_info('command_definitions') WHERE name IN ('source', 'runner_schema_version', 'runner_source', 'runner_version')`).Scan(&obsoleteCount); err != nil {
+		t.Fatal(err)
+	}
+	if obsoleteCount != 0 {
+		t.Fatalf("obsolete definition columns = %d, want 0", obsoleteCount)
+	}
+	var foreignKeyCount int
+	if err := database.sql.QueryRow(`SELECT count(*) FROM pragma_foreign_key_list('command_attempts') WHERE "table" = 'command_definitions'`).Scan(&foreignKeyCount); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeyCount == 0 {
+		t.Fatal("command attempt foreign key was not preserved")
+	}
+	if _, err := Open(dbPath); err != nil {
+		t.Fatalf("reopen migrated database: %v", err)
 	}
 }
 

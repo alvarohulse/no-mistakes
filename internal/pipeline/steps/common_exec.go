@@ -376,6 +376,10 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	if err == nil {
 		recordedExitCode = &result.ExitCode
 	}
+	var observedExitCode *int
+	if result.ExitCode >= 0 {
+		observedExitCode = &result.ExitCode
+	}
 	var completionErr error
 	var attemptOutcome string
 	if attempt != nil {
@@ -398,7 +402,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			tested := attempt.BeforeSHA
 			testedSHA = &tested
 		}
-		attemptExitCode := recordedExitCode
+		attemptExitCode := observedExitCode
 		if result.Signal != nil {
 			attemptExitCode = nil
 		}
