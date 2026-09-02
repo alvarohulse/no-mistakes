@@ -146,9 +146,6 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	if r2.UsageCoverage != agent.UsageCoverageComplete {
 		t.Fatalf("r2 usage coverage = %q, want complete", r2.UsageCoverage)
 	}
-	if r2.PricingReceiptJSON != nil {
-		t.Fatalf("new invocation carries legacy pricing receipt: %s", *r2.PricingReceiptJSON)
-	}
 }
 
 type configuredModelFailureAgent struct{}

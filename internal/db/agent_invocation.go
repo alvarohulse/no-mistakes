@@ -117,10 +117,6 @@ type AgentInvocation struct {
 	DeltaCacheCreationTokens *int
 	// ReportedCostUSD is the cost emitted by the agent CLI, when available.
 	ReportedCostUSD *float64
-	// PricingReceiptJSON is a temporary in-memory compatibility field for the
-	// presentation cleanup that follows this persistence slice. The database no
-	// longer stores or reads it.
-	PricingReceiptJSON *string
 	// ModelRoundtrips is the count of model-authored items (messages + tool
 	// calls) - a live-stream proxy for productive model round-trips. Nil when
 	// the adapter reported no activity metrics.
@@ -174,7 +170,6 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 // UpdateAgentInvocation. Nil pointer fields are stored as SQL NULL
 // (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
-	inv.PricingReceiptJSON = nil
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
@@ -205,7 +200,6 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 // UpdateAgentInvocation finalizes a previously inserted invocation while
 // retaining its stable receipt identity.
 func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
-	inv.PricingReceiptJSON = nil
 	if strings.TrimSpace(inv.ID) == "" {
 		return nil, fmt.Errorf("update agent invocation: id is required")
 	}

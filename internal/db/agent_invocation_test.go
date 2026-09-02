@@ -60,33 +60,6 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 }
 
-func TestAgentInvocations_PricingReceiptIsNotPersisted(t *testing.T) {
-	d, _, run := openSessionTestDB(t)
-	receipt := `{"catalog":"captured"}`
-	persisted, err := d.InsertAgentInvocation(AgentInvocation{
-		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
-		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 1, ExitStatus: "started",
-		PricingReceiptJSON: &receipt,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondReceipt := `{"catalog":"updated"}`
-	persisted.CompletedAt = 2
-	persisted.ExitStatus = "ok"
-	persisted.PricingReceiptJSON = &secondReceipt
-	if _, err := d.UpdateAgentInvocation(*persisted); err != nil {
-		t.Fatal(err)
-	}
-	got, err := d.GetAgentInvocationsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].PricingReceiptJSON != nil {
-		t.Fatalf("stored pricing receipt = %+v, want none", got)
-	}
-}
-
 func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	pool := []ReviewCandidateReceipt{
@@ -608,7 +581,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
 	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
-		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil || legacy.PricingReceiptJSON != nil {
+		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}
 	// The migrated table now accepts the new fields.
