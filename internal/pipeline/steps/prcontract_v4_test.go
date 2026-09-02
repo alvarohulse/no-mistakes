@@ -103,13 +103,14 @@ func TestContractV5SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T
 func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 	t.Parallel()
 
-	testFindings := `{"findings":[],"summary":"","testing_summary":"tests completed","tested":["go test ./...","make e2e"]}`
+	testFindings := `{"findings":[],"summary":"","testing_summary":"tests completed","tested":["go test ./...","make e2e","agent-only smoke test"]}`
 	zero, one := 0, 1
 	tests := []struct {
 		name               string
 		commands           []db.CommandEvidence
 		wantStaticCommands []string
 		wantReported       []string
+		wantExplicitEmpty  bool
 	}{
 		{
 			name: "all attempts lack passing evidence",
@@ -118,15 +119,27 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomePassed},
 				{Round: 1, Sequence: 3, Command: "go vet ./...", Outcome: db.CommandOutcomePassed, ExitCode: &one},
 			},
+			wantExplicitEmpty: true,
 		},
 		{
-			name: "valid pass remains alongside failed history",
+			name: "mixed distinct commands keep only the valid pass",
 			commands: []db.CommandEvidence{
 				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &zero},
 				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
 			},
 			wantStaticCommands: []string{"go test ./..."},
-			wantReported:       []string{"go test ./..."},
+		},
+		{
+			name: "a final failure supersedes an earlier pass",
+			commands: []db.CommandEvidence{
+				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &zero},
+				{Round: 2, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
+			},
+			wantExplicitEmpty: true,
+		},
+		{
+			name:         "legacy agent-only evidence remains reported",
+			wantReported: []string{"go test ./...", "make e2e", "agent-only smoke test"},
 		},
 	}
 
@@ -161,7 +174,7 @@ func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 					t.Fatalf("static_tests reported = %+v, want %v", staticTests.Reported, tt.wantReported)
 				}
 			}
-			if len(tt.wantStaticCommands) == 0 && (staticTests.Summary != "" || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0) {
+			if tt.wantExplicitEmpty && (staticTests.Summary != "" || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0) {
 				t.Fatalf("static_tests = %+v, want explicit empty evidence", staticTests)
 			}
 

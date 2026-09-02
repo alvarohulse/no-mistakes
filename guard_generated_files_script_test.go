@@ -774,10 +774,6 @@ type generatedGuardFixture struct {
 
 func newGeneratedGuardFixture(t *testing.T) *generatedGuardFixture {
 	t.Helper()
-	// Each caller has independent temporary repositories. Run the expensive
-	// provenance checks concurrently so this suite remains within the CI test
-	// timeout on slower runners.
-	t.Parallel()
 	script, err := filepath.Abs(filepath.Join("scripts", "guard-generated-files.sh"))
 	if err != nil {
 		t.Fatalf("resolve guard script: %v", err)
@@ -801,10 +797,6 @@ func newGeneratedGuardFixture(t *testing.T) *generatedGuardFixture {
 
 func newGeneratedGuardBootstrapFixture(t *testing.T) (string, string, string) {
 	t.Helper()
-	// Each caller has independent temporary repositories. Run the expensive
-	// provenance checks concurrently so this suite remains within the CI test
-	// timeout on slower runners.
-	t.Parallel()
 	script, err := filepath.Abs(filepath.Join("scripts", "guard-generated-files.sh"))
 	if err != nil {
 		t.Fatalf("resolve guard script: %v", err)

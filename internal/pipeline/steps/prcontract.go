@@ -249,14 +249,19 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 		section := &prbody.StaticTestsSection{}
 		hadCommands := false
-		passedCommands := make(map[string]bool)
 		if evidence, err := sr.Evidence(); err == nil {
-			for _, command := range evidence.Commands {
-				hadCommands = true
+			hadCommands = len(evidence.Commands) > 0
+			lastAttemptByCommand := make(map[string]int, len(evidence.Commands))
+			for i, command := range evidence.Commands {
+				lastAttemptByCommand[command.Command] = i
+			}
+			for i, command := range evidence.Commands {
+				if lastAttemptByCommand[command.Command] != i {
+					continue
+				}
 				if command.Outcome != db.CommandOutcomePassed || command.ExitCode == nil || *command.ExitCode != 0 {
 					continue
 				}
-				passedCommands[command.Command] = true
 				section.Commands = append(section.Commands, prbody.PipelineCommand{
 					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
 					Outcome: command.Outcome, ExitCode: command.ExitCode,
@@ -268,10 +273,8 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
 			section.Summary = strings.TrimSpace(findings.TestingSummary)
-			for _, tested := range findings.Tested {
-				if passedCommands[tested] {
-					section.Reported = append(section.Reported, tested)
-				}
+			if !hadCommands {
+				section.Reported = append(section.Reported, findings.Tested...)
 			}
 			for _, artifact := range findings.Artifacts {
 				section.Artifacts = append(section.Artifacts, prbody.Artifact{
