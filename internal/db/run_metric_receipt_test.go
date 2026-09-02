@@ -51,6 +51,9 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptRoundStatusMigration); err != nil {
+		t.Fatal(err)
+	}
 	if err := before.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +67,7 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 		after.Close()
 		t.Fatal(err)
 	}
-	if migrated.SchemaVersion != 5 || migrated.ReceiptSHA256 == old.ReceiptSHA256 {
+	if migrated.SchemaVersion != 6 || migrated.ReceiptSHA256 == old.ReceiptSHA256 {
 		after.Close()
 		t.Fatalf("migrated receipt version/digest = %d/%q, old digest %q", migrated.SchemaVersion, migrated.ReceiptSHA256, old.ReceiptSHA256)
 	}
@@ -90,7 +93,7 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 		after.Close()
 		t.Fatalf("top-level costs survived migration: %s", migrated.PayloadJSON)
 	}
-	if decoded["schema_version"] != float64(5) || !reflect.DeepEqual(decoded["custom_top"], map[string]any{"kept": "yes"}) {
+	if decoded["schema_version"] != float64(6) || !reflect.DeepEqual(decoded["custom_top"], map[string]any{"kept": "yes"}) {
 		after.Close()
 		t.Fatalf("top-level facts changed during migration: %#v", decoded)
 	}
@@ -199,7 +202,7 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 		if got.SchemaVersion != expected.SchemaVersion {
 			t.Fatalf("unsupported receipt %q was relabeled from v%d to v%d", runID, expected.SchemaVersion, got.SchemaVersion)
 		}
-		if expected.SchemaVersion > RunMetricReceiptSchemaVersion {
+		if expected.SchemaVersion >= RunMetricReceiptSchemaVersion {
 			if got.PayloadJSON != expected.PayloadJSON || got.ReceiptSHA256 != expected.ReceiptSHA256 {
 				t.Fatalf("future receipt %q was rewritten:\nwant: %+v\n got: %+v", runID, expected, *got)
 			}
