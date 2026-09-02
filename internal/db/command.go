@@ -233,7 +233,7 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if !validCommandRetryReason(*attempt.RetryReason) {
 		return fmt.Errorf("start command attempt: unsupported retry reason %q", *attempt.RetryReason)
 	}
-	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.RoundID != attempt.RoundID || prior.Sequence+1 != attempt.Sequence || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.Trigger != attempt.Trigger || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
+	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.Trigger != attempt.Trigger || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
 	if prior.BeforeSHA != attempt.BeforeSHA {

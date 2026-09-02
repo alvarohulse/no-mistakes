@@ -89,9 +89,9 @@ Previous lint findings to address:
 	var exitCode int
 	var err error
 	if plannedLint {
-		output, exitCode, err = runStepShellCommand(sctx, lintCmd)
+		output, exitCode, err = runStepShellCommand(sctx, lintCmd, string(types.StepLint))
 	} else {
-		output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand)
+		output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand, string(types.StepLint))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("run lint command: %w", err)

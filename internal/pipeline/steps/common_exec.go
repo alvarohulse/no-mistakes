@@ -246,8 +246,12 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 	return runShellCommandWithEnv(ctx, dir, nil, cmdStr, shellenv.DefaultProcessTerminationGrace)
 }
 
-func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, string(sctxStepName(sctx)))
+func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string, purpose ...string) (string, int, error) {
+	resolvedPurpose := "command"
+	if len(purpose) > 0 {
+		resolvedPurpose = purpose[0]
+	}
+	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, resolvedPurpose)
 }
 
 func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, purpose ...string) (string, int, error) {
@@ -300,6 +304,25 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if stateErr != nil {
 			return "", -1, fmt.Errorf("resolve command input state: %w", stateErr)
 		}
+		var retryOf *string
+		var retryReason *string
+		priorAttempts, lookupErr := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+		if lookupErr != nil {
+			return "", -1, fmt.Errorf("resolve command retry: %w", lookupErr)
+		}
+		for i := len(priorAttempts) - 1; i >= 0; i-- {
+			candidate := priorAttempts[i]
+			if candidate.CommandID == definition.ID && candidate.StepID == sctx.StepResultID &&
+				candidate.Purpose == purpose && candidate.BeforeSHA == beforeSHA &&
+				sameStateID(candidate.ResultStateID, inputStateID) &&
+				candidate.CompletedAt != nil && candidate.Outcome != nil &&
+				isRetryableCommandOutcome(*candidate.Outcome) {
+				retryOf = &candidate.ID
+				reason := db.CommandRetryReasonTransientFailure
+				retryReason = &reason
+				break
+			}
+		}
 		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
 			RunID:               sctx.Run.ID,
 			CommandID:           definition.ID,
@@ -315,6 +338,8 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			RunnerSource:        definitionResolution.Provenance.Source,
 			RunnerVersion:       definitionResolution.Provenance.Version,
 			InputStateID:        inputStateID,
+			RetryOfAttemptID:    retryOf,
+			RetryReason:         retryReason,
 		})
 		if persistErr != nil {
 			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
@@ -354,7 +379,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			attemptExitCode = nil
 		}
 		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
-			return result.Output, result.ExitCode, fmt.Errorf("persist command attempt completion: %w", persistErr)
+			return result.Output, result.ExitCode, errors.Join(err, fmt.Errorf("persist command attempt completion: %w", persistErr))
 		}
 		if resultStateErr != nil {
 			return result.Output, result.ExitCode, resultStateErr
@@ -388,26 +413,26 @@ func commandPurpose(sctx *pipeline.StepContext, explicit []string) string {
 	if len(explicit) > 0 && strings.TrimSpace(explicit[0]) != "" {
 		return explicit[0]
 	}
-	if step := sctxStepName(sctx); step != "" {
-		return string(step)
+	if sctx != nil && sctx.DB != nil && sctx.StepResultID != "" {
+		if step, err := sctx.DB.GetStepResult(sctx.StepResultID); err == nil && step != nil {
+			return string(step.StepName)
+		}
 	}
 	return "command"
-}
-
-func sctxStepName(sctx *pipeline.StepContext) types.StepName {
-	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
-		return ""
-	}
-	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
-	if err != nil || step == nil {
-		return ""
-	}
-	return step.StepName
 }
 
 func commandEstablishesTestedHead(purpose string) bool {
 	switch purpose {
 	case string(types.StepBuild), string(types.StepTest), string(types.StepLint):
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableCommandOutcome(outcome string) bool {
+	switch outcome {
+	case db.CommandOutcomeFail, db.CommandOutcomeProcessError, db.CommandOutcomeCancelled, db.CommandOutcomeTimeout:
 		return true
 	default:
 		return false

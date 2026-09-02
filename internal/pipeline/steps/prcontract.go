@@ -300,7 +300,7 @@ func contractReviewEvidence(steps []*db.StepResult, rounds map[string][]*db.Step
 		}
 		section := &prbody.ReviewEvidenceSection{
 			Status:   string(sr.Status),
-			Rounds:   len(rounds[sr.ID]),
+			Rounds:   completedRoundCount(rounds[sr.ID]),
 			Findings: contractStepFindings(sr, rounds[sr.ID]),
 		}
 		if section.Rounds == 0 {
@@ -312,6 +312,16 @@ func contractReviewEvidence(steps []*db.StepResult, rounds map[string][]*db.Step
 		return section
 	}
 	return nil
+}
+
+func completedRoundCount(rounds []*db.StepRound) int {
+	count := 0
+	for _, round := range rounds {
+		if round.Status == "" || round.Status == db.RoundStatusCompleted {
+			count++
+		}
+	}
+	return count
 }
 
 // finalStepFindings returns a step's authoritative findings: the step row's
@@ -395,7 +405,7 @@ func contractPipeline(steps []*db.StepResult, rounds map[string][]*db.StepRound,
 			SkipSource: sr.SkipSource,
 			ExitCode:   sr.ExitCode,
 			DurationMS: sr.DurationMS,
-			Rounds:     len(rounds[sr.ID]),
+			Rounds:     completedRoundCount(rounds[sr.ID]),
 			Findings:   contractStepFindings(sr, rounds[sr.ID]),
 			Agents:     byStep[string(sr.StepName)],
 		}

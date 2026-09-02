@@ -36,7 +36,7 @@ func (s *BuildStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 	}
 
 	sctx.Log(fmt.Sprintf("running build: %s", buildCommand.Run))
-	output, exitCode, err := runStepRunnerCommand(sctx, buildCommand)
+	output, exitCode, err := runStepRunnerCommand(sctx, buildCommand, string(types.StepBuild))
 	if err != nil {
 		return nil, fmt.Errorf("run build command: %w", err)
 	}
@@ -124,7 +124,7 @@ func (s *BuildStep) executeAgentBuild(sctx *pipeline.StepContext) (*pipeline.Ste
 		return buildNotEstablishedOutcome("build planner found no meaningful build or compile command"), nil
 	}
 	sctx.Log(fmt.Sprintf("running planned build: %s", sctx.PlannedCommand))
-	output, exitCode, err := runStepShellCommand(sctx, sctx.PlannedCommand)
+	output, exitCode, err := runStepShellCommand(sctx, sctx.PlannedCommand, string(types.StepBuild))
 	if err != nil {
 		return nil, fmt.Errorf("run planned build command: %w", err)
 	}

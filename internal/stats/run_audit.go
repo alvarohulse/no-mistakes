@@ -318,9 +318,6 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 	}
 	result.Rounds = make([]Round, 0, len(rounds))
 	for _, round := range rounds {
-		if round.Status != "" && round.Status != db.RoundStatusCompleted {
-			continue
-		}
 		result.Rounds = append(result.Rounds, Round{
 			Number: round.Round, Trigger: round.Trigger, Status: round.Status, SelectionSource: cloneString(round.SelectionSource),
 			RepairFailureFingerprint: cloneString(round.RepairFailureFingerprint), RepairResult: cloneString(round.RepairResult),
