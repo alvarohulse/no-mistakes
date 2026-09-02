@@ -2844,7 +2844,7 @@ func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()","body":"## Intent\n\n- agent paraphrase"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","body":"## Intent\n\n- agent paraphrase\n\n## What Changed\n\n- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2865,6 +2865,9 @@ func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 
 	if strings.Contains(ghLog, "## Intent") || strings.Contains(ghLog, "agent paraphrase") {
 		t.Fatalf("expected agent-emitted Intent body to be stripped, got:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "## What Changed\n\n- add Bar()") {
+		t.Fatalf("expected the remaining legacy What Changed section to be retained, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "real user intent string") {
 		t.Fatalf("stored intent leaked into PR body:\n%s", ghLog)
