@@ -159,7 +159,16 @@ func opencodeUsageCoverage(state *opencodeStreamState) UsageCoverage {
 	if state == nil {
 		return UsageCoverageUnknown
 	}
-	return usageCoverageForCompleteStream(state.reachedIdle && state.usage.Reported, state.observations.uniqueCount() > 0)
+	if !state.reachedIdle || len(state.assistantMsgIDs) == 0 {
+		return UsageCoverageUnknown
+	}
+	for messageID := range state.assistantMsgIDs {
+		usage, ok := state.usageByMsg[messageID]
+		if !ok || !usage.Reported {
+			return UsageCoverageUnknown
+		}
+	}
+	return usageCoverageForCompleteStream(true, state.observations.uniqueCount() > 0)
 }
 
 func foldOpencodeMessageResponse(state *opencodeStreamState, response *opencodeMessageResponse) {

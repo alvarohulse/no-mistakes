@@ -14,7 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`

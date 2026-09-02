@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	MetricReceiptSchemaVersion = 2
+	MetricReceiptSchemaVersion = 3
 	RichRunRetentionAge        = 14 * 24 * time.Hour
 	RichRunRetentionFloor      = 50
 )
@@ -389,7 +389,7 @@ func decodeMetricReceipt(record *db.RunMetricReceipt) (*MetricReceipt, error) {
 	if err := json.Unmarshal([]byte(record.PayloadJSON), &receipt); err != nil {
 		return nil, fmt.Errorf("decode run metric receipt: %w", err)
 	}
-	if receipt.SchemaVersion != MetricReceiptSchemaVersion || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
+	if (receipt.SchemaVersion != MetricReceiptSchemaVersion && receipt.SchemaVersion != 2) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
 		return nil, fmt.Errorf("run metric receipt %q identity mismatch", record.RunID)
 	}
 	for i := range receipt.Invocations {

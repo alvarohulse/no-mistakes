@@ -169,7 +169,11 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
-	coverage := usageCoverageForCompleteStream(usage.Reported, result.nestedAgentCount > 0)
+	coverage := UsageCoverageUnknown
+	if result.terminalUsageReported || (result.assistantEvents > 0 && result.assistantUsageEvents == result.assistantEvents) ||
+		(result.assistantEvents == 0 && usage.Reported) {
+		coverage = usageCoverageForCompleteStream(true, result.nestedAgentCount > 0)
+	}
 	finalized := &Result{
 		Output:                    result.StructuredOutput,
 		Text:                      result.text,
@@ -329,6 +333,9 @@ type claudeResult struct {
 	agentObservationsReported bool
 	nestedAgentCount          int
 	reportedCostUSD           *float64
+	assistantEvents           int
+	assistantUsageEvents      int
+	terminalUsageReported     bool
 }
 
 type claudeUsage struct {
@@ -364,6 +371,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var lastSessionID string
 	var lastModel string
 	observations := newAgentObservationCollector(true)
+	assistantEvents := 0
+	assistantUsageEvents := 0
 
 	for scanner.Scan() {
 		select {
@@ -390,6 +399,11 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			var msg claudeMessage
 			if err := json.Unmarshal(event.Message, &msg); err != nil {
 				continue
+			}
+			assistantEvents++
+			if msg.Usage.InputTokens != nil || msg.Usage.OutputTokens != nil ||
+				msg.Usage.CacheReadInputTokens != nil || msg.Usage.CacheCreationInputTokens != nil {
+				assistantUsageEvents++
 			}
 			if msg.Model != "" {
 				lastModel = msg.Model
@@ -418,6 +432,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			}
 
 		case "result":
+			terminalUsageReported := event.Usage != nil
 			if event.Usage != nil {
 				*usage = tokenUsageFromFields(
 					event.Usage.InputTokens,
@@ -442,6 +457,9 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					agentObservationsReported: observations.reported,
 					nestedAgentCount:          observations.uniqueCount(),
 					reportedCostUSD:           event.TotalCostUSD,
+					assistantEvents:           assistantEvents,
+					assistantUsageEvents:      assistantUsageEvents,
+					terminalUsageReported:     terminalUsageReported,
 				}
 			}
 		}

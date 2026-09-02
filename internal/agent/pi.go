@@ -125,7 +125,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
 	if res != nil {
-		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd && pp.agentEndUsageReported, false)
+		res.UsageCoverage = usageCoverageForCompleteStream(pp.sawAgentEnd && pp.agentEndUsageComplete, false)
 	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
@@ -232,7 +232,7 @@ type piParser struct {
 	seenUsage             map[string]struct{}
 	assistantError        string
 	sawAgentEnd           bool
-	agentEndUsageReported bool
+	agentEndUsageComplete bool
 }
 
 func (p *piParser) parse(ctx context.Context, r io.Reader) error {
@@ -308,12 +308,14 @@ func (p *piParser) rememberAgentEnd(raw any) {
 
 	total := TokenUsage{}
 	seen := make(map[string]struct{})
-	hasUsage := false
+	assistantCount := 0
+	coveredCount := 0
 	for i, rawMsg := range messages {
 		msg, ok := rawMsg.(map[string]any)
 		if !ok || msg["role"] != "assistant" {
 			continue
 		}
+		assistantCount++
 		usageMap, ok := msg["usage"].(map[string]any)
 		if !ok {
 			continue
@@ -331,10 +333,10 @@ func (p *piParser) rememberAgentEnd(raw any) {
 		}
 		seen[key] = struct{}{}
 		total = piUsageAdd(total, usage)
-		hasUsage = true
+		coveredCount++
 	}
-	if hasUsage {
-		p.agentEndUsageReported = true
+	if assistantCount > 0 && coveredCount == assistantCount {
+		p.agentEndUsageComplete = true
 		p.usage = total
 		p.seenUsage = make(map[string]struct{}, len(seen))
 		for key := range seen {

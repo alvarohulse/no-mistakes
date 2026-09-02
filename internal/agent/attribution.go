@@ -30,12 +30,25 @@ func (c *agentObservationCollector) observe(key, identity string) {
 	}
 	if key != "" {
 		if _, ok := c.seen[key]; ok {
+			identity = sanitizeAgentIdentity(identity)
+			if identity != "" {
+				for _, observation := range c.observations {
+					if observation.Identity == identity {
+						return
+					}
+				}
+				if len(c.observations) < maxAgentObservations {
+					c.observations = append(c.observations, types.AgentObservation{
+						Identity: identity, InvocationMode: types.AgentInvocationModeSubagentTool,
+					})
+				}
+			}
 			return
 		}
 		c.seen[key] = struct{}{}
 	}
-	c.count++
 	identity = sanitizeAgentIdentity(identity)
+	c.count++
 	if identity == "" {
 		return
 	}
