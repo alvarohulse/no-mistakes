@@ -137,8 +137,41 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	_, err = d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 3, Purpose: "test", Observer: CommandObserverController,
-		Trigger: "initial", BeforeSHA: "different-head", TestedSHA: stringPointer("different-head"),
+		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
 		RetryOfAttemptID: &second.ID, RetryReason: &retryReason,
+	})
+	if err == nil || !strings.Contains(err.Error(), "outcome is not retryable") {
+		t.Fatalf("passing-attempt retry error = %v", err)
+	}
+
+	third, err := d.StartCommandAttempt(CommandAttempt{
+		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+		Sequence: 3, Purpose: "test", Observer: CommandObserverController,
+		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+	})
+	if err != nil {
+		t.Fatalf("start third attempt: %v", err)
+	}
+	if err := d.CompleteCommandAttempt(third.ID, CommandOutcomeTimeout, nil, nil); err != nil {
+		t.Fatalf("complete third attempt: %v", err)
+	}
+
+	invalidReason := "operator_retry"
+	_, err = d.StartCommandAttempt(CommandAttempt{
+		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+		Sequence: 4, Purpose: "test", Observer: CommandObserverController,
+		Trigger: "initial", BeforeSHA: "head", TestedSHA: stringPointer("head"),
+		RetryOfAttemptID: &third.ID, RetryReason: &invalidReason,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported retry reason") {
+		t.Fatalf("invalid retry reason error = %v", err)
+	}
+
+	_, err = d.StartCommandAttempt(CommandAttempt{
+		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+		Sequence: 4, Purpose: "test", Observer: CommandObserverController,
+		Trigger: "initial", BeforeSHA: "different-head", TestedSHA: stringPointer("different-head"),
+		RetryOfAttemptID: &third.ID, RetryReason: &retryReason,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unchanged subject") {
 		t.Fatalf("changed-subject retry error = %v", err)

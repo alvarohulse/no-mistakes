@@ -215,6 +215,12 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.CompletedAt == nil || prior.Outcome == nil {
 		return fmt.Errorf("start command attempt: retry attempt is incomplete")
 	}
+	if !retryableCommandOutcome(*prior.Outcome) {
+		return fmt.Errorf("start command attempt: prior attempt outcome is not retryable: %q", *prior.Outcome)
+	}
+	if !validCommandRetryReason(*attempt.RetryReason) {
+		return fmt.Errorf("start command attempt: unsupported retry reason %q", *attempt.RetryReason)
+	}
 	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.RoundID != attempt.RoundID || prior.Sequence+1 != attempt.Sequence || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.Trigger != attempt.Trigger {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
@@ -222,6 +228,19 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 		return fmt.Errorf("start command attempt: retry requires unchanged subject")
 	}
 	return nil
+}
+
+func retryableCommandOutcome(outcome string) bool {
+	switch outcome {
+	case CommandOutcomeFail, CommandOutcomeProcessError, CommandOutcomeCancelled, CommandOutcomeTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func validCommandRetryReason(reason string) bool {
+	return reason == CommandRetryReasonTransientFailure
 }
 
 func sameOptionalString(left, right *string) bool {
