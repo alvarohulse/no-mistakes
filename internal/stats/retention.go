@@ -378,6 +378,13 @@ func decodeMetricReceipt(record *db.RunMetricReceipt) (*MetricReceipt, error) {
 	if (receipt.SchemaVersion < 2 || receipt.SchemaVersion > MetricReceiptSchemaVersion) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
 		return nil, fmt.Errorf("run metric receipt %q identity mismatch", record.RunID)
 	}
+	for i := range receipt.Steps {
+		for j := range receipt.Steps[i].Rounds {
+			if receipt.Steps[i].Rounds[j].Status == "" {
+				receipt.Steps[i].Rounds[j].Status = "completed"
+			}
+		}
+	}
 	for i := range receipt.Invocations {
 		if receipt.Invocations[i].UsageCoverage == "" {
 			receipt.Invocations[i].UsageCoverage = agent.UsageCoverageUnknown
