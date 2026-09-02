@@ -238,8 +238,8 @@ func TestOpenRejectsCorruptFutureReceiptDuringMigration(t *testing.T) {
 	record := RunMetricReceipt{
 		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
 		SchemaVersion: RunMetricReceiptSchemaVersion + 1,
-		PayloadJSON: fmt.Sprintf(`{"schema_version":%d}`, RunMetricReceiptSchemaVersion+1),
-		ArchivedAt: run.UpdatedAt,
+		PayloadJSON:   fmt.Sprintf(`{"schema_version":%d}`, RunMetricReceiptSchemaVersion+1),
+		ArchivedAt:    run.UpdatedAt,
 	}
 	if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
 		t.Fatalf("archive future receipt = %t, %v", archived, err)
