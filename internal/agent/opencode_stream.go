@@ -37,27 +37,27 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 
 		var event opencodeStreamEvent
 		if err := json.Unmarshal([]byte(ev.Data), &event); err != nil {
-			return true // skip malformed events
+			state.streamIntegrityLost = true
+			return true
 		}
 
 		payload := event.Payload
 		if payload == nil {
+			state.streamIntegrityLost = true
 			return true
 		}
 		props := payload.Properties
 		// The endpoint is a shared, long-lived stream, so any idle event is the
 		// boundary for this read. Only an idle explicitly scoped to our session
 		// proves that its usage is complete.
+		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
+			return true
+		}
 		if payload.Type == "session.idle" {
 			if props != nil && props.SessionID == state.sessionID {
 				state.reachedIdle = true
 			}
 			return false
-		}
-
-		// Filter by session ID
-		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
-			return true
 		}
 
 		switch payload.Type {
@@ -107,6 +107,10 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 					state.hadToolActivity = true
 					if p.MessageID != "" && p.Tokens != nil {
 						state.usageByMsg[p.MessageID] = opencodeTokensToUsage(p.Tokens)
+						if state.liveUsageByMsg == nil {
+							state.liveUsageByMsg = make(map[string]TokenUsage)
+						}
+						state.liveUsageByMsg[p.MessageID] = state.usageByMsg[p.MessageID]
 						state.usage = accumulateUsage(state.usageByMsg)
 					}
 				}
@@ -130,6 +134,10 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 				}
 				if props.Info.Role == "assistant" && props.Info.Tokens != nil {
 					state.usageByMsg[props.Info.ID] = opencodeTokensToUsage(props.Info.Tokens)
+					if state.liveUsageByMsg == nil {
+						state.liveUsageByMsg = make(map[string]TokenUsage)
+					}
+					state.liveUsageByMsg[props.Info.ID] = state.usageByMsg[props.Info.ID]
 					state.usage = accumulateUsage(state.usageByMsg)
 				}
 			}

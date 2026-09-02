@@ -171,7 +171,7 @@ func (a *claudeAgent) Close() error { return nil }
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	coverage := UsageCoverageUnknown
 	terminalMetersComplete := usage.InputIsReported() && usage.OutputIsReported()
-	if result.terminalUsageReported && !result.unaccountedWork {
+	if result.terminalUsageReported && !result.unaccountedWork && !result.terminalUnderreports {
 		coverage = usageCoverageForCompleteStream(terminalMetersComplete, result.nestedAgentCount > 0)
 	}
 	finalized := &Result{
@@ -336,6 +336,7 @@ type claudeResult struct {
 	assistantEvents           int
 	assistantUsageEvents      int
 	terminalUsageReported     bool
+	terminalUnderreports      bool
 	unaccountedWork           bool
 }
 
@@ -375,6 +376,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	assistantEvents := 0
 	assistantUsageEvents := 0
 	unaccountedWork := false
+	var observedUsage TokenUsage
 
 	for scanner.Scan() {
 		select {
@@ -390,7 +392,8 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 
 		var event claudeEvent
 		if err := json.Unmarshal(line, &event); err != nil {
-			continue // skip malformed lines
+			unaccountedWork = true
+			continue
 		}
 		if event.SessionID != "" {
 			lastSessionID = event.SessionID
@@ -411,13 +414,15 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if msg.Model != "" {
 				lastModel = msg.Model
 			}
-			usage.Add(tokenUsageFromFields(
+			assistantUsage := tokenUsageFromFields(
 				msg.Usage.InputTokens,
 				msg.Usage.OutputTokens,
 				msg.Usage.CacheReadInputTokens,
 				msg.Usage.CacheCreationInputTokens,
 				nil,
-			))
+			)
+			observedUsage.Add(assistantUsage)
+			usage.Add(assistantUsage)
 			for _, c := range msg.Content {
 				if c.Type == "text" && c.Text != "" {
 					textBuf += c.Text
@@ -440,14 +445,20 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 
 		case "result":
 			terminalUsageReported := event.Usage != nil
+			terminalUnderreports := false
 			if event.Usage != nil {
-				*usage = tokenUsageFromFields(
+				terminalUsage := tokenUsageFromFields(
 					event.Usage.InputTokens,
 					event.Usage.OutputTokens,
 					event.Usage.CacheReadInputTokens,
 					event.Usage.CacheCreationInputTokens,
 					nil,
 				)
+				terminalUnderreports = terminalUsage.InputTokens < observedUsage.InputTokens ||
+					terminalUsage.OutputTokens < observedUsage.OutputTokens ||
+					terminalUsage.CacheReadTokens < observedUsage.CacheReadTokens ||
+					terminalUsage.CacheCreationTokens < observedUsage.CacheCreationTokens
+				*usage = terminalUsage
 			}
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
@@ -467,6 +478,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					assistantEvents:           assistantEvents,
 					assistantUsageEvents:      assistantUsageEvents,
 					terminalUsageReported:     terminalUsageReported,
+					terminalUnderreports:      terminalUnderreports,
 					unaccountedWork:           unaccountedWork,
 				}
 			}

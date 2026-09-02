@@ -86,11 +86,12 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 
 	// Process SSE events until session.idle
 	state := &opencodeStreamState{
-		sessionID:    sessionID,
-		onChunk:      opts.OnChunk,
-		textParts:    make(map[string]*opencodeTextPart),
-		usageByMsg:   make(map[string]TokenUsage),
-		observations: newAgentObservationCollector(true),
+		sessionID:      sessionID,
+		onChunk:        opts.OnChunk,
+		textParts:      make(map[string]*opencodeTextPart),
+		usageByMsg:     make(map[string]TokenUsage),
+		liveUsageByMsg: make(map[string]TokenUsage),
+		observations:   newAgentObservationCollector(true),
 	}
 	err = parseOpencodeSSE(eventBody, state)
 	streamCancel()
@@ -159,11 +160,11 @@ func opencodeUsageCoverage(state *opencodeStreamState) UsageCoverage {
 	if state == nil {
 		return UsageCoverageUnknown
 	}
-	if !state.reachedIdle || len(state.assistantMsgIDs) == 0 {
+	if !state.reachedIdle || state.streamIntegrityLost || len(state.assistantMsgIDs) == 0 {
 		return UsageCoverageUnknown
 	}
 	for messageID := range state.assistantMsgIDs {
-		usage, ok := state.usageByMsg[messageID]
+		usage, ok := state.liveUsageByMsg[messageID]
 		if !ok || !usage.Reported {
 			return UsageCoverageUnknown
 		}
