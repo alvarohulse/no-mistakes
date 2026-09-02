@@ -96,6 +96,12 @@ func validateRunNarrative(n RunNarrative) error {
 	if n.Source == NarrativeSourceFallback && n.DraftingInvocationID != nil {
 		return fmt.Errorf("insert run narrative: fallback source cannot reference a drafting invocation")
 	}
+	if n.Source == NarrativeSourceAgent && n.TitleMode != NarrativeTitleModeAgent && n.TitleMode != NarrativeTitleModePreserved {
+		return fmt.Errorf("insert run narrative: agent source requires agent or preserved title mode")
+	}
+	if n.Source == NarrativeSourceFallback && n.TitleMode != NarrativeTitleModeFallback && n.TitleMode != NarrativeTitleModePreserved {
+		return fmt.Errorf("insert run narrative: fallback source requires fallback or preserved title mode")
+	}
 	if n.DraftedAt <= 0 || strings.TrimSpace(n.BaseSHA) == "" || strings.TrimSpace(n.HeadSHA) == "" {
 		return fmt.Errorf("insert run narrative: draft time, base SHA, and head SHA are required")
 	}

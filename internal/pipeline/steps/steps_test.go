@@ -137,6 +137,13 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		number := extractTrailingNumber(prURL)
+		if logFile := os.Getenv("FAKE_CLI_LOG"); logFile != "" {
+			f, _ := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if f != nil {
+				fmt.Fprintf(f, "pr list result title=%s\n", prTitle)
+				f.Close()
+			}
+		}
 		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q,\"title\":%q}]\n", number, prURL, prBase, prTitle)
 		os.Exit(0)
 	}

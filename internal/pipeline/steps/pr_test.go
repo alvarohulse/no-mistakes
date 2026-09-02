@@ -1582,6 +1582,9 @@ func TestPRStep_ExistingPRPreservesHostedTitleWithoutChangingDraftedTitle(t *tes
 	if !strings.Contains(string(logData), "pr edit 42") {
 		t.Fatalf("expected existing pull request body update:\n%s", logData)
 	}
+	if !strings.Contains(string(logData), "Keep the hosted title") {
+		t.Fatalf("expected hosted title to be observed:\n%s", logData)
+	}
 	if strings.Contains(lineContaining(string(logData), "pr edit 42"), "--title") {
 		t.Fatalf("existing hosted title was overwritten:\n%s", logData)
 	}

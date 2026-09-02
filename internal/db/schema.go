@@ -168,7 +168,9 @@ CREATE TABLE IF NOT EXISTS run_narratives (
     summary                 TEXT NOT NULL,
     what_changed            TEXT NOT NULL,
     CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
-           (source = 'fallback' AND drafting_invocation_id IS NULL))
+           (source = 'fallback' AND drafting_invocation_id IS NULL)),
+    CHECK ((source = 'agent' AND title_mode IN ('agent', 'preserved')) OR
+           (source = 'fallback' AND title_mode IN ('fallback', 'preserved')))
 );
 
 CREATE TABLE IF NOT EXISTS run_agent_sessions (

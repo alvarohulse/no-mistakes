@@ -64,7 +64,7 @@ func TestRunNarrativeFallbackProvenanceAndMissingRun(t *testing.T) {
 
 	narrative := RunNarrative{
 		RunID: run.ID, Source: NarrativeSourceFallback, DraftedAt: 12,
-		BaseSHA: "base-1", HeadSHA: "head-1", TitleMode: NarrativeTitleModeAgent,
+		BaseSHA: "base-1", HeadSHA: "head-1", TitleMode: NarrativeTitleModeFallback,
 		TitleText: "chore: update pull request", Summary: "Fallback summary.", WhatChanged: "- fallback change",
 	}
 	if err := d.InsertRunNarrative(narrative); err != nil {
@@ -74,12 +74,27 @@ func TestRunNarrativeFallbackProvenanceAndMissingRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Source != NarrativeSourceFallback || got.DraftingInvocationID != nil {
+	if got == nil || got.Source != NarrativeSourceFallback || got.DraftingInvocationID != nil || got.TitleMode != NarrativeTitleModeFallback {
 		t.Fatalf("fallback provenance = %#v", got)
 	}
 	missing, err := d.GetRunNarrative("missing-run")
 	if err != nil || missing != nil {
 		t.Fatalf("missing narrative = %#v, %v; want nil, nil", missing, err)
+	}
+}
+
+func TestRunNarrativeRejectsSourceAndTitleModeMismatch(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/mismatched-narrative", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head-1", "base-1")
+
+	err := d.InsertRunNarrative(RunNarrative{
+		RunID: run.ID, Source: NarrativeSourceFallback, DraftedAt: 12,
+		BaseSHA: "base-1", HeadSHA: "head-1", TitleMode: NarrativeTitleModeAgent,
+		TitleText: "feat: mismatched draft", Summary: "Summary.", WhatChanged: "- Change.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "fallback or preserved title mode") {
+		t.Fatalf("InsertRunNarrative() error = %v, want source/title mode mismatch rejection", err)
 	}
 }
 
