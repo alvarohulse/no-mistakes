@@ -294,7 +294,11 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 				prepareErr = errors.Join(prepareErr, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr))
 			}
 		}
-		sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, prepareErr)
+		if resolved.Script != "" {
+			sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, prepareErr)
+		} else {
+			sctx.RecordCommandAtSequence(command.Run, sequence, nil, prepareErr)
+		}
 		return "", -1, prepareErr
 	}
 
