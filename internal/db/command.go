@@ -229,6 +229,19 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
+	if prior.RoundID != attempt.RoundID {
+		return fmt.Errorf("start command attempt: retry must remain in the same round")
+	}
+	var laterAttempts int
+	if err := d.sql.QueryRow(
+		`SELECT count(*) FROM command_attempts
+		 WHERE round_id = ? AND sequence > ?`, prior.RoundID, prior.Sequence,
+	).Scan(&laterAttempts); err != nil {
+		return fmt.Errorf("start command attempt: validate retry order: %w", err)
+	}
+	if laterAttempts != 0 {
+		return fmt.Errorf("start command attempt: retry must reference the immediate prior attempt")
+	}
 	if prior.BeforeSHA != attempt.BeforeSHA {
 		return fmt.Errorf("start command attempt: retry requires unchanged subject")
 	}
@@ -273,12 +286,18 @@ func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, r
 	if outcome == CommandOutcomePass && (exitCode == nil || *exitCode != 0 || signal != nil) {
 		return fmt.Errorf("complete command attempt: passing outcome requires exit code zero")
 	}
-	if outcome == CommandOutcomeFail && exitCode == nil && signal == nil {
-		return fmt.Errorf("complete command attempt: failing outcome requires exit code or signal")
+	if outcome == CommandOutcomeFail && (exitCode == nil || *exitCode == 0) && signal == nil {
+		return fmt.Errorf("complete command attempt: failing outcome requires non-zero exit code or signal")
+	}
+	if outcome == CommandOutcomeProcessError && exitCode != nil {
+		return fmt.Errorf("complete command attempt: process error cannot have an exit code")
 	}
 	attempt, err := d.getCommandAttempt(id)
 	if err != nil {
 		return fmt.Errorf("complete command attempt: %w", err)
+	}
+	if outcome != CommandOutcomePass {
+		testedSHA = nil
 	}
 	if testedSHA != nil {
 		if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != *resultStateID || *testedSHA != attempt.BeforeSHA {

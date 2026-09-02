@@ -152,7 +152,9 @@ func executeArgv(ctx context.Context, argv []string, options ExecuteOptions, std
 			result.Signal = processSignal(exitErr.ProcessState)
 			return result, nil
 		}
-		return capturedResult(output, -1), fmt.Errorf("launch runner: %w", err)
+		result := capturedResult(output, -1)
+		populateProcessResult(&result, cmd.ProcessState)
+		return result, fmt.Errorf("launch runner: %w", err)
 	}
 	return capturedResult(output, 0), nil
 }

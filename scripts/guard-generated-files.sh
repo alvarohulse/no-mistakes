@@ -136,15 +136,17 @@ commits_touching_generated_files() {
   if [ -z "$commits_touching_generated_files_list" ]; then
     return 0
   fi
-  if ! commits_touching_generated_files_result=$(
+  if ! commits_touching_generated_files_diff=$(
     printf '%s\n' "$commits_touching_generated_files_list" |
       git diff-tree --stdin --root -r -m --name-only --format='%H' -- \
         CHANGELOG.md \
-        .release-please-manifest.json |
-      awk '
-        /^[0-9a-f]{40}$/ && !seen[$0]++ { printf "%s ", $0 }
-      '
+        .release-please-manifest.json
   ); then
+    fail "could not identify commits that change generated files"
+  fi
+  if ! commits_touching_generated_files_result=$(printf '%s\n' "$commits_touching_generated_files_diff" | awk '
+    /^[0-9a-f]+$/ && length($0) == 40 && !seen[$0]++ { printf "%s ", $0 }
+  '); then
     fail "could not identify commits that change generated files"
   fi
   printf '%s\n' "$commits_touching_generated_files_result"

@@ -339,6 +339,7 @@ var migrationStatements = []string{
 		UNIQUE (round_id, sequence)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id ON command_attempts (run_id, started_at, id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_retry_of ON command_attempts (retry_of_attempt_id) WHERE retry_of_attempt_id IS NOT NULL`,
 	`ALTER TABLE command_attempts ADD COLUMN command_source TEXT NOT NULL DEFAULT 'legacy'`,
 	`ALTER TABLE command_attempts ADD COLUMN runner_schema_version INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE command_attempts ADD COLUMN runner_source TEXT NOT NULL DEFAULT 'legacy'`,

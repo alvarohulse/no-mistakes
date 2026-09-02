@@ -175,7 +175,14 @@ func stepFindingCounts(step *StepResult, rounds []*StepRound) (reported int, fin
 
 func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
 	stats := StepStats{StepName: step.StepName}
-	if len(rounds) == 0 {
+	hasCompletedRound := false
+	for _, round := range rounds {
+		if round.Status == "" || round.Status == RoundStatusCompleted {
+			hasCompletedRound = true
+			break
+		}
+	}
+	if !hasCompletedRound {
 		count := findingsCount(step.FindingsJSON)
 		stats.ReportedFindings = count
 		return stats
