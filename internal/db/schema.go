@@ -106,6 +106,47 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     created_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS command_definitions (
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    id                    TEXT NOT NULL,
+    script                TEXT NOT NULL,
+    source                TEXT NOT NULL,
+    platform              TEXT NOT NULL,
+    runner_schema_version INTEGER NOT NULL,
+    runner_source         TEXT NOT NULL,
+    runner_executable     TEXT NOT NULL,
+    runner_args_json      TEXT NOT NULL,
+    runner_version        TEXT,
+    PRIMARY KEY (run_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS command_attempts (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL,
+    command_id            TEXT NOT NULL,
+    step_id               TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    round_id              TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+    sequence              INTEGER NOT NULL,
+    purpose               TEXT NOT NULL,
+    observer              TEXT NOT NULL,
+    trigger_type          TEXT NOT NULL,
+    before_sha            TEXT NOT NULL,
+    tested_sha            TEXT,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER,
+    duration_ms           INTEGER,
+    outcome               TEXT,
+    exit_code             INTEGER,
+    signal                TEXT,
+    retry_of_attempt_id   TEXT REFERENCES command_attempts(id),
+    retry_reason          TEXT,
+    FOREIGN KEY (run_id, command_id) REFERENCES command_definitions(run_id, id) ON DELETE CASCADE,
+    UNIQUE (round_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id
+    ON command_attempts (run_id, started_at, id);
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -256,6 +297,43 @@ var migrationStatements = []string{
 		CHECK ((source = 'agent' AND drafting_invocation_id IS NOT NULL) OR
 		       (source = 'fallback' AND drafting_invocation_id IS NULL))
 	)`,
+	`CREATE TABLE IF NOT EXISTS command_definitions (
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		id TEXT NOT NULL,
+		script TEXT NOT NULL,
+		source TEXT NOT NULL,
+		platform TEXT NOT NULL,
+		runner_schema_version INTEGER NOT NULL,
+		runner_source TEXT NOT NULL,
+		runner_executable TEXT NOT NULL,
+		runner_args_json TEXT NOT NULL,
+		runner_version TEXT,
+		PRIMARY KEY (run_id, id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS command_attempts (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL,
+		command_id TEXT NOT NULL,
+		step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+		sequence INTEGER NOT NULL,
+		purpose TEXT NOT NULL,
+		observer TEXT NOT NULL,
+		trigger_type TEXT NOT NULL,
+		before_sha TEXT NOT NULL,
+		tested_sha TEXT,
+		started_at INTEGER NOT NULL,
+		completed_at INTEGER,
+		duration_ms INTEGER,
+		outcome TEXT,
+		exit_code INTEGER,
+		signal TEXT,
+		retry_of_attempt_id TEXT REFERENCES command_attempts(id),
+		retry_reason TEXT,
+		FOREIGN KEY (run_id, command_id) REFERENCES command_definitions(run_id, id) ON DELETE CASCADE,
+		UNIQUE (round_id, sequence)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id ON command_attempts (run_id, started_at, id)`,
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
