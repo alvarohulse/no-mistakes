@@ -164,6 +164,48 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 	}
 }
 
+func TestBuildStepLinksUnchangedAfterRepairRetry(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"command":"exit 1"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRound, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID, sctx.Round, sctx.RoundID, sctx.RoundTrigger = step.ID, 1, firstRound.ID, "initial"
+	if _, err := (&BuildStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	secondRound, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Round, sctx.RoundID, sctx.RoundTrigger = 2, secondRound.ID, "auto_fix"
+	if _, err := (&BuildStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 || attempts[1].RetryOfAttemptID == nil ||
+		*attempts[1].RetryOfAttemptID != attempts[0].ID ||
+		attempts[1].RetryReason == nil ||
+		*attempts[1].RetryReason != "unchanged_after_repair" {
+		t.Fatalf("attempts = %+v, want linked unchanged-after-repair retry", attempts)
+	}
+}
+
 func TestBuildStepWithoutCommandDoesNotPassWithoutExecutedBuild(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

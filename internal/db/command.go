@@ -21,7 +21,7 @@ const (
 	CommandOutcomeCancelled    = "cancelled"
 	CommandOutcomeTimeout      = "timeout"
 
-	CommandRetryReasonTransientFailure = "transient_failure"
+	CommandRetryReasonUnchangedAfterRepair = "unchanged_after_repair"
 )
 
 // CommandDefinition is the exact resolved command and portable runner identity
@@ -255,11 +255,15 @@ func RetryableCommandOutcome(outcome string) bool {
 }
 
 func validCommandRetryReason(reason string) bool {
-	return reason == CommandRetryReasonTransientFailure
+	return reason == CommandRetryReasonUnchangedAfterRepair
 }
 
 func sameOptionalString(left, right *string) bool {
 	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func OptionalStringsEqual(left, right *string) bool {
+	return sameOptionalString(left, right)
 }
 
 // CompleteCommandAttempt stores the controller-observed terminal result once.

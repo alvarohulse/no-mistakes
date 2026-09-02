@@ -159,7 +159,7 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 		t.Fatalf("complete first attempt: %v", err)
 	}
 
-	retryReason := CommandRetryReasonTransientFailure
+	retryReason := CommandRetryReasonUnchangedAfterRepair
 	second, err := d.StartCommandAttempt(CommandAttempt{
 		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
 		Sequence: 2, Purpose: "test", Observer: CommandObserverController,
