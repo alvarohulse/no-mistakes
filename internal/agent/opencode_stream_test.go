@@ -747,7 +747,7 @@ data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info"
 	}
 }
 
-func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testing.T) {
+func TestParseOpencodeSSE_OtherSessionIdleIsIgnoredUntilTargetIdle(t *testing.T) {
 	input := strings.Join([]string{
 		`data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg1","role":"assistant","tokens":{"input":17,"output":5}}}}}`,
 		``,
@@ -766,8 +766,29 @@ func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testi
 	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
 		t.Fatalf("parseOpencodeSSE() error = %v", err)
 	}
+	if !state.reachedIdle {
+		t.Fatal("target session idle should credit top-level completion after foreign idle")
+	}
+}
+
+func TestParseOpencodeSSE_UnscopedIdleStopsWithoutCreditingCoverage(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"payload":{"type":"session.idle"}}`,
+		``,
+		`data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}`,
+		``,
+	}, "\n")
+	state := &opencodeStreamState{
+		sessionID:  "s1",
+		textParts:  make(map[string]*opencodeTextPart),
+		usageByMsg: make(map[string]TokenUsage),
+	}
+
+	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
+		t.Fatalf("parseOpencodeSSE() error = %v", err)
+	}
 	if state.reachedIdle {
-		t.Fatal("other session idle must stop the global stream without crediting top-level completion")
+		t.Fatal("unscoped idle must stop the stream without crediting top-level completion")
 	}
 }
 
