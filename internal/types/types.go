@@ -241,24 +241,6 @@ const (
 	AgentCursor   AgentName = "cursor"
 )
 
-// AgentInvocationMode identifies how an agent process or nested agent was
-// invoked. The vocabulary intentionally stops at the harness boundary; SDK
-// internals that adapters cannot observe are not inferred.
-type AgentInvocationMode string
-
-const (
-	AgentInvocationModeHarnessCLI   AgentInvocationMode = "harness_cli"
-	AgentInvocationModeSubagentTool AgentInvocationMode = "subagent_tool"
-)
-
-// AgentObservation is one nested agent invocation observed in an adapter's
-// event stream. Identity is a bounded agent name or privacy-safe fingerprint,
-// never a prompt or model response.
-type AgentObservation struct {
-	Identity       string              `json:"identity"`
-	InvocationMode AgentInvocationMode `json:"invocation_mode"`
-}
-
 // RegisteredACPTarget describes an ACP target with built-in launch metadata.
 type RegisteredACPTarget struct {
 	LegacyArgsKey  AgentName

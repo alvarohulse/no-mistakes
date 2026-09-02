@@ -7,40 +7,32 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 
 	inv := AgentInvocation{
-		RunID:          run.ID,
-		StepName:       "review",
-		Round:          2,
-		Purpose:        "review-fix",
-		Agent:          "codex",
-		UsageCoverage:  agent.UsageCoverageComplete,
-		Model:          "gpt-5.2-codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
-		AgentObservations: []types.AgentObservation{
-			{Identity: "repo-scanner", InvocationMode: types.AgentInvocationModeSubagentTool},
-			{Identity: "thread:0123456789abcdef", InvocationMode: types.AgentInvocationModeSubagentTool},
-		},
-		AgentObservationsReported: true,
-		NestedAgentCount:          intPtr(2),
-		SessionMode:               InvocationModeResumed,
-		SessionKey:                "abcd1234abcd1234",
-		StartedAt:                 1_700_000_000,
-		CompletedAt:               1_700_000_090,
-		DurationMS:                90_000,
-		ExitStatus:                "ok",
-		InputTokens:               1000,
-		OutputTokens:              200,
-		CacheReadTokens:           800,
-		CacheCreationTokens:       intPtr(50),
-		DeltaCacheCreationTokens:  intPtr(50),
-		ReportedCostUSD:           float64Ptr(1.25),
-		PricingReceiptJSON:        strPtr(`{"receipt":"captured"}`),
+		RunID:                    run.ID,
+		StepName:                 "review",
+		Round:                    2,
+		Purpose:                  "review-fix",
+		Agent:                    "codex",
+		UsageCoverage:            agent.UsageCoverageComplete,
+		Model:                    "gpt-5.2-codex",
+		SessionMode:              InvocationModeResumed,
+		SessionKey:               "abcd1234abcd1234",
+		StartedAt:                1_700_000_000,
+		CompletedAt:              1_700_000_090,
+		DurationMS:               90_000,
+		ExitStatus:               "ok",
+		InputTokens:              1000,
+		OutputTokens:             200,
+		CacheReadTokens:          800,
+		CacheCreationTokens:      intPtr(50),
+		DeltaCacheCreationTokens: intPtr(50),
+		ReportedCostUSD:          float64Ptr(1.25),
+		PricingReceiptJSON:       strPtr(`{"receipt":"captured"}`),
 	}
 	if _, err := d.InsertAgentInvocation(inv); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -69,18 +61,6 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.PricingReceiptJSON == nil || *back.PricingReceiptJSON != `{"receipt":"captured"}` {
 		t.Fatalf("pricing receipt readback = %v", back.PricingReceiptJSON)
-	}
-	if back.InvocationMode != types.AgentInvocationModeHarnessCLI {
-		t.Fatalf("invocation mode = %q, want harness_cli", back.InvocationMode)
-	}
-	if !reflect.DeepEqual(back.AgentObservations, inv.AgentObservations) {
-		t.Fatalf("agent observations = %+v, want %+v", back.AgentObservations, inv.AgentObservations)
-	}
-	if !back.AgentObservationsReported {
-		t.Fatal("agent observations should be reported")
-	}
-	if back.NestedAgentCount == nil || *back.NestedAgentCount != 2 {
-		t.Fatalf("nested agent count = %v, want 2", back.NestedAgentCount)
 	}
 }
 
@@ -298,6 +278,11 @@ func TestAgentInvocations_PrivacySafeShape(t *testing.T) {
 	if !containsString(columns, "usage_coverage") {
 		t.Fatalf("agent_invocations columns = %v, want usage_coverage", columns)
 	}
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+		if containsString(columns, removed) {
+			t.Fatalf("agent_invocations columns retained removed field %q: %v", removed, columns)
+		}
+	}
 }
 
 func TestOpenMigratesUsageCoverageAsUnknown(t *testing.T) {
@@ -318,8 +303,8 @@ func TestOpenMigratesUsageCoverageAsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
-		(id, run_id, step_name, round, purpose, agent, invocation_mode, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
-		VALUES ('legacy-coverage', ?, 'review', 1, 'review', 'codex', 'harness_cli', '', 'cold', '', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
+		(id, run_id, step_name, round, purpose, agent, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
+		VALUES ('legacy-coverage', ?, 'review', 1, 'review', 'codex', '', 'cold', '', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
@@ -641,7 +626,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesAgentAttributionColumns(t *testing.T) {
+func TestOpenDropsAgentAttributionColumnsWithoutLosingInvocationFacts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.sqlite")
 	d, err := Open(path)
 	if err != nil {
@@ -655,14 +640,18 @@ func TestOpenMigratesAgentAttributionColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
-	for _, column := range []string{"agent_observations_json", "invocation_mode"} {
-		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + column); err != nil {
-			t.Fatalf("drop %s: %v", column, err)
+	for _, statement := range []string{
+		`ALTER TABLE agent_invocations ADD COLUMN invocation_mode TEXT NOT NULL DEFAULT 'harness_cli'`,
+		`ALTER TABLE agent_invocations ADD COLUMN agent_observations_json TEXT`,
+		`ALTER TABLE agent_invocations ADD COLUMN nested_agent_count INTEGER`,
+	} {
+		if _, err := d.sql.Exec(statement); err != nil {
+			t.Fatalf("add legacy attribution column: %v", err)
 		}
 	}
 	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
-		(id, run_id, step_name, round, purpose, agent, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
-		VALUES ('legacy-attribution', ?, 'review', 1, 'review', 'codex', '', 'cold', '', 1, 2, 1, 'ok', '', 0, 0, 0)`, run.ID); err != nil {
+		(id, run_id, step_name, round, purpose, agent, usage_coverage, invocation_mode, agent_observations_json, nested_agent_count, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
+		VALUES ('legacy-attribution', ?, 'review', 1, 'review', 'codex', 'complete', 'harness_cli', '[{"identity":"worker","invocation_mode":"subagent_tool"}]', 1, 'gpt-5.6-sol', 'cold', 'session-key', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
 		t.Fatalf("insert legacy invocation: %v", err)
 	}
 	if err := d.Close(); err != nil {
@@ -682,10 +671,25 @@ func TestOpenMigratesAgentAttributionColumns(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1", len(got))
 	}
-	if got[0].InvocationMode != types.AgentInvocationModeHarnessCLI {
-		t.Fatalf("legacy invocation mode = %q, want harness_cli", got[0].InvocationMode)
+	if got[0].UsageCoverage != agent.UsageCoverageComplete || got[0].Model != "gpt-5.6-sol" || got[0].InputTokens != 100 || got[0].OutputTokens != 20 || got[0].SessionKey != "session-key" {
+		t.Fatalf("retained invocation facts = %+v", got[0])
 	}
-	if got[0].AgentObservationsReported {
-		t.Fatal("legacy row must keep nested-agent observations unknown")
+	rows, err := d.sql.Query(`SELECT name FROM pragma_table_info('agent_invocations')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatal(err)
+		}
+		columns = append(columns, column)
+	}
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+		if containsString(columns, removed) {
+			t.Fatalf("migration retained removed column %q: %v", removed, columns)
+		}
 	}
 }

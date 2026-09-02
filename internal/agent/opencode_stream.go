@@ -153,15 +153,11 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 	return nil
 }
 
-func (s *opencodeStreamState) observeOpencodeTool(id, partType, tool string, state *opencodeToolState) {
-	if s == nil || s.observations == nil || partType != "tool" || !strings.EqualFold(tool, "task") || state == nil {
+func (s *opencodeStreamState) observeOpencodeTool(_ string, partType, tool string, state *opencodeToolState) {
+	if s == nil || partType != "tool" || !strings.EqualFold(tool, "task") || state == nil {
 		return
 	}
-	identity := state.Input.SubagentType
-	if identity == "" {
-		identity = state.Input.Agent
-	}
-	s.observations.observe(id, identity)
+	s.subagentWorkObserved = true
 }
 
 func (s *opencodeStreamState) emitSeparatorIfNeeded() {

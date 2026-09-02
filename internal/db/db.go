@@ -40,6 +40,12 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
+	for _, stmt := range removalMigrationStatements {
+		if _, err := sqlDB.Exec(stmt); err != nil && !isMissingColumnErr(err) {
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate db: %w", err)
+		}
+	}
 	return &DB{sql: sqlDB}, nil
 }
 
@@ -70,6 +76,13 @@ func isDuplicateColumnErr(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "duplicate column name")
+}
+
+func isMissingColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "no such column")
 }
 
 // Close closes the database connection.

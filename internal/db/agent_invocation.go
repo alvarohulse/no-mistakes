@@ -8,7 +8,6 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
@@ -70,20 +69,7 @@ type AgentInvocation struct {
 	// UsageCoverage is the adapter's explicit statement about whether its
 	// top-level usage totals account for all work in this invocation.
 	UsageCoverage agent.UsageCoverage
-	// InvocationMode is how the top-level adapter was invoked. Pipeline agent
-	// processes use harness_cli; nested event-stream observations use
-	// subagent_tool in AgentObservations.
-	InvocationMode types.AgentInvocationMode
-	// AgentObservations is the ordered list of nested agent invocations exposed
-	// by the adapter stream. AgentObservationsReported distinguishes a supported
-	// stream with no nested invocations from an adapter that exposes no such
-	// evidence.
-	AgentObservations         []types.AgentObservation
-	AgentObservationsReported bool
-	// NestedAgentCount is the exact unique child count when the adapter reports
-	// nesting. Nil means unsupported; a non-nil zero means supported and none.
-	NestedAgentCount *int
-	Model            string
+	Model         string
 	// ModelProvider is the provider that served the model (openai, anthropic,
 	// ...). Nil when the adapter cannot report it.
 	ModelProvider *string
@@ -161,7 +147,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, usage_coverage, invocation_mode, agent_observations_json, nested_agent_count, model, model_provider, review_candidate_pool_json,
+const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, usage_coverage, model, model_provider, review_candidate_pool_json,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -172,7 +158,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, us
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -190,13 +176,6 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
-	if inv.InvocationMode == "" {
-		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
-	}
-	observationsJSON, err := encodeAgentObservations(inv)
-	if err != nil {
-		return nil, fmt.Errorf("encode agent observations: %w", err)
-	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
 	if err != nil {
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
@@ -205,7 +184,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	_, err = d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -230,19 +209,12 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
-	if inv.InvocationMode == "" {
-		inv.InvocationMode = types.AgentInvocationModeHarnessCLI
-	}
-	observationsJSON, err := encodeAgentObservations(inv)
-	if err != nil {
-		return nil, fmt.Errorf("encode agent observations: %w", err)
-	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
 	if err != nil {
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
 	}
 	result, err := d.sql.Exec(`UPDATE agent_invocations SET
-		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, usage_coverage = ?, invocation_mode = ?, agent_observations_json = ?, nested_agent_count = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, usage_coverage = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
 		session_mode = ?, session_key = ?, fallback_reason = ?,
 		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
@@ -253,7 +225,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
 		WHERE id = ?`,
-		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.InvocationMode, observationsJSON, inv.NestedAgentCount, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -348,10 +320,9 @@ type scanner interface {
 
 func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
-	var observationsJSON *string
 	var reviewCandidatePoolJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.InvocationMode, &observationsJSON, &inv.NestedAgentCount, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -362,12 +333,6 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 		&inv.WorkloadFiles, &inv.WorkloadLines, &inv.FindingCount,
 	); err != nil {
 		return AgentInvocation{}, fmt.Errorf("scan agent invocation: %w", err)
-	}
-	if observationsJSON != nil {
-		inv.AgentObservationsReported = true
-		if err := json.Unmarshal([]byte(*observationsJSON), &inv.AgentObservations); err != nil {
-			return AgentInvocation{}, fmt.Errorf("decode agent observations: %w", err)
-		}
 	}
 	if reviewCandidatePoolJSON != nil {
 		if err := json.Unmarshal([]byte(*reviewCandidatePoolJSON), &inv.ReviewCandidatePool); err != nil {
@@ -437,22 +402,6 @@ func validateReviewCandidateIdentity(field, value string, maxBytes int) error {
 		return fmt.Errorf("candidate %s is not a bounded printable identity", field)
 	}
 	return nil
-}
-
-func encodeAgentObservations(inv AgentInvocation) (*string, error) {
-	if !inv.AgentObservationsReported {
-		return nil, nil
-	}
-	observations := inv.AgentObservations
-	if observations == nil {
-		observations = []types.AgentObservation{}
-	}
-	encoded, err := json.Marshal(observations)
-	if err != nil {
-		return nil, err
-	}
-	value := string(encoded)
-	return &value, nil
 }
 
 // LatestSessionCumulative returns the most recent prior invocation's cumulative

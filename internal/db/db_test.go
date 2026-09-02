@@ -96,6 +96,11 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
 		}
 	}
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+		if hasColumn(t, d, "agent_invocations", removed) {
+			t.Fatalf("agent_invocations.%s should be absent from fresh schema", removed)
+		}
+	}
 }
 
 func TestOpenMigratesCIFixAttemptsWithoutGrantingLegacyRunsAFreshBudget(t *testing.T) {
@@ -175,7 +180,7 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 		CREATE TABLE agent_invocations (
 			id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL, round INTEGER NOT NULL,
 			purpose TEXT NOT NULL, agent TEXT NOT NULL, invocation_mode TEXT NOT NULL DEFAULT 'harness_cli',
-			agent_observations_json TEXT, model TEXT, model_provider TEXT, session_mode TEXT NOT NULL,
+			agent_observations_json TEXT, nested_agent_count INTEGER, model TEXT, model_provider TEXT, session_mode TEXT NOT NULL,
 			session_key TEXT, fallback_reason TEXT, started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL,
 			duration_ms INTEGER NOT NULL, subprocess_wait_ms INTEGER, exit_status TEXT NOT NULL,
 			failure_category TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
@@ -209,6 +214,11 @@ func TestOpenMigratesPRContractV3PersistenceColumns(t *testing.T) {
 			if !hasColumn(t, database, table, column) {
 				t.Fatalf("%s.%s was not migrated", table, column)
 			}
+		}
+	}
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+		if hasColumn(t, database, "agent_invocations", removed) {
+			t.Fatalf("agent_invocations.%s was not removed", removed)
 		}
 	}
 }
