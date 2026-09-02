@@ -948,20 +948,15 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	}
 	var run *db.Run
 	var newerPushed *db.Run
-	var newerCustodyTransformations []*db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != branch {
 			continue
 		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
-			// exact push binding that contains it, or by an exact submitted-head
-			// lineage whose newer gate head has already returned custody or was
-			// subsequently published by another exact binding. Active ownership
-			// remains absolute.
-			if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) ||
-				s.supersededByReturnedCustodyRun(ctx, candidate, newerCustodyTransformations, branch) ||
-				s.supersededByPushedCustodyLineage(ctx, candidate, newerPushed, newerCustodyTransformations, branch)) {
+			// exact binding whose pushed head is proven, in the local gate, to
+			// contain the preserved head. Active ownership remains absolute.
+			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
 				continue
 			}
 			run = candidate
@@ -969,9 +964,6 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		}
 		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, branch) {
 			newerPushed = candidate
-		}
-		if returnedUnpublishedCustody(candidate) || certifiedPushedCustodyTransformation(s.Repo, candidate, branch) {
-			newerCustodyTransformations = append(newerCustodyTransformations, candidate)
 		}
 		// Custody-returned runs stay selectable so a recovered branch reports
 		// custody_returned (or its ordinary post-push classification) instead
@@ -1330,97 +1322,6 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 		return false
 	}
 	return isAncestor(ctx, s.GateDir, older.HeadSHA, pushed)
-}
-
-// supersededByReturnedCustodyRun recognizes a later unpublished run that
-// started from the older preserved head and whose guarded recovery already
-// returned custody at the gate's current head. The exact submitted-head chain
-// is the durable lineage proof when the later run rebased those commits and
-// ordinary Git ancestry no longer connects the two run heads.
-func (s *Service) supersededByReturnedCustodyRun(ctx context.Context, older *db.Run, newerRuns []*db.Run, branch string) bool {
-	if older == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
-		len(newerRuns) == 0 || strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" {
-		return false
-	}
-	gateHead, err := git.Run(ctx, s.GateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
-	if err != nil {
-		return false
-	}
-	for _, newer := range newerRuns {
-		if newer.Branch == branch && ptr(newer.SubmittedHeadSHA) == older.HeadSHA && newer.HeadSHA == gateHead {
-			return true
-		}
-	}
-	return false
-}
-
-// supersededByPushedCustodyLineage proves that a newer exact push published
-// the older preserved work even when one or more pipeline rebases erased Git
-// ancestry between run heads. Each discontinuity must be certified by a
-// terminal verified run whose guarded recovery returned custody, while normal
-// operator commits between runs remain ordinary ancestry.
-func (s *Service) supersededByPushedCustodyLineage(ctx context.Context, older, pushedRun *db.Run, transformations []*db.Run, branch string) bool {
-	if older == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
-		pushedRun == nil || !certifiedPushedCustodyTransformation(s.Repo, pushedRun, branch) ||
-		strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" ||
-		pushedRun.SubmittedHeadSHA == nil || pushedRun.LastPushedSHA == nil {
-		return false
-	}
-	gateHead, err := git.Run(ctx, s.GateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
-	if err != nil || gateHead != ptr(pushedRun.LastPushedSHA) {
-		return false
-	}
-	return custodyTransformationLineageReaches(ctx, s.GateDir, older.HeadSHA, ptr(pushedRun.SubmittedHeadSHA), transformations, pushedRun, s.Repo, branch)
-}
-
-func custodyTransformationLineageReaches(ctx context.Context, dir, from, target string, runs []*db.Run, final *db.Run, repo *db.Repo, branch string) bool {
-	if from == "" || target == "" {
-		return false
-	}
-	contains := func(ancestor, descendant string) bool {
-		return ancestor == descendant || isAncestor(ctx, dir, ancestor, descendant)
-	}
-	represented := map[string]bool{from: false}
-	applied := false
-	for i := len(runs) - 1; i >= 0; i-- {
-		run := runs[i]
-		if run == nil || final == nil || run.ID == final.ID ||
-			(!returnedUnpublishedCustody(run) && !certifiedPushedCustodyTransformation(repo, run, branch)) {
-			continue
-		}
-		submitted := ptr(run.SubmittedHeadSHA)
-		matched := false
-		for head := range represented {
-			if contains(head, submitted) {
-				represented[head] = true
-				matched = true
-			}
-		}
-		if !matched {
-			continue
-		}
-		represented[run.HeadSHA] = false
-		applied = true
-	}
-	if !applied {
-		return false
-	}
-	for head, consumed := range represented {
-		if !consumed && !contains(head, target) {
-			return false
-		}
-	}
-	return true
-}
-
-func returnedUnpublishedCustody(run *db.Run) bool {
-	return run != nil && terminalRunStatus(run.Status) && run.CustodyReturnedAt != nil && run.TerminalHeadVerifiedAt != nil &&
-		run.LastPushedSHA == nil && run.SubmittedHeadSHA != nil && run.HeadSHA != "" && run.HeadSHA != ptr(run.SubmittedHeadSHA)
-}
-
-func certifiedPushedCustodyTransformation(repo *db.Repo, run *db.Run, branch string) bool {
-	return run != nil && terminalRunStatus(run.Status) && run.TerminalHeadVerifiedAt != nil &&
-		exactPushedBinding(repo, run, branch) && run.SubmittedHeadSHA != nil && run.HeadSHA != ptr(run.SubmittedHeadSHA)
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
