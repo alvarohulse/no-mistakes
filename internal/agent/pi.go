@@ -125,10 +125,10 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
 	if res != nil {
-		res.UsageCoverage = usageCoverageForCompleteStream(
-			pp.sawAgentEnd && pp.agentEndUsageComplete && pp.usage.Reported,
-			false,
-		)
+		// agent_end proves that the top-level assistant messages were fully
+		// reported, but Pi extensions can run nested agents whose usage is not
+		// represented by those messages. The adapter cannot prove completeness.
+		res.UsageCoverage = UsageCoverageUnknown
 	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
