@@ -429,11 +429,6 @@ func TestContractPipelineIsPerStepData(t *testing.T) {
 		Invocations: []db.AgentInvocation{{
 			StepName: string(types.StepRefresh), Round: 1, Purpose: "refresh",
 			Agent: "claude", Model: "claude-opus-5", ModelProvider: &provider,
-			InvocationMode:            types.AgentInvocationModeHarnessCLI,
-			AgentObservationsReported: true,
-			AgentObservations: []types.AgentObservation{
-				{Identity: "Explore", InvocationMode: types.AgentInvocationModeSubagentTool},
-			},
 		}},
 	})
 
@@ -458,11 +453,8 @@ func TestContractPipelineIsPerStepData(t *testing.T) {
 		t.Fatalf("agents = %+v", step.Agents)
 	}
 	agent := step.Agents[0]
-	if agent.Model != "claude-opus-5" || agent.Vendor != "anthropic" || agent.InvocationMode != "harness_cli" {
+	if agent.Model != "claude-opus-5" || agent.Vendor != "anthropic" {
 		t.Errorf("agent telemetry = %+v", agent)
-	}
-	if !agent.NestedReported || len(agent.Nested) != 1 || agent.Nested[0].Identity != "Explore" {
-		t.Errorf("nested agents = %+v", agent.Nested)
 	}
 }
 

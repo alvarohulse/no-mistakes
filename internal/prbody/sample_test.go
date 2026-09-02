@@ -51,7 +51,7 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 
 	commandSteps := map[string]bool{"refresh": false, "build": false, "test": false, "lint": false, "push": false}
-	var completeTelemetry, supportedNested, unsupportedNested bool
+	var completeTelemetry bool
 	for _, step := range s.Pipeline.Steps {
 		if _, ok := commandSteps[step.Name]; ok {
 			commandSteps[step.Name] = len(step.Commands) > 0
@@ -65,12 +65,6 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			t.Errorf("sample successful/skipped step %q has no evidence or explanation", step.Name)
 		}
 		for _, run := range step.Agents {
-			if run.NestedReported {
-				supportedNested = true
-				if run.NestedCount == nil {
-					t.Errorf("sample supported nested-agent row has no exact count: %+v", run)
-				}
-			}
 			if (run.Agent == "claude" || run.Agent == "codex") && run.InputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil {
 				want := *run.UncachedInputTokens + *run.CacheReadTokens + *run.CacheWriteTokens
 				if *run.InputTokens != want {
@@ -86,9 +80,6 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			if run.Costs != nil {
 				t.Errorf("v5 sample carries legacy cost receipt: %+v", run.Costs)
 			}
-			if !run.NestedReported {
-				unsupportedNested = true
-			}
 		}
 	}
 	for step, populated := range commandSteps {
@@ -98,12 +89,6 @@ func TestSampleExercisesEverySection(t *testing.T) {
 	}
 	if !completeTelemetry {
 		t.Error("sample has no fully populated telemetry row")
-	}
-	if !supportedNested {
-		t.Error("sample does not exercise supported nested-agent telemetry")
-	}
-	if !unsupportedNested {
-		t.Error("sample does not exercise unsupported nested-agent telemetry")
 	}
 }
 
@@ -134,7 +119,7 @@ func TestSampleCoversNonHappyPathStates(t *testing.T) {
 	t.Parallel()
 	steps := Sample().Sections.Pipeline.Steps
 
-	var sawFailed, sawRunning, sawMultiRound, sawFindings, sawNested, sawTwoVendors bool
+	var sawFailed, sawRunning, sawMultiRound, sawFindings, sawTwoVendors bool
 	vendors := map[string]bool{}
 	for _, step := range steps {
 		switch step.Status {
@@ -150,9 +135,6 @@ func TestSampleCoversNonHappyPathStates(t *testing.T) {
 			sawFindings = true
 		}
 		for _, a := range step.Agents {
-			if len(a.Nested) > 0 {
-				sawNested = true
-			}
 			if a.Vendor != "" {
 				vendors[a.Vendor] = true
 			}
@@ -165,7 +147,6 @@ func TestSampleCoversNonHappyPathStates(t *testing.T) {
 		"an in-flight step":          sawRunning,
 		"a multi-round step":         sawMultiRound,
 		"a step with findings":       sawFindings,
-		"a nested agent":             sawNested,
 		"more than one model vendor": sawTwoVendors,
 	} {
 		if !ok {
@@ -222,7 +203,7 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 			t.Errorf("v2 sample step %q carries v3-only evidence: %+v", step.Name, step)
 		}
 		for _, run := range step.Agents {
-			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 || run.NestedCount != nil ||
+			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 ||
 				run.InputTokens != nil || run.OutputTokens != nil || run.UncachedInputTokens != nil ||
 				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil || run.Costs != nil {
 				t.Errorf("v2 sample agent row carries v3-only telemetry: %+v", run)

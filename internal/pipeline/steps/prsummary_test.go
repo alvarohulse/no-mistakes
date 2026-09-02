@@ -84,9 +84,8 @@ func TestBuildPipelineSummary_EmitsStructuredStepAttestation(t *testing.T) {
 	}
 
 	invocations := []db.AgentInvocation{{
-		StepName:       string(types.StepReview),
-		Agent:          "codex",
-		InvocationMode: types.AgentInvocationModeHarnessCLI,
+		StepName: string(types.StepReview),
+		Agent:    "codex",
 	}}
 	got, _ := buildPipelineSummary(steps, nil, invocations, types.RefreshStrategyRebase, testPipelineHeadSHA)
 	repeated, _ := buildPipelineSummary(steps, nil, invocations, types.RefreshStrategyRebase, testPipelineHeadSHA)

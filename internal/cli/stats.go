@@ -358,14 +358,14 @@ func renderRunAudit(w io.Writer, audit *runstats.RunAudit) error {
 	// Table 1: session, timing split, activity, workload, and findings.
 	fmt.Fprintln(w)
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tAGENT\tINVOKED VIA\tNESTED AGENTS\tMODEL\tPROVIDER\tREVIEW ROUTE\tSESSION\tKEY\tDURATION\tMODEL TIME\tSUBPROC\tRT\tTOOLS (w/t/e/r/g/o)\tFIND\tWORK (f/l)\tFALLBACK\tEXIT")
+	fmt.Fprintln(tw, "STEP\tROUND\tPURPOSE\tAGENT\tMODEL\tPROVIDER\tREVIEW ROUTE\tSESSION\tKEY\tDURATION\tMODEL TIME\tSUBPROC\tRT\tTOOLS (w/t/e/r/g/o)\tFIND\tWORK (f/l)\tFALLBACK\tEXIT")
 	for _, inv := range audit.Invocations {
 		exit := inv.ExitStatus
 		if inv.FailureCategory != nil && *inv.FailureCategory != inv.ExitStatus {
 			exit += "/" + *inv.FailureCategory
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.Agent, orUnknown(string(inv.InvocationMode)), formatAgentObservations(inv), orUnknown(deref(inv.Model)), orUnknown(deref(inv.Provider)), formatReviewReceipt(inv.Review),
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			inv.Step.DisplayName(audit.Run.RefreshStrategy), inv.Round, inv.Purpose, inv.Agent, orUnknown(deref(inv.Model)), orUnknown(deref(inv.Provider)), formatReviewReceipt(inv.Review),
 			inv.SessionMode, inv.SessionKey,
 			formatMS(inv.DurationMS), formatModelTime(inv), optMS(inv.Activity.SubprocessWaitMS),
 			optInt(inv.Activity.ModelRoundtrips), formatToolHistogram(inv), optInt(inv.Activity.FindingCount),
@@ -469,23 +469,6 @@ func formatWorkload(inv runstats.Invocation) string {
 		return "-"
 	}
 	return fmt.Sprintf("%s/%s", optInt(inv.Activity.WorkloadFiles), optInt(inv.Activity.WorkloadLines))
-}
-
-func formatAgentObservations(inv runstats.Invocation) string {
-	if !inv.NestedAgentsReported {
-		return "-"
-	}
-	if len(inv.NestedAgents) == 0 {
-		if inv.NestedAgentCount != nil && *inv.NestedAgentCount > 0 {
-			return strconv.Itoa(*inv.NestedAgentCount)
-		}
-		return "none"
-	}
-	observations := make([]string, 0, len(inv.NestedAgents))
-	for _, observation := range inv.NestedAgents {
-		observations = append(observations, fmt.Sprintf("%s (%s)", observation.Identity, observation.InvocationMode))
-	}
-	return strings.Join(observations, ", ")
 }
 
 func optSkipSource(source *types.SkipSource) string {

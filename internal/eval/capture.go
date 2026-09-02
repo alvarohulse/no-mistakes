@@ -74,47 +74,43 @@ type sourceStep struct {
 }
 
 type sourceInvocation struct {
-	StepName                  string                    `json:"step_name"`
-	Round                     int                       `json:"round"`
-	Purpose                   string                    `json:"purpose"`
-	Agent                     string                    `json:"agent"`
-	UsageCoverage             agent.UsageCoverage       `json:"usage_coverage"`
-	InvocationMode            types.AgentInvocationMode `json:"invocation_mode,omitempty"`
-	AgentObservations         []types.AgentObservation  `json:"agent_observations,omitempty"`
-	AgentObservationsReported bool                      `json:"agent_observations_reported,omitempty"`
-	NestedAgentCount          *int                      `json:"nested_agent_count,omitempty"`
-	Model                     string                    `json:"model,omitempty"`
-	ModelProvider             *string                   `json:"model_provider,omitempty"`
-	SessionMode               string                    `json:"session_mode,omitempty"`
-	FallbackReason            *string                   `json:"fallback_reason,omitempty"`
-	StartedAt                 int64                     `json:"started_at,omitempty"`
-	CompletedAt               int64                     `json:"completed_at,omitempty"`
-	DurationMS                int64                     `json:"duration_ms"`
-	SubprocessWaitMS          *int64                    `json:"subprocess_wait_ms,omitempty"`
-	InputTokens               int                       `json:"input_tokens"`
-	OutputTokens              int                       `json:"output_tokens"`
-	CacheReadTokens           int                       `json:"cache_read_tokens"`
-	CacheCreationTokens       *int                      `json:"cache_creation_tokens,omitempty"`
-	FreshInputTokens          *int                      `json:"fresh_input_tokens,omitempty"`
-	ReasoningTokens           *int                      `json:"reasoning_tokens,omitempty"`
-	DeltaInputTokens          *int                      `json:"delta_input_tokens,omitempty"`
-	DeltaOutputTokens         *int                      `json:"delta_output_tokens,omitempty"`
-	DeltaCacheReadTokens      *int                      `json:"delta_cache_read_tokens,omitempty"`
-	DeltaCacheCreationTokens  *int                      `json:"delta_cache_creation_tokens,omitempty"`
-	ReportedCostUSD           *float64                  `json:"reported_cost_usd,omitempty"`
-	ModelRoundtrips           *int                      `json:"model_roundtrips,omitempty"`
-	ToolCalls                 *int                      `json:"tool_calls,omitempty"`
-	ToolWaitCalls             *int                      `json:"tool_wait_calls,omitempty"`
-	ToolTestLintCalls         *int                      `json:"tool_test_lint_calls,omitempty"`
-	ToolEditCalls             *int                      `json:"tool_edit_calls,omitempty"`
-	ToolReadCalls             *int                      `json:"tool_read_calls,omitempty"`
-	ToolGitCalls              *int                      `json:"tool_git_calls,omitempty"`
-	ToolOtherCalls            *int                      `json:"tool_other_calls,omitempty"`
-	WorkloadFiles             *int                      `json:"workload_files,omitempty"`
-	WorkloadLines             *int                      `json:"workload_lines,omitempty"`
-	FindingCount              *int                      `json:"finding_count,omitempty"`
-	ExitStatus                string                    `json:"exit_status"`
-	FailureCategory           string                    `json:"failure_category,omitempty"`
+	StepName                 string              `json:"step_name"`
+	Round                    int                 `json:"round"`
+	Purpose                  string              `json:"purpose"`
+	Agent                    string              `json:"agent"`
+	UsageCoverage            agent.UsageCoverage `json:"usage_coverage"`
+	Model                    string              `json:"model,omitempty"`
+	ModelProvider            *string             `json:"model_provider,omitempty"`
+	SessionMode              string              `json:"session_mode,omitempty"`
+	FallbackReason           *string             `json:"fallback_reason,omitempty"`
+	StartedAt                int64               `json:"started_at,omitempty"`
+	CompletedAt              int64               `json:"completed_at,omitempty"`
+	DurationMS               int64               `json:"duration_ms"`
+	SubprocessWaitMS         *int64              `json:"subprocess_wait_ms,omitempty"`
+	InputTokens              int                 `json:"input_tokens"`
+	OutputTokens             int                 `json:"output_tokens"`
+	CacheReadTokens          int                 `json:"cache_read_tokens"`
+	CacheCreationTokens      *int                `json:"cache_creation_tokens,omitempty"`
+	FreshInputTokens         *int                `json:"fresh_input_tokens,omitempty"`
+	ReasoningTokens          *int                `json:"reasoning_tokens,omitempty"`
+	DeltaInputTokens         *int                `json:"delta_input_tokens,omitempty"`
+	DeltaOutputTokens        *int                `json:"delta_output_tokens,omitempty"`
+	DeltaCacheReadTokens     *int                `json:"delta_cache_read_tokens,omitempty"`
+	DeltaCacheCreationTokens *int                `json:"delta_cache_creation_tokens,omitempty"`
+	ReportedCostUSD          *float64            `json:"reported_cost_usd,omitempty"`
+	ModelRoundtrips          *int                `json:"model_roundtrips,omitempty"`
+	ToolCalls                *int                `json:"tool_calls,omitempty"`
+	ToolWaitCalls            *int                `json:"tool_wait_calls,omitempty"`
+	ToolTestLintCalls        *int                `json:"tool_test_lint_calls,omitempty"`
+	ToolEditCalls            *int                `json:"tool_edit_calls,omitempty"`
+	ToolReadCalls            *int                `json:"tool_read_calls,omitempty"`
+	ToolGitCalls             *int                `json:"tool_git_calls,omitempty"`
+	ToolOtherCalls           *int                `json:"tool_other_calls,omitempty"`
+	WorkloadFiles            *int                `json:"workload_files,omitempty"`
+	WorkloadLines            *int                `json:"workload_lines,omitempty"`
+	FindingCount             *int                `json:"finding_count,omitempty"`
+	ExitStatus               string              `json:"exit_status"`
+	FailureCategory          string              `json:"failure_category,omitempty"`
 }
 
 // ErrNoCapturableReview marks the outcomes where a run simply holds nothing to
@@ -463,10 +459,8 @@ func sourceInvocationsFor(invocations []db.AgentInvocation) []sourceInvocation {
 	for _, inv := range invocations {
 		out = append(out, sourceInvocation{
 			StepName: inv.StepName, Round: inv.Round, Purpose: inv.Purpose, Agent: inv.Agent,
-			UsageCoverage:  inv.UsageCoverage,
-			InvocationMode: inv.InvocationMode, AgentObservations: inv.AgentObservations,
-			AgentObservationsReported: inv.AgentObservationsReported, NestedAgentCount: inv.NestedAgentCount,
-			Model: inv.Model, ModelProvider: inv.ModelProvider, SessionMode: inv.SessionMode,
+			UsageCoverage: inv.UsageCoverage,
+			Model:         inv.Model, ModelProvider: inv.ModelProvider, SessionMode: inv.SessionMode,
 			FallbackReason: inv.FallbackReason, StartedAt: inv.StartedAt, CompletedAt: inv.CompletedAt,
 			DurationMS: inv.DurationMS, SubprocessWaitMS: inv.SubprocessWaitMS,
 			InputTokens: inv.InputTokens, OutputTokens: inv.OutputTokens, CacheReadTokens: inv.CacheReadTokens,

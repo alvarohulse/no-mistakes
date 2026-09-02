@@ -159,9 +159,9 @@ func renderText(report *Report, forceDetails bool) string {
 	}
 	for _, agent := range report.Agents {
 		invocation := agent.Invocation
-		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s usage_coverage=%s invoked_via=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s reported_cost_usd=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s nested_agents=%s\n",
-			agent.RunID, invocation.ID, invocation.Step, invocation.Round, invocation.Purpose, invocation.Agent, invocation.UsageCoverage, invocation.InvocationMode, textString(invocation.Model), textString(invocation.Provider), invocation.ExitStatus, invocation.SessionMode, invocation.DurationMS,
-			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textFloat(invocation.ReportedCostUSD), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines), textNestedAgents(invocation))
+		fmt.Fprintf(&out, "agent %s/%s step=%s round=%d purpose=%s harness=%s usage_coverage=%s model=%s provider=%s status=%s session=%s duration_ms=%d delta_input_tokens=%s raw_input_tokens=%s cache_write_tokens=%s reported_cost_usd=%s subprocess_wait_ms=%s roundtrips=%s tool_calls=%s test_lint_calls=%s workload=%s/%s\n",
+			agent.RunID, invocation.ID, invocation.Step, invocation.Round, invocation.Purpose, invocation.Agent, invocation.UsageCoverage, textString(invocation.Model), textString(invocation.Provider), invocation.ExitStatus, invocation.SessionMode, invocation.DurationMS,
+			textInt(invocation.DeltaUsage.InputTokens), textInt(invocation.RawUsage.InputTokens), textInt(invocation.RawUsage.CacheWriteTokens), textFloat(invocation.ReportedCostUSD), textInt64(invocation.Activity.SubprocessWaitMS), textInt(invocation.Activity.ModelRoundtrips), textInt(invocation.Activity.ToolCalls), textInt(invocation.Activity.ToolTestLintCalls), textInt(invocation.Activity.WorkloadFiles), textInt(invocation.Activity.WorkloadLines))
 	}
 	for _, record := range report.Metrics.Items {
 		renderMetricsText(&out, "metric "+record.RunID, record.Metrics)
@@ -273,23 +273,6 @@ func provenanceProfile(value legacycost.Provenance) string {
 		return "—"
 	}
 	return fmt.Sprintf("%s/v%d", value.ProfileID, value.ProfileVersion)
-}
-
-func textNestedAgents(invocation Invocation) string {
-	if !invocation.NestedAgentsReported {
-		return "—"
-	}
-	if len(invocation.NestedAgents) == 0 {
-		if invocation.NestedAgentCount != nil {
-			return strconv.Itoa(*invocation.NestedAgentCount)
-		}
-		return "0"
-	}
-	values := make([]string, 0, len(invocation.NestedAgents))
-	for _, observation := range invocation.NestedAgents {
-		values = append(values, fmt.Sprintf("%s(%s)", observation.Identity, observation.InvocationMode))
-	}
-	return strings.Join(values, ",")
 }
 
 func renderMetricsText(out *strings.Builder, prefix string, metrics Metrics) {

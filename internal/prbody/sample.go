@@ -70,7 +70,6 @@ func SampleV2() *Contract {
 				run.CacheReadTokens = nil
 				run.CacheWriteTokens = nil
 				run.ReportedCostUSD = nil
-				run.NestedCount = nil
 			}
 		}
 	}
@@ -232,12 +231,11 @@ func sampleWithLegacyCosts() *Contract {
 						},
 						Agents: []AgentRun{{
 							Round: 1, Purpose: "intent", Agent: "claude", Model: "claude-opus-5",
-							Provider: "anthropic", Vendor: "anthropic", InvocationMode: "harness_cli",
+							Provider: "anthropic", Vendor: "anthropic",
 							StartedAt: 1786500000, DurationMS: 2140,
 							InputTokens: integer(1400), OutputTokens: integer(180), UncachedInputTokens: integer(700),
 							CacheReadTokens: integer(500), CacheWriteTokens: integer(200), ReportedCostUSD: usd(0.08),
-							Costs:          costs(0.08, 0.09, 0.09),
-							NestedReported: true, NestedCount: integer(0),
+							Costs: costs(0.08, 0.09, 0.09),
 						}},
 					},
 					{
@@ -255,21 +253,16 @@ func sampleWithLegacyCosts() *Contract {
 						Agents: []AgentRun{
 							{
 								Round: 1, Purpose: "review", Agent: "claude", Model: "claude-opus-5",
-								Provider: "anthropic", Vendor: "anthropic", InvocationMode: "harness_cli",
+								Provider: "anthropic", Vendor: "anthropic",
 								StartedAt: 1786500300, DurationMS: 241000,
 								InputTokens: integer(900000), OutputTokens: integer(18000), UncachedInputTokens: integer(120000),
 								CacheReadTokens: integer(730000), CacheWriteTokens: integer(50000), ReportedCostUSD: usd(4.65),
-								NestedReported: true, NestedCount: integer(2),
-								Nested: []NestedAgent{
-									{Identity: "Explore:session-1", InvocationMode: "subagent_tool"},
-									{Identity: "Explore:session-2", InvocationMode: "subagent_tool"},
-								},
 							},
 							{
 								Round: 2, Purpose: "review-fix", Agent: "cursor", Model: "claude-4.5-sonnet",
-								InvocationMode: "harness_cli", StartedAt: 1786500541, DurationMS: 70420,
+								StartedAt: 1786500541, DurationMS: 70420,
 								OutputTokens: integer(6400), UncachedInputTokens: integer(9000),
-								CacheReadTokens: integer(32000), CacheWriteTokens: integer(11000), NestedReported: false,
+								CacheReadTokens: integer(32000), CacheWriteTokens: integer(11000),
 							},
 						},
 					},
@@ -292,10 +285,10 @@ func sampleWithLegacyCosts() *Contract {
 						Evidence: []string{"Scheduler regression suite passed after repairing the exhausted-budget assertion."},
 						Agents: []AgentRun{{
 							Round: 2, Purpose: "test-evidence", Agent: "codex", Model: "gpt-5.6-sol",
-							Provider: "openai", Vendor: "openai", InvocationMode: "harness_cli",
+							Provider: "openai", Vendor: "openai",
 							StartedAt: 1786500620, DurationMS: 178300,
 							InputTokens: integer(93000), OutputTokens: integer(12400), UncachedInputTokens: integer(13000),
-							CacheReadTokens: integer(72000), CacheWriteTokens: integer(8000), NestedReported: false,
+							CacheReadTokens: integer(72000), CacheWriteTokens: integer(8000),
 						}},
 					},
 					{

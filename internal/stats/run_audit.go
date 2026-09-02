@@ -14,7 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -95,33 +95,29 @@ type SkipReceipt struct {
 }
 
 type Invocation struct {
-	ID                   string                    `json:"id"`
-	Step                 types.StepName            `json:"step"`
-	Round                int                       `json:"round"`
-	Purpose              string                    `json:"purpose"`
-	Agent                string                    `json:"agent"`
-	UsageCoverage        agent.UsageCoverage       `json:"usage_coverage"`
-	InvocationMode       types.AgentInvocationMode `json:"invocation_mode"`
-	NestedAgentsReported bool                      `json:"nested_agents_reported"`
-	NestedAgentCount     *int                      `json:"nested_agent_count"`
-	NestedAgents         []types.AgentObservation  `json:"nested_agents"`
-	Model                *string                   `json:"model"`
-	Provider             *string                   `json:"provider"`
-	Review               *ReviewReceipt            `json:"review"`
-	SessionMode          string                    `json:"session_mode"`
-	SessionKey           string                    `json:"session_key"`
-	FallbackReason       *string                   `json:"fallback_reason"`
-	StartedAt            int64                     `json:"started_at"`
-	CompletedAt          int64                     `json:"completed_at"`
-	DurationMS           int64                     `json:"duration_ms"`
-	ExitStatus           string                    `json:"exit_status"`
-	FailureCategory      *string                   `json:"failure_category"`
-	RawUsage             TokenMeters               `json:"raw_usage"`
-	DeltaUsage           TokenMeters               `json:"delta_usage"`
-	ReportedCostUSD      *float64                  `json:"reported_cost_usd"`
-	Costs                legacycost.CostClasses    `json:"costs"`
-	HistoricalCosts      bool                      `json:"historical_costs"`
-	Activity             Activity                  `json:"activity"`
+	ID              string                 `json:"id"`
+	Step            types.StepName         `json:"step"`
+	Round           int                    `json:"round"`
+	Purpose         string                 `json:"purpose"`
+	Agent           string                 `json:"agent"`
+	UsageCoverage   agent.UsageCoverage    `json:"usage_coverage"`
+	Model           *string                `json:"model"`
+	Provider        *string                `json:"provider"`
+	Review          *ReviewReceipt         `json:"review"`
+	SessionMode     string                 `json:"session_mode"`
+	SessionKey      string                 `json:"session_key"`
+	FallbackReason  *string                `json:"fallback_reason"`
+	StartedAt       int64                  `json:"started_at"`
+	CompletedAt     int64                  `json:"completed_at"`
+	DurationMS      int64                  `json:"duration_ms"`
+	ExitStatus      string                 `json:"exit_status"`
+	FailureCategory *string                `json:"failure_category"`
+	RawUsage        TokenMeters            `json:"raw_usage"`
+	DeltaUsage      TokenMeters            `json:"delta_usage"`
+	ReportedCostUSD *float64               `json:"reported_cost_usd"`
+	Costs           legacycost.CostClasses `json:"costs"`
+	HistoricalCosts bool                   `json:"historical_costs"`
+	Activity        Activity               `json:"activity"`
 }
 
 type TokenMeters struct {
@@ -389,10 +385,8 @@ func cloneRunnerProvenance(value *runner.Provenance) *runner.Provenance {
 func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) (Invocation, []string) {
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
-		UsageCoverage:  row.UsageCoverage,
-		InvocationMode: row.InvocationMode, NestedAgentsReported: row.AgentObservationsReported, NestedAgentCount: cloneInt(row.NestedAgentCount),
-		NestedAgents: append([]types.AgentObservation(nil), row.AgentObservations...),
-		Model:        nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),
+		UsageCoverage: row.UsageCoverage,
+		Model:         nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),
 		SessionMode: row.SessionMode, SessionKey: row.SessionKey, FallbackReason: cloneString(row.FallbackReason),
 		StartedAt: row.StartedAt, CompletedAt: row.CompletedAt, DurationMS: row.DurationMS, ExitStatus: row.ExitStatus,
 		FailureCategory: nonEmptyValue(row.FailureCategory), ReportedCostUSD: cloneFloat64(row.ReportedCostUSD),
@@ -408,7 +402,6 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 			FindingCount: cloneInt(row.FindingCount),
 		},
 	}
-	result.NestedAgents = nonNilObservations(result.NestedAgents)
 	if row.DeltaInputTokens != nil {
 		result.RawUsage.InputTokens = intValue(row.InputTokens)
 	}
@@ -479,13 +472,6 @@ func sameReviewPool(actual, expected []ReviewCandidate) bool {
 		}
 	}
 	return true
-}
-
-func nonNilObservations(values []types.AgentObservation) []types.AgentObservation {
-	if values == nil {
-		return []types.AgentObservation{}
-	}
-	return values
 }
 
 func nonEmptyString(value *string) *string {
