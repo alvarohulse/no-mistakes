@@ -285,6 +285,13 @@ func TestProjectionsCarryOnlyCLIReportedCost(t *testing.T) {
 	if !strings.Contains(textOutput, "reported_cost_usd=9.25") {
 		t.Fatalf("text projection omitted CLI-reported cost:\n%s", textOutput)
 	}
+	if !strings.Contains(textOutput, "data_error run=") {
+		t.Fatalf("text projection omitted data error:\n%s", textOutput)
+	}
+	errorRow := byPath["/data_errors/0/detail"]
+	if errorRow[8] == "" {
+		t.Fatalf("data error CSV fact = %v", errorRow)
+	}
 }
 
 func TestProjectionsMarkMissingCLIReportedCostAsUnreported(t *testing.T) {
