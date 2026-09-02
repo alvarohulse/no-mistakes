@@ -323,11 +323,12 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 				db.OptionalStringsEqual(candidate.RunnerVersion, definitionResolution.Provenance.Version) &&
 				sameStateID(candidate.InputStateID, inputStateID) &&
 				sameStateID(candidate.ResultStateID, inputStateID) &&
-				candidate.CompletedAt != nil && candidate.Outcome != nil &&
-				db.RetryableCommandOutcome(*candidate.Outcome) {
-				retryOf = &candidate.ID
-				reason := db.CommandRetryReasonUnchangedAfterRepair
-				retryReason = &reason
+				candidate.CompletedAt != nil && candidate.Outcome != nil {
+				if db.RetryableCommandOutcome(*candidate.Outcome) {
+					retryOf = &candidate.ID
+					reason := db.CommandRetryReasonUnchangedAfterRepair
+					retryReason = &reason
+				}
 				break
 			}
 		}
@@ -371,11 +372,11 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if sctx.Ctx.Err() == nil {
 			afterSHA, stateErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 			if stateErr != nil {
-				resultStateErr = fmt.Errorf("resolve command result subject: %w", stateErr)
+				resultStateErr = fmt.Errorf("%w: resolve command result subject: %w", errCommandPersistence, stateErr)
 			} else {
 				resultStateID, stateErr = cleanCommandStateID(sctx.Ctx, sctx.WorkDir, afterSHA)
 				if stateErr != nil {
-					resultStateErr = fmt.Errorf("resolve command result state: %w", stateErr)
+					resultStateErr = fmt.Errorf("%w: resolve command result state: %w", errCommandPersistence, stateErr)
 				}
 			}
 		}
