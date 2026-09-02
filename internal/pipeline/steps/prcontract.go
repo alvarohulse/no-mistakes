@@ -249,7 +249,11 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 		section := &prbody.StaticTestsSection{}
 		hadCommands := false
-		if evidence, err := sr.Evidence(); err == nil {
+		if sr.EvidenceJSON != nil && strings.TrimSpace(*sr.EvidenceJSON) != "" {
+			evidence, err := sr.Evidence()
+			if err != nil {
+				return section
+			}
 			hadCommands = len(evidence.Commands) > 0
 			// CommandEvidence rows are independent attempts in v5. Preserve
 			// their recorded order and duplicates; do not infer supersession.
