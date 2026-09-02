@@ -320,6 +320,25 @@ func TestPiParser_SumsUniqueAssistantUsageAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestPiParser_UsesPartialAgentEndAggregateWithoutClaimingCompleteCoverage(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"message_end","message":{"role":"assistant","responseId":"r1","usage":{"input":99,"output":9}}}`,
+		`{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","usage":{"input":0,"output":0}},{"role":"assistant","responseId":"r2","content":[{"type":"text","text":"done"}]}]}`,
+	}, "\n")
+
+	pp := &piParser{}
+	if err := pp.parse(context.Background(), strings.NewReader(stream)); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := TokenUsage{Reported: true}
+	if pp.usage != want {
+		t.Fatalf("usage = %+v, want partial agent_end aggregate %+v", pp.usage, want)
+	}
+	if pp.agentEndUsageComplete {
+		t.Fatal("partial agent_end usage must not claim complete coverage")
+	}
+}
+
 func TestPiAgent_RunRejectsAssistantError(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakePi(t, dir, `#!/bin/sh

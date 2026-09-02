@@ -172,7 +172,7 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 	coverage := UsageCoverageUnknown
 	if result.terminalUsageReported || (result.assistantEvents > 0 && result.assistantUsageEvents == result.assistantEvents) ||
 		(result.assistantEvents == 0 && usage.Reported) {
-		coverage = usageCoverageForCompleteStream(true, result.nestedAgentCount > 0)
+		coverage = usageCoverageForCompleteStream(usage.Reported, result.nestedAgentCount > 0)
 	}
 	finalized := &Result{
 		Output:                    result.StructuredOutput,

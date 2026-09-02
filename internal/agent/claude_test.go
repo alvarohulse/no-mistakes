@@ -514,6 +514,20 @@ func TestClaudeAgent_NestedWorkMakesUsageCoverageUnknown(t *testing.T) {
 	}
 }
 
+func TestClaudeAgent_EmptyTerminalUsageLeavesCoverageUnknown(t *testing.T) {
+	result, err := finalizeClaudeResult(
+		&claudeResult{Subtype: "success", text: "done", terminalUsageReported: true},
+		nil,
+		TokenUsage{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for an empty terminal usage object", result.UsageCoverage)
+	}
+}
+
 func TestClaudeAgent_FinalizeResult_ErrorSubtypeNotRetryable(t *testing.T) {
 	_, err := finalizeClaudeResult(&claudeResult{Subtype: "error", IsError: true}, json.RawMessage(`{"type":"object"}`), TokenUsage{})
 	if err == nil {

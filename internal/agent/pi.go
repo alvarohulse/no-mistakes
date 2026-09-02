@@ -321,7 +321,7 @@ func (p *piParser) rememberAgentEnd(raw any) {
 			continue
 		}
 		usage := piUsageFrom(usageMap)
-		if piUsageIsZero(usage) {
+		if !usage.Reported {
 			continue
 		}
 		key := piUsageKey(msg)
@@ -335,14 +335,14 @@ func (p *piParser) rememberAgentEnd(raw any) {
 		total = piUsageAdd(total, usage)
 		coveredCount++
 	}
-	if assistantCount > 0 && coveredCount == assistantCount {
-		p.agentEndUsageComplete = true
+	if total.Reported {
 		p.usage = total
 		p.seenUsage = make(map[string]struct{}, len(seen))
 		for key := range seen {
 			p.seenUsage[key] = struct{}{}
 		}
 	}
+	p.agentEndUsageComplete = assistantCount > 0 && coveredCount == assistantCount
 
 	for i := len(messages) - 1; i >= 0; i-- {
 		if msg, ok := messages[i].(map[string]any); ok && msg["role"] == "assistant" {

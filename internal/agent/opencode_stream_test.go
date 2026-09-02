@@ -747,6 +747,30 @@ data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info"
 	}
 }
 
+func TestParseOpencodeSSE_OtherSessionIdleStopsWithoutCreditingCoverage(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"payload":{"type":"message.updated","properties":{"sessionID":"s1","info":{"id":"msg1","role":"assistant","tokens":{"input":17,"output":5}}}}}`,
+		``,
+		`data: {"payload":{"type":"session.idle","properties":{"sessionID":"other-session"}}}`,
+		``,
+		`data: {"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}`,
+		``,
+		``,
+	}, "\n")
+	state := &opencodeStreamState{
+		sessionID:  "s1",
+		textParts:  make(map[string]*opencodeTextPart),
+		usageByMsg: make(map[string]TokenUsage),
+	}
+
+	if err := parseOpencodeSSE(strings.NewReader(input), state); err != nil {
+		t.Fatalf("parseOpencodeSSE() error = %v", err)
+	}
+	if state.reachedIdle {
+		t.Fatal("other session idle must stop the global stream without crediting top-level completion")
+	}
+}
+
 func TestParseOpencodeSSE_CollectsNestedAgentInvocations(t *testing.T) {
 	input := `data: {"payload":{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"task-1","messageID":"asst-msg","type":"tool","tool":"task","state":{"status":"completed","input":{"subagent_type":"explore"}}}}}}
 
