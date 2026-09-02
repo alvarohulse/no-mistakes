@@ -11,12 +11,11 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	MetricReceiptSchemaVersion = 4
+	MetricReceiptSchemaVersion = 5
 	RichRunRetentionAge        = 14 * 24 * time.Hour
 	RichRunRetentionFloor      = 50
 )
@@ -32,7 +31,6 @@ type MetricReceipt struct {
 	Steps               []MetricStep       `json:"steps"`
 	Invocations         []MetricInvocation `json:"invocations"`
 	Metrics             Metrics            `json:"metrics"`
-	Costs               CostTotals         `json:"costs"`
 	IntegrityErrorCount int                `json:"integrity_error_count"`
 }
 
@@ -64,26 +62,25 @@ type MetricStep struct {
 }
 
 type MetricInvocation struct {
-	ID              string                 `json:"id"`
-	Step            types.StepName         `json:"step"`
-	Round           int                    `json:"round"`
-	Purpose         string                 `json:"purpose"`
-	Agent           string                 `json:"agent"`
-	UsageCoverage   agent.UsageCoverage    `json:"usage_coverage"`
-	Model           *string                `json:"model"`
-	Provider        *string                `json:"provider"`
-	SessionMode     string                 `json:"session_mode"`
-	FallbackReason  *string                `json:"fallback_reason"`
-	StartedAt       int64                  `json:"started_at"`
-	CompletedAt     int64                  `json:"completed_at"`
-	DurationMS      int64                  `json:"duration_ms"`
-	ExitStatus      string                 `json:"exit_status"`
-	FailureCategory *string                `json:"failure_category"`
-	RawUsage        TokenMeters            `json:"raw_usage"`
-	DeltaUsage      TokenMeters            `json:"delta_usage"`
-	ReportedCostUSD *float64               `json:"reported_cost_usd"`
-	Costs           legacycost.CostClasses `json:"costs"`
-	Activity        Activity               `json:"activity"`
+	ID              string              `json:"id"`
+	Step            types.StepName      `json:"step"`
+	Round           int                 `json:"round"`
+	Purpose         string              `json:"purpose"`
+	Agent           string              `json:"agent"`
+	UsageCoverage   agent.UsageCoverage `json:"usage_coverage"`
+	Model           *string             `json:"model"`
+	Provider        *string             `json:"provider"`
+	SessionMode     string              `json:"session_mode"`
+	FallbackReason  *string             `json:"fallback_reason"`
+	StartedAt       int64               `json:"started_at"`
+	CompletedAt     int64               `json:"completed_at"`
+	DurationMS      int64               `json:"duration_ms"`
+	ExitStatus      string              `json:"exit_status"`
+	FailureCategory *string             `json:"failure_category"`
+	RawUsage        TokenMeters         `json:"raw_usage"`
+	DeltaUsage      TokenMeters         `json:"delta_usage"`
+	ReportedCostUSD *float64            `json:"reported_cost_usd"`
+	Activity        Activity            `json:"activity"`
 }
 
 // RunArtifactCleanup binds the immutable filesystem targets selected at
@@ -272,7 +269,6 @@ func BuildMetricReceipt(database *db.DB, runID string, archivedAt time.Time) (*M
 		Steps:               []MetricStep{},
 		Invocations:         []MetricInvocation{},
 		Metrics:             audit.Metrics,
-		Costs:               audit.Costs,
 		IntegrityErrorCount: len(audit.IntegrityErrors),
 	}
 	stepStats := make([]db.StepStats, 0, len(audit.Steps))
@@ -327,7 +323,7 @@ func metricInvocation(invocation Invocation) MetricInvocation {
 		FallbackReason: cloneString(invocation.FallbackReason), StartedAt: invocation.StartedAt, CompletedAt: invocation.CompletedAt,
 		DurationMS: invocation.DurationMS, ExitStatus: invocation.ExitStatus, FailureCategory: cloneString(invocation.FailureCategory),
 		RawUsage: cloneTokenMeters(invocation.RawUsage), DeltaUsage: cloneTokenMeters(invocation.DeltaUsage),
-		ReportedCostUSD: cloneFloat64(invocation.ReportedCostUSD), Costs: invocation.Costs, Activity: invocation.Activity,
+		ReportedCostUSD: cloneFloat64(invocation.ReportedCostUSD), Activity: invocation.Activity,
 	}
 }
 
@@ -340,7 +336,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 			NoMistakesVersion: cloneString(receipt.Run.NoMistakesVersion), NoMistakesBuildSHA: cloneString(receipt.Run.NoMistakesBuildSHA),
 			ConfigSources: []ConfigDigest{}, RichDataRetained: false,
 		},
-		Steps: []Step{}, SkipReceipts: []SkipReceipt{}, Invocations: []Invocation{}, Metrics: receipt.Metrics, Costs: receipt.Costs, IntegrityErrors: []string{},
+		Steps: []Step{}, SkipReceipts: []SkipReceipt{}, Invocations: []Invocation{}, Metrics: receipt.Metrics, IntegrityErrors: []string{},
 	}
 	if receipt.IntegrityErrorCount > 0 {
 		audit.IntegrityErrors = []string{fmt.Sprintf("archived run recorded %d integrity errors before rich data was pruned", receipt.IntegrityErrorCount)}
@@ -365,7 +361,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 			FallbackReason: cloneString(stored.FallbackReason), StartedAt: stored.StartedAt, CompletedAt: stored.CompletedAt,
 			DurationMS: stored.DurationMS, ExitStatus: stored.ExitStatus, FailureCategory: cloneString(stored.FailureCategory),
 			RawUsage: cloneTokenMeters(stored.RawUsage), DeltaUsage: cloneTokenMeters(stored.DeltaUsage), ReportedCostUSD: cloneFloat64(stored.ReportedCostUSD),
-			Costs: stored.Costs, HistoricalCosts: stored.Costs != (legacycost.CostClasses{}), Activity: stored.Activity,
+			Activity: stored.Activity,
 		})
 	}
 	return audit
@@ -379,7 +375,7 @@ func decodeMetricReceipt(record *db.RunMetricReceipt) (*MetricReceipt, error) {
 	if err := json.Unmarshal([]byte(record.PayloadJSON), &receipt); err != nil {
 		return nil, fmt.Errorf("decode run metric receipt: %w", err)
 	}
-	if (receipt.SchemaVersion != MetricReceiptSchemaVersion && receipt.SchemaVersion != 3 && receipt.SchemaVersion != 2) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
+	if (receipt.SchemaVersion < 2 || receipt.SchemaVersion > MetricReceiptSchemaVersion) || receipt.Run.ID != record.RunID || receipt.Run.RepoID != record.RepoID || receipt.Run.Status != record.RunStatus || receipt.Run.CreatedAt != record.RunCreatedAt {
 		return nil, fmt.Errorf("run metric receipt %q identity mismatch", record.RunID)
 	}
 	for i := range receipt.Invocations {

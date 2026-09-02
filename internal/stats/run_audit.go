@@ -9,12 +9,11 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -23,7 +22,6 @@ type RunAudit struct {
 	SkipReceipts    []SkipReceipt `json:"skip_receipts"`
 	Invocations     []Invocation  `json:"invocations"`
 	Metrics         Metrics       `json:"metrics"`
-	Costs           CostTotals    `json:"costs"`
 	IntegrityErrors []string      `json:"integrity_errors"`
 }
 
@@ -95,29 +93,27 @@ type SkipReceipt struct {
 }
 
 type Invocation struct {
-	ID              string                 `json:"id"`
-	Step            types.StepName         `json:"step"`
-	Round           int                    `json:"round"`
-	Purpose         string                 `json:"purpose"`
-	Agent           string                 `json:"agent"`
-	UsageCoverage   agent.UsageCoverage    `json:"usage_coverage"`
-	Model           *string                `json:"model"`
-	Provider        *string                `json:"provider"`
-	Review          *ReviewReceipt         `json:"review"`
-	SessionMode     string                 `json:"session_mode"`
-	SessionKey      string                 `json:"session_key"`
-	FallbackReason  *string                `json:"fallback_reason"`
-	StartedAt       int64                  `json:"started_at"`
-	CompletedAt     int64                  `json:"completed_at"`
-	DurationMS      int64                  `json:"duration_ms"`
-	ExitStatus      string                 `json:"exit_status"`
-	FailureCategory *string                `json:"failure_category"`
-	RawUsage        TokenMeters            `json:"raw_usage"`
-	DeltaUsage      TokenMeters            `json:"delta_usage"`
-	ReportedCostUSD *float64               `json:"reported_cost_usd"`
-	Costs           legacycost.CostClasses `json:"costs"`
-	HistoricalCosts bool                   `json:"historical_costs"`
-	Activity        Activity               `json:"activity"`
+	ID              string              `json:"id"`
+	Step            types.StepName      `json:"step"`
+	Round           int                 `json:"round"`
+	Purpose         string              `json:"purpose"`
+	Agent           string              `json:"agent"`
+	UsageCoverage   agent.UsageCoverage `json:"usage_coverage"`
+	Model           *string             `json:"model"`
+	Provider        *string             `json:"provider"`
+	Review          *ReviewReceipt      `json:"review"`
+	SessionMode     string              `json:"session_mode"`
+	SessionKey      string              `json:"session_key"`
+	FallbackReason  *string             `json:"fallback_reason"`
+	StartedAt       int64               `json:"started_at"`
+	CompletedAt     int64               `json:"completed_at"`
+	DurationMS      int64               `json:"duration_ms"`
+	ExitStatus      string              `json:"exit_status"`
+	FailureCategory *string             `json:"failure_category"`
+	RawUsage        TokenMeters         `json:"raw_usage"`
+	DeltaUsage      TokenMeters         `json:"delta_usage"`
+	ReportedCostUSD *float64            `json:"reported_cost_usd"`
+	Activity        Activity            `json:"activity"`
 }
 
 type TokenMeters struct {
@@ -278,7 +274,6 @@ func BuildRunAudit(database *db.DB, runID string) (*RunAudit, error) {
 		audit.IntegrityErrors = append(audit.IntegrityErrors, errors...)
 	}
 	audit.Metrics, policyErrors = buildMetrics(audit.Invocations, databaseTotals)
-	audit.Costs = buildCostTotals(audit.Invocations)
 	audit.IntegrityErrors = append(audit.IntegrityErrors, policyErrors...)
 	return audit, nil
 }
@@ -415,8 +410,6 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	result.RawUsage.FreshInputTokens = cloneInt(row.FreshInputTokens)
 	result.RawUsage.ReasoningTokens = cloneInt(row.ReasoningTokens)
 	var integrityErrors []string
-	result.Costs, integrityErrors = invocationHistoricalCosts(row)
-	result.HistoricalCosts = row.PricingReceiptJSON != nil
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
@@ -429,17 +422,6 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	}
 	integrityErrors = append(integrityErrors, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)...)
 	return result, integrityErrors
-}
-
-func invocationHistoricalCosts(row db.AgentInvocation) (legacycost.CostClasses, []string) {
-	if row.PricingReceiptJSON == nil {
-		return legacycost.CostClasses{}, nil
-	}
-	receipt, err := legacycost.DecodeReceipt(*row.PricingReceiptJSON)
-	if err != nil {
-		return legacycost.CostClasses{}, []string{fmt.Sprintf("agent invocation %s historical pricing receipt could not be read: %v", row.ID, err)}
-	}
-	return receipt, nil
 }
 
 func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool, expectedReviewPool []ReviewCandidate) []string {
