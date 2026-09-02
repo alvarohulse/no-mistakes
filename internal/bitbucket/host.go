@@ -192,6 +192,7 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 		Number: strconv.Itoa(pr.ID),
 		URL:    prURL(h.repo, pr.ID, pr.URL),
 		Base:   pr.Base,
+		Title:  pr.Title,
 	}
 }
 

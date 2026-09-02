@@ -89,7 +89,7 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 
 	h := newTestHost(map[string]azdoTestResponse{
 		"az repos pr list --source-branch feature --status active --target-branch main --organization " + testOrg + " --project " + testProject + " --repository " + testRepo + " --output json": {
-			stdout: `[{"pullRequestId":42,"status":"active","targetRefName":"refs/heads/main","repository":{"webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo"}}]` + "\n",
+			stdout: `[{"pullRequestId":42,"status":"active","targetRefName":"refs/heads/main","title":"Keep this title","repository":{"webUrl":"https://dev.azure.com/myorg/myproject/_git/myrepo"}}]` + "\n",
 		},
 	})
 
@@ -108,6 +108,9 @@ func TestFindPRReturnsBrowsableURL(t *testing.T) {
 	}
 	if pr.Base != "main" {
 		t.Fatalf("FindPR() base = %q, want main", pr.Base)
+	}
+	if pr.Title != "Keep this title" {
+		t.Fatalf("FindPR() title = %q, want hosted title", pr.Title)
 	}
 }
 

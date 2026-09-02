@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/effectiveconfig"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
@@ -108,7 +110,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		updated := existing
 		retargeting := strings.TrimSpace(existing.Base) != "" && strings.TrimSpace(existing.Base) != baseBranch
 		baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
-		content, buildErr := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
+		content, buildErr := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider), existing)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -146,7 +148,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 	// Resolve the complete owned branch delta for the initial marked body.
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
-	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider))
+	content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, scm.MaxPRBodyChars(provider), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +293,7 @@ func describePR(pr *scm.PR) string {
 	return ""
 }
 
-func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
+func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int, existing *scm.PR) (prContent, error) {
 	ctx := sctx.Ctx
 	renderBodyLimit := bodyLimit
 	if renderBodyLimit > 0 {
@@ -319,6 +321,22 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	// when a formatter is configured, the contract that replaces it.
 	records := LoadRunRecords(sctx.DB, sctx.Run.ID)
 	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, records)
+	persisted, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		return prContent{}, fmt.Errorf("load run PR narrative: %w", err)
+	}
+	if persisted != nil {
+		return renderRunNarrative(sctx, provider, records, scope, *persisted, riskLine, testingMD, pipelineMD, renderBodyLimit, bodyLimit)
+	}
+
+	priorInvocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+	if err != nil {
+		return prContent{}, fmt.Errorf("load PR drafting invocations: %w", err)
+	}
+	priorInvocationIDs := make(map[string]struct{}, len(priorInvocations))
+	for _, invocation := range priorInvocations {
+		priorInvocationIDs[invocation.ID] = struct{}{}
+	}
 
 	prompt := fmt.Sprintf(`Draft a pull request title, self-contained summary, and What Changed content for the full branch delta.
 
@@ -353,15 +371,17 @@ Final diff paths and statuses:
 		CWD:        sctx.WorkDir,
 		JSONSchema: prContentSchema,
 		OnChunk:    sctx.LogChunk,
+		Purpose:    string(types.StepPR),
 	})
+	var content prContent
+	validDraft := false
+	source := db.NarrativeSourceAgent
+	var draftingInvocationID *string
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
-		return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit))
-	}
-
-	var content prContent
-	if result.Output != nil {
+		content = fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
+		source = db.NarrativeSourceFallback
+	} else if result.Output != nil {
 		if err := json.Unmarshal(result.Output, &content); err == nil {
 			content.Title = strings.TrimSpace(content.Title)
 			content.Summary = stripLeadingSectionHeading(strings.TrimSpace(content.Summary), "Summary")
@@ -379,22 +399,68 @@ Final diff paths and statuses:
 				if content.Title != originalTitle {
 					slog.Warn("tightened agent PR title type", "from", originalTitle, "to", content.Title)
 				}
-				// Kept before assembly: the contract wants the agent's own
-				// What Changed prose, not the assembled body it ends up in.
-				whatChanged := content.WhatChanged
-				narrative := buildPRNarrative(content.Summary, whatChanged)
-				if renderBodyLimit > 0 {
-					content.Body = assemblePRBody(sctx, narrative, riskLine, testingMD, pipelineMD, renderBodyLimit)
-				} else {
-					content.Body = buildPRBody(narrative, riskLine, testingMD, pipelineMD, sctx)
+				draftingInvocationID, err = latestPRDraftingInvocationID(sctx.DB, sctx.Run.ID, priorInvocationIDs)
+				if err != nil {
+					return prContent{}, err
 				}
-				return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, content, whatChanged, scope), bodyLimit))
+				validDraft = true
+			} else {
+				content = prContent{}
 			}
 		}
 	}
+	if !validDraft {
+		content = fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
+		source = db.NarrativeSourceFallback
+		draftingInvocationID = nil
+	}
 
-	fallback := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, renderBodyLimit)
-	return finalizePRContent(sctx, provider, redactOutboundPRContent(applyPRBodyHook(sctx, records, fallback, fallback.WhatChanged, scope), bodyLimit))
+	titleMode := db.NarrativeTitleModeAgent
+	if existing != nil {
+		if hostedTitle := strings.TrimSpace(existing.Title); hostedTitle != "" {
+			content.Title = hostedTitle
+		}
+		titleMode = db.NarrativeTitleModePreserved
+	}
+	narrative := db.RunNarrative{
+		RunID: sctx.Run.ID, Source: source, DraftingInvocationID: draftingInvocationID,
+		DraftedAt: time.Now().Unix(), BaseSHA: baseSHA, HeadSHA: sctx.Run.HeadSHA,
+		TitleMode: titleMode, TitleText: content.Title, Summary: content.Summary, WhatChanged: content.WhatChanged,
+	}
+	if err := sctx.DB.InsertRunNarrative(narrative); err != nil {
+		return prContent{}, fmt.Errorf("persist run PR narrative: %w", err)
+	}
+	return renderRunNarrative(sctx, provider, records, scope, narrative, riskLine, testingMD, pipelineMD, renderBodyLimit, bodyLimit)
+}
+
+func latestPRDraftingInvocationID(database *db.DB, runID string, priorIDs map[string]struct{}) (*string, error) {
+	invocations, err := database.GetAgentInvocationsByRun(runID)
+	if err != nil {
+		return nil, fmt.Errorf("load completed PR drafting invocation: %w", err)
+	}
+	for i := len(invocations) - 1; i >= 0; i-- {
+		invocation := invocations[i]
+		if _, existed := priorIDs[invocation.ID]; existed || invocation.StepName != string(types.StepPR) || invocation.Purpose != string(types.StepPR) || invocation.ExitStatus != "ok" {
+			continue
+		}
+		id := invocation.ID
+		return &id, nil
+	}
+	return nil, nil
+}
+
+func renderRunNarrative(sctx *pipeline.StepContext, provider scm.Provider, records RunRecords, scope prBodyScope, narrative db.RunNarrative, riskLine, testingMD, pipelineMD string, renderBodyLimit, bodyLimit int) (prContent, error) {
+	content := prContent{
+		Title: narrative.TitleText, Summary: narrative.Summary, WhatChanged: narrative.WhatChanged,
+	}
+	body := buildPRNarrative(content.Summary, content.WhatChanged)
+	if renderBodyLimit > 0 {
+		content.Body = assemblePRBody(sctx, body, riskLine, testingMD, pipelineMD, renderBodyLimit)
+	} else {
+		content.Body = buildPRBody(body, riskLine, testingMD, pipelineMD, sctx)
+	}
+	content = applyPRBodyHook(sctx, records, content, content.WhatChanged, scope)
+	return finalizePRContent(sctx, provider, redactOutboundPRContent(content, bodyLimit))
 }
 
 func finalizePRContent(sctx *pipeline.StepContext, provider scm.Provider, content prContent) (prContent, error) {

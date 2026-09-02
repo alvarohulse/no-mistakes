@@ -383,5 +383,6 @@ func (h *Host) toPR(raw *azPR) *scm.PR {
 		Number: id,
 		URL:    webPRURL(h.org, h.project, h.repo, raw.Repository.WebURL, id),
 		Base:   strings.TrimPrefix(strings.TrimSpace(raw.TargetRefName), "refs/heads/"),
+		Title:  strings.TrimSpace(raw.Title),
 	}
 }

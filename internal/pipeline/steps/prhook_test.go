@@ -292,7 +292,7 @@ func TestBuildPRContentPassesPreAssemblyWhatChangedToTheFormatter(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

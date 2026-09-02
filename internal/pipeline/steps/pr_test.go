@@ -1097,7 +1097,7 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr list --head feature --repo parent-owner/no-mistakes --state open --json number,url,baseRefName,headRefName,headRepositoryOwner") {
+	if !strings.Contains(ghLog, "pr list --head feature --repo parent-owner/no-mistakes --state open --json number,url,baseRefName,title,headRefName,headRepositoryOwner") {
 		t.Fatalf("expected PR lookup to use parent repo and bare head branch, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "pr list --head fork-owner:feature") {
@@ -1346,6 +1346,167 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	}
 	if strings.Contains(ghLog, "--title feature") {
 		t.Fatalf("expected PR title to avoid raw branch name, got:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_PersistsAgentNarrativeAndReusesItWithinRun(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+
+	var sctx *pipeline.StepContext
+	var invocationID string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			invocation, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+				RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "test",
+				SessionMode: db.InvocationModeCold, StartedAt: 10, CompletedAt: 11, DurationMS: 1000, ExitStatus: "ok",
+			})
+			if err != nil {
+				return nil, err
+			}
+			invocationID = invocation.ID
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat(pipeline): save narrative","summary":"Saved agent summary.","what_changed":"- Persist the draft."}`)}, nil
+		},
+	}
+	sctx = newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	first, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("run narrative was not persisted")
+	}
+	if first.Source != db.NarrativeSourceAgent || first.DraftingInvocationID == nil || *first.DraftingInvocationID != invocationID {
+		t.Fatalf("agent provenance = %#v, want invocation %q", first, invocationID)
+	}
+	if first.BaseSHA != baseSHA || first.HeadSHA != headSHA || first.DraftedAt == 0 {
+		t.Fatalf("draft provenance = %#v", first)
+	}
+	if first.TitleMode != db.NarrativeTitleModeAgent || first.TitleText != "feat(pipeline): save narrative" || first.Summary != "Saved agent summary." || first.WhatChanged != "- Persist the draft." {
+		t.Fatalf("persisted narrative = %#v", first)
+	}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatalf("retry Execute() error = %v", err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("drafting calls = %d, want 1 across same-run retry", len(ag.calls))
+	}
+	second, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == nil || second.DraftedAt != first.DraftedAt || second.Summary != first.Summary || second.WhatChanged != first.WhatChanged {
+		t.Fatalf("retry changed the persisted narrative: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestPRStep_PersistsFallbackNarrativeAndReusesItWithinRun(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return nil, fmt.Errorf("draft unavailable")
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("drafting calls = %d, want 1 across same-run fallback reuse", len(ag.calls))
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil || narrative.TitleMode != db.NarrativeTitleModeAgent || narrative.TitleText != "chore: update pull request" {
+		t.Fatalf("fallback provenance = %#v", narrative)
+	}
+}
+
+func TestPRStep_NewRunDraftsNewNarrativeAtSameHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(fmt.Sprintf(`{"title":"feat(pipeline): draft run %d","summary":"Summary %d.","what_changed":"- Change %d."}`, calls, calls, calls))}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	step := &PRStep{}
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	firstRunID := sctx.Run.ID
+	secondRun, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = secondRun
+	if _, err := step.Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("drafting calls = %d, want one per run", calls)
+	}
+	first, _ := sctx.DB.GetRunNarrative(firstRunID)
+	second, _ := sctx.DB.GetRunNarrative(secondRun.ID)
+	if first == nil || second == nil || first.Summary == second.Summary {
+		t.Fatalf("separate runs reused one narrative: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestPRStep_ExistingPRPersistsHostedTitleWithoutUpdatingIt(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	env = append(env, "FAKE_CLI_PR_TITLE=Keep the hosted title")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: replace the title","summary":"New run summary.","what_changed":"- New run changes."}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.TitleMode != db.NarrativeTitleModePreserved || narrative.TitleText != "Keep the hosted title" || narrative.Summary != "New run summary." || narrative.WhatChanged != "- New run changes." {
+		t.Fatalf("preserved title provenance = %#v", narrative)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(lineContaining(string(logData), "pr edit 42"), "--title") {
+		t.Fatalf("existing hosted title was overwritten:\n%s", logData)
 	}
 }
 
@@ -2271,7 +2432,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 		}
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3216,7 +3377,7 @@ func TestPRStep_PromptRequiresReleaseTypesForProductImpact(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	step := &PRStep{}
-	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err != nil {
+	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {

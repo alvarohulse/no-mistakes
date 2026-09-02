@@ -86,8 +86,8 @@ func validateRunNarrative(n RunNarrative) error {
 	if n.TitleMode != NarrativeTitleModeCLI && n.TitleMode != NarrativeTitleModeAgent && n.TitleMode != NarrativeTitleModePreserved {
 		return fmt.Errorf("insert run narrative: invalid title mode %q", n.TitleMode)
 	}
-	if strings.TrimSpace(n.TitleText) == "" || strings.TrimSpace(n.Summary) == "" || strings.TrimSpace(n.WhatChanged) == "" {
-		return fmt.Errorf("insert run narrative: title, summary, and what changed are required")
+	if strings.TrimSpace(n.TitleText) == "" || strings.TrimSpace(n.WhatChanged) == "" {
+		return fmt.Errorf("insert run narrative: title and what changed are required")
 	}
 	return nil
 }

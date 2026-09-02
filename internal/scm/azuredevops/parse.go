@@ -14,6 +14,7 @@ type azPR struct {
 	MergeStatus   string `json:"mergeStatus"` // notSet | queued | conflicts | succeeded | rejectedByPolicy | failure
 	SourceRefName string `json:"sourceRefName"`
 	TargetRefName string `json:"targetRefName"`
+	Title         string `json:"title"`
 	URL           string `json:"url"` // _apis/... endpoint - NOT browsable
 	Description   string `json:"description"`
 	Repository    struct {

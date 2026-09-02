@@ -612,8 +612,8 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url,baseRefName": {
-			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"release/1.0"}]` + "\n",
+		"gh pr list --head feature/refactor --base release/1.0 --state open --json number,url,baseRefName,title": {
+			stdout: `[{"number":42,"url":"https://github.example.com/org/repo/pull/42","baseRefName":"release/1.0","title":"Keep this title"}]` + "\n",
 		},
 	}), nil, "", "")
 
@@ -633,6 +633,9 @@ func TestFindPRFiltersByBaseBranch(t *testing.T) {
 	if pr.Base != "release/1.0" {
 		t.Fatalf("FindPR() base = %q, want release/1.0", pr.Base)
 	}
+	if pr.Title != "Keep this title" {
+		t.Fatalf("FindPR() title = %q, want hosted title", pr.Title)
+	}
 }
 
 func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
@@ -640,11 +643,11 @@ func TestFindPRForkUsesBareHeadAndFiltersOwner(t *testing.T) {
 
 	branch := "feature/refactor"
 	host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
+		"gh pr list --head fork-owner:" + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,title,headRefName,headRepositoryOwner": {
 			stderr: `invalid argument: "--head" does not support "<owner>:<branch>"` + "\n",
 			code:   1,
 		},
-		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,headRefName,headRepositoryOwner": {
+		"gh pr list --head " + branch + " --base main --repo parent/repo --state open --json number,url,baseRefName,title,headRefName,headRepositoryOwner": {
 			stdout: `[` +
 				`{"number":40,"url":"https://github.com/parent/repo/pull/40","headRefName":"feature/refactor","headRepositoryOwner":{"login":"other-owner"}},` +
 				`{"number":42,"url":"https://github.com/parent/repo/pull/42","headRefName":"feature/refactor","headRepositoryOwner":{"login":"fork-owner"}}` +
@@ -671,7 +674,7 @@ func TestFindPRReturnsCLIError(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName": {
+		"gh pr list --head feature/refactor --base main --state open --json number,url,baseRefName,title": {
 			stderr: "api unavailable\n",
 			code:   1,
 		},
