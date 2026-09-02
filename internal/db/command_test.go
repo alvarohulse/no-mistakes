@@ -480,6 +480,15 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 	if attemptCount != 1 {
 		t.Fatalf("migrated attempts = %d, want 1", attemptCount)
 	}
+	var commandSource, runnerSource string
+	var runnerSchemaVersion int
+	var runnerVersion *string
+	if err := database.sql.QueryRow(`SELECT command_source, runner_schema_version, runner_source, runner_version FROM command_attempts WHERE id = 'attempt'`).Scan(&commandSource, &runnerSchemaVersion, &runnerSource, &runnerVersion); err != nil {
+		t.Fatal(err)
+	}
+	if commandSource != "base" || runnerSchemaVersion != 1 || runnerSource != "default" || runnerVersion == nil || *runnerVersion != "5.9" {
+		t.Fatalf("migrated attempt provenance = source %q schema %d runner %q version %v", commandSource, runnerSchemaVersion, runnerSource, runnerVersion)
+	}
 	var obsoleteCount int
 	if err := database.sql.QueryRow(`SELECT count(*) FROM pragma_table_info('command_definitions') WHERE name IN ('source', 'runner_schema_version', 'runner_source', 'runner_version')`).Scan(&obsoleteCount); err != nil {
 		t.Fatal(err)

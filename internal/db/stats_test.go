@@ -175,6 +175,36 @@ func TestStepFindingStatsIgnoresActiveAndFailedRounds(t *testing.T) {
 	assertStats(0)
 }
 
+func TestStepFindingStatsDoesNotFallbackWhenOnlyRoundFailed(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/failed-only-round", "git@example.com:failed-only.git", "main")
+	run, _ := d.InsertRun(repo.ID, "failed-only", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	findings := `{"findings":[{"id":"r1","severity":"warning","description":"not durably completed"}],"summary":"one"}`
+	if err := d.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := d.BeginStepRound(step.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FailStepRound(round.ID, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := d.StepFindingStats(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ReportedFindings != 0 || stats.FixedFindings != 0 {
+		t.Fatalf("stats = %+v, want no findings from failed round", stats)
+	}
+}
+
 func TestStepFindingStatsAddsNewFindingsToTotal(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/repo/new-findings", "git@example.com:new.git", "main")

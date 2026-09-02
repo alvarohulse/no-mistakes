@@ -62,9 +62,34 @@ func migrateCommandDefinitionProvenanceColumns(sqlDB *sql.DB) error {
 		return fmt.Errorf("close command definition columns: %w", err)
 	}
 
+	backfills := map[string]string{
+		"source": `UPDATE command_attempts
+			SET command_source = (SELECT source FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)
+			WHERE command_source = 'legacy' AND EXISTS (SELECT 1 FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)`,
+		"runner_schema_version": `UPDATE command_attempts
+			SET runner_schema_version = (SELECT runner_schema_version FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)
+			WHERE runner_schema_version = 1 AND EXISTS (SELECT 1 FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)`,
+		"runner_source": `UPDATE command_attempts
+			SET runner_source = (SELECT runner_source FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)
+			WHERE runner_source = 'legacy' AND EXISTS (SELECT 1 FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)`,
+		"runner_version": `UPDATE command_attempts
+			SET runner_version = (SELECT runner_version FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)
+			WHERE runner_version IS NULL AND EXISTS (SELECT 1 FROM command_definitions
+				WHERE command_definitions.run_id = command_attempts.run_id AND command_definitions.id = command_attempts.command_id)`,
+	}
 	for _, column := range obsoleteCommandDefinitionColumns {
 		if !present[column] {
 			continue
+		}
+		if _, err := tx.Exec(backfills[column]); err != nil {
+			return fmt.Errorf("backfill command attempt column %s: %w", column, err)
 		}
 		if _, err := tx.Exec(`ALTER TABLE command_definitions DROP COLUMN ` + column); err != nil {
 			return fmt.Errorf("drop command definition column %s: %w", column, err)
