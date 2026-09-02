@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -244,10 +247,19 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runStepRunnerCommand(sctx, runner.Command{Run: cmdStr})
+	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, string(sctxStepName(sctx)))
 }
 
-func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command) (string, int, error) {
+func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, purpose ...string) (string, int, error) {
+	return runStepCommand(sctx, command, commandPurpose(sctx, purpose), "")
+}
+
+func runStepPlannedCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
+	return runStepCommand(sctx, command, purpose, db.CommandDefinitionSourcePlanned)
+}
+
+func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose, definitionSource string) (string, int, error) {
+	sequence := sctx.NextCommandSequence()
 	processTerminationGrace := shellenv.DefaultProcessTerminationGrace
 	defaultRunner := runner.Spec{}
 	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
@@ -256,17 +268,126 @@ func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command) (s
 	if sctx.Config != nil {
 		defaultRunner = sctx.Config.Runner
 	}
-	result, resolved, err := runRunnerCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, command, defaultRunner, processTerminationGrace)
+	options := runner.ExecuteOptions{
+		Dir:                     sctx.WorkDir,
+		ExtraEnv:                sctx.Env,
+		ProcessTerminationGrace: processTerminationGrace,
+		CaptureFullOutput:       true,
+	}
+	prepared, err := runner.Prepare(sctx.Ctx, command, defaultRunner, options)
+	resolved := prepared.Resolution()
+	if err != nil {
+		err = fmt.Errorf("prepare command %q: %w", command.Run, err)
+		sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, err)
+		return "", -1, err
+	}
+
+	var attempt *db.CommandAttempt
+	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
+		definitionResolution := resolved
+		if definitionSource != "" {
+			definitionResolution.CommandSource = definitionSource
+		}
+		definition, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution)
+		if persistErr != nil {
+			return "", -1, fmt.Errorf("persist command definition: %w", persistErr)
+		}
+		beforeSHA, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if headErr != nil {
+			return "", -1, fmt.Errorf("resolve command subject: %w", headErr)
+		}
+		var testedSHA *string
+		if commandEstablishesTestedHead(purpose) {
+			tested := beforeSHA
+			testedSHA = &tested
+		}
+		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
+			RunID:     sctx.Run.ID,
+			CommandID: definition.ID,
+			StepID:    sctx.StepResultID,
+			RoundID:   sctx.RoundID,
+			Sequence:  sequence,
+			Purpose:   purpose,
+			Observer:  db.CommandObserverController,
+			Trigger:   sctx.RoundTrigger,
+			BeforeSHA: beforeSHA,
+			TestedSHA: testedSHA,
+		})
+		if persistErr != nil {
+			return "", -1, fmt.Errorf("persist command attempt start: %w", persistErr)
+		}
+	}
+
+	result, err := prepared.Execute(sctx.Ctx, options)
+	if err != nil {
+		err = fmt.Errorf("run command %q: %w", resolved.Script, err)
+	}
 	var recordedExitCode *int
 	if err == nil {
 		recordedExitCode = &result.ExitCode
 	}
+	if attempt != nil {
+		outcome := commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		attemptExitCode := recordedExitCode
+		if result.Signal != nil {
+			attemptExitCode = nil
+		}
+		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, outcome, attemptExitCode, result.Signal); persistErr != nil {
+			return result.Output, result.ExitCode, fmt.Errorf("persist command attempt completion: %w", persistErr)
+		}
+	}
 	if resolved.Script != "" {
-		sctx.RecordResolvedCommand(resolved, recordedExitCode, err)
+		sctx.RecordResolvedCommandAtSequence(resolved, sequence, recordedExitCode, err)
 	} else {
 		sctx.RecordCommand(command.Run, recordedExitCode, err)
 	}
 	return result.Output, result.ExitCode, err
+}
+
+func commandPurpose(sctx *pipeline.StepContext, explicit []string) string {
+	if len(explicit) > 0 && strings.TrimSpace(explicit[0]) != "" {
+		return explicit[0]
+	}
+	if step := sctxStepName(sctx); step != "" {
+		return string(step)
+	}
+	return "command"
+}
+
+func sctxStepName(sctx *pipeline.StepContext) types.StepName {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
+		return ""
+	}
+	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil || step == nil {
+		return ""
+	}
+	return step.StepName
+}
+
+func commandEstablishesTestedHead(purpose string) bool {
+	switch purpose {
+	case string(types.StepBuild), string(types.StepTest), string(types.StepLint):
+		return true
+	default:
+		return false
+	}
+}
+
+func commandAttemptOutcome(ctx context.Context, exitCode int, runErr error) string {
+	if runErr == nil {
+		if exitCode == 0 {
+			return db.CommandOutcomePass
+		}
+		return db.CommandOutcomeFail
+	}
+	if errors.Is(runErr, runner.ErrTimeout) || errors.Is(runErr, context.DeadlineExceeded) {
+		return db.CommandOutcomeTimeout
+	}
+	if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+		return db.CommandOutcomeCancelled
+	}
+	return db.CommandOutcomeProcessError
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string, processTerminationGrace time.Duration) (string, int, error) {

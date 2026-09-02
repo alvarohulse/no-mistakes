@@ -44,6 +44,11 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
+## Execution vocabulary
+
+- An **attempt** is one actual controller-launched execution of a resolved pipeline command. Repeated executions remain separate attempts even when the script and runner are identical.
+- A **retry** is a later attempt of the same operation, input, and target after a transient failure, with no intervening repository mutation. A post-repair execution is a new attempt, not a retry.
+
 ## The ten steps
 
 | # | Step | What it does | Default auto-fix limit |

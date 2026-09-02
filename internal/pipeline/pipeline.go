@@ -61,6 +61,11 @@ type StepContext struct {
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
 	Round        int
+	// RoundID and RoundTrigger identify the already-persisted execution round.
+	// The executor creates it before calling the step so command attempts can
+	// reference their exact owner while the command is running.
+	RoundID      string
+	RoundTrigger string
 	// PlannedCommand is retained across repair rounds so an unconfigured
 	// command gate reruns the exact command selected before the failure.
 	PlannedCommand  string
@@ -103,19 +108,38 @@ type StepContext struct {
 // oversized evidence blob must not abort a step whose remote branch, worktree,
 // or commit history has already moved.
 func (sctx *StepContext) RecordCommand(command string, exitCode *int, runErr error) {
-	sctx.recordCommand(command, exitCode, runErr, "", nil)
+	sctx.recordCommand(command, sctx.NextCommandSequence(), exitCode, runErr, "", nil)
 }
 
 // RecordResolvedCommand records a configured or planned pipeline command with
 // the exact runner identity that parsed and executed it.
 func (sctx *StepContext) RecordResolvedCommand(resolved runner.Resolved, exitCode *int, runErr error) {
-	provenance := resolved.Provenance
-	sctx.recordCommand(resolved.Script, exitCode, runErr, resolved.CommandSource, &provenance)
+	sctx.RecordResolvedCommandAtSequence(resolved, sctx.NextCommandSequence(), exitCode, runErr)
 }
 
-func (sctx *StepContext) recordCommand(command string, exitCode *int, runErr error, commandSource string, provenance *runner.Provenance) {
+// NextCommandSequence allocates the next execution position within the current
+// round. Durable attempts and legacy step evidence share this sequence.
+func (sctx *StepContext) NextCommandSequence() int {
+	if sctx == nil {
+		return 0
+	}
+	sctx.commandSequence++
+	return sctx.commandSequence
+}
+
+// RecordResolvedCommandAtSequence preserves the existing bounded evidence
+// projection while a durable attempt owns the authoritative sequence.
+func (sctx *StepContext) RecordResolvedCommandAtSequence(resolved runner.Resolved, sequence int, exitCode *int, runErr error) {
+	provenance := resolved.Provenance
+	sctx.recordCommand(resolved.Script, sequence, exitCode, runErr, resolved.CommandSource, &provenance)
+}
+
+func (sctx *StepContext) recordCommand(command string, sequence int, exitCode *int, runErr error, commandSource string, provenance *runner.Provenance) {
 	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" {
 		return
+	}
+	if sequence <= 0 {
+		sequence = sctx.NextCommandSequence()
 	}
 	outcome := db.CommandOutcomePassed
 	if runErr != nil {
@@ -123,10 +147,9 @@ func (sctx *StepContext) recordCommand(command string, exitCode *int, runErr err
 	} else if exitCode != nil && *exitCode != 0 {
 		outcome = db.CommandOutcomeFailed
 	}
-	sctx.commandSequence++
 	display := boundedCommandDisplay(safeurl.RedactText(intent.RedactSecrets(strings.TrimSpace(command))))
 	if err := sctx.DB.AppendStepCommandEvidence(sctx.StepResultID, db.CommandEvidence{
-		Round: sctx.Round, Sequence: sctx.commandSequence, Command: display, Outcome: outcome, ExitCode: exitCode,
+		Round: sctx.Round, Sequence: sequence, Command: display, Outcome: outcome, ExitCode: exitCode,
 		CommandSource: commandSource, Runner: provenance,
 	}); err != nil {
 		slog.Warn("failed to record step command evidence", "step_result", sctx.StepResultID, "err", err)

@@ -156,6 +156,54 @@ func (d *DB) InsertStepRound(stepResultID string, round int, trigger string, fin
 	return d.insertStepRound(stepResultID, round, trigger, findingsJSON, fixSummary, nil, nil, nil, nil, nil, nil, durationMS)
 }
 
+// BeginStepRound creates the durable round identity before its work starts so
+// command attempts can reference the exact owning round as they execute.
+func (d *DB) BeginStepRound(stepResultID string, round int, trigger string) (*StepRound, error) {
+	return d.insertStepRound(stepResultID, round, trigger, nil, nil, nil, nil, nil, nil, nil, nil, 0)
+}
+
+// CompleteStepRound fills the result fields of a round created by
+// BeginStepRound. Selection and repair audit fields remain independently
+// writable because they are decided after the execution result is observed.
+func (d *DB) CompleteStepRound(id string, findingsJSON *string, fixSummary *string, durationMS int64) error {
+	return d.completeStepRound(id, findingsJSON, fixSummary, nil, nil, nil, nil, nil, nil, durationMS)
+}
+
+// CompleteReviewStepRound fills a pre-created Review round and preserves the
+// exact commit/config provenance already owned by the existing Review APIs.
+func (d *DB) CompleteReviewStepRound(id string, findingsJSON *string, fixSummary *string, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA string, replayConfigJSON, globalConfigYAML, repoConfigYAML []byte, durationMS int64) error {
+	var reviewed, starting, trusted *string
+	if reviewedHeadSHA != "" {
+		reviewed = &reviewedHeadSHA
+	}
+	if startingHeadSHA != "" {
+		starting = &startingHeadSHA
+	}
+	if trustedConfigSHA != "" {
+		trusted = &trustedConfigSHA
+	}
+	return d.completeStepRound(id, findingsJSON, fixSummary, reviewed, starting, trusted, replayConfigJSON, globalConfigYAML, repoConfigYAML, durationMS)
+}
+
+func (d *DB) completeStepRound(id string, findingsJSON *string, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA *string, replayConfigJSON, globalConfigYAML, repoConfigYAML []byte, durationMS int64) error {
+	result, err := d.sql.Exec(
+		`UPDATE step_rounds SET findings_json = ?, fix_summary = ?, reviewed_head_sha = ?, starting_head_sha = ?, trusted_config_sha = ?, replay_config_json = ?, global_config_yaml = ?, repo_config_yaml = ?, duration_ms = ? WHERE id = ?`,
+		findingsJSON, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA,
+		replayConfigJSON, globalConfigYAML, repoConfigYAML, durationMS, id,
+	)
+	if err != nil {
+		return fmt.Errorf("complete step round: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete step round: rows affected: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("complete step round: round %q not found", id)
+	}
+	return nil
+}
+
 // InsertReviewStepRound persists a review round's examined commit as a
 // non-authoritative candidate. A recovered parked gate can promote this exact
 // candidate only after approval; merely storing it grants no push authority.

@@ -39,6 +39,12 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	}
 	sctx.StepResultID = step.ID
 	sctx.Round = 1
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	output, exitCode, err := runStepRunnerCommand(sctx, command)
 	if err != nil || exitCode != 0 || output != "" {
@@ -65,6 +71,24 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	receipt := evidence.Commands[0]
 	if receipt.Command != platformScript || receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "bash" || receipt.Runner.Version == nil {
 		t.Fatalf("runner receipt = %+v", receipt)
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != platformScript || definitions[0].Source != wantSource || definitions[0].RunnerExecutable != "bash" {
+		t.Fatalf("command definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("command attempts = %+v", attempts)
+	}
+	attempt := attempts[0]
+	if attempt.CommandID != definitions[0].ID || attempt.StepID != step.ID || attempt.RoundID != round.ID || attempt.Sequence != 1 || attempt.Purpose != "build" || attempt.Observer != "controller" || attempt.Trigger != "initial" || attempt.BeforeSHA != headSHA || attempt.TestedSHA == nil || *attempt.TestedSHA != headSHA || attempt.Outcome == nil || *attempt.Outcome != "pass" || attempt.ExitCode == nil || *attempt.ExitCode != 0 {
+		t.Fatalf("command attempt = %+v", attempt)
 	}
 }
 
@@ -174,5 +198,69 @@ func TestRunStepRunnerCommandRetainsCompleteOutputForStepLogging(t *testing.T) {
 	}
 	if len(output) != 131072 {
 		t.Fatalf("output length = %d, want 131072", len(output))
+	}
+}
+
+func TestRunStepRunnerCommandPersistsSignalWithoutFabricatedExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "kill -TERM $$"})
+	if err != nil || exitCode != -1 {
+		t.Fatalf("signal command = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode != nil || attempts[0].Signal == nil {
+		t.Fatalf("signal attempt = %+v", attempts)
+	}
+}
+
+func TestRunStepRunnerCommandPersistsNonZeroExitAsFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "exit 7"})
+	if err != nil || exitCode != 7 {
+		t.Fatalf("failing command = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode == nil || *attempts[0].ExitCode != 7 || attempts[0].Signal != nil {
+		t.Fatalf("failed attempt = %+v", attempts)
 	}
 }

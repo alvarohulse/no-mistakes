@@ -41,6 +41,7 @@ type ExecuteOptions struct {
 type Result struct {
 	Output    string
 	ExitCode  int
+	Signal    *string
 	Truncated bool
 }
 
@@ -143,7 +144,9 @@ func executeArgv(ctx context.Context, argv []string, options ExecuteOptions, std
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return capturedResult(output, exitErr.ExitCode()), nil
+			result := capturedResult(output, exitErr.ExitCode())
+			result.Signal = processSignal(exitErr.ProcessState)
+			return result, nil
 		}
 		return capturedResult(output, -1), fmt.Errorf("launch runner: %w", err)
 	}

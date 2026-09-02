@@ -78,7 +78,19 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(`{"command":"go env GOVERSION"}`)}, nil
 		},
 	}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	outcome, err := (&BuildStep{}).Execute(sctx)
 	if err != nil {
@@ -101,6 +113,54 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 		if !strings.Contains(prompt, clause) {
 			t.Errorf("prompt missing %q", clause)
 		}
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != "go env GOVERSION" || definitions[0].Source != "planned" {
+		t.Fatalf("planned command definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].CommandID != definitions[0].ID || attempts[0].RoundID != round.ID {
+		t.Fatalf("planned command attempts = %+v", attempts)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "repair.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "repair.txt")
+	gitCmd(t, dir, "commit", "-m", "fix: simulate repair")
+	repairedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	secondRound, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Round = 2
+	sctx.RoundID = secondRound.ID
+	sctx.RoundTrigger = "auto_fix"
+	if _, err := (&BuildStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	definitions, err = sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err = sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || len(attempts) != 2 {
+		t.Fatalf("reused plan definitions/attempts = %d/%d, want 1/2", len(definitions), len(attempts))
+	}
+	if attempts[1].CommandID != definitions[0].ID || attempts[1].TestedSHA == nil || *attempts[1].TestedSHA != repairedHead || attempts[1].RetryOfAttemptID != nil {
+		t.Fatalf("post-repair attempt = %+v", attempts[1])
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("planner calls after repair = %d, want original plan reused", len(ag.calls))
 	}
 }
 
