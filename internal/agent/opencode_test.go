@@ -38,7 +38,7 @@ func TestOpencodeAgent_FullFlow(t *testing.T) {
 			// Send text delta events then usage and idle
 			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"message.part.updated\",\"properties\":{\"sessionID\":\"test-session-456\",\"part\":{\"id\":\"p1\",\"messageID\":\"msg1\",\"type\":\"text\",\"text\":\"{\\\"success\\\":true,\\\"summary\\\":\\\"all good\\\"}\"}}}}\n\n")
 			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"message.updated\",\"properties\":{\"sessionID\":\"test-session-456\",\"info\":{\"id\":\"msg1\",\"role\":\"assistant\",\"tokens\":{\"input\":100,\"output\":50}}}}}\n\n")
-			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\",\"properties\":{\"sessionID\":\"test-session-456\"}}}\n\n")
 
 		case r.URL.Path == "/session/test-session-456/message" && r.Method == http.MethodPost:
 			var body struct {
@@ -153,6 +153,37 @@ func TestOpencodeAgent_EOFBeforeIdleLeavesUsageCoverageUnknown(t *testing.T) {
 	}
 	if result.UsageCoverage != UsageCoverageUnknown {
 		t.Fatalf("usage coverage = %q, want unknown without session.idle", result.UsageCoverage)
+	}
+}
+
+func TestOpencodeAgent_UnscopedIdleLeavesUsageCoverageUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/session" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"id":"s1"}`)
+		case r.URL.Path == "/global/event" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"message.updated\",\"properties\":{\"sessionID\":\"s1\",\"info\":{\"id\":\"msg1\",\"role\":\"assistant\",\"tokens\":{\"input\":17,\"output\":5}}}}}\n\n")
+			fmt.Fprint(w, "data: {\"payload\":{\"type\":\"session.idle\"}}\n\n")
+		case r.URL.Path == "/session/s1/message" && r.Method == http.MethodPost:
+			fmt.Fprint(w, `{"info":{"id":"msg1","role":"assistant","structured":{"ok":true},"tokens":{"input":17,"output":5}},"parts":[{"type":"text","text":"{\"ok\":true}"}]}`)
+		case r.URL.Path == "/session/s1" && r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	result, err := (&opencodeAgent{bin: "opencode", server: &managedServer{port: mustParsePort(server.URL)}}).runOnce(
+		context.Background(),
+		RunOpts{Prompt: "review", CWD: t.TempDir(), JSONSchema: json.RawMessage(`{"type":"object"}`)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown without session-scoped idle", result.UsageCoverage)
 	}
 }
 

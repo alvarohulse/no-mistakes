@@ -184,14 +184,14 @@ cat > /dev/null
 printf '%s\n' '{"type":"message_update","message":{"role":"assistant","responseId":"r1"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"{\"ok"}}'
 printf '%s\n' '{"type":"message_update","message":{"role":"assistant","responseId":"r1"},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"\":true}"}}'
 printf '%s\n' '{"type":"message_end","message":{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input":11,"output":7,"cacheRead":3,"cacheWrite":1}}}'
-printf '%s\n' '{"type":"agent_end","messages":[]}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input":11,"output":7,"cacheRead":3,"cacheWrite":1}}]}'
 `, strings.Join([]string{
 		"@echo off",
 		"more > nul",
 		"echo {\"type\":\"message_update\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\"},\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"{\\\"ok\"}}",
 		"echo {\"type\":\"message_update\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\"},\"assistantMessageEvent\":{\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"\\\":true}\"}}",
 		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":11,\"output\":7,\"cacheRead\":3,\"cacheWrite\":1}}}",
-		"echo {\"type\":\"agent_end\",\"messages\":[]}",
+		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}],\"usage\":{\"input\":11,\"output\":7,\"cacheRead\":3,\"cacheWrite\":1}}]}",
 	}, "\r\n"))
 
 	schema := json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`)
@@ -231,6 +231,28 @@ printf '%s\n' '{"type":"agent_end","messages":[]}'
 		if chunks[i] != want {
 			t.Errorf("chunk[%d] = %q, want %q", i, chunks[i], want)
 		}
+	}
+}
+
+func TestPiAgent_AgentEndWithoutUsageLeavesCoverageUnknown(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakePi(t, dir, `#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"done"}],"usage":{"input":11,"output":7}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","responseId":"r1","content":[{"type":"text","text":"done"}]}]}'
+`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		"echo {\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"input\":11,\"output\":7}}}",
+		"echo {\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"responseId\":\"r1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}]}",
+	}, "\r\n"))
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageCoverage != UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown when agent_end omits usage", result.UsageCoverage)
 	}
 }
 

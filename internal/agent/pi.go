@@ -125,7 +125,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
 	if res != nil {
-		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd, false)
+		res.UsageCoverage = usageCoverageForCompleteStream(pp.usage.Reported && pp.sawAgentEnd && pp.agentEndUsageReported, false)
 	}
 	emitAgentExited(opts, "pi", pid, err)
 	return res, err
