@@ -1,6 +1,8 @@
 # Build output
 bin/
 tmp/
+/no-mistakes
+/no-mistakes.exe
 
 # Go
 *.exe
