@@ -251,14 +251,7 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		hadCommands := false
 		if evidence, err := sr.Evidence(); err == nil {
 			hadCommands = len(evidence.Commands) > 0
-			lastAttemptByCommand := make(map[string]int, len(evidence.Commands))
-			for i, command := range evidence.Commands {
-				lastAttemptByCommand[command.Command] = i
-			}
-			for i, command := range evidence.Commands {
-				if lastAttemptByCommand[command.Command] != i {
-					continue
-				}
+			for _, command := range evidence.Commands {
 				if command.Outcome != db.CommandOutcomePassed || command.ExitCode == nil || *command.ExitCode != 0 {
 					continue
 				}

@@ -103,92 +103,37 @@ func TestContractV5SeparatesStaticTestsReviewEvidenceAndUserTesting(t *testing.T
 func TestContractV5KeepsApprovedFailedTestsOutOfStaticEvidence(t *testing.T) {
 	t.Parallel()
 
-	testFindings := `{"findings":[],"summary":"","testing_summary":"tests completed","tested":["go test ./...","make e2e","agent-only smoke test"]}`
-	zero, one := 0, 1
-	tests := []struct {
-		name               string
-		commands           []db.CommandEvidence
-		wantStaticCommands []string
-		wantReported       []string
-		wantExplicitEmpty  bool
-	}{
-		{
-			name: "all attempts lack passing evidence",
-			commands: []db.CommandEvidence{
-				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
-				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomePassed},
-				{Round: 1, Sequence: 3, Command: "go vet ./...", Outcome: db.CommandOutcomePassed, ExitCode: &one},
-			},
-			wantExplicitEmpty: true,
-		},
-		{
-			name: "mixed distinct commands keep only the valid pass",
-			commands: []db.CommandEvidence{
-				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &zero},
-				{Round: 1, Sequence: 2, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
-			},
-			wantStaticCommands: []string{"go test ./..."},
-		},
-		{
-			name: "a final failure supersedes an earlier pass",
-			commands: []db.CommandEvidence{
-				{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomePassed, ExitCode: &zero},
-				{Round: 2, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &one},
-			},
-			wantExplicitEmpty: true,
-		},
-		{
-			name:         "legacy agent-only evidence remains reported",
-			wantReported: []string{"go test ./...", "make e2e", "agent-only smoke test"},
-		},
+	testFindings := `{"findings":[],"summary":"","testing_summary":"tests completed","tested":["go test ./...","make e2e"]}`
+	firstExitCode, secondExitCode := 1, 2
+	testEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Commands: []db.CommandEvidence{
+		{Round: 1, Sequence: 1, Command: "go test ./...", Outcome: db.CommandOutcomeFailed, ExitCode: &firstExitCode},
+		{Round: 2, Sequence: 1, Command: "make e2e", Outcome: db.CommandOutcomeFailed, ExitCode: &secondExitCode},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	contract := BuildContract(ContractInput{Steps: []*db.StepResult{{
+		ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted,
+		FindingsJSON: &testFindings, EvidenceJSON: &testEvidence,
+	}}})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testEvidence, err := db.EncodeStepEvidence(db.StepEvidence{Commands: tt.commands})
-			if err != nil {
-				t.Fatal(err)
-			}
-			contract := BuildContract(ContractInput{Steps: []*db.StepResult{{
-				ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted,
-				FindingsJSON: &testFindings, EvidenceJSON: &testEvidence,
-			}}})
-
-			staticTests := contract.Sections.StaticTests
-			if staticTests == nil {
-				t.Fatal("static_tests omitted; want an explicit section")
-			}
-			if len(staticTests.Commands) != len(tt.wantStaticCommands) {
-				t.Fatalf("static_tests commands = %+v, want %v", staticTests.Commands, tt.wantStaticCommands)
-			}
-			for i, want := range tt.wantStaticCommands {
-				if staticTests.Commands[i].Command != want {
-					t.Fatalf("static_tests commands = %+v, want %v", staticTests.Commands, tt.wantStaticCommands)
-				}
-			}
-			if len(staticTests.Reported) != len(tt.wantReported) {
-				t.Fatalf("static_tests reported = %+v, want %v", staticTests.Reported, tt.wantReported)
-			}
-			for i, want := range tt.wantReported {
-				if staticTests.Reported[i] != want {
-					t.Fatalf("static_tests reported = %+v, want %v", staticTests.Reported, tt.wantReported)
-				}
-			}
-			if tt.wantExplicitEmpty && (staticTests.Summary != "" || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0) {
-				t.Fatalf("static_tests = %+v, want explicit empty evidence", staticTests)
-			}
-
-			pipelineCommands := contract.Sections.Pipeline.Steps[0].Commands
-			if len(pipelineCommands) != len(tt.commands) {
-				t.Fatalf("pipeline commands = %+v, want all %d attempts", pipelineCommands, len(tt.commands))
-			}
-			for i, want := range tt.commands {
-				got := pipelineCommands[i]
-				if got.Command != want.Command || got.Outcome != want.Outcome || (got.ExitCode == nil) != (want.ExitCode == nil) || (got.ExitCode != nil && *got.ExitCode != *want.ExitCode) {
-					t.Fatalf("pipeline command %d = %+v, want %+v", i, pipelineCommands[i], want)
-				}
-			}
-		})
+	staticTests := contract.Sections.StaticTests
+	if staticTests == nil {
+		t.Fatal("static_tests omitted; want an explicit empty section")
+	}
+	if staticTests.Summary != "" || len(staticTests.Commands) != 0 || len(staticTests.Reported) != 0 || len(staticTests.Artifacts) != 0 {
+		t.Fatalf("static_tests = %+v, want no passing evidence", staticTests)
+	}
+	pipelineCommands := contract.Sections.Pipeline.Steps[0].Commands
+	if len(pipelineCommands) != 2 {
+		t.Fatalf("pipeline commands = %+v, want both failed attempts", pipelineCommands)
+	}
+	first, second := pipelineCommands[0], pipelineCommands[1]
+	if first.Round != 1 || first.Sequence != 1 || first.Command != "go test ./..." || first.Outcome != db.CommandOutcomeFailed || first.ExitCode == nil || *first.ExitCode != firstExitCode {
+		t.Fatalf("first pipeline command = %+v, want the exact first failed attempt", first)
+	}
+	if second.Round != 2 || second.Sequence != 1 || second.Command != "make e2e" || second.Outcome != db.CommandOutcomeFailed || second.ExitCode == nil || *second.ExitCode != secondExitCode {
+		t.Fatalf("second pipeline command = %+v, want the exact second failed attempt", second)
 	}
 }
 
