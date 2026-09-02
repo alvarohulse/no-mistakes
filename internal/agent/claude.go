@@ -170,8 +170,9 @@ func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	coverage := UsageCoverageUnknown
+	terminalMetersComplete := usage.InputIsReported() && usage.OutputIsReported()
 	if result.terminalUsageReported && !result.unaccountedWork {
-		coverage = usageCoverageForCompleteStream(usage.Reported, result.nestedAgentCount > 0)
+		coverage = usageCoverageForCompleteStream(terminalMetersComplete, result.nestedAgentCount > 0)
 	}
 	finalized := &Result{
 		Output:                    result.StructuredOutput,
@@ -425,14 +426,13 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					}
 				}
 				if c.Type == "tool_use" {
-					name := strings.ToLower(c.Name)
 					if c.Name == "Agent" || c.Name == "Task" {
 						identity := c.Input.SubagentType
 						if identity == "" {
 							identity = c.Input.Name
 						}
 						observations.observe(c.ID, identity)
-					} else if strings.Contains(name, "agent") || strings.Contains(name, "spawn") {
+					} else {
 						unaccountedWork = true
 					}
 				}

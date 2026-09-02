@@ -45,16 +45,18 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 			return true
 		}
 		props := payload.Properties
-		// Filter by session ID
-		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
-			return true
-		}
-
+		// The endpoint is a shared, long-lived stream, so any idle event is the
+		// boundary for this read. Only an idle explicitly scoped to our session
+		// proves that its usage is complete.
 		if payload.Type == "session.idle" {
 			if props != nil && props.SessionID == state.sessionID {
 				state.reachedIdle = true
-				return false
 			}
+			return false
+		}
+
+		// Filter by session ID
+		if props != nil && props.SessionID != "" && props.SessionID != state.sessionID {
 			return true
 		}
 

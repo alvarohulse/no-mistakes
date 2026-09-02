@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +15,31 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestDecodeMetricReceiptVersion2DefaultsUsageCoverageToUnknown(t *testing.T) {
+	receipt := MetricReceipt{
+		SchemaVersion: 2,
+		Run: MetricRun{
+			ID: "run-1", RepoID: "repo-1", Status: types.RunCompleted, CreatedAt: 10,
+		},
+		Invocations: []MetricInvocation{{ID: "inv-1", Agent: "codex"}},
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := decodeMetricReceipt(&db.RunMetricReceipt{
+		RunID: "run-1", RepoID: "repo-1", RunStatus: types.RunCompleted, RunCreatedAt: 10,
+		SchemaVersion: 2, PayloadJSON: string(payload),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Invocations[0].UsageCoverage; got != agent.UsageCoverageUnknown {
+		t.Fatalf("usage coverage = %q, want unknown for version 2 receipt", got)
+	}
+}
 
 func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/retention.sqlite")
