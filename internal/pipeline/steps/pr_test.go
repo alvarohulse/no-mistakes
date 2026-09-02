@@ -1077,7 +1077,7 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: route fork prs","body":"## Summary\n\n- open fork PR against parent"}`)
+			payload := json.RawMessage(`{"title":"fix: route fork prs","summary":"Routes fork pull requests to the parent.","what_changed":"- Open the fork pull request against the parent."}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1271,7 +1271,7 @@ func TestPRStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: process env bitbucket pr","body":"## Summary\n\n- create PR via process env"}`)
+			payload := json.RawMessage(`{"title":"fix: process env bitbucket pr","summary":"Uses process credentials for Bitbucket pull requests.","what_changed":"- Create the pull request via the process environment."}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1305,7 +1305,7 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"## Summary\n\n- keep branch status readable\n- fix footer truncation"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1449,8 +1449,15 @@ func TestPRStep_UnrecordedAgentDraftUsesFallbackProvenance(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+		RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "stale",
+		SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	}); err != nil {
+		t.Fatalf("insert stale invocation: %v", err)
+	}
 	// Bypass the test invocation recorder to simulate the production recorder
-	// failing before the PR step tries to bind the narrative provenance.
+	// failing before the PR step tries to bind the narrative provenance. The
+	// earlier successful invocation must not be reused for this draft.
 	sctx.Agent = ag
 	sctx.Env = env
 
@@ -1467,6 +1474,44 @@ func TestPRStep_UnrecordedAgentDraftUsesFallbackProvenance(t *testing.T) {
 	body := readFakeGHBodyArg(t, logFile)
 	if strings.Contains(body, "Unrecorded summary") || !strings.Contains(body, "Updates the branch with the final recorded changes.") {
 		t.Fatalf("unrecorded agent draft was published instead of fallback:\n%s", body)
+	}
+}
+
+func TestPRStep_FailedDraftingInvocationUsesFallbackProvenance(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	var sctx *pipeline.StepContext
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{
+				RunID: sctx.Run.ID, StepName: string(types.StepPR), Round: 1, Purpose: string(types.StepPR), Agent: "test",
+				SessionMode: db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1,
+				ExitStatus: "error", FailureCategory: "other",
+			}); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"title":"feat: failed receipt","summary":"Failed receipt summary.","what_changed":"- Failed receipt change."}`)}, nil
+		},
+	}
+	sctx = newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Agent = ag
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	narrative, err := sctx.DB.GetRunNarrative(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if narrative == nil || narrative.Source != db.NarrativeSourceFallback || narrative.DraftingInvocationID != nil {
+		t.Fatalf("failed drafting invocation provenance = %#v, want deterministic fallback", narrative)
+	}
+	body := readFakeGHBodyArg(t, logFile)
+	if strings.Contains(body, "Failed receipt summary") || !strings.Contains(body, "Updates the branch with the final recorded changes.") {
+		t.Fatalf("failed drafting invocation was published instead of fallback:\n%s", body)
 	}
 }
 
@@ -1507,7 +1552,7 @@ func TestPRStep_NewRunDraftsNewNarrativeAtSameHead(t *testing.T) {
 	}
 }
 
-func TestPRStep_ExistingPRPersistsHostedTitleWithoutUpdatingIt(t *testing.T) {
+func TestPRStep_ExistingPRPreservesHostedTitleWithoutChangingDraftedTitle(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
@@ -1527,7 +1572,7 @@ func TestPRStep_ExistingPRPersistsHostedTitleWithoutUpdatingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if narrative == nil || narrative.TitleMode != db.NarrativeTitleModePreserved || narrative.TitleText != "Keep the hosted title" || narrative.Summary != "New run summary." || narrative.WhatChanged != "- New run changes." {
+	if narrative == nil || narrative.TitleMode != db.NarrativeTitleModePreserved || narrative.TitleText != "feat: replace the title" || narrative.Summary != "New run summary." || narrative.WhatChanged != "- New run changes." {
 		t.Fatalf("preserved title provenance = %#v", narrative)
 	}
 	logData, err := os.ReadFile(logFile)
@@ -1554,7 +1599,7 @@ func TestPRStep_AppendsDeterministicValidationSections(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"## Summary\n\n- keep branch status readable\n- fix footer truncation"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -1623,7 +1668,7 @@ func TestPRStep_UnwrapsNestedJSONBody(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## Summary\\n\\n- keep branch status readable\\n- fix footer truncation\"}"}`)
+			payload := json.RawMessage(`{"title":"fix: improve pipeline header UX","summary":"Keeps branch status readable.","what_changed":"- keep branch status readable\n- fix footer truncation","body":"{\"title\":\"fix: improve pipeline header UX\",\"body\":\"## Summary\\n\\n- legacy body\"}"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2368,7 +2413,7 @@ func TestPRStep_CreateKeepsGeneratedSectionsWithoutRenderingIntent(t *testing.T)
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","body":"## What Changed\n\n- essential summary survives"}`)
+			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","summary":"Keeps generated pull request bodies postable.","what_changed":"- essential summary survives"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2439,7 +2484,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","body":"## What Changed\n\n- essential summary survives"}`)
+			payload := json.RawMessage(`{"title":"fix: keep generated pr bodies postable","summary":"Keeps generated pull request bodies postable.","what_changed":"- essential summary survives"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2494,8 +2539,9 @@ func TestPRStep_CreateCapsBodyWithoutRenderingIntent(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			payload, err := json.Marshal(prContent{
-				Title: "fix: keep generated pr bodies postable",
-				Body:  "## What Changed\n\n- essential summary survives",
+				Title:       "fix: keep generated pr bodies postable",
+				Summary:     "Keeps generated pull request bodies postable.",
+				WhatChanged: "- essential summary survives",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -2726,7 +2772,7 @@ func TestPRStep_UsesIntentForDraftingWithoutRenderingIt(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2765,7 +2811,7 @@ func TestPRStep_OmitsIntentSectionWhenIntentEmpty(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2798,7 +2844,7 @@ func TestPRStep_StripsAgentEmittedIntent(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## Intent\n\n- agent paraphrase\n\n## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()","body":"## Intent\n\n- agent paraphrase"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2834,7 +2880,7 @@ func TestPRStep_PrependsNotesSectionBeforeWhatChanged(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2879,7 +2925,7 @@ func TestPRStep_OmitsNotesSectionWhenPRNoteEmpty(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -2913,7 +2959,7 @@ func TestPRStep_PromptIncludesAuthorNotesAsTrustedGuidance(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3027,7 +3073,7 @@ func TestPRStep_PromptRequestsDistinctHeadingFreeMarkdownSections(t *testing.T) 
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"feat: add bar","body":"## What Changed\n\n- add Bar()"}`)
+			payload := json.RawMessage(`{"title":"feat: add bar","summary":"Adds Bar.","what_changed":"- add Bar()"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3129,7 +3175,7 @@ func TestPRStep_FallsBackWhenAgentOmitsSummary(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: incomplete draft","what_changed":"- agent-only change"}`)
+			payload := json.RawMessage(`{"title":"feat: incomplete draft","body":"## What Changed\n\n- agent-only change"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3161,7 +3207,7 @@ func TestPRStep_GitLabCreatesNewMR(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat: improve gitlab flow","body":"## Summary\n\n- add gitlab support\n\n## Testing\n\n- go test ./..."}`)
+			payload := json.RawMessage(`{"title":"feat: improve gitlab flow","summary":"Adds GitLab support.","what_changed":"- add gitlab support"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3339,7 +3385,7 @@ func TestPRStep_AgentScopedBreakingTitlePassesThrough(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"feat(api)!: require auth token","body":"## Summary\n\n- require auth token on all API requests"}`)
+			payload := json.RawMessage(`{"title":"feat(api)!: require auth token","summary":"Requires authentication for API requests.","what_changed":"- require auth token on all API requests"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3373,7 +3419,7 @@ func TestPRStep_AgentConventionalNonReleaseTitlePassesThrough(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"refactor(cli): improve CLI output","body":"## Summary\n\n- improve user-visible command output"}`)
+			payload := json.RawMessage(`{"title":"refactor(cli): improve CLI output","summary":"Improves user-visible CLI output.","what_changed":"- improve user-visible command output"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3402,7 +3448,7 @@ func TestPRStep_PromptRequiresReleaseTypesForProductImpact(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			payload := json.RawMessage(`{"title":"fix: improve CLI output","body":"## What Changed\n\n- improve output"}`)
+			payload := json.RawMessage(`{"title":"fix: improve CLI output","summary":"Improves CLI output.","what_changed":"- improve output"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}
@@ -3438,7 +3484,7 @@ func TestPRStep_PromptGuidesScopeToRealModule(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			capturedPrompt = opts.Prompt
-			payload := json.RawMessage(`{"title":"fix(daemon): tidy logs","body":"## Summary\n\n- tidy"}`)
+			payload := json.RawMessage(`{"title":"fix(daemon): tidy logs","summary":"Tidies daemon logs.","what_changed":"- tidy logs"}`)
 			return &agent.Result{Output: payload}, nil
 		},
 	}

@@ -161,6 +161,39 @@ func TestPerfRecordingAgent_RecordsFallbackAttemptsSeparately(t *testing.T) {
 	}
 }
 
+func TestPerfRecordingAgent_PRInvocationSupportsNarrativeProvenance(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	wrapped := &perfRecordingAgent{
+		inner:    &usageAgent{},
+		db:       database,
+		runID:    run.ID,
+		stepName: types.StepPR,
+		round:    func() int { return 1 },
+	}
+
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: string(types.StepPR)}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatalf("get invocations: %v", err)
+	}
+	if len(invocations) != 1 {
+		t.Fatalf("invocations = %d, want 1", len(invocations))
+	}
+	invocation := invocations[0]
+	if invocation.StepName != string(types.StepPR) || invocation.Purpose != string(types.StepPR) || invocation.ExitStatus != "ok" {
+		t.Fatalf("PR invocation = %+v, want successful PR provenance", invocation)
+	}
+	if err := database.InsertRunNarrative(db.RunNarrative{
+		RunID: run.ID, Source: db.NarrativeSourceAgent, DraftingInvocationID: &invocation.ID, DraftedAt: 1,
+		BaseSHA: "base", HeadSHA: "head", TitleMode: db.NarrativeTitleModeAgent,
+		TitleText: "feat(pipeline): record narrative", Summary: "Summary.", WhatChanged: "- Change.",
+	}); err != nil {
+		t.Fatalf("persist narrative from production invocation: %v", err)
+	}
+}
+
 func TestPerfRecordingAgent_MixedFallbackRecordsActualProviderCold(t *testing.T) {
 	database, _, run, _ := setupTest(t)
 	wrapped := &perfRecordingAgent{

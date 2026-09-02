@@ -337,6 +337,40 @@ func TestPRBodyReconstructsAStackedRunsBaseBranch(t *testing.T) {
 	}
 }
 
+func TestPRBodyReplaysStoredRunNarrative(t *testing.T) {
+	local := setupPRBodyRepo(t)
+
+	run, err := local.db.InsertRun(local.repo.ID, "feature/narrative", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := local.db.InsertRunNarrative(db.RunNarrative{
+		RunID: run.ID, Source: db.NarrativeSourceFallback, DraftedAt: 123,
+		BaseSHA: "base", HeadSHA: "head", TitleMode: db.NarrativeTitleModeFallback,
+		TitleText: "chore: replay narrative", Summary: "Stored summary.", WhatChanged: "- Stored change.",
+	}); err != nil {
+		t.Fatalf("insert narrative: %v", err)
+	}
+
+	out, errOut, err := runPRBody(t, "", "--run", run.ID, "--print-contract")
+	if err != nil {
+		t.Fatalf("pr-body: %v\n%s", err, errOut)
+	}
+	var contract prbody.Contract
+	if err := json.Unmarshal([]byte(out), &contract); err != nil {
+		t.Fatalf("printed contract is not valid JSON: %v\n%s", err, out)
+	}
+	if contract.Title != "chore: replay narrative" {
+		t.Fatalf("title = %q, want stored title", contract.Title)
+	}
+	if contract.Sections.Summary == nil || contract.Sections.Summary.Text != "Stored summary." {
+		t.Fatalf("summary = %#v, want stored summary", contract.Sections.Summary)
+	}
+	if contract.Sections.WhatChanged == nil || contract.Sections.WhatChanged.Text != "- Stored change." {
+		t.Fatalf("what_changed = %#v, want stored change", contract.Sections.WhatChanged)
+	}
+}
+
 // A failing formatter must say that a run would fall back, so the fallback path
 // is visible here rather than inferred.
 func TestPRBodyReportsThatARunWouldFallBack(t *testing.T) {

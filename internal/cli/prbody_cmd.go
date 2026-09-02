@@ -220,10 +220,9 @@ func joinVersions(versions []int) string {
 
 // storedRunContract rebuilds a completed run's contract from the database.
 //
-// The Summary and What Changed sections are not stored - they are the drafting
-// agent's output, which lives only in the assembled body - so they are absent
-// here. Every other section is reconstructed exactly as the pr step would have
-// built it.
+// Runs with a persisted narrative replay the exact title, Summary, and What
+// Changed that the PR step used. Legacy runs without one retain the older empty
+// narrative fields.
 func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID string) (*prbody.Contract, error) {
 	repo := local.repo
 	if repo == nil {
@@ -286,6 +285,15 @@ func storedRunContract(ctx context.Context, d *db.DB, local localRepo, runID str
 	}
 	if run.PRNote != nil {
 		in.Note = strings.TrimSpace(*run.PRNote)
+	}
+	narrative, err := d.GetRunNarrative(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get run narrative: %w", err)
+	}
+	if narrative != nil {
+		in.Title = narrative.TitleText
+		in.Summary = narrative.Summary
+		in.WhatChanged = narrative.WhatChanged
 	}
 	return steps.BuildContract(in), nil
 }

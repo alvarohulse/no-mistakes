@@ -393,8 +393,7 @@ Final diff paths and statuses:
 				content.WhatChanged = stripLeadingSectionHeading(content.WhatChanged, "Summary")
 			}
 			structuredContent := content.Summary != "" && content.WhatChanged != ""
-			legacyContent := content.Summary == "" && content.WhatChanged != "" && strings.TrimSpace(content.Body) != ""
-			if content.Title != "" && (structuredContent || legacyContent) {
+			if content.Title != "" && structuredContent {
 				originalTitle := content.Title
 				content.Title = conventional.TightenTitle(content.Title)
 				if content.Title != originalTitle {
@@ -428,7 +427,6 @@ Final diff paths and statuses:
 	}
 	if existing != nil {
 		if hostedTitle := strings.TrimSpace(existing.Title); hostedTitle != "" {
-			content.Title = hostedTitle
 			titleMode = db.NarrativeTitleModePreserved
 		}
 	}
