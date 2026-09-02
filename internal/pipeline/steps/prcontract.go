@@ -248,20 +248,28 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			continue
 		}
 		section := &prbody.StaticTestsSection{}
+		hadCommands := false
+		if evidence, err := sr.Evidence(); err == nil {
+			for _, command := range evidence.Commands {
+				hadCommands = true
+				if command.Outcome != db.CommandOutcomePassed || (command.ExitCode != nil && *command.ExitCode != 0) {
+					continue
+				}
+				section.Commands = append(section.Commands, prbody.PipelineCommand{
+					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
+					Outcome: command.Outcome, ExitCode: command.ExitCode,
+				})
+			}
+		}
+		if hadCommands && len(section.Commands) == 0 {
+			return section
+		}
 		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
 			section.Summary = strings.TrimSpace(findings.TestingSummary)
 			section.Reported = append(section.Reported, findings.Tested...)
 			for _, artifact := range findings.Artifacts {
 				section.Artifacts = append(section.Artifacts, prbody.Artifact{
 					Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL,
-				})
-			}
-		}
-		if evidence, err := sr.Evidence(); err == nil {
-			for _, command := range evidence.Commands {
-				section.Commands = append(section.Commands, prbody.PipelineCommand{
-					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
-					Outcome: command.Outcome, ExitCode: command.ExitCode,
 				})
 			}
 		}
