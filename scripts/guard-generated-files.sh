@@ -142,7 +142,7 @@ commits_touching_generated_files() {
         CHANGELOG.md \
         .release-please-manifest.json |
       awk '
-        /^[0-9a-f]{40}$/ && !seen[$0]++ { print }
+        /^[0-9a-f]{40}$/ && !seen[$0]++ { printf "%s ", $0 }
       '
   ); then
     fail "could not identify commits that change generated files"
