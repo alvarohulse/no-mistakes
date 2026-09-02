@@ -92,7 +92,7 @@ func (d *DB) StepFixSummaries(stepResultID string) ([]string, error) {
 	}
 	var summaries []string
 	for _, r := range rounds {
-		if !r.IsFixRound() {
+		if (r.Status != "" && r.Status != RoundStatusCompleted) || !r.IsFixRound() {
 			continue
 		}
 		summary := ""
@@ -114,6 +114,9 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 	latestSelectedRound := 0
 	latestSelectedSource := ""
 	for _, r := range rounds {
+		if r.Status != "" && r.Status != RoundStatusCompleted {
+			continue
+		}
 		stats.TotalRounds++
 		stats.LatestRound = r.Round
 		stats.LatestTrigger = r.Trigger

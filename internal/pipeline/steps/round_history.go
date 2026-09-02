@@ -76,7 +76,7 @@ func uncertifiedRoundHistoryPromptSection(sctx *pipeline.StepContext) string {
 }
 
 func renderRoundHistoryEntry(r *db.StepRound) string {
-	if r == nil {
+	if r == nil || (r.Status != "" && r.Status != db.RoundStatusCompleted) {
 		return ""
 	}
 
