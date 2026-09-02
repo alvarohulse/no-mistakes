@@ -77,9 +77,6 @@ func TestSampleExercisesEverySection(t *testing.T) {
 			if run.StartedAt > 0 && run.DurationMS > 0 && run.InputTokens != nil && run.OutputTokens != nil && run.UncachedInputTokens != nil && run.CacheReadTokens != nil && run.CacheWriteTokens != nil && run.ReportedCostUSD != nil {
 				completeTelemetry = true
 			}
-			if run.Costs != nil {
-				t.Errorf("v5 sample carries legacy cost receipt: %+v", run.Costs)
-			}
 		}
 	}
 	for step, populated := range commandSteps {
@@ -205,54 +202,33 @@ func TestSampleV2IsAVersion2Contract(t *testing.T) {
 		for _, run := range step.Agents {
 			if run.Provider != "" || run.StartedAt != 0 || run.DurationMS != 0 ||
 				run.InputTokens != nil || run.OutputTokens != nil || run.UncachedInputTokens != nil ||
-				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil || run.Costs != nil {
+				run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.ReportedCostUSD != nil {
 				t.Errorf("v2 sample agent row carries v3-only telemetry: %+v", run)
 			}
 		}
 	}
 
-	if SampleForVersion(2) == nil || SampleForVersion(3) == nil || SampleForVersion(4) == nil || SampleForVersion(Version) == nil {
-		t.Error("SampleForVersion does not cover every supported version")
-	}
-	if SampleForVersion(1) != nil {
-		t.Error("SampleForVersion returned a contract for an unsupported version")
-	}
-	if !IsSupportedVersion(2) || !IsSupportedVersion(3) || !IsSupportedVersion(4) || !IsSupportedVersion(Version) || IsSupportedVersion(1) {
-		t.Error("IsSupportedVersion disagrees with SupportedVersions")
-	}
 	// Sample must stay unaffected by the downgrade.
 	if Sample().Sections.Summary == nil {
 		t.Error("SampleV2 mutated the shared current sample")
 	}
 }
-func TestSampleV3OmitsVersion4CostReceipts(t *testing.T) {
+
+func TestSupportedSampleVersionsExcludeProducerPricedV4(t *testing.T) {
 	t.Parallel()
-	for _, step := range SampleV3().Sections.Pipeline.Steps {
-		for _, run := range step.Agents {
-			if run.Costs != nil {
-				t.Errorf("v3 sample agent row carries v4 costs: %+v", run.Costs)
-			}
+	for _, version := range []int{2, 3, Version} {
+		if SampleForVersion(version) == nil || !IsSupportedVersion(version) {
+			t.Errorf("supported version %d is unavailable", version)
+		}
+	}
+	for _, version := range []int{1, 4} {
+		if SampleForVersion(version) != nil || IsSupportedVersion(version) {
+			t.Errorf("removed version %d remains supported", version)
 		}
 	}
 }
 
-func TestSampleV4RetainsLegacyCostReceipts(t *testing.T) {
-	t.Parallel()
-	sample := SampleV4()
-	if sample.Version != 4 {
-		t.Fatalf("SampleV4 version = %d, want 4", sample.Version)
-	}
-	for _, step := range sample.Sections.Pipeline.Steps {
-		for _, run := range step.Agents {
-			if run.Costs != nil {
-				return
-			}
-		}
-	}
-	t.Fatal("v4 sample has no legacy cost receipt")
-}
-
-func TestOlderSamplesOmitVersion4SectionsFromJSON(t *testing.T) {
+func TestOlderSamplesOmitCurrentSectionsFromJSON(t *testing.T) {
 	t.Parallel()
 
 	for _, sample := range []*Contract{SampleV2(), SampleV3()} {
@@ -262,7 +238,7 @@ func TestOlderSamplesOmitVersion4SectionsFromJSON(t *testing.T) {
 		}
 		for _, key := range []string{`"static_tests"`, `"review_evidence"`, `"user_testing"`} {
 			if bytes.Contains(raw, []byte(key)) {
-				t.Errorf("v%d sample carries v4-only key %s: %s", sample.Version, key, raw)
+				t.Errorf("v%d sample carries current-only key %s: %s", sample.Version, key, raw)
 			}
 		}
 	}

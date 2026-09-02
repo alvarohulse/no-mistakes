@@ -61,6 +61,29 @@ func TestDecodeMetricReceiptVersion3DropsRemovedAttribution(t *testing.T) {
 	}
 }
 
+func TestDecodeMetricReceiptVersion4DropsStoredCostEstimates(t *testing.T) {
+	payload := `{"schema_version":4,"run":{"id":"run-1","repo_id":"repo-1","status":"completed","created_at":10},"steps":[],"invocations":[{"id":"inv-1","agent":"codex","usage_coverage":"complete","reported_cost_usd":2.5,"costs":{"api_list_estimate":{"value_usd":99}}}],"metrics":{"invocation_count":1,"reported_cost_usd":{"value":2.5}},"costs":{"api_list_estimate":{"value_usd":99}},"integrity_error_count":0,"archived_at":20}`
+	decoded, err := decodeMetricReceipt(&db.RunMetricReceipt{
+		RunID: "run-1", RepoID: "repo-1", RunStatus: types.RunCompleted, RunCreatedAt: 10,
+		SchemaVersion: 4, PayloadJSON: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(decoded.RunAudit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Invocations[0].ReportedCostUSD == nil || *decoded.Invocations[0].ReportedCostUSD != 2.5 {
+		t.Fatalf("reported cost = %v, want 2.5", decoded.Invocations[0].ReportedCostUSD)
+	}
+	for _, removed := range []string{"costs", "historical_costs", "api_list_estimate"} {
+		if strings.Contains(string(raw), `"`+removed+`"`) {
+			t.Fatalf("decoded historical receipt retained removed field %q: %s", removed, raw)
+		}
+	}
+}
+
 func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T) {
 	database, err := db.Open(t.TempDir() + "/retention.sqlite")
 	if err != nil {
@@ -151,14 +174,14 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	provider := "openai"
 	fallback := db.FallbackReasonOther
 	tokens := 10
-	historicalReceipt := `{"api_list_estimate":{"value_usd":1,"coverage":{"reported":2,"eligible":2},"complete":true,"basis":"historical"}}`
+	reportedCost := 1.25
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: oldest.ID, StepName: string(types.StepReview), Round: 2, Purpose: "review-fix", Agent: "codex",
 		UsageCoverage: agent.UsageCoverageComplete,
 		Model:         "gpt-5.6-sol", ModelProvider: &provider, SessionMode: db.InvocationModeFallback,
 		SessionKey: privateMarker, FallbackReason: &fallback, StartedAt: oldest.CreatedAt, CompletedAt: oldest.CreatedAt + 1,
 		DurationMS: 1000, ExitStatus: "ok", DeltaInputTokens: &tokens, DeltaOutputTokens: &tokens,
-		PricingReceiptJSON: &historicalReceipt,
+		ReportedCostUSD: &reportedCost,
 	})
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: oldest.ID, StepName: string(types.StepReview), Round: 1, Purpose: "legacy-raw", Agent: "codex",
@@ -231,8 +254,13 @@ func TestPruneRichRunDataRetainsTheRequiredUnionAndArchivesMetrics(t *testing.T)
 	if !reflect.DeepEqual(audit.Steps, beforeAudit.Steps) {
 		t.Fatalf("content-free step audit changed after pruning:\n before: %+v\n  after: %+v", beforeAudit.Steps, audit.Steps)
 	}
-	if !beforeAudit.Invocations[0].HistoricalCosts || !audit.Invocations[0].HistoricalCosts {
-		t.Fatalf("historical cost label was lost during pruning: before=%t after=%t", beforeAudit.Invocations[0].HistoricalCosts, audit.Invocations[0].HistoricalCosts)
+	if beforeAudit.Invocations[0].ReportedCostUSD == nil || audit.Invocations[0].ReportedCostUSD == nil || *beforeAudit.Invocations[0].ReportedCostUSD != reportedCost || *audit.Invocations[0].ReportedCostUSD != reportedCost {
+		t.Fatalf("CLI-reported cost changed during pruning: before=%v after=%v", beforeAudit.Invocations[0].ReportedCostUSD, audit.Invocations[0].ReportedCostUSD)
+	}
+	for _, removedField := range []string{`"costs"`, `"historical_costs"`} {
+		if strings.Contains(receipt.PayloadJSON, removedField) {
+			t.Fatalf("metric receipt retained removed cost field %s: %s", removedField, receipt.PayloadJSON)
+		}
 	}
 	if audit.Invocations[0].UsageCoverage != agent.UsageCoverageComplete {
 		t.Fatalf("archived usage coverage = %q, want complete", audit.Invocations[0].UsageCoverage)

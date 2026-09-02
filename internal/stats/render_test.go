@@ -1,7 +1,9 @@
 package stats
 
 import (
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -11,7 +13,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -224,36 +225,28 @@ func TestTextJSONAndCSVProjectContentFreeCommandAndRepairFacts(t *testing.T) {
 	}
 }
 
-func TestProjectionsCarryPopulatedCostProvenanceCoverageAndIntegrityErrors(t *testing.T) {
+func TestProjectionsCarryOnlyCLIReportedCost(t *testing.T) {
 	database, run := newAuditRun(t)
-	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
-	reported := 9.25
-	listValue, effectiveValue := 36.75, 40.75
-	provider := "anthropic"
-	receiptBytes, err := json.Marshal(legacycost.CostClasses{
-		HarnessReported: legacycost.CostEstimate{
-			ValueUSD: &reported, Coverage: legacycost.Coverage{Reported: 1, Eligible: 1},
-			Complete: true, Basis: "agent_invocations.reported_cost_usd",
-		},
-		APIListEstimate: legacycost.CostEstimate{
-			ValueUSD: &listValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4},
-			Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
-			Provenance: legacycost.Provenance{CatalogVersion: 2, CatalogSHA256: "historical-catalog"},
-		},
-		HarnessAdjustedEstimate: legacycost.CostEstimate{
-			ValueUSD: &effectiveValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4},
-			Complete: true, Basis: "public_list_estimate_plus_harness_profile",
-		},
-	})
+	policy := `{"version":5,"managed":true,"steps":[{"name":"review","status":"enabled"}],"routing":{"review_candidates":[{"agent":"codex"}]}}`
+	digest := sha256.Sum256([]byte(policy))
+	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	review, err := database.InsertStepResult(run.ID, types.StepReview)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt := string(receiptBytes)
+	if err := database.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
+	reported := 9.25
+	provider := "anthropic"
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor", Model: "claude-opus-5", ModelProvider: &provider,
 		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(), CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
 		DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cacheRead, DeltaCacheCreationTokens: &cacheWrite,
-		ReportedCostUSD: &reported, PricingReceiptJSON: &receipt,
+		ReportedCostUSD: &reported,
 	})
 
 	report, err := BuildReport(database, Query{RunID: run.ID}, time.Unix(run.CreatedAt+1, 0).UTC())
@@ -278,22 +271,61 @@ func TestProjectionsCarryPopulatedCostProvenanceCoverageAndIntegrityErrors(t *te
 	for _, row := range rows[1:] {
 		byPath[row[15]] = row
 	}
-	valueRow := byPath["/agents/0/invocation/costs/api_list_estimate/value_usd"]
-	if valueRow[8] != "36.75" || valueRow[10] != "4" || valueRow[11] != "4" || valueRow[12] != "true" || valueRow[13] != "canonical_delta_token_meters_x_public_list_rate" {
-		t.Fatalf("API list CSV fact = %v", valueRow)
+	valueRow := byPath["/agents/0/invocation/reported_cost_usd"]
+	if valueRow[8] != "9.25" || valueRow[9] != "usd" {
+		t.Fatalf("reported cost CSV fact = %v", valueRow)
 	}
-	provenanceRow := byPath["/costs/items/0/classes/api_list_estimate/provenance/catalog_sha256"]
-	if provenanceRow[8] == "" {
-		t.Fatalf("catalog provenance CSV fact = %v", provenanceRow)
-	}
-	if errorRow := byPath["/data_errors/0/detail"]; errorRow[8] == "" {
-		t.Fatalf("integrity error CSV fact = %v", errorRow)
-	}
-	for _, want := range []string{"coverage=4/4", "catalog=v2@", "data_error run="} {
-		if !strings.Contains(textOutput, want) {
-			t.Fatalf("text projection omitted %q:\n%s", want, textOutput)
+	for _, output := range []string{jsonOutput, textOutput, csvOutput} {
+		for _, removed := range []string{"api_list_estimate", "harness_adjusted_estimate", "historical_costs"} {
+			if strings.Contains(output, removed) {
+				t.Fatalf("projection retained removed cost field %q:\n%s", removed, output)
+			}
 		}
 	}
+	if !strings.Contains(textOutput, "reported_cost_usd=9.25") {
+		t.Fatalf("text projection omitted CLI-reported cost:\n%s", textOutput)
+	}
+	if !strings.Contains(textOutput, "data_error run=") {
+		t.Fatalf("text projection omitted data error:\n%s", textOutput)
+	}
+	errorRow := byPath["/data_errors/0/detail"]
+	if errorRow[8] == "" {
+		t.Fatalf("data error CSV fact = %v", errorRow)
+	}
+}
+
+func TestProjectionsMarkMissingCLIReportedCostAsUnreported(t *testing.T) {
+	database, run := newAuditRun(t)
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
+		SessionMode: db.InvocationModeCold, StartedAt: run.CreatedAt, CompletedAt: run.CreatedAt + 1, ExitStatus: "ok",
+	})
+
+	report, err := BuildReport(database, Query{RunID: run.ID}, time.Unix(run.CreatedAt+1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	textOutput := RenderText(report)
+	if !strings.Contains(textOutput, "reported_cost_usd=—") {
+		t.Fatalf("text projection did not mark missing CLI-reported cost as unreported:\n%s", textOutput)
+	}
+	csvOutput, err := RenderCSV(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(csvOutput)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows[1:] {
+		if row[15] == "/agents/0/invocation/reported_cost_usd" {
+			if row[8] != "" || row[10] != "0" || row[12] != "false" || row[14] != "not_reported" {
+				t.Fatalf("missing reported cost CSV fact = %v", row)
+			}
+			return
+		}
+	}
+	t.Fatal("missing reported cost CSV fact was not projected")
 }
 
 type projectedLeaf struct {

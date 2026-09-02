@@ -3,14 +3,12 @@ package stats
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -29,14 +27,13 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 		SkipReceipts:    []SkipReceipt{},
 		Invocations:     []Invocation{},
 		Metrics:         emptyMetrics(),
-		Costs:           buildCostTotals(nil),
 		IntegrityErrors: []string{},
 	}
 	got, err := audit.CanonicalJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":7,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"costs":{"harness_reported":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"api_list_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]},"harness_adjusted_estimate":{"value_usd":null,"coverage":{"reported":0,"eligible":0},"complete":false,"basis":"","reasons":[],"provenance":[]}},"integrity_errors":[]}`
+	want := `{"schema_version":8,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -184,39 +181,18 @@ func TestBuildRunAuditAggregatesResumedSessionDeltasNotRawCounters(t *testing.T)
 	}
 }
 
-func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing.T) {
+func TestBuildRunAuditReportsOnlyCLIReportedCost(t *testing.T) {
 	database, run := newAuditRun(t)
-	policy := `{"version":6,"managed":false,"steps":[{"name":"review","status":"enabled"}],"routing":{},"pricing":{"profiles":{"cursor":"cursor-token-rate"}}}`
-	digest := sha256.Sum256([]byte(policy))
-	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
-		t.Fatal(err)
-	}
 	input, output, cacheRead, cacheWrite := 1_000_000, 1_000_000, 1_000_000, 1_000_000
 	reported := 9.25
-	listValue, effectiveValue := 12.5, 13.5
 	provider := "anthropic"
-	receiptBytes, err := json.Marshal(legacycost.CostClasses{
-		HarnessReported: legacycost.CostEstimate{ValueUSD: &reported, Coverage: legacycost.Coverage{Reported: 1, Eligible: 1}, Complete: true, Basis: "agent_invocations.reported_cost_usd"},
-		APIListEstimate: legacycost.CostEstimate{
-			ValueUSD: &listValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "canonical_delta_token_meters_x_public_list_rate",
-			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", PriceSourceURL: "https://example.com/persisted"},
-		},
-		HarnessAdjustedEstimate: legacycost.CostEstimate{
-			ValueUSD: &effectiveValue, Coverage: legacycost.Coverage{Reported: 4, Eligible: 4}, Complete: true, Basis: "public_list_estimate_plus_harness_profile",
-			Provenance: legacycost.Provenance{CatalogVersion: 77, CatalogSHA256: "persisted-catalog", ProfileID: "cursor-token-rate", ProfileVersion: 9},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	receipt := string(receiptBytes)
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
 		Model: "claude-opus-5", ModelProvider: &provider,
 		SessionMode: db.InvocationModeCold, StartedAt: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC).Unix(),
 		CompletedAt: time.Date(2026, 8, 17, 0, 1, 0, 0, time.UTC).Unix(), ExitStatus: "ok",
 		DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cacheRead,
-		DeltaCacheCreationTokens: &cacheWrite, ReportedCostUSD: &reported, PricingReceiptJSON: &receipt,
+		DeltaCacheCreationTokens: &cacheWrite, ReportedCostUSD: &reported,
 	})
 
 	audit, err := BuildRunAudit(database, run.ID)
@@ -226,46 +202,17 @@ func TestBuildRunAuditUsesPersistedPricingReceiptWithoutRecalculation(t *testing
 	if len(audit.Invocations) != 1 {
 		t.Fatalf("invocations = %d, want 1", len(audit.Invocations))
 	}
-	costs := audit.Invocations[0].Costs
-	if costs.HarnessReported.ValueUSD == nil || *costs.HarnessReported.ValueUSD != 9.25 {
-		t.Fatalf("harness-reported = %+v", costs.HarnessReported)
+	if got := audit.Invocations[0].ReportedCostUSD; got == nil || *got != reported {
+		t.Fatalf("reported cost = %v, want %v", got, reported)
 	}
-	if costs.APIListEstimate.ValueUSD == nil || *costs.APIListEstimate.ValueUSD != listValue || costs.APIListEstimate.Provenance.CatalogVersion != 77 {
-		t.Fatalf("API-list estimate = %+v", costs.APIListEstimate)
-	}
-	if costs.HarnessAdjustedEstimate.ValueUSD == nil || *costs.HarnessAdjustedEstimate.ValueUSD != effectiveValue || costs.HarnessAdjustedEstimate.Provenance.ProfileVersion != 9 {
-		t.Fatalf("harness-adjusted estimate = %+v", costs.HarnessAdjustedEstimate)
-	}
-	if audit.Costs.HarnessReported.ValueUSD == nil || *audit.Costs.HarnessReported.ValueUSD != 9.25 || !audit.Costs.HarnessReported.Complete {
-		t.Fatalf("run harness-reported total = %+v", audit.Costs.HarnessReported)
-	}
-	if audit.Costs.APIListEstimate.ValueUSD == nil || *audit.Costs.APIListEstimate.ValueUSD != listValue || !audit.Costs.APIListEstimate.Complete {
-		t.Fatalf("run API-list total = %+v", audit.Costs.APIListEstimate)
-	}
-	if audit.Costs.HarnessAdjustedEstimate.ValueUSD == nil || *audit.Costs.HarnessAdjustedEstimate.ValueUSD != effectiveValue || !audit.Costs.HarnessAdjustedEstimate.Complete {
-		t.Fatalf("run harness-adjusted total = %+v", audit.Costs.HarnessAdjustedEstimate)
-	}
-}
-
-func TestBuildRunAuditLeavesNewRawOnlyEstimatesUnknownWithoutIntegrityError(t *testing.T) {
-	database, run := newAuditRun(t)
-	input, output := 100, 20
-	seedInvocation(t, database, db.AgentInvocation{
-		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor", Model: "claude-opus-5",
-		SessionMode: db.InvocationModeCold, StartedAt: run.CreatedAt, CompletedAt: run.CreatedAt + 1, ExitStatus: "ok",
-		DeltaInputTokens: &input, DeltaOutputTokens: &output,
-	})
-
-	audit, err := BuildRunAudit(database, run.ID)
+	raw, err := audit.CanonicalJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	costs := audit.Invocations[0].Costs
-	if costs != (legacycost.CostClasses{}) || audit.Invocations[0].HistoricalCosts {
-		t.Fatalf("raw-only costs = %+v, want absent historical costs", costs)
-	}
-	if joined := strings.Join(audit.IntegrityErrors, "\n"); strings.Contains(joined, "pricing receipt") || strings.Contains(joined, "historical pricing") {
-		t.Fatalf("raw-only invocation produced a pricing integrity error: %v", audit.IntegrityErrors)
+	for _, removed := range []string{"costs", "historical_costs", "api_list_estimate", "harness_adjusted_estimate"} {
+		if strings.Contains(raw, `"`+removed+`"`) {
+			t.Fatalf("run audit retained removed field %q: %s", removed, raw)
+		}
 	}
 }
 

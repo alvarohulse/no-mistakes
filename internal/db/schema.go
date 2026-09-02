@@ -134,11 +134,10 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     reasoning_tokens      INTEGER,
     delta_input_tokens    INTEGER,
     delta_output_tokens   INTEGER,
-    delta_cache_read_tokens INTEGER,
+	delta_cache_read_tokens INTEGER,
 	delta_cache_creation_tokens INTEGER,
 	reported_cost_usd       REAL,
-	pricing_receipt_json    TEXT,
-    model_roundtrips      INTEGER,
+	model_roundtrips      INTEGER,
     tool_calls            INTEGER,
     tool_wait_calls       INTEGER,
     tool_test_lint_calls  INTEGER,
@@ -206,6 +205,10 @@ CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_repo_created
 
 CREATE INDEX IF NOT EXISTS idx_run_metric_receipts_status_created
     ON run_metric_receipts (run_status, run_created_at DESC, run_id DESC);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY
+);
 
 CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (
     run_id TEXT PRIMARY KEY,
@@ -343,9 +346,6 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_read_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_creation_tokens INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN reported_cost_usd REAL`,
-	// Retained for immutable receipts written by older producers. New rows
-	// remain NULL; readers never reprice them.
-	`ALTER TABLE agent_invocations ADD COLUMN pricing_receipt_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN model_roundtrips INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_calls INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN tool_wait_calls INTEGER`,
@@ -373,4 +373,5 @@ var removalMigrationStatements = []string{
 	`ALTER TABLE agent_invocations DROP COLUMN invocation_mode`,
 	`ALTER TABLE agent_invocations DROP COLUMN agent_observations_json`,
 	`ALTER TABLE agent_invocations DROP COLUMN nested_agent_count`,
+	`ALTER TABLE agent_invocations DROP COLUMN pricing_receipt_json`,
 }

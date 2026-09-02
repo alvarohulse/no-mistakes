@@ -2,13 +2,320 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-cost-receipt.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/legacy-cost-receipt", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := before.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"schema_version":4,"archived_at":99,"run":{"id":"` + run.ID + `","repo_id":"` + repo.ID + `","status":"completed","created_at":` + fmt.Sprint(run.CreatedAt) + `},"pull_request":true,"steps":[{"name":"review","custom_step":"kept"}],"invocations":[{"id":"inv-1","reported_cost_usd":null,"usage_coverage":"complete","raw_usage":{"input_tokens":11},"activity":{"tool_calls":2},"custom_invocation":{"kept":true},"costs":{"api_list_estimate":{"value_usd":1.5}}}],"metrics":{"invocation_count":1},"costs":{"api_list_estimate":{"value_usd":1.5}},"integrity_error_count":0,"custom_top":{"kept":"yes"}}`
+	record := RunMetricReceipt{
+		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+		SchemaVersion: 4, PayloadJSON: payload, ArchivedAt: 99, PullRequest: true,
+		ReportedFindings: 3, FixedFindings: 2,
+		StepStats:       []StepStats{{StepName: types.StepReview, ReportedFindings: 3, FixedFindings: 2}},
+		AgentAggregates: []AgentInvocationAggregate{{Purpose: "review", Count: 1, TotalDurationMS: 123}},
+	}
+	if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+		t.Fatalf("archive legacy receipt = %t, %v", archived, err)
+	}
+	if _, err := before.sql.Exec(`UPDATE run_metric_receipts SET artifact_cleanup_pending = 1 WHERE run_id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	old, err := before.GetRunMetricReceipt(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := after.GetRunMetricReceipt(run.ID)
+	if err != nil {
+		after.Close()
+		t.Fatal(err)
+	}
+	if migrated.SchemaVersion != 5 || migrated.ReceiptSHA256 == old.ReceiptSHA256 {
+		after.Close()
+		t.Fatalf("migrated receipt version/digest = %d/%q, old digest %q", migrated.SchemaVersion, migrated.ReceiptSHA256, old.ReceiptSHA256)
+	}
+	if migrated.RunID != old.RunID || migrated.RepoID != old.RepoID || migrated.RunCreatedAt != old.RunCreatedAt || migrated.RunStatus != old.RunStatus || migrated.ArchivedAt != old.ArchivedAt || migrated.PullRequest != old.PullRequest || migrated.ReportedFindings != old.ReportedFindings || migrated.FixedFindings != old.FixedFindings || !reflect.DeepEqual(migrated.StepStats, old.StepStats) || !reflect.DeepEqual(migrated.AgentAggregates, old.AgentAggregates) {
+		after.Close()
+		t.Fatalf("receipt metadata changed during migration:\n old: %+v\n new: %+v", old, migrated)
+	}
+	var cleanupPending int
+	if err := after.sql.QueryRow(`SELECT artifact_cleanup_pending FROM run_metric_receipts WHERE run_id = ?`, run.ID).Scan(&cleanupPending); err != nil {
+		after.Close()
+		t.Fatal(err)
+	}
+	if cleanupPending != 1 {
+		after.Close()
+		t.Fatalf("artifact cleanup metadata = %d, want 1", cleanupPending)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(migrated.PayloadJSON), &decoded); err != nil {
+		after.Close()
+		t.Fatal(err)
+	}
+	if _, exists := decoded["costs"]; exists {
+		after.Close()
+		t.Fatalf("top-level costs survived migration: %s", migrated.PayloadJSON)
+	}
+	if decoded["schema_version"] != float64(5) || !reflect.DeepEqual(decoded["custom_top"], map[string]any{"kept": "yes"}) {
+		after.Close()
+		t.Fatalf("top-level facts changed during migration: %#v", decoded)
+	}
+	invocations := decoded["invocations"].([]any)
+	invocation := invocations[0].(map[string]any)
+	if _, exists := invocation["costs"]; exists {
+		after.Close()
+		t.Fatalf("invocation costs survived migration: %s", migrated.PayloadJSON)
+	}
+	if value, exists := invocation["reported_cost_usd"]; !exists || value != nil || invocation["usage_coverage"] != "complete" || !reflect.DeepEqual(invocation["raw_usage"], map[string]any{"input_tokens": float64(11)}) || !reflect.DeepEqual(invocation["activity"], map[string]any{"tool_calls": float64(2)}) || !reflect.DeepEqual(invocation["custom_invocation"], map[string]any{"kept": true}) {
+		after.Close()
+		t.Fatalf("invocation facts changed during migration: %#v", invocation)
+	}
+	firstPayload, firstDigest := migrated.PayloadJSON, migrated.ReceiptSHA256
+	if err := after.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := reopened.GetRunMetricReceipt(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.PayloadJSON != firstPayload || again.ReceiptSHA256 != firstDigest {
+		t.Fatalf("idempotent reopen changed receipt:\n first: %s / %s\n again: %s / %s", firstPayload, firstDigest, again.PayloadJSON, again.ReceiptSHA256)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = ?`, run.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	postMigration, err := Open(path)
+	if err != nil {
+		t.Fatalf("completed migration rescanned receipts: %v", err)
+	}
+	defer postMigration.Close()
+	if _, err := postMigration.GetRunMetricReceipt(run.ID); err == nil || !strings.Contains(err.Error(), "SHA-256 verification") {
+		t.Fatalf("corrupt migrated receipt read error = %v", err)
+	}
+}
+
+func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unsupported-receipts.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/unsupported-receipts", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make(map[string]RunMetricReceipt)
+	for _, version := range []int{1, 6} {
+		runID := fmt.Sprintf("receipt-v%d", version)
+		run, err := before.InsertRunWithIDAndOptions(runID, repo.ID, "feature", "head", "base", RunOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+		payload := fmt.Sprintf(`{"schema_version":%d,"run":{"id":%q,"repo_id":%q,"status":"completed","created_at":%d},"costs":{"legacy":true}}`, version, run.ID, repo.ID, run.CreatedAt)
+		record := RunMetricReceipt{
+			RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+			SchemaVersion: version, PayloadJSON: payload, ArchivedAt: run.UpdatedAt,
+		}
+		if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+			t.Fatalf("archive v%d receipt = %t, %v", version, archived, err)
+		}
+		stored, err := before.GetRunMetricReceipt(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[run.ID] = *stored
+	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer after.Close()
+	for runID, expected := range want {
+		got, err := after.GetRunMetricReceipt(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SchemaVersion != expected.SchemaVersion {
+			t.Fatalf("unsupported receipt %q was relabeled from v%d to v%d", runID, expected.SchemaVersion, got.SchemaVersion)
+		}
+		if expected.SchemaVersion > RunMetricReceiptSchemaVersion {
+			if got.PayloadJSON != expected.PayloadJSON || got.ReceiptSHA256 != expected.ReceiptSHA256 {
+				t.Fatalf("future receipt %q was rewritten:\nwant: %+v\n got: %+v", runID, expected, *got)
+			}
+			continue
+		}
+		if got.PayloadJSON == expected.PayloadJSON || got.ReceiptSHA256 == expected.ReceiptSHA256 {
+			t.Fatalf("legacy receipt %q retained its estimate bytes", runID)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(got.PayloadJSON), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := payload["costs"]; exists {
+			t.Fatalf("legacy receipt %q retained costs: %s", runID, got.PayloadJSON)
+		}
+	}
+}
+
+func TestOpenRejectsCorruptFutureReceiptDuringMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt-future-receipt.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/corrupt-future-receipt", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := before.InsertRunWithIDAndOptions("future-corrupt", repo.ID, "feature", "head", "base", RunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	record := RunMetricReceipt{
+		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+		SchemaVersion: RunMetricReceiptSchemaVersion + 1,
+		PayloadJSON:   fmt.Sprintf(`{"schema_version":%d}`, RunMetricReceiptSchemaVersion+1),
+		ArchivedAt:    run.UpdatedAt,
+	}
+	if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+		t.Fatalf("archive future receipt = %t, %v", archived, err)
+	}
+	if _, err := before.sql.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = ?`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if opened, err := Open(path); err == nil || !strings.Contains(err.Error(), "future-corrupt") || !strings.Contains(err.Error(), "SHA-256 verification") {
+		if opened != nil {
+			opened.Close()
+		}
+		t.Fatalf("corrupt future receipt open error = %v", err)
+	}
+}
+
+func TestOpenRejectsCorruptArchivedReceiptWithoutPartiallyMigratingSiblings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "corrupt-cost-receipt.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/corrupt-cost-receipt", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"a-valid", "z-corrupt"} {
+		run, err := before.InsertRunWithIDAndOptions(runID, repo.ID, "feature", "head", "base", RunOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+		payload := `{"schema_version":4,"run":{"id":"` + run.ID + `","repo_id":"` + repo.ID + `","status":"completed","created_at":` + fmt.Sprint(run.CreatedAt) + `},"invocations":[{"id":"inv-1","costs":{"api_list_estimate":{"value_usd":1.5}}}],"costs":{"api_list_estimate":{"value_usd":1.5}}}`
+		record := RunMetricReceipt{RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted, SchemaVersion: 4, PayloadJSON: payload, ArchivedAt: run.UpdatedAt}
+		if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+			t.Fatalf("archive %s = %t, %v", runID, archived, err)
+		}
+	}
+	if _, err := before.sql.Exec(`UPDATE run_metric_receipts SET receipt_sha256 = 'corrupt' WHERE run_id = 'z-corrupt'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+		t.Fatal(err)
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if opened, err := Open(path); err == nil || !strings.Contains(err.Error(), "z-corrupt") || !strings.Contains(err.Error(), "SHA-256 verification") {
+		if opened != nil {
+			opened.Close()
+		}
+		t.Fatalf("corrupt receipt open error = %v", err)
+	}
+	raw, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var version int
+	var payload string
+	if err := raw.QueryRow(`SELECT schema_version, payload_json FROM run_metric_receipts WHERE run_id = 'a-valid'`).Scan(&version, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 || !strings.Contains(payload, `"costs"`) {
+		t.Fatalf("valid sibling was partially migrated: version=%d payload=%s", version, payload)
+	}
+}
 
 func TestRunMetricReceiptSurvivesCascadesAndDetectsMutation(t *testing.T) {
 	database := openTestDB(t)

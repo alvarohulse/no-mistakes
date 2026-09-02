@@ -32,7 +32,6 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		CacheCreationTokens:      intPtr(50),
 		DeltaCacheCreationTokens: intPtr(50),
 		ReportedCostUSD:          float64Ptr(1.25),
-		PricingReceiptJSON:       strPtr(`{"receipt":"captured"}`),
 	}
 	if _, err := d.InsertAgentInvocation(inv); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -58,37 +57,6 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.DeltaCacheCreationTokens == nil || *back.DeltaCacheCreationTokens != 50 || back.ReportedCostUSD == nil || *back.ReportedCostUSD != 1.25 {
 		t.Fatalf("cache-write/cost readback = %v/%v", back.DeltaCacheCreationTokens, back.ReportedCostUSD)
-	}
-	if back.PricingReceiptJSON == nil || *back.PricingReceiptJSON != `{"receipt":"captured"}` {
-		t.Fatalf("pricing receipt readback = %v", back.PricingReceiptJSON)
-	}
-}
-
-func TestAgentInvocations_PricingReceiptIsWriteOnce(t *testing.T) {
-	d, _, run := openSessionTestDB(t)
-	pending, err := d.InsertAgentInvocation(AgentInvocation{
-		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "cursor",
-		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 1, ExitStatus: "started",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := `{"catalog":"captured"}`
-	pending.CompletedAt, pending.ExitStatus, pending.PricingReceiptJSON = 2, "ok", &first
-	if _, err := d.UpdateAgentInvocation(*pending); err != nil {
-		t.Fatal(err)
-	}
-	second := `{"catalog":"newer"}`
-	pending.PricingReceiptJSON = &second
-	if _, err := d.UpdateAgentInvocation(*pending); err != nil {
-		t.Fatal(err)
-	}
-	got, err := d.GetAgentInvocationsByRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].PricingReceiptJSON == nil || *got[0].PricingReceiptJSON != first {
-		t.Fatalf("stored pricing receipt = %+v, want first capture", got)
 	}
 }
 
@@ -578,7 +546,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	// Simulate a pre-fidelity table by dropping the new columns, then insert a
 	// legacy row that has no fidelity data.
 	for _, col := range []string{"model_provider", "fallback_reason", "subprocess_wait_ms",
-		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count", "review_candidate_pool_json", "pricing_receipt_json"} {
+		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count", "review_candidate_pool_json"} {
 		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + col); err != nil {
 			t.Fatalf("drop %s: %v", col, err)
 		}
@@ -613,7 +581,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
 	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
-		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil || legacy.PricingReceiptJSON != nil {
+		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}
 	// The migrated table now accepts the new fields.
@@ -644,14 +612,15 @@ func TestOpenDropsAgentAttributionColumnsWithoutLosingInvocationFacts(t *testing
 		`ALTER TABLE agent_invocations ADD COLUMN invocation_mode TEXT NOT NULL DEFAULT 'harness_cli'`,
 		`ALTER TABLE agent_invocations ADD COLUMN agent_observations_json TEXT`,
 		`ALTER TABLE agent_invocations ADD COLUMN nested_agent_count INTEGER`,
+		`ALTER TABLE agent_invocations ADD COLUMN pricing_receipt_json TEXT`,
 	} {
 		if _, err := d.sql.Exec(statement); err != nil {
 			t.Fatalf("add legacy attribution column: %v", err)
 		}
 	}
 	if _, err := d.sql.Exec(`INSERT INTO agent_invocations
-		(id, run_id, step_name, round, purpose, agent, usage_coverage, invocation_mode, agent_observations_json, nested_agent_count, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens)
-		VALUES ('legacy-attribution', ?, 'review', 1, 'review', 'codex', 'complete', 'harness_cli', '[{"identity":"worker","invocation_mode":"subagent_tool"}]', 1, 'gpt-5.6-sol', 'cold', 'session-key', 1, 2, 1, 'ok', '', 100, 20, 50)`, run.ID); err != nil {
+		(id, run_id, step_name, round, purpose, agent, usage_coverage, invocation_mode, agent_observations_json, nested_agent_count, model, session_mode, session_key, started_at, completed_at, duration_ms, exit_status, failure_category, input_tokens, output_tokens, cache_read_tokens, reported_cost_usd, pricing_receipt_json)
+		VALUES ('legacy-attribution', ?, 'review', 1, 'review', 'codex', 'complete', 'harness_cli', '[{"identity":"worker","invocation_mode":"subagent_tool"}]', 1, 'gpt-5.6-sol', 'cold', 'session-key', 1, 2, 1, 'ok', '', 100, 20, 50, 1.25, '{"api_list_estimate":{"value_usd":2.5}}')`, run.ID); err != nil {
 		t.Fatalf("insert legacy invocation: %v", err)
 	}
 	if err := d.Close(); err != nil {
@@ -671,7 +640,7 @@ func TestOpenDropsAgentAttributionColumnsWithoutLosingInvocationFacts(t *testing
 	if len(got) != 1 {
 		t.Fatalf("got %d rows, want 1", len(got))
 	}
-	if got[0].UsageCoverage != agent.UsageCoverageComplete || got[0].Model != "gpt-5.6-sol" || got[0].InputTokens != 100 || got[0].OutputTokens != 20 || got[0].SessionKey != "session-key" {
+	if got[0].UsageCoverage != agent.UsageCoverageComplete || got[0].Model != "gpt-5.6-sol" || got[0].InputTokens != 100 || got[0].OutputTokens != 20 || got[0].SessionKey != "session-key" || got[0].ReportedCostUSD == nil || *got[0].ReportedCostUSD != 1.25 {
 		t.Fatalf("retained invocation facts = %+v", got[0])
 	}
 	rows, err := d.sql.Query(`SELECT name FROM pragma_table_info('agent_invocations')`)
@@ -687,7 +656,7 @@ func TestOpenDropsAgentAttributionColumnsWithoutLosingInvocationFacts(t *testing
 		}
 		columns = append(columns, column)
 	}
-	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count"} {
+	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {
 		if containsString(columns, removed) {
 			t.Fatalf("migration retained removed column %q: %v", removed, columns)
 		}

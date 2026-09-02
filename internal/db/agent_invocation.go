@@ -117,9 +117,6 @@ type AgentInvocation struct {
 	DeltaCacheCreationTokens *int
 	// ReportedCostUSD is the cost emitted by the agent CLI, when available.
 	ReportedCostUSD *float64
-	// PricingReceiptJSON retains immutable three-class cost receipts written by
-	// older producers. New rows leave it nil; readers must never recalculate it.
-	PricingReceiptJSON *string
 	// ModelRoundtrips is the count of model-authored items (messages + tool
 	// calls) - a live-stream proxy for productive model round-trips. Nil when
 	// the adapter reported no activity metrics.
@@ -152,7 +149,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, us
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 	fresh_input_tokens, reasoning_tokens,
-	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens, delta_cache_creation_tokens, reported_cost_usd, pricing_receipt_json,
+	delta_input_tokens, delta_output_tokens, delta_cache_read_tokens, delta_cache_creation_tokens, reported_cost_usd,
 	model_roundtrips, tool_calls,
 	tool_wait_calls, tool_test_lint_calls, tool_edit_calls, tool_read_calls, tool_git_calls, tool_other_calls,
 	workload_files, workload_lines, finding_count`
@@ -163,7 +160,7 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
 	?, ?,
-	?, ?, ?,
+	?, ?,
 	?, ?,
 	?, ?, ?, ?, ?, ?,
 	?, ?, ?`
@@ -189,7 +186,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
 		inv.FreshInputTokens, inv.ReasoningTokens,
-		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD, inv.PricingReceiptJSON,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
 		inv.ModelRoundtrips, inv.ToolCalls,
 		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
 		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
@@ -220,7 +217,6 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
 		fresh_input_tokens = ?, reasoning_tokens = ?,
 		delta_input_tokens = ?, delta_output_tokens = ?, delta_cache_read_tokens = ?, delta_cache_creation_tokens = ?, reported_cost_usd = ?,
-		pricing_receipt_json = COALESCE(pricing_receipt_json, ?),
 		model_roundtrips = ?, tool_calls = ?,
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
@@ -230,7 +226,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
 		inv.FreshInputTokens, inv.ReasoningTokens,
-		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD, inv.PricingReceiptJSON,
+		inv.DeltaInputTokens, inv.DeltaOutputTokens, inv.DeltaCacheReadTokens, inv.DeltaCacheCreationTokens, inv.ReportedCostUSD,
 		inv.ModelRoundtrips, inv.ToolCalls,
 		inv.ToolWaitCalls, inv.ToolTestLintCalls, inv.ToolEditCalls, inv.ToolReadCalls, inv.ToolGitCalls, inv.ToolOtherCalls,
 		inv.WorkloadFiles, inv.WorkloadLines, inv.FindingCount,
@@ -327,7 +323,7 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
 		&inv.FreshInputTokens, &inv.ReasoningTokens,
-		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens, &inv.DeltaCacheCreationTokens, &inv.ReportedCostUSD, &inv.PricingReceiptJSON,
+		&inv.DeltaInputTokens, &inv.DeltaOutputTokens, &inv.DeltaCacheReadTokens, &inv.DeltaCacheCreationTokens, &inv.ReportedCostUSD,
 		&inv.ModelRoundtrips, &inv.ToolCalls,
 		&inv.ToolWaitCalls, &inv.ToolTestLintCalls, &inv.ToolEditCalls, &inv.ToolReadCalls, &inv.ToolGitCalls, &inv.ToolOtherCalls,
 		&inv.WorkloadFiles, &inv.WorkloadLines, &inv.FindingCount,

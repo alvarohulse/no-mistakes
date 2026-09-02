@@ -10,8 +10,6 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
-
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 )
 
 var csvHeader = []string{
@@ -123,13 +121,6 @@ func renderText(report *Report, forceDetails bool) string {
 		}
 		sort.Strings(statuses)
 		fmt.Fprintf(&out, "runs by status: %s\n", textValue(strings.Join(statuses, ", ")))
-		for _, total := range namedCostTotals(report.Costs.Totals) {
-			if !hasCostTotal(total.total) {
-				continue
-			}
-			fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
-				total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
-		}
 		renderMetricsText(&out, "metric total", report.Metrics.Totals)
 		if len(report.DataErrors) > 0 {
 			fmt.Fprintf(&out, "data errors: %d (use --format json or csv for complete details)\n", len(report.DataErrors))
@@ -166,64 +157,10 @@ func renderText(report *Report, forceDetails bool) string {
 	for _, record := range report.Metrics.Items {
 		renderMetricsText(&out, "metric "+record.RunID, record.Metrics)
 	}
-	for _, item := range report.Costs.Items {
-		if !item.Historical {
-			continue
-		}
-		for _, class := range namedCostEstimates(item.Classes) {
-			if !hasCostEstimate(class.estimate) {
-				continue
-			}
-			fmt.Fprintf(&out, "cost %s/%s/%s value_usd=%s coverage=%d/%d complete=%t reason=%s catalog=%s profile=%s\n",
-				item.RunID, item.InvocationID, class.name, textFloat(class.estimate.ValueUSD), class.estimate.Coverage.Reported, class.estimate.Coverage.Eligible,
-				class.estimate.Complete, textValue(class.estimate.Reason), provenanceCatalog(class.estimate.Provenance), provenanceProfile(class.estimate.Provenance))
-		}
-	}
-	for _, total := range namedCostTotals(report.Costs.Totals) {
-		if !hasCostTotal(total.total) {
-			continue
-		}
-		fmt.Fprintf(&out, "cost total/%s value_usd=%s coverage=%d/%d complete=%t reason=%s\n",
-			total.name, textFloat(total.total.ValueUSD), total.total.Coverage.Reported, total.total.Coverage.Eligible, total.total.Complete, textValue(strings.Join(total.total.Reasons, ";")))
-	}
 	for _, dataError := range report.DataErrors {
 		fmt.Fprintf(&out, "data_error run=%s code=%s detail=%s\n", dataError.RunID, dataError.Code, strconv.Quote(dataError.Detail))
 	}
 	return out.String()
-}
-
-func hasCostEstimate(estimate legacycost.CostEstimate) bool {
-	return estimate.ValueUSD != nil || estimate.Coverage.Reported > 0 || estimate.Coverage.Eligible > 0 || estimate.Basis != "" || estimate.Reason != ""
-}
-
-func hasCostTotal(total CostTotal) bool {
-	return total.ValueUSD != nil || total.Coverage.Reported > 0 || total.Coverage.Eligible > 0 || total.Basis != "" || len(total.Reasons) > 0
-}
-
-type namedCostEstimate struct {
-	name     string
-	estimate legacycost.CostEstimate
-}
-
-func namedCostEstimates(costs legacycost.CostClasses) []namedCostEstimate {
-	return []namedCostEstimate{
-		{name: "harness_reported", estimate: costs.HarnessReported},
-		{name: "historical_api_list_receipt", estimate: costs.APIListEstimate},
-		{name: "historical_harness_adjusted_receipt", estimate: costs.HarnessAdjustedEstimate},
-	}
-}
-
-type namedCostTotal struct {
-	name  string
-	total CostTotal
-}
-
-func namedCostTotals(costs CostTotals) []namedCostTotal {
-	return []namedCostTotal{
-		{name: "harness_reported", total: costs.HarnessReported},
-		{name: "historical_api_list_receipt", total: costs.APIListEstimate},
-		{name: "historical_harness_adjusted_receipt", total: costs.HarnessAdjustedEstimate},
-	}
 }
 
 func textString(value *string) string {
@@ -259,20 +196,6 @@ func textFloat(value *float64) string {
 		return "—"
 	}
 	return strconv.FormatFloat(*value, 'f', -1, 64)
-}
-
-func provenanceCatalog(value legacycost.Provenance) string {
-	if value.CatalogVersion == 0 && value.CatalogSHA256 == "" {
-		return "—"
-	}
-	return fmt.Sprintf("v%d@%s", value.CatalogVersion, value.CatalogSHA256)
-}
-
-func provenanceProfile(value legacycost.Provenance) string {
-	if value.ProfileID == "" {
-		return "—"
-	}
-	return fmt.Sprintf("%s/v%d", value.ProfileID, value.ProfileVersion)
 }
 
 func renderMetricsText(out *strings.Builder, prefix string, metrics Metrics) {
@@ -402,7 +325,6 @@ func appendReportFact(report *Report, repoByRun map[string]string, path []string
 		fact.Reason = "not_reported"
 	}
 	fact.Unit = factUnit(path)
-	applyCostMetadata(report, path, &fact)
 	applyMetricMetadata(report, path, &fact)
 	applyAgentAggregateMetadata(report, path, &fact)
 	*facts = append(*facts, fact)
@@ -574,25 +496,6 @@ func factContext(report *Report, repoByRun map[string]string, path []string) rep
 				fact.Metric = relativeMetric(path, 3)
 			}
 		}
-	case "costs":
-		fact.RecordType, fact.Group = "cost", "aggregate"
-		if len(path) >= 3 && path[1] == "totals" {
-			fact.EntityID = "total:" + path[2]
-			fact.Group = path[2]
-			fact.Metric = relativeMetric(path, 3)
-		} else if len(path) >= 3 && path[1] == "items" {
-			if index, ok := pathIndex(path, 2, len(report.Costs.Items)); ok {
-				record := report.Costs.Items[index]
-				fact.RunID, fact.RepoID = record.RunID, repoByRun[record.RunID]
-				fact.EntityID = record.InvocationID
-				fact.Metric = relativeMetric(path, 3)
-				if len(path) >= 5 && path[3] == "classes" {
-					fact.EntityID += ":" + path[4]
-					fact.Group = path[4]
-					fact.Metric = relativeMetric(path, 5)
-				}
-			}
-		}
 	case "metrics":
 		fact.RecordType, fact.Group = "metric", "aggregate"
 		if len(path) >= 3 && path[1] == "totals" {
@@ -729,69 +632,5 @@ func metricMetadata(metrics Metrics, name string) (projectedMetricMetadata, bool
 		return projectedMetricMetadata{reported: metrics.ReportedCostUSD.Coverage.Reported, total: metrics.ReportedCostUSD.Coverage.Total, present: metrics.ReportedCostUSD.Value != nil, integrityError: stringOrEmpty(metrics.ReportedCostUSD.IntegrityError)}, true
 	default:
 		return projectedMetricMetadata{}, false
-	}
-}
-
-func applyCostMetadata(report *Report, path []string, fact *reportFact) {
-	if len(path) == 0 || path[len(path)-1] != "value_usd" {
-		return
-	}
-	if estimate, ok := costEstimateAt(report, path); ok {
-		fact.Reported = estimate.Coverage.Reported
-		fact.Eligible = estimate.Coverage.Eligible
-		fact.Complete = estimate.Complete
-		fact.Basis = estimate.Basis
-		fact.Reason = estimate.Reason
-		return
-	}
-	if total, ok := costTotalAt(report, path); ok {
-		fact.Reported = total.Coverage.Reported
-		fact.Eligible = total.Coverage.Eligible
-		fact.Complete = total.Complete
-		fact.Basis = total.Basis
-		fact.Reason = strings.Join(total.Reasons, ";")
-	}
-}
-
-func costEstimateAt(report *Report, path []string) (legacycost.CostEstimate, bool) {
-	if len(path) == 6 && path[0] == "agents" && path[2] == "invocation" && path[3] == "costs" {
-		if index, valid := pathIndex(path, 1, len(report.Agents)); valid {
-			return costEstimate(report.Agents[index].Invocation.Costs, path[4])
-		}
-	}
-	if len(path) == 6 && path[0] == "costs" && path[1] == "items" && path[3] == "classes" {
-		if index, valid := pathIndex(path, 2, len(report.Costs.Items)); valid {
-			return costEstimate(report.Costs.Items[index].Classes, path[4])
-		}
-	}
-	return legacycost.CostEstimate{}, false
-}
-
-func costEstimate(classes legacycost.CostClasses, name string) (legacycost.CostEstimate, bool) {
-	switch name {
-	case "harness_reported":
-		return classes.HarnessReported, true
-	case "api_list_estimate":
-		return classes.APIListEstimate, true
-	case "harness_adjusted_estimate":
-		return classes.HarnessAdjustedEstimate, true
-	default:
-		return legacycost.CostEstimate{}, false
-	}
-}
-
-func costTotalAt(report *Report, path []string) (CostTotal, bool) {
-	if len(path) != 4 || path[0] != "costs" || path[1] != "totals" {
-		return CostTotal{}, false
-	}
-	switch path[2] {
-	case "harness_reported":
-		return report.Costs.Totals.HarnessReported, true
-	case "api_list_estimate":
-		return report.Costs.Totals.APIListEstimate, true
-	case "harness_adjusted_estimate":
-		return report.Costs.Totals.HarnessAdjustedEstimate, true
-	default:
-		return CostTotal{}, false
 	}
 }

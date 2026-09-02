@@ -10,11 +10,10 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/legacycost"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 7
+const ReportSchemaVersion = 8
 
 type Query struct {
 	RunID    string
@@ -39,7 +38,6 @@ type Report struct {
 	Agents          []ReportAgent    `json:"agents"`
 	AgentAggregates []AgentAggregate `json:"agent_aggregates"`
 	Metrics         ReportMetrics    `json:"metrics"`
-	Costs           ReportCosts      `json:"costs"`
 	Dashboard       Dashboard        `json:"dashboard"`
 	DataErrors      []DataError      `json:"data_errors"`
 }
@@ -148,18 +146,6 @@ type MetricRecord struct {
 	Metrics Metrics `json:"metrics"`
 }
 
-type ReportCosts struct {
-	Totals CostTotals   `json:"totals"`
-	Items  []CostRecord `json:"items"`
-}
-
-type CostRecord struct {
-	RunID        string                 `json:"run_id"`
-	InvocationID string                 `json:"invocation_id"`
-	Historical   bool                   `json:"historical"`
-	Classes      legacycost.CostClasses `json:"classes"`
-}
-
 type DataError struct {
 	RunID  string `json:"run_id"`
 	Code   string `json:"code"`
@@ -220,7 +206,7 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		Scope:         query.scope(),
 		Runs:          ReportRuns{ByStatus: map[types.RunStatus]int{}, Items: []RunIdentity{}},
 		Skips:         []ReportSkip{}, Repairs: []Repair{}, Steps: []ReportStep{}, Agents: []ReportAgent{},
-		AgentAggregates: []AgentAggregate{}, Metrics: ReportMetrics{Items: []MetricRecord{}}, Costs: ReportCosts{Items: []CostRecord{}},
+		AgentAggregates: []AgentAggregate{}, Metrics: ReportMetrics{Items: []MetricRecord{}},
 		Dashboard: Dashboard{Steps: []DashboardStep{}, Repositories: []DashboardRepo{}}, DataErrors: []DataError{},
 	}
 
@@ -337,7 +323,6 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		}
 		for _, invocation := range invocations {
 			report.Agents = append(report.Agents, ReportAgent{RunID: audit.Run.ID, Invocation: invocation})
-			report.Costs.Items = append(report.Costs.Items, CostRecord{RunID: audit.Run.ID, InvocationID: invocation.ID, Historical: invocation.HistoricalCosts, Classes: invocation.Costs})
 			selectedInvocations = append(selectedInvocations, invocation)
 		}
 		for _, integrityError := range audit.IntegrityErrors {
@@ -350,7 +335,6 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 	report.Runs.Count = len(report.Runs.Items)
 	report.AgentAggregates = buildAgentAggregates(selectedInvocations)
 	report.Metrics.Totals = projectedMetrics(selectedInvocations)
-	report.Costs.Totals = buildCostTotals(selectedInvocations)
 	report.Dashboard = buildDashboard(dashboardRuns, repoDisplayNames, query.unfiltered())
 	return report, nil
 }
