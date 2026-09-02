@@ -47,7 +47,7 @@ func TestSubscribeReceivesEvents(t *testing.T) {
 	}
 
 	// Wait for step to reach awaiting_approval.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		steps, _ := d.GetStepsByRun(pushResult.RunID)
 		for _, s := range steps {

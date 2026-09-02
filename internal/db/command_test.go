@@ -362,8 +362,12 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 	if foreignKeyCount == 0 {
 		t.Fatal("command attempt foreign key was not preserved")
 	}
-	if _, err := Open(dbPath); err != nil {
+	reopened, err := Open(dbPath)
+	if err != nil {
 		t.Fatalf("reopen migrated database: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened migrated database: %v", err)
 	}
 }
 
