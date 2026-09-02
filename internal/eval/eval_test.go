@@ -657,10 +657,21 @@ func TestSourceInvocationsPreserveTopLevelTelemetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, removed := range []string{"invocation_mode", "agent_observations", "agent_observations_reported", "nested_agent_count"} {
+	for _, removed := range []string{"invocation_mode", "agent_observations", "agent_observations_reported", "nested_agent_count", "costs", "api_list_estimate", "harness_adjusted_estimate", "pricing_receipt_json"} {
 		if bytes.Contains(raw, []byte(`"`+removed+`"`)) {
 			t.Fatalf("eval invocation retained removed field %q: %s", removed, raw)
 		}
+	}
+
+	withoutCost := sourceInvocationsFor([]db.AgentInvocation{{
+		StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "codex",
+	}})
+	raw, err = json.Marshal(withoutCost[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"reported_cost_usd"`)) {
+		t.Fatalf("eval invocation fabricated an unreported CLI cost: %s", raw)
 	}
 }
 
