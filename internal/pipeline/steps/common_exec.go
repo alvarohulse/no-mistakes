@@ -321,10 +321,10 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 				candidate.RunnerSchemaVersion == definitionResolution.Provenance.SchemaVersion &&
 				candidate.RunnerSource == definitionResolution.Provenance.Source &&
 				db.OptionalStringsEqual(candidate.RunnerVersion, definitionResolution.Provenance.Version) &&
-				sameStateID(candidate.InputStateID, inputStateID) &&
-				sameStateID(candidate.ResultStateID, inputStateID) &&
-				candidate.CompletedAt != nil && candidate.Outcome != nil {
-				if db.RetryableCommandOutcome(*candidate.Outcome) {
+				sameStateID(candidate.InputStateID, inputStateID) {
+				if candidate.CompletedAt != nil && candidate.Outcome != nil &&
+					sameStateID(candidate.ResultStateID, inputStateID) &&
+					db.RetryableCommandOutcome(*candidate.Outcome) {
 					retryOf = &candidate.ID
 					reason := db.CommandRetryReasonUnchangedAfterRepair
 					retryReason = &reason
