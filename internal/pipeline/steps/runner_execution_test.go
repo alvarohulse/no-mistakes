@@ -100,6 +100,12 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	}
 	sctx.StepResultID = step.ID
 	sctx.Round = 1
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	_, _, err = runStepRunnerCommand(sctx, command, "test")
 	if err == nil || !errors.Is(err, runner.ErrInvalidSyntax) {
@@ -118,6 +124,20 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	}
 	if len(evidence.Commands) != 1 || evidence.Commands[0].Outcome != "error" || evidence.Commands[0].Runner == nil || evidence.Commands[0].Runner.Executable != "bash" || !strings.Contains(evidence.Commands[0].Command, "if true; then") {
 		t.Fatalf("syntax-error receipt = %+v", evidence.Commands)
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != command.Run || definitions[0].Source != runner.SourceBase || definitions[0].RunnerExecutable != "bash" {
+		t.Fatalf("syntax-error definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("syntax-error attempts = %+v, want none", attempts)
 	}
 }
 

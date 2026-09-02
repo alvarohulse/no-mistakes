@@ -283,9 +283,19 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	prepared, err := runner.Prepare(sctx.Ctx, command, defaultRunner, options)
 	resolved := prepared.Resolution()
 	if err != nil {
-		err = fmt.Errorf("%w: prepare command %q: %w", errCommandPreparation, command.Run, err)
-		sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, err)
-		return "", -1, err
+		prepareErr := fmt.Errorf("%w: prepare command %q: %w", errCommandPreparation, command.Run, err)
+		if resolved.Script != "" && len(resolved.Argv) > 0 && resolved.Provenance.Executable != "" &&
+			sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
+			definitionResolution := resolved
+			if definitionSource != "" {
+				definitionResolution.CommandSource = definitionSource
+			}
+			if _, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution); persistErr != nil {
+				prepareErr = errors.Join(prepareErr, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr))
+			}
+		}
+		sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, prepareErr)
+		return "", -1, prepareErr
 	}
 
 	var attempt *db.CommandAttempt
