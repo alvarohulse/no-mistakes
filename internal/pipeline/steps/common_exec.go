@@ -398,7 +398,8 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			}
 		}
 		var testedSHA *string
-		if commandEstablishesTestedHead(purpose) && attemptOutcome != db.CommandOutcomeProcessError && sameStateID(attempt.InputStateID, resultStateID) {
+		if commandEstablishesTestedHead(purpose) && attemptOutcome != db.CommandOutcomeProcessError &&
+			sameStateID(attempt.InputStateID, resultStateID) {
 			tested := attempt.BeforeSHA
 			testedSHA = &tested
 		}

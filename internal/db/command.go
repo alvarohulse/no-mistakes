@@ -229,13 +229,10 @@ func validateCommandAttemptStart(d *DB, attempt CommandAttempt) error {
 	if prior.RunID != attempt.RunID || prior.CommandID != attempt.CommandID || prior.StepID != attempt.StepID || prior.Purpose != attempt.Purpose || prior.Observer != attempt.Observer || prior.CommandSource != attempt.CommandSource || prior.RunnerSchemaVersion != attempt.RunnerSchemaVersion || prior.RunnerSource != attempt.RunnerSource || !sameOptionalString(prior.RunnerVersion, attempt.RunnerVersion) {
 		return fmt.Errorf("start command attempt: retry must keep the same operation and input")
 	}
-	if prior.RoundID != attempt.RoundID {
-		return fmt.Errorf("start command attempt: retry must remain in the same round")
-	}
 	var laterAttempts int
 	if err := d.sql.QueryRow(
 		`SELECT count(*) FROM command_attempts
-		 WHERE round_id = ? AND sequence > ?`, prior.RoundID, prior.Sequence,
+		 WHERE run_id = ? AND sequence > ?`, prior.RunID, prior.Sequence,
 	).Scan(&laterAttempts); err != nil {
 		return fmt.Errorf("start command attempt: validate retry order: %w", err)
 	}
@@ -295,9 +292,6 @@ func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, r
 	attempt, err := d.getCommandAttempt(id)
 	if err != nil {
 		return fmt.Errorf("complete command attempt: %w", err)
-	}
-	if outcome != CommandOutcomePass {
-		testedSHA = nil
 	}
 	if testedSHA != nil {
 		if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != *resultStateID || *testedSHA != attempt.BeforeSHA {
