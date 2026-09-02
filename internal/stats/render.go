@@ -10,6 +10,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/db"
 )
 
 var csvHeader = []string{
@@ -138,7 +140,13 @@ func renderText(report *Report, forceDetails bool) string {
 			repair.RunID, repair.Step, repair.Round, repair.Trigger, textString(repair.SelectionSource), textString(repair.RepairFailureFingerprint), textString(repair.RepairResult), repair.DurationMS)
 	}
 	for _, step := range report.Steps {
-		fmt.Fprintf(&out, "step %s/%s status=%s rounds=%d duration_ms=%s\n", step.RunID, step.Step.Name, step.Step.Status, len(step.Step.Rounds), textInt64(step.Step.DurationMS))
+		completedRounds := 0
+		for _, round := range step.Step.Rounds {
+			if round.Status == "" || round.Status == db.RoundStatusCompleted {
+				completedRounds++
+			}
+		}
+		fmt.Fprintf(&out, "step %s/%s status=%s rounds=%d duration_ms=%s\n", step.RunID, step.Step.Name, step.Step.Status, completedRounds, textInt64(step.Step.DurationMS))
 		for _, command := range step.Step.Commands {
 			runnerName := "—"
 			if command.Runner != nil && command.Runner.Executable != "" {

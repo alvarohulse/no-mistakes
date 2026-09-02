@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,13 +11,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
+)
+
+var (
+	errCommandPreparation = errors.New("command preparation failed")
+	errCommandPersistence = errors.New("command provenance persistence failed")
+	errCommandExecution   = errors.New("command execution failed")
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -243,11 +252,20 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 	return runShellCommandWithEnv(ctx, dir, nil, cmdStr, shellenv.DefaultProcessTerminationGrace)
 }
 
-func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runStepRunnerCommand(sctx, runner.Command{Run: cmdStr})
+func runStepShellCommand(sctx *pipeline.StepContext, cmdStr, purpose string) (string, int, error) {
+	return runStepPlannedCommand(sctx, runner.Command{Run: cmdStr}, purpose)
 }
 
-func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command) (string, int, error) {
+func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
+	return runStepCommand(sctx, command, purpose, "")
+}
+
+func runStepPlannedCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
+	return runStepCommand(sctx, command, purpose, db.CommandDefinitionSourcePlanned)
+}
+
+func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose, definitionSource string) (string, int, error) {
+	sequence := sctx.NextCommandSequence()
 	processTerminationGrace := shellenv.DefaultProcessTerminationGrace
 	defaultRunner := runner.Spec{}
 	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
@@ -256,17 +274,206 @@ func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command) (s
 	if sctx.Config != nil {
 		defaultRunner = sctx.Config.Runner
 	}
-	result, resolved, err := runRunnerCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, command, defaultRunner, processTerminationGrace)
+	options := runner.ExecuteOptions{
+		Dir:                     sctx.WorkDir,
+		ExtraEnv:                sctx.Env,
+		ProcessTerminationGrace: processTerminationGrace,
+		CaptureFullOutput:       true,
+	}
+	prepared, err := runner.Prepare(sctx.Ctx, command, defaultRunner, options)
+	resolved := prepared.Resolution()
+	if err != nil {
+		prepareErr := fmt.Errorf("%w: prepare command %q: %w", errCommandPreparation, command.Run, err)
+		if resolved.Script != "" && len(resolved.Argv) > 0 && resolved.Provenance.Executable != "" &&
+			sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
+			definitionResolution := resolved
+			if definitionSource != "" {
+				definitionResolution.CommandSource = definitionSource
+			}
+			if _, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution); persistErr != nil {
+				prepareErr = errors.Join(prepareErr, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr))
+			}
+		}
+		if resolved.Script != "" {
+			sctx.RecordResolvedCommandAtSequence(resolved, sequence, nil, prepareErr)
+		} else {
+			sctx.RecordCommandAtSequence(command.Run, sequence, nil, prepareErr)
+		}
+		return "", -1, prepareErr
+	}
+
+	var attempt *db.CommandAttempt
+	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
+		definitionResolution := resolved
+		if definitionSource != "" {
+			definitionResolution.CommandSource = definitionSource
+		}
+		definition, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution)
+		if persistErr != nil {
+			return "", -1, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr)
+		}
+		beforeSHA, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if headErr != nil {
+			return "", -1, fmt.Errorf("%w: resolve command subject: %w", errCommandPersistence, headErr)
+		}
+		inputStateID, stateErr := cleanCommandStateID(sctx.Ctx, sctx.WorkDir, beforeSHA)
+		if stateErr != nil {
+			return "", -1, fmt.Errorf("%w: resolve command input state: %w", errCommandPersistence, stateErr)
+		}
+		var retryOf *string
+		var retryReason *string
+		priorAttempts, lookupErr := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+		if lookupErr != nil {
+			return "", -1, fmt.Errorf("%w: resolve command retry: %w", errCommandPersistence, lookupErr)
+		}
+		for i := len(priorAttempts) - 1; i >= 0; i-- {
+			candidate := priorAttempts[i]
+			if candidate.CommandID == definition.ID && candidate.StepID == sctx.StepResultID &&
+				candidate.Purpose == purpose && candidate.Observer == db.CommandObserverController &&
+				candidate.CommandSource == definitionResolution.CommandSource &&
+				candidate.RunnerSchemaVersion == definitionResolution.Provenance.SchemaVersion &&
+				candidate.RunnerSource == definitionResolution.Provenance.Source &&
+				db.OptionalStringsEqual(candidate.RunnerVersion, definitionResolution.Provenance.Version) {
+				if candidate.BeforeSHA == beforeSHA && sameStateID(candidate.InputStateID, inputStateID) &&
+					candidate.CompletedAt != nil && candidate.Outcome != nil &&
+					sameStateID(candidate.ResultStateID, inputStateID) &&
+					db.RetryableCommandOutcome(*candidate.Outcome) {
+					retryOf = &candidate.ID
+					reason := db.CommandRetryReasonUnchangedAfterRepair
+					retryReason = &reason
+				}
+				break
+			}
+		}
+		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
+			RunID:               sctx.Run.ID,
+			CommandID:           definition.ID,
+			StepID:              sctx.StepResultID,
+			RoundID:             sctx.RoundID,
+			Sequence:            sequence,
+			Purpose:             purpose,
+			Observer:            db.CommandObserverController,
+			Trigger:             sctx.RoundTrigger,
+			BeforeSHA:           beforeSHA,
+			CommandSource:       definitionResolution.CommandSource,
+			RunnerSchemaVersion: definitionResolution.Provenance.SchemaVersion,
+			RunnerSource:        definitionResolution.Provenance.Source,
+			RunnerVersion:       definitionResolution.Provenance.Version,
+			InputStateID:        inputStateID,
+			RetryOfAttemptID:    retryOf,
+			RetryReason:         retryReason,
+		})
+		if persistErr != nil {
+			return "", -1, fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)
+		}
+	}
+
+	result, err := prepared.Execute(sctx.Ctx, options)
+	if err != nil {
+		err = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, err)
+	}
 	var recordedExitCode *int
 	if err == nil {
 		recordedExitCode = &result.ExitCode
 	}
+	var observedExitCode *int
+	if result.ExitCode >= 0 {
+		observedExitCode = &result.ExitCode
+	}
+	var completionErr error
+	var attemptOutcome string
+	if attempt != nil {
+		attemptOutcome = commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		var resultStateID *string
+		var resultStateErr error
+		if sctx.Ctx.Err() == nil {
+			afterSHA, stateErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+			if stateErr != nil {
+				resultStateErr = fmt.Errorf("%w: resolve command result subject: %w", errCommandPersistence, stateErr)
+			} else {
+				resultStateID, stateErr = cleanCommandStateID(sctx.Ctx, sctx.WorkDir, afterSHA)
+				if stateErr != nil {
+					resultStateErr = fmt.Errorf("%w: resolve command result state: %w", errCommandPersistence, stateErr)
+				}
+			}
+		}
+		var testedSHA *string
+		if commandEstablishesTestedHead(purpose) && attemptOutcome == db.CommandOutcomePass &&
+			sameStateID(attempt.InputStateID, resultStateID) {
+			tested := attempt.BeforeSHA
+			testedSHA = &tested
+		}
+		attemptExitCode := observedExitCode
+		if result.Signal != nil {
+			attemptExitCode = nil
+		}
+		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
+			completionErr = fmt.Errorf("%w: persist command attempt completion: %w", errCommandPersistence, persistErr)
+		}
+		if resultStateErr != nil {
+			err = errors.Join(err, resultStateErr)
+		}
+	}
 	if resolved.Script != "" {
-		sctx.RecordResolvedCommand(resolved, recordedExitCode, err)
+		recordedResolution := resolved
+		if definitionSource != "" {
+			recordedResolution.CommandSource = definitionSource
+		}
+		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, err)
 	} else {
-		sctx.RecordCommand(command.Run, recordedExitCode, err)
+		sctx.RecordCommandAtSequence(command.Run, sequence, recordedExitCode, err)
+	}
+	if attempt != nil {
+		if completionErr != nil {
+			outcomeErr := fmt.Errorf("command completed with outcome %s (exit code %d)", attemptOutcome, result.ExitCode)
+			if result.Signal != nil {
+				outcomeErr = fmt.Errorf("command completed with outcome %s (signal %s)", attemptOutcome, *result.Signal)
+			}
+			err = errors.Join(err, outcomeErr, completionErr)
+		}
 	}
 	return result.Output, result.ExitCode, err
+}
+
+func cleanCommandStateID(ctx context.Context, dir, sha string) (*string, error) {
+	dirty, err := git.HasUncommittedChanges(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	if dirty {
+		return nil, nil
+	}
+	state := "git:" + sha
+	return &state, nil
+}
+
+func sameStateID(left, right *string) bool {
+	return left != nil && right != nil && *left == *right
+}
+
+func commandEstablishesTestedHead(purpose string) bool {
+	switch purpose {
+	case string(types.StepBuild), string(types.StepTest), string(types.StepLint):
+		return true
+	default:
+		return false
+	}
+}
+
+func commandAttemptOutcome(ctx context.Context, exitCode int, runErr error) string {
+	if runErr == nil {
+		if exitCode == 0 {
+			return db.CommandOutcomePass
+		}
+		return db.CommandOutcomeFail
+	}
+	if errors.Is(runErr, runner.ErrTimeout) || errors.Is(runErr, context.DeadlineExceeded) {
+		return db.CommandOutcomeTimeout
+	}
+	if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+		return db.CommandOutcomeCancelled
+	}
+	return db.CommandOutcomeProcessError
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string, processTerminationGrace time.Duration) (string, int, error) {

@@ -39,6 +39,31 @@ func TestPushStep_RejectsUnattributedAgentChanges(t *testing.T) {
 	}
 }
 
+func TestPushStep_ContinuesWhenFormatterCannotBePrepared(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Format: "printf should-not-run",
+	})
+	sctx.Config.Runner.Executable = "runner-that-does-not-exist"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	recordReviewApproval(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("PushStep.Execute() error = %v", err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote head = %s, want %s", got, headSHA)
+	}
+}
+
 // TestPushStep_RefusesPostReviewClobberWithoutLaterPipelineCommit reproduces
 // the end-user incident at the real push boundary. Review approved R, then an
 // out-of-band reset replaced HEAD with divergent D and no pipeline-owned commit

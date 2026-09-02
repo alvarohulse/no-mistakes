@@ -38,6 +38,86 @@ func TestExecutor_TerminalizesRunWhenFinalCompletedWriteFails(t *testing.T) {
 	assertDurableFailedRunAndEvent(t, database, run.ID, events)
 }
 
+func TestExecutor_TerminalizesStepWhenRoundInsertFails(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TRIGGER reject_step_round_insert
+		BEFORE INSERT ON step_rounds
+		BEGIN
+			SELECT RAISE(FAIL, 'injected round insert failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepReview)}, nil)
+	err = exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "begin review round 1") || !strings.Contains(err.Error(), "injected round insert failure") {
+		t.Fatalf("Execute() error = %v, want original round insert failure", err)
+	}
+	gotRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRun.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", gotRun.Status)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed || steps[0].Error == nil || !strings.Contains(*steps[0].Error, "injected round insert failure") {
+		t.Fatalf("step result = %+v, want one failed step with original persistence error", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 0 {
+		t.Fatalf("rounds = %+v, want no partially inserted round", rounds)
+	}
+}
+
+func TestExecutor_TerminalizesStepAndRoundWhenRoundCompletionFails(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TRIGGER reject_step_round_completion
+		BEFORE UPDATE OF status ON step_rounds
+		WHEN NEW.status = 'completed'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected round completion failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepReview)}, nil)
+	err = exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "complete review round 1") || !strings.Contains(err.Error(), "injected round completion failure") {
+		t.Fatalf("Execute() error = %v, want original round completion failure", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed || steps[0].Error == nil || !strings.Contains(*steps[0].Error, "injected round completion failure") {
+		t.Fatalf("step result = %+v, want failed completion", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed {
+		t.Fatalf("rounds = %+v, want failed active round", rounds)
+	}
+}
+
 func installRunStatusFailureTrigger(t *testing.T, path, status string) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")

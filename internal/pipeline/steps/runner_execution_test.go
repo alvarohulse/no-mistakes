@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -18,9 +20,8 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 		t.Skip("POSIX runner fixture")
 	}
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	marker := filepath.Join(dir, "runner-selection")
-	baseScript := "printf base > " + marker
-	platformScript := "printf platform > " + marker
+	baseScript := "printf base"
+	platformScript := "printf platform"
 	bash := &runner.Spec{Executable: "bash", Args: []string{"-lc"}}
 	override := &runner.Override{Run: &platformScript, Runner: bash}
 	command := runner.Command{Run: baseScript}
@@ -39,17 +40,16 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	}
 	sctx.StepResultID = step.ID
 	sctx.Round = 1
-
-	output, exitCode, err := runStepRunnerCommand(sctx, command)
-	if err != nil || exitCode != 0 || output != "" {
-		t.Fatalf("command result = output %q exit %d error %v", output, exitCode, err)
-	}
-	data, err := os.ReadFile(marker)
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "platform" {
-		t.Fatalf("marker = %q, want platform override", data)
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	output, exitCode, err := runStepRunnerCommand(sctx, command, "build")
+	if err != nil || exitCode != 0 || output != "platform" {
+		t.Fatalf("command result = output %q exit %d error %v", output, exitCode, err)
 	}
 	stored, err := sctx.DB.GetStepResult(step.ID)
 	if err != nil {
@@ -65,6 +65,24 @@ func TestRunStepRunnerCommandUsesPlatformOverrideAndPersistsProvenance(t *testin
 	receipt := evidence.Commands[0]
 	if receipt.Command != platformScript || receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "bash" || receipt.Runner.Version == nil {
 		t.Fatalf("runner receipt = %+v", receipt)
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != platformScript || definitions[0].RunnerExecutable != "bash" {
+		t.Fatalf("command definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("command attempts = %+v", attempts)
+	}
+	attempt := attempts[0]
+	if attempt.CommandID != definitions[0].ID || attempt.StepID != step.ID || attempt.RoundID != round.ID || attempt.Sequence != 1 || attempt.Purpose != "build" || attempt.Observer != "controller" || attempt.Trigger != "initial" || attempt.BeforeSHA != headSHA || attempt.TestedSHA == nil || *attempt.TestedSHA != headSHA || attempt.Outcome == nil || *attempt.Outcome != "pass" || attempt.ExitCode == nil || *attempt.ExitCode != 0 {
+		t.Fatalf("command attempt = %+v", attempt)
 	}
 }
 
@@ -83,8 +101,14 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	}
 	sctx.StepResultID = step.ID
 	sctx.Round = 1
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
-	_, _, err = runStepRunnerCommand(sctx, command)
+	_, _, err = runStepRunnerCommand(sctx, command, "test")
 	if err == nil || !errors.Is(err, runner.ErrInvalidSyntax) {
 		t.Fatalf("command error = %v, want invalid syntax", err)
 	}
@@ -101,6 +125,20 @@ func TestRunStepRunnerCommandRejectsInvalidSyntaxBeforeExecution(t *testing.T) {
 	}
 	if len(evidence.Commands) != 1 || evidence.Commands[0].Outcome != "error" || evidence.Commands[0].Runner == nil || evidence.Commands[0].Runner.Executable != "bash" || !strings.Contains(evidence.Commands[0].Command, "if true; then") {
 		t.Fatalf("syntax-error receipt = %+v", evidence.Commands)
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != command.Run || definitions[0].RunnerExecutable != "bash" {
+		t.Fatalf("syntax-error definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("syntax-error attempts = %+v, want none", attempts)
 	}
 }
 
@@ -135,7 +173,7 @@ func TestRunStepRunnerCommandPersistsPartialProvenanceOnPrepareErrors(t *testing
 			sctx.StepResultID = step.ID
 			sctx.Round = 1
 
-			_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf ready"})
+			_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf ready"}, "test")
 			if err == nil || exitCode != -1 {
 				t.Fatalf("prepare result = exit %d error %v, want -1/error", exitCode, err)
 			}
@@ -168,11 +206,249 @@ func TestRunStepRunnerCommandRetainsCompleteOutputForStepLogging(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
 
-	output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: `head -c 131072 /dev/zero`})
+	output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: `head -c 131072 /dev/zero`}, "test")
 	if err != nil || exitCode != 0 {
 		t.Fatalf("command exit = %d, error %v", exitCode, err)
 	}
 	if len(output) != 131072 {
 		t.Fatalf("output length = %d, want 131072", len(output))
+	}
+}
+
+func TestRunStepRunnerCommandPersistsSignalWithoutFabricatedExitCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "kill -TERM $$"}, "test")
+	if err != nil || exitCode != -1 {
+		t.Fatalf("signal command = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode != nil || attempts[0].Signal == nil {
+		t.Fatalf("signal attempt = %+v", attempts)
+	}
+}
+
+func TestRunStepRunnerCommandPersistsNonZeroExitAsFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "exit 7"}, "test")
+	if err != nil || exitCode != 7 {
+		t.Fatalf("failing command = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode == nil || *attempts[0].ExitCode != 7 || attempts[0].Signal != nil || attempts[0].TestedSHA != nil {
+		t.Fatalf("failed attempt = %+v", attempts)
+	}
+}
+
+func TestCommandAttemptOutcomeKeepsObservedExitAsProcessError(t *testing.T) {
+	if got := commandAttemptOutcome(context.Background(), 0, errors.New("post-process wait failed")); got != db.CommandOutcomeProcessError {
+		t.Fatalf("command attempt outcome = %q, want process_error", got)
+	}
+}
+
+func TestRunStepRunnerCommandDoesNotRetryPastInterveningMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	command := runner.Command{Run: `if [ "$MUTATE" = 1 ]; then printf changed > intervening-mutation; fi; exit 1`}
+
+	runRound := func(roundNumber int, trigger, mutate string) {
+		t.Helper()
+		round, err := sctx.DB.InsertStepRound(step.ID, roundNumber, trigger, nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Round = roundNumber
+		sctx.RoundID = round.ID
+		sctx.RoundTrigger = trigger
+		sctx.Env = []string{"MUTATE=" + mutate}
+		if _, exitCode, err := runStepRunnerCommand(sctx, command, "test"); err != nil || exitCode != 1 {
+			t.Fatalf("round %d result = exit %d error %v, want exit 1", roundNumber, exitCode, err)
+		}
+	}
+
+	runRound(1, "initial", "0")
+	runRound(2, "auto_fix", "1")
+	if err := os.Remove(filepath.Join(dir, "intervening-mutation")); err != nil {
+		t.Fatal(err)
+	}
+	runRound(3, "auto_fix", "0")
+
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("attempts = %+v, want three attempts", attempts)
+	}
+	if attempts[1].RetryOfAttemptID == nil || *attempts[1].RetryOfAttemptID != attempts[0].ID || attempts[1].ResultStateID != nil {
+		t.Fatalf("mutating attempt = %+v, want retry of first with changed result state", attempts[1])
+	}
+	if attempts[2].RetryOfAttemptID != nil || attempts[2].RetryReason != nil {
+		t.Fatalf("post-mutation attempt = %+v, must not link past the newer mutating attempt", attempts[2])
+	}
+}
+
+func TestRunStepRunnerCommandDoesNotRetryPastInterveningInputChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	command := runner.Command{Run: `if [ "$RESTORE" = 1 ]; then rm intervening-input; fi; exit 1`}
+
+	runRound := func(roundNumber int, trigger, restore string) {
+		t.Helper()
+		round, err := sctx.DB.InsertStepRound(step.ID, roundNumber, trigger, nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Round = roundNumber
+		sctx.RoundID = round.ID
+		sctx.RoundTrigger = trigger
+		sctx.Env = []string{"RESTORE=" + restore}
+		if _, exitCode, err := runStepRunnerCommand(sctx, command, "test"); err != nil || exitCode != 1 {
+			t.Fatalf("round %d result = exit %d error %v, want exit 1", roundNumber, exitCode, err)
+		}
+	}
+
+	runRound(1, "initial", "0")
+	if err := os.WriteFile(filepath.Join(dir, "intervening-input"), []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRound(2, "auto_fix", "1")
+	runRound(3, "auto_fix", "0")
+
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 3 {
+		t.Fatalf("attempts = %+v, want three attempts", attempts)
+	}
+	if attempts[1].RetryOfAttemptID != nil || attempts[1].RetryReason != nil {
+		t.Fatalf("changed-input attempt = %+v, must not retry the first attempt", attempts[1])
+	}
+	if attempts[2].RetryOfAttemptID != nil || attempts[2].RetryReason != nil {
+		t.Fatalf("post-input-change attempt = %+v, must not link past the newer changed-input attempt", attempts[2])
+	}
+}
+
+func TestRunStepRunnerCommandDoesNotClaimTestedSHAWhenCommandMutatesWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf changed >> feature.txt"}, "test")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("mutating command = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].TestedSHA != nil || attempts[0].InputStateID == nil || attempts[0].ResultStateID != nil {
+		t.Fatalf("mutating attempt subject = %+v", attempts)
+	}
+}
+
+func TestRunStepRunnerCommandCompletesAttemptWhenResultStateCannotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+
+	_, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "rm -rf .git"}, "test")
+	if err == nil || !strings.Contains(err.Error(), "resolve command result subject") || exitCode != 0 {
+		t.Fatalf("command result = exit %d error %v", exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("command attempts = %+v", attempts)
+	}
+	attempt := attempts[0]
+	if attempt.CompletedAt == nil || attempt.DurationMS == nil || attempt.Outcome == nil || *attempt.Outcome != db.CommandOutcomePass || attempt.ExitCode == nil || *attempt.ExitCode != 0 || attempt.Signal != nil || attempt.ResultStateID != nil || attempt.TestedSHA != nil {
+		t.Fatalf("completed attempt = %+v", attempt)
 	}
 }

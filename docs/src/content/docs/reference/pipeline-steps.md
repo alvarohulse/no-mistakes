@@ -10,7 +10,7 @@ intent → refresh → review → build → test → document → lint → push 
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
-Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, nullable exit code, and resolved command-source/runner provenance when available; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence. Stats deliberately drops the display text while retaining the content-free command and runner facts.
+Each completed or skipped step contributes bounded evidence to PR rendering: primary commands include round, sequence, redacted display text, outcome, nullable exit code, and resolved command-source/runner provenance when available; non-shell evidence and explicit skip/success explanations fill the remaining cases. Git plumbing is not recorded as step evidence. Stats deliberately drops the display text while retaining the content-free command and runner facts. Separately, controller-observed command executions have durable command-definition and attempt records; PR rendering and stats use bounded step evidence rather than this rich execution graph.
 In the TUI, yolo mode is an explicit override that auto-resolves paused steps: `auto-fix` and `ask-user` findings are fixed once with every finding selected, fix-review gates are approved, and gates with only `no-op` findings are approved as-is.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
@@ -63,7 +63,7 @@ Fetches the latest authoritative remote state and configured pushed-branch targe
 - If the diff against the selected base branch is empty after refresh, completes refresh and skips all remaining pipeline steps
 - On conflict: records conflicting files, aborts the in-progress rebase or merge, and reports findings
 
-**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` or `git merge --continue` for the selected strategy. Rebase continuation uses a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Refresh step does not synthesize a fix commit subject; Git preserves the rebased subjects or creates the normal merge commit.
+**Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` or `git merge --continue` for the selected strategy. Rebase continuation uses a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior completed-round history in the prompt. The Refresh step does not synthesize a fix commit subject; Git preserves the rebased subjects or creates the normal merge commit.
 
 **Default auto-fix limit:** `3`.
 
@@ -96,7 +96,7 @@ AI code review of your diff.
 
 **Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
 
-**Auto-fix:** the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and which findings the user left unselected.
+**Auto-fix:** the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior completed rounds for that step, including earlier fix summaries and which findings the user left unselected.
 The fixer applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
 The dedicated Build, Test, and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
 Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
@@ -118,7 +118,7 @@ Compiles the changed production code before behavioral testing begins. [`command
 
 **Approval:** objective compile failures use `action: auto-fix` and enter the normal fix loop while attempts remain. A build that cannot be established uses `action: ask-user` and parks for a decision. `action: no-op` findings are informational only.
 
-**Auto-fix:** the routed Build agent receives the previous findings, sanitized prior-round context, user intent, and the exact configured build command when one exists. It applies the smallest build root-cause fix, commits through the shared fix machinery, performs only focused build verification, and then the Build step runs again. Tests, linters, and documentation remain owned by their later stages.
+**Auto-fix:** the routed Build agent receives the previous findings, sanitized prior completed-round context, user intent, and the exact configured build command when one exists. It applies the smallest build root-cause fix, commits through the shared fix machinery, performs only focused build verification, and then the Build step runs again. Tests, linters, and documentation remain owned by their later stages.
 
 **Default auto-fix limit:** `3`.
 
@@ -141,7 +141,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 
 **Approval:** test findings with `action: ask-user` pause for approval, including missing-evidence warnings for user intent and a targeted command plan that could not be established. `action: auto-fix` findings stay eligible for the fix loop. `action: no-op` findings are informational only.
 
-**Auto-fix:** the agent receives the previous test findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles. Repair mode reproduces the specific failure, applies a root-cause fix, and re-runs only focused verification - not a complete-suite confirmation - then the step's baseline command (configured or the same previously planned one) and the evidence path run again.
+**Auto-fix:** the agent receives the previous test findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior completed rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles. Repair mode reproduces the specific failure, applies a root-cause fix, and re-runs only focused verification - not a complete-suite confirmation - then the step's baseline command (configured or the same previously planned one) and the evidence path run again.
 
 **Default auto-fix limit:** `3`.
 
@@ -159,7 +159,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
 
-**Auto-fix:** documentation fixes happen during the initial document pass. Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and sanitized prior-round history.
+**Auto-fix:** documentation fixes happen during the initial document pass. Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and sanitized prior completed-round history.
 
 **Default auto-fix limit:** not used for automatic document follow-up loops.
 
@@ -175,7 +175,7 @@ Runs linters and static analysis.
 `action: auto-fix` findings stay eligible for the fix loop.
 `action: no-op` findings are informational only.
 
-**Auto-fix:** the lint step follows the same pattern as test, whether the command was configured or planned - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then the same lint command re-runs.
+**Auto-fix:** the lint step follows the same pattern as test, whether the command was configured or planned - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and a sanitized history of prior completed rounds for that step, including earlier fix summaries and any findings the user left unselected in prior approval cycles, then the same lint command re-runs.
 
 **Default auto-fix limit:** `3`.
 

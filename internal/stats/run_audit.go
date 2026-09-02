@@ -13,7 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -80,6 +80,7 @@ type CommandReceipt struct {
 type Round struct {
 	Number                   int     `json:"number"`
 	Trigger                  string  `json:"trigger"`
+	Status                   string  `json:"status"`
 	SelectionSource          *string `json:"selection_source"`
 	RepairFailureFingerprint *string `json:"repair_failure_fingerprint"`
 	RepairResult             *string `json:"repair_result"`
@@ -318,7 +319,7 @@ func buildStep(database *db.DB, row *db.StepResult, policySource types.SkipSourc
 	result.Rounds = make([]Round, 0, len(rounds))
 	for _, round := range rounds {
 		result.Rounds = append(result.Rounds, Round{
-			Number: round.Round, Trigger: round.Trigger, SelectionSource: cloneString(round.SelectionSource),
+			Number: round.Round, Trigger: round.Trigger, Status: round.Status, SelectionSource: cloneString(round.SelectionSource),
 			RepairFailureFingerprint: cloneString(round.RepairFailureFingerprint), RepairResult: cloneString(round.RepairResult),
 			DurationMS: round.DurationMS, CreatedAt: round.CreatedAt,
 		})

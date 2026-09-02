@@ -44,6 +44,11 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
+## Execution vocabulary
+
+- An **attempt** is one actual controller-launched execution of a resolved pipeline command. Repeated executions remain separate attempts even when the script and runner are identical.
+- A **retry** is a later controller-observed attempt only when the immediately prior attempt is for the same command definition, step, purpose, command source, and runner provenance and ends in `fail`, `process_error`, `cancelled`, or `timeout`. It requires the same subject SHA and an unchanged clean input state (`input_state_id` equals the preceding attempt's `result_state_id`); otherwise it is a new attempt. A qualifying retry uses the durable reason `unchanged_after_repair`.
+
 ## The ten steps
 
 | # | Step | What it does | Default auto-fix limit |

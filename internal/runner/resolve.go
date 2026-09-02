@@ -88,7 +88,7 @@ func resolve(ctx context.Context, command Command, defaultRunner Spec, deps reso
 	}
 	argv := make([]string, 0, len(provenance.Args)+2)
 	argv = append(argv, provenancePath)
-	argv = append(argv, provenance.Args...)
+	argv = append(argv, selectedRunner.Args...)
 	argv = append(argv, script)
 	resolved.Argv = argv
 	resolved.executable = provenancePath
@@ -161,8 +161,13 @@ func resolveSpec(ctx context.Context, spec Spec, source, platform string, deps r
 		SchemaVersion: SchemaVersion,
 		Platform:      platform,
 		Source:        source,
-		Executable:    spec.Executable,
+		Executable:    strings.ToLower(spec.Executable),
 		Args:          append([]string(nil), spec.Args...),
+	}
+	if kind == shellPowerShell {
+		for i := range provenance.Args {
+			provenance.Args[i] = strings.ToLower(provenance.Args[i])
+		}
 	}
 	path, err := deps.lookPath(spec.Executable)
 	if err != nil {

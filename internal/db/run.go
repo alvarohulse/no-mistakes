@@ -866,6 +866,17 @@ func (d *DB) RecoverStaleRun(id, errMsg string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("recover stale run steps: %w", err)
 	}
+	if _, err = tx.Exec(
+		`UPDATE step_rounds SET status = ?, duration_ms = MAX(0, (? - created_at) * 1000)
+		 WHERE status = ? AND step_result_id IN (
+			SELECT id FROM step_results WHERE run_id = ? AND EXISTS (
+				SELECT 1 FROM runs WHERE id = ? AND status IN (?, ?)
+			)
+		 )`,
+		RoundStatusFailed, ts, RoundStatusActive, id, id, types.RunPending, types.RunRunning,
+	); err != nil {
+		return false, fmt.Errorf("recover stale run rounds: %w", err)
+	}
 	result, err := tx.Exec(
 		`UPDATE runs SET status = ?, error = ?, push_active = 0,
 			parked_ms = COALESCE(parked_ms, 0) + CASE
@@ -916,6 +927,19 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	)
 	if err != nil {
 		return 0, fmt.Errorf("recover stale steps: %w", err)
+	}
+	roundArgs := []any{RoundStatusFailed, ts, RoundStatusActive, types.RunPending, types.RunRunning}
+	roundArgs = append(roundArgs, args...)
+	if _, err = tx.Exec(
+		`UPDATE step_rounds SET status = ?, duration_ms = MAX(0, (? - created_at) * 1000)
+		 WHERE status = ? AND step_result_id IN (
+			SELECT id FROM step_results WHERE run_id IN (
+				SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
+			)
+		 )`,
+		roundArgs...,
+	); err != nil {
+		return 0, fmt.Errorf("recover stale rounds: %w", err)
 	}
 
 	// Fail stale runs. Clear any awaiting-agent marker so a recovered (now

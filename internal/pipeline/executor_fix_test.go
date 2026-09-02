@@ -943,16 +943,6 @@ func TestExecutor_AutoFixHardCapsConfiguredLimitAtThree(t *testing.T) {
 	<-done
 }
 
-func TestRoundInsertIDClearsOnInsertFailure(t *testing.T) {
-	round := &db.StepRound{ID: "round-2"}
-	if got := roundInsertID("round-1", round, nil); got != "round-2" {
-		t.Fatalf("roundInsertID success = %q, want %q", got, "round-2")
-	}
-	if got := roundInsertID("round-1", nil, context.Canceled); got != "" {
-		t.Fatalf("roundInsertID failure = %q, want empty", got)
-	}
-}
-
 func TestExecutor_StepResultIDIsExposedToSteps(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
@@ -980,6 +970,52 @@ func TestExecutor_StepResultIDIsExposedToSteps(t *testing.T) {
 	}
 	if len(dbSteps) != 1 || dbSteps[0].ID != capturedStepResultID {
 		t.Fatalf("StepResultID did not match the step's DB row (got %q, want %q)", capturedStepResultID, dbSteps[0].ID)
+	}
+}
+
+func TestExecutor_PersistsAndExposesRoundBeforeStepExecution(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	var capturedRoundID string
+	step := &adaptiveCallStep{
+		name: types.StepBuild,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			capturedRoundID = sctx.RoundID
+			if capturedRoundID == "" || sctx.Round != 1 || sctx.RoundTrigger != "initial" {
+				return nil, fmt.Errorf("round context = id %q number %d trigger %q", capturedRoundID, sctx.Round, sctx.RoundTrigger)
+			}
+			rounds, err := database.GetRoundsByStep(sctx.StepResultID)
+			if err != nil {
+				return nil, err
+			}
+			if len(rounds) != 1 || rounds[0].ID != capturedRoundID {
+				return nil, fmt.Errorf("persisted rounds = %+v", rounds)
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if capturedRoundID == "" {
+		t.Fatal("expected persisted round identity during execution")
+	}
+	stepResults, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stepResults) != 1 {
+		t.Fatalf("step results = %+v", stepResults)
+	}
+	rounds, err := database.GetRoundsByStep(stepResults[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].ID != capturedRoundID {
+		t.Fatalf("completed rounds = %+v", rounds)
 	}
 }
 

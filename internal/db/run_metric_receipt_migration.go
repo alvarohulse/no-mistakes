@@ -13,9 +13,23 @@ type runMetricReceiptMigrationRow struct {
 	aggregatesJSON string
 }
 
-const runMetricReceiptCostSanitizerMigration = "run_metric_receipt_cost_sanitizer_v5"
+const (
+	runMetricReceiptCostSanitizerMigration = "run_metric_receipt_cost_sanitizer_v5"
+	runMetricReceiptRoundStatusMigration   = "run_metric_receipt_round_status_v6"
+)
 
 func migrateRunMetricReceipts(sqlDB *sql.DB) error {
+	if err := migrateRunMetricReceiptsVersion(sqlDB, runMetricReceiptCostSanitizerMigration, 5, func(version int) bool {
+		return version == 1 || (version >= 2 && version < 5)
+	}); err != nil {
+		return err
+	}
+	return migrateRunMetricReceiptsVersion(sqlDB, runMetricReceiptRoundStatusMigration, 6, func(version int) bool {
+		return version == 5
+	})
+}
+
+func migrateRunMetricReceiptsVersion(sqlDB *sql.DB, migrationMarker string, targetVersion int, eligible func(int) bool) error {
 	ctx := context.Background()
 	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
@@ -34,7 +48,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 	var complete int
 	if err := conn.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`,
-		runMetricReceiptCostSanitizerMigration,
+		migrationMarker,
 	).Scan(&complete); err != nil {
 		return fmt.Errorf("read run metric receipt migration marker: %w", err)
 	}
@@ -86,21 +100,19 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		if digest != row.receipt.ReceiptSHA256 {
 			return fmt.Errorf("run metric receipt %q failed SHA-256 verification", row.receipt.RunID)
 		}
-		targetVersion := row.receipt.SchemaVersion
-		switch {
-		case row.receipt.SchemaVersion == 1:
-		case row.receipt.SchemaVersion >= 2 && row.receipt.SchemaVersion < RunMetricReceiptSchemaVersion:
-			targetVersion = RunMetricReceiptSchemaVersion
-		case row.receipt.SchemaVersion == RunMetricReceiptSchemaVersion:
-		default:
+		if !eligible(row.receipt.SchemaVersion) {
 			continue
 		}
 
-		payload, changed, err := sanitizeRunMetricReceiptPayload(row.receipt.PayloadJSON, targetVersion)
+		migrationVersion := targetVersion
+		if row.receipt.SchemaVersion == 1 {
+			migrationVersion = 1
+		}
+		payload, changed, err := sanitizeRunMetricReceiptPayload(row.receipt.PayloadJSON, migrationVersion)
 		if err != nil {
 			return fmt.Errorf("sanitize run metric receipt %q: %w", row.receipt.RunID, err)
 		}
-		if row.receipt.SchemaVersion != targetVersion {
+		if row.receipt.SchemaVersion != migrationVersion {
 			changed = true
 		}
 		if !changed {
@@ -108,7 +120,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		}
 
 		migrated := row.receipt
-		migrated.SchemaVersion = targetVersion
+		migrated.SchemaVersion = migrationVersion
 		migrated.PayloadJSON = payload
 		migrated.ReceiptSHA256, err = runMetricReceiptDigest(migrated, row.stepStatsJSON, row.aggregatesJSON)
 		if err != nil {
@@ -143,7 +155,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 	}
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO schema_migrations (name) VALUES (?)`,
-		runMetricReceiptCostSanitizerMigration,
+		migrationMarker,
 	); err != nil {
 		return fmt.Errorf("record run metric receipt migration: %w", err)
 	}
@@ -211,6 +223,40 @@ func sanitizeRunMetricReceiptPayload(payloadJSON string, schemaVersion int) (str
 			}
 			payload["invocations"] = encoded
 			changed = true
+		}
+	}
+	if schemaVersion == 6 {
+		if rawSteps, exists := payload["steps"]; exists {
+			var steps []map[string]json.RawMessage
+			if err := json.Unmarshal(rawSteps, &steps); err != nil {
+				return "", false, fmt.Errorf("decode steps: %w", err)
+			}
+			for _, step := range steps {
+				rawRounds, exists := step["rounds"]
+				if !exists {
+					continue
+				}
+				var rounds []map[string]json.RawMessage
+				if err := json.Unmarshal(rawRounds, &rounds); err != nil {
+					return "", false, fmt.Errorf("decode rounds: %w", err)
+				}
+				for _, round := range rounds {
+					if _, exists := round["status"]; !exists {
+						round["status"] = json.RawMessage(`"completed"`)
+						changed = true
+					}
+				}
+				encoded, err := json.Marshal(rounds)
+				if err != nil {
+					return "", false, fmt.Errorf("encode rounds: %w", err)
+				}
+				step["rounds"] = encoded
+			}
+			encoded, err := json.Marshal(steps)
+			if err != nil {
+				return "", false, fmt.Errorf("encode steps: %w", err)
+			}
+			payload["steps"] = encoded
 		}
 	}
 

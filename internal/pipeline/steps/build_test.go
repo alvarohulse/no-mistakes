@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -78,7 +81,19 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(`{"command":"go env GOVERSION"}`)}, nil
 		},
 	}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	outcome, err := (&BuildStep{}).Execute(sctx)
 	if err != nil {
@@ -101,6 +116,116 @@ func TestBuildStepWithoutCommandAsksAgentToCompile(t *testing.T) {
 		if !strings.Contains(prompt, clause) {
 			t.Errorf("prompt missing %q", clause)
 		}
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].Script != "go env GOVERSION" {
+		t.Fatalf("planned command definitions = %+v", definitions)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].CommandID != definitions[0].ID || attempts[0].RoundID != round.ID {
+		t.Fatalf("planned command attempts = %+v", attempts)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "repair.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "repair.txt")
+	gitCmd(t, dir, "commit", "-m", "fix: simulate repair")
+	repairedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	secondRound, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Round = 2
+	sctx.RoundID = secondRound.ID
+	sctx.RoundTrigger = "auto_fix"
+	if _, err := (&BuildStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	definitions, err = sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err = sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || len(attempts) != 2 {
+		t.Fatalf("reused plan definitions/attempts = %d/%d, want 1/2", len(definitions), len(attempts))
+	}
+	if attempts[1].CommandID != definitions[0].ID || attempts[1].TestedSHA == nil || *attempts[1].TestedSHA != repairedHead || attempts[1].RetryOfAttemptID != nil {
+		t.Fatalf("post-repair attempt = %+v", attempts[1])
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("planner calls after repair = %d, want original plan reused", len(ag.calls))
+	}
+}
+
+func TestExecutorBuildLinksUnchangedAfterRepairRetry(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"no repair needed"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Build: "exit 1"})
+	sctx.Config.AutoFix.Build = 1
+	executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, ag, []pipeline.Step{&BuildStep{}}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Execute(ctx, sctx.Run, sctx.Repo, dir)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("executor did not stop after cancellation")
+		}
+	})
+
+	timeout := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	reachedFixReview := false
+	for time.Now().Before(deadline) {
+		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+		if err == nil && len(steps) == 1 && steps[0].Status == types.StepStatusFixReview {
+			reachedFixReview = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !reachedFixReview {
+		t.Fatal("build step did not reach fix review")
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 2 || attempts[1].RetryOfAttemptID == nil ||
+		*attempts[1].RetryOfAttemptID != attempts[0].ID ||
+		attempts[1].RetryReason == nil ||
+		*attempts[1].RetryReason != "unchanged_after_repair" {
+		t.Fatalf("attempts = %+v, want linked unchanged-after-repair retry", attempts)
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(attempts[0].StepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Trigger != "initial" || rounds[1].Trigger != "auto_fix" || len(ag.calls) != 1 {
+		t.Fatalf("executor repair flow = rounds %+v agent calls %d", rounds, len(ag.calls))
 	}
 }
 

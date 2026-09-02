@@ -40,6 +40,10 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
+	if err := migrateCommandDefinitionProvenanceColumns(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
+	}
 	for _, stmt := range removalMigrationStatements {
 		if _, err := sqlDB.Exec(stmt); err != nil && !isMissingColumnErr(err) {
 			sqlDB.Close()

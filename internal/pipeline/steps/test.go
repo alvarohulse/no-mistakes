@@ -117,9 +117,9 @@ Previous test findings to address:
 		var exitCode int
 		var err error
 		if plannedTest {
-			output, exitCode, err = runStepShellCommand(sctx, testCmd)
+			output, exitCode, err = runStepShellCommand(sctx, testCmd, string(types.StepTest))
 		} else {
-			output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand)
+			output, exitCode, err = runStepRunnerCommand(sctx, configuredCommand, string(types.StepTest))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)

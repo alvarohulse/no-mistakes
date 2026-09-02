@@ -168,7 +168,7 @@ func TestStepContext_RecordResolvedCommandPersistsRunnerProvenance(t *testing.T)
 	}
 	sctx := &StepContext{DB: database, StepResultID: step.ID, Round: 1}
 	zero := 0
-	sctx.RecordResolvedCommand(resolved, &zero, nil)
+	sctx.RecordResolvedCommandAtSequence(resolved, sctx.NextCommandSequence(), &zero, nil)
 
 	stored, err := database.GetStepResult(step.ID)
 	if err != nil {

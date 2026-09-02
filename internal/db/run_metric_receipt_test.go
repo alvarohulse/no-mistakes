@@ -30,10 +30,10 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"schema_version":4,"archived_at":99,"run":{"id":"` + run.ID + `","repo_id":"` + repo.ID + `","status":"completed","created_at":` + fmt.Sprint(run.CreatedAt) + `},"pull_request":true,"steps":[{"name":"review","custom_step":"kept"}],"invocations":[{"id":"inv-1","reported_cost_usd":null,"usage_coverage":"complete","raw_usage":{"input_tokens":11},"activity":{"tool_calls":2},"custom_invocation":{"kept":true},"costs":{"api_list_estimate":{"value_usd":1.5}}}],"metrics":{"invocation_count":1},"costs":{"api_list_estimate":{"value_usd":1.5}},"integrity_error_count":0,"custom_top":{"kept":"yes"}}`
+	payload := `{"schema_version":5,"archived_at":99,"run":{"id":"` + run.ID + `","repo_id":"` + repo.ID + `","status":"completed","created_at":` + fmt.Sprint(run.CreatedAt) + `},"pull_request":true,"steps":[{"name":"review","rounds":[{"round":1,"findings":[] }],"custom_step":"kept"}],"invocations":[{"id":"inv-1","reported_cost_usd":null,"usage_coverage":"complete","raw_usage":{"input_tokens":11},"activity":{"tool_calls":2},"custom_invocation":{"kept":true},"costs":{"api_list_estimate":{"value_usd":1.5}}}],"metrics":{"invocation_count":1},"costs":{"api_list_estimate":{"value_usd":1.5}},"integrity_error_count":0,"custom_top":{"kept":"yes"}}`
 	record := RunMetricReceipt{
 		RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
-		SchemaVersion: 4, PayloadJSON: payload, ArchivedAt: 99, PullRequest: true,
+		SchemaVersion: 5, PayloadJSON: payload, ArchivedAt: 99, PullRequest: true,
 		ReportedFindings: 3, FixedFindings: 2,
 		StepStats:       []StepStats{{StepName: types.StepReview, ReportedFindings: 3, FixedFindings: 2}},
 		AgentAggregates: []AgentInvocationAggregate{{Purpose: "review", Count: 1, TotalDurationMS: 123}},
@@ -48,7 +48,7 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptCostSanitizerMigration); err != nil {
+	if _, err := before.sql.Exec(`DELETE FROM schema_migrations WHERE name = ?`, runMetricReceiptRoundStatusMigration); err != nil {
 		t.Fatal(err)
 	}
 	if err := before.Close(); err != nil {
@@ -64,7 +64,7 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 		after.Close()
 		t.Fatal(err)
 	}
-	if migrated.SchemaVersion != 5 || migrated.ReceiptSHA256 == old.ReceiptSHA256 {
+	if migrated.SchemaVersion != 6 || migrated.ReceiptSHA256 == old.ReceiptSHA256 {
 		after.Close()
 		t.Fatalf("migrated receipt version/digest = %d/%q, old digest %q", migrated.SchemaVersion, migrated.ReceiptSHA256, old.ReceiptSHA256)
 	}
@@ -90,9 +90,15 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 		after.Close()
 		t.Fatalf("top-level costs survived migration: %s", migrated.PayloadJSON)
 	}
-	if decoded["schema_version"] != float64(5) || !reflect.DeepEqual(decoded["custom_top"], map[string]any{"kept": "yes"}) {
+	if decoded["schema_version"] != float64(6) || !reflect.DeepEqual(decoded["custom_top"], map[string]any{"kept": "yes"}) {
 		after.Close()
 		t.Fatalf("top-level facts changed during migration: %#v", decoded)
+	}
+	steps := decoded["steps"].([]any)
+	rounds := steps[0].(map[string]any)["rounds"].([]any)
+	if rounds[0].(map[string]any)["status"] != "completed" {
+		after.Close()
+		t.Fatalf("historical round status = %#v, want completed", rounds[0].(map[string]any)["status"])
 	}
 	invocations := decoded["invocations"].([]any)
 	invocation := invocations[0].(map[string]any)
@@ -199,7 +205,7 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 		if got.SchemaVersion != expected.SchemaVersion {
 			t.Fatalf("unsupported receipt %q was relabeled from v%d to v%d", runID, expected.SchemaVersion, got.SchemaVersion)
 		}
-		if expected.SchemaVersion > RunMetricReceiptSchemaVersion {
+		if expected.SchemaVersion >= RunMetricReceiptSchemaVersion {
 			if got.PayloadJSON != expected.PayloadJSON || got.ReceiptSHA256 != expected.ReceiptSHA256 {
 				t.Fatalf("future receipt %q was rewritten:\nwant: %+v\n got: %+v", runID, expected, *got)
 			}

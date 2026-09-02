@@ -14,7 +14,7 @@ import (
 
 // RunMetricReceiptSchemaVersion is the current persisted receipt payload
 // version. Version 5 removes producer-calculated cost estimates.
-const RunMetricReceiptSchemaVersion = 5
+const RunMetricReceiptSchemaVersion = 6
 
 // RunMetricReceipt is the immutable content-free record retained after a rich
 // run and its cascading child rows are pruned.

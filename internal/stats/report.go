@@ -13,7 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 8
+const ReportSchemaVersion = 9
 
 type Query struct {
 	RunID    string
@@ -309,6 +309,9 @@ func BuildReport(database *db.DB, query Query, generatedAt time.Time) (*Report, 
 		for _, step := range steps {
 			report.Steps = append(report.Steps, ReportStep{RunID: audit.Run.ID, Step: step})
 			for _, round := range step.Rounds {
+				if round.Status != "" && round.Status != db.RoundStatusCompleted {
+					continue
+				}
 				isFixRound := round.Trigger == "auto_fix" || round.Trigger == "user_fix"
 				hasRepairDecision := round.RepairFailureFingerprint != nil || round.RepairResult != nil
 				if !isFixRound && !hasRepairDecision {

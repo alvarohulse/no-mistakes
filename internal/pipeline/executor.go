@@ -939,6 +939,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	for {
 		sctx.Round = roundNum + 1
 		sctx.commandSequence = 0
+		startedRound, beginErr := e.db.BeginStepRound(sr.ID, sctx.Round, nextTrigger)
+		if beginErr != nil {
+			if failErr := e.db.FailStep(sr.ID, beginErr.Error(), executionMS); failErr != nil {
+				beginErr = errors.Join(beginErr, fmt.Errorf("mark step failed: %w", failErr))
+			}
+			return false, fmt.Errorf("begin %s round %d: %w", stepName, sctx.Round, beginErr)
+		}
+		currentRoundID = startedRound.ID
+		sctx.RoundID = startedRound.ID
+		sctx.RoundTrigger = nextTrigger
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := step.Execute(sctx)
@@ -946,6 +956,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			durationMS := executionMS + roundDuration
+			if dbErr := e.db.FailStepRound(currentRoundID, roundDuration); dbErr != nil {
+				slog.Warn("failed to complete errored step round", "step", stepName, "round", roundNum, "error", dbErr)
+			}
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
 			// stderr from a rejected push); without this the step log shows the
@@ -989,22 +1002,30 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			s := outcome.FixSummary
 			fixSummaryPtr = &s
 		}
-		var inserted *db.StepRound
 		var dbErr error
 		if stepName == types.StepReview {
 			if e.config != nil && e.config.CaptureEvalProvenance {
-				inserted, dbErr = e.db.InsertReviewStepRoundWithReplayConfig(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayConfigJSON, roundDuration)
+				dbErr = e.db.CompleteReviewStepRound(currentRoundID, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayConfigJSON, nil, nil, roundDuration)
 			} else {
-				inserted, dbErr = e.db.InsertReviewStepRound(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, roundDuration)
+				dbErr = e.db.CompleteReviewStepRound(currentRoundID, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, "", "", nil, nil, nil, roundDuration)
 			}
 		} else {
-			inserted, dbErr = e.db.InsertStepRound(sr.ID, roundNum, nextTrigger, findingsPtr, fixSummaryPtr, roundDuration)
+			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
 		}
 		if dbErr != nil {
-			currentRoundID = roundInsertID(currentRoundID, inserted, dbErr)
-			slog.Warn("failed to insert step round", "step", stepName, "round", roundNum, "error", dbErr)
-		} else {
-			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
+			roundErr := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)
+			if failErr := e.db.FailStepRound(currentRoundID, roundDuration); failErr != nil {
+				roundErr = errors.Join(roundErr, fmt.Errorf("mark round failed: %w", failErr))
+			}
+			redactedErr := safeurl.RedactText(roundErr.Error())
+			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
+			touchLogActivity("error: "+redactedErr, true)
+			durationMS := executionMS + roundDuration
+			if failErr := e.db.FailStep(sr.ID, redactedErr, durationMS); failErr != nil {
+				roundErr = errors.Join(roundErr, fmt.Errorf("mark step failed: %w", failErr))
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
+			return false, roundErr
 		}
 		persistRepairAudit := func(audit RepairAudit) {
 			if currentRoundID == "" || (audit.FailureFingerprint == "" && audit.Result == "") {
@@ -1257,13 +1278,6 @@ func (e *Executor) recordDeclinedReviewRound(roundID, findingsJSON string, stepN
 	if err := e.db.SetStepRoundDeclined(roundID); err != nil {
 		slog.Warn("failed to record declined review findings", "round", roundNum, "error", err)
 	}
-}
-
-func roundInsertID(_ string, inserted *db.StepRound, err error) string {
-	if err != nil || inserted == nil {
-		return ""
-	}
-	return inserted.ID
 }
 
 type gateStepBoundaryAgent struct {

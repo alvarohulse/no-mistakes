@@ -41,6 +41,7 @@ type ExecuteOptions struct {
 type Result struct {
 	Output    string
 	ExitCode  int
+	Signal    *string
 	Truncated bool
 }
 
@@ -133,21 +134,37 @@ func executeArgv(ctx context.Context, argv []string, options ExecuteOptions, std
 	cmd.Stderr = output
 	err := shellenv.RunShellCommand(cmd)
 	if ctx.Err() != nil {
-		return capturedResult(output, -1), ctx.Err()
+		result := capturedResult(output, -1)
+		populateProcessResult(&result, cmd.ProcessState)
+		return result, ctx.Err()
 	}
 	if runCtx.Err() != nil {
+		result := capturedResult(output, -1)
+		populateProcessResult(&result, cmd.ProcessState)
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return capturedResult(output, -1), fmt.Errorf("%w after %s", ErrTimeout, options.Timeout)
+			return result, fmt.Errorf("%w after %s", ErrTimeout, options.Timeout)
 		}
-		return capturedResult(output, -1), runCtx.Err()
+		return result, runCtx.Err()
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return capturedResult(output, exitErr.ExitCode()), nil
+			result := capturedResult(output, exitErr.ExitCode())
+			result.Signal = processSignal(exitErr.ProcessState)
+			return result, nil
 		}
-		return capturedResult(output, -1), fmt.Errorf("launch runner: %w", err)
+		result := capturedResult(output, -1)
+		populateProcessResult(&result, cmd.ProcessState)
+		return result, fmt.Errorf("launch runner: %w", err)
 	}
 	return capturedResult(output, 0), nil
+}
+
+func populateProcessResult(result *Result, state *os.ProcessState) {
+	if state == nil {
+		return
+	}
+	result.ExitCode = state.ExitCode()
+	result.Signal = processSignal(state)
 }
 
 func outputLimit(requested int) int {

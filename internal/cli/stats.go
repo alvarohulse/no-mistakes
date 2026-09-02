@@ -342,8 +342,14 @@ func renderRunAudit(w io.Writer, audit *runstats.RunAudit) error {
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(tw, "STEP\tSTATUS\tSKIP SOURCE\tROUNDS\tDURATION")
 		for _, step := range audit.Steps {
+			completedRounds := 0
+			for _, round := range step.Rounds {
+				if round.Status == "" || round.Status == db.RoundStatusCompleted {
+					completedRounds++
+				}
+			}
 			fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n",
-				step.Name.DisplayName(audit.Run.RefreshStrategy), step.Status, optSkipSource(step.SkipSource), len(step.Rounds), optMS(step.DurationMS))
+				step.Name.DisplayName(audit.Run.RefreshStrategy), step.Status, optSkipSource(step.SkipSource), completedRounds, optMS(step.DurationMS))
 		}
 		if err := tw.Flush(); err != nil {
 			return err

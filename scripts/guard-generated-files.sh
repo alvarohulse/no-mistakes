@@ -130,6 +130,28 @@ bounded_rev_list() {
   printf '%s\n' "$bounded_rev_list_commits"
 }
 
+commits_touching_generated_files() {
+  commits_touching_generated_files_list=$1
+
+  if [ -z "$commits_touching_generated_files_list" ]; then
+    return 0
+  fi
+  if ! commits_touching_generated_files_diff=$(
+    printf '%s\n' "$commits_touching_generated_files_list" |
+      git diff-tree --stdin --root -r -m --name-only --format='%H' -- \
+        CHANGELOG.md \
+        .release-please-manifest.json
+  ); then
+    fail "could not identify commits that change generated files"
+  fi
+  if ! commits_touching_generated_files_result=$(printf '%s\n' "$commits_touching_generated_files_diff" | awk '
+    /^[0-9a-f]+$/ && length($0) == 40 && !seen[$0]++ { printf "%s ", $0 }
+  '); then
+    fail "could not identify commits that change generated files"
+  fi
+  printf '%s\n' "$commits_touching_generated_files_result"
+}
+
 candidate_ancestors() {
   candidate_ancestors_treeish=$1
   candidate_ancestors_candidates=$2
@@ -444,6 +466,10 @@ EOF
     fail "could not verify ${audit_commits_label} commit identities"
   fi
 
+  if ! audit_commits_generated_changes=$(commits_touching_generated_files "$audit_commits_list"); then
+    exit 1
+  fi
+
   while IFS= read -r commit_and_parents; do
     set -- $commit_and_parents
     commit=$1
@@ -457,6 +483,10 @@ EOF
     if [ "$audit_commits_trust" = trusted ] && is_trusted_base_first_parent_commit "$commit"; then
       continue
     fi
+    case " $audit_commits_generated_changes " in
+      *" $commit "*) ;;
+      *) continue ;;
+    esac
     if ! commit_entries=$(generated_entries "$commit"); then
       fail "could not inspect generated entries in a ${audit_commits_label} commit"
     fi
