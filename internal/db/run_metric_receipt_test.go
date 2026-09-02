@@ -120,6 +120,76 @@ func TestOpenSanitizesArchivedMetricReceiptsAndReopenIsIdempotent(t *testing.T) 
 	}
 }
 
+func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unsupported-receipts.sqlite")
+	before, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := before.InsertRepo("/tmp/unsupported-receipts", "https://github.com/owner/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make(map[string]RunMetricReceipt)
+	for _, version := range []int{1, 6} {
+		runID := fmt.Sprintf("receipt-v%d", version)
+		run, err := before.InsertRunWithIDAndOptions(runID, repo.ID, "feature", "head", "base", RunOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := before.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+		payload := fmt.Sprintf(`{"schema_version":%d,"run":{"id":%q,"repo_id":%q,"status":"completed","created_at":%d},"costs":{"legacy":true}}`, version, run.ID, repo.ID, run.CreatedAt)
+		record := RunMetricReceipt{
+			RunID: run.ID, RepoID: repo.ID, RunCreatedAt: run.CreatedAt, RunStatus: types.RunCompleted,
+			SchemaVersion: version, PayloadJSON: payload, ArchivedAt: run.UpdatedAt,
+		}
+		if archived, err := before.ArchiveRunWithMetricReceipt(record, true); err != nil || !archived {
+			t.Fatalf("archive v%d receipt = %t, %v", version, archived, err)
+		}
+		stored, err := before.GetRunMetricReceipt(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[run.ID] = *stored
+	}
+	if err := before.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer after.Close()
+	for runID, expected := range want {
+		got, err := after.GetRunMetricReceipt(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SchemaVersion != expected.SchemaVersion {
+			t.Fatalf("unsupported receipt %q was relabeled from v%d to v%d", runID, expected.SchemaVersion, got.SchemaVersion)
+		}
+		if expected.SchemaVersion > RunMetricReceiptSchemaVersion {
+			if got.PayloadJSON != expected.PayloadJSON || got.ReceiptSHA256 != expected.ReceiptSHA256 {
+				t.Fatalf("future receipt %q was rewritten:\nwant: %+v\n got: %+v", runID, expected, *got)
+			}
+			continue
+		}
+		if got.PayloadJSON == expected.PayloadJSON || got.ReceiptSHA256 == expected.ReceiptSHA256 {
+			t.Fatalf("legacy receipt %q retained its estimate bytes", runID)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(got.PayloadJSON), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := payload["costs"]; exists {
+			t.Fatalf("legacy receipt %q retained costs: %s", runID, got.PayloadJSON)
+		}
+	}
+}
+
 func TestOpenRejectsCorruptArchivedReceiptWithoutPartiallyMigratingSiblings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "corrupt-cost-receipt.sqlite")
 	before, err := Open(path)

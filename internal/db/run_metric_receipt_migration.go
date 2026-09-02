@@ -58,12 +58,21 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		if digest != row.receipt.ReceiptSHA256 {
 			return fmt.Errorf("run metric receipt %q failed SHA-256 verification", row.receipt.RunID)
 		}
+		targetVersion := row.receipt.SchemaVersion
+		switch {
+		case row.receipt.SchemaVersion == 1:
+		case row.receipt.SchemaVersion >= 2 && row.receipt.SchemaVersion < RunMetricReceiptSchemaVersion:
+			targetVersion = RunMetricReceiptSchemaVersion
+		case row.receipt.SchemaVersion == RunMetricReceiptSchemaVersion:
+		default:
+			continue
+		}
 
-		payload, changed, err := sanitizeRunMetricReceiptPayload(row.receipt.PayloadJSON)
+		payload, changed, err := sanitizeRunMetricReceiptPayload(row.receipt.PayloadJSON, targetVersion)
 		if err != nil {
 			return fmt.Errorf("sanitize run metric receipt %q: %w", row.receipt.RunID, err)
 		}
-		if row.receipt.SchemaVersion != RunMetricReceiptSchemaVersion {
+		if row.receipt.SchemaVersion != targetVersion {
 			changed = true
 		}
 		if !changed {
@@ -71,7 +80,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 		}
 
 		migrated := row.receipt
-		migrated.SchemaVersion = RunMetricReceiptSchemaVersion
+		migrated.SchemaVersion = targetVersion
 		migrated.PayloadJSON = payload
 		migrated.ReceiptSHA256, err = runMetricReceiptDigest(migrated, row.stepStatsJSON, row.aggregatesJSON)
 		if err != nil {
@@ -102,7 +111,7 @@ func migrateRunMetricReceipts(sqlDB *sql.DB) error {
 	return nil
 }
 
-func sanitizeRunMetricReceiptPayload(payloadJSON string) (string, bool, error) {
+func sanitizeRunMetricReceiptPayload(payloadJSON string, schemaVersion int) (string, bool, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return "", false, fmt.Errorf("decode payload: %w", err)
@@ -113,8 +122,8 @@ func sanitizeRunMetricReceiptPayload(payloadJSON string) (string, bool, error) {
 
 	changed := false
 	var embeddedVersion int
-	if raw, exists := payload["schema_version"]; !exists || json.Unmarshal(raw, &embeddedVersion) != nil || embeddedVersion != RunMetricReceiptSchemaVersion {
-		versionJSON, err := json.Marshal(RunMetricReceiptSchemaVersion)
+	if raw, exists := payload["schema_version"]; !exists || json.Unmarshal(raw, &embeddedVersion) != nil || embeddedVersion != schemaVersion {
+		versionJSON, err := json.Marshal(schemaVersion)
 		if err != nil {
 			return "", false, fmt.Errorf("encode schema version: %w", err)
 		}
