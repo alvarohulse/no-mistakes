@@ -251,18 +251,21 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		hadCommands := false
 		if evidence, err := sr.Evidence(); err == nil {
 			hadCommands = len(evidence.Commands) > 0
-			for _, command := range evidence.Commands {
+			for i, command := range evidence.Commands {
 				if command.Outcome != db.CommandOutcomePassed || command.ExitCode == nil || *command.ExitCode != 0 {
 					continue
+				}
+				for _, later := range evidence.Commands[i+1:] {
+					if later.Command == command.Command && (later.Outcome != db.CommandOutcomePassed || later.ExitCode == nil || *later.ExitCode != 0) {
+						goto superseded
+					}
 				}
 				section.Commands = append(section.Commands, prbody.PipelineCommand{
 					Round: command.Round, Sequence: command.Sequence, Command: command.Command,
 					Outcome: command.Outcome, ExitCode: command.ExitCode,
 				})
+			superseded:
 			}
-		}
-		if hadCommands && len(section.Commands) == 0 {
-			return section
 		}
 		if findings := finalStepFindings(sr, rounds[sr.ID]); findings != nil {
 			section.Summary = strings.TrimSpace(findings.TestingSummary)
@@ -274,6 +277,9 @@ func contractStaticTests(steps []*db.StepResult, rounds map[string][]*db.StepRou
 					Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL,
 				})
 			}
+		}
+		if hadCommands && len(section.Commands) == 0 {
+			return section
 		}
 		if section.Summary == "" && len(section.Commands) == 0 && len(section.Reported) == 0 && len(section.Artifacts) == 0 {
 			return nil
