@@ -125,6 +125,38 @@ func TestCompleteCommandAttemptWithOutputArtifactRejectsNonNormalizedPathWithout
 	}
 }
 
+func TestCompleteCommandAttemptWithOutputArtifactRejectsMissingOutputWithoutTerminalizing(t *testing.T) {
+	d := openTestDB(t)
+	attempt, _, _, _ := newCommandArtifactAttemptFixture(t, d)
+	exit := 0
+	_, err := d.CompleteCommandAttemptWithOutputArtifact(
+		attempt.ID,
+		CommandOutcomePass,
+		&exit,
+		nil,
+		stringPointer("git:head"),
+		stringPointer("head"),
+		Artifact{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "required metadata is incomplete") {
+		t.Fatalf("missing output artifact error = %v", err)
+	}
+	stored, err := d.getCommandAttempt(attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CompletedAt != nil || stored.OutputArtifactID != nil {
+		t.Fatalf("missing artifact terminalized attempt: %+v", stored)
+	}
+	artifacts, err := d.GetArtifactsByRun(attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("missing artifact created rows: %+v", artifacts)
+	}
+}
+
 func TestRegisterArtifactKeepsOneStableRowPerPhysicalPath(t *testing.T) {
 	d := openTestDB(t)
 	attempt, _, step, round := newCommandArtifactAttemptFixture(t, d)

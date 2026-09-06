@@ -127,9 +127,7 @@ func TestCommandAttemptsPreserveOccurrenceProvenanceForSharedDefinition(t *testi
 			t.Fatalf("start occurrence %d: %v", sequence+1, err)
 		}
 		exit := 0
-		if err := d.CompleteCommandAttempt(attempt.ID, CommandOutcomePass, &exit, nil, &state, stringPointer("head")); err != nil {
-			t.Fatalf("complete occurrence %d: %v", sequence+1, err)
-		}
+		completeCommandAttemptWithOutput(t, d, attempt, CommandOutcomePass, &exit, nil, &state, stringPointer("head"))
 	}
 
 	attempts, err := d.GetCommandAttemptsByRun(run.ID)
@@ -166,9 +164,7 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 		t.Fatalf("start first attempt: %v", err)
 	}
 	exitOne := 1
-	if err := d.CompleteCommandAttempt(first.ID, CommandOutcomeFail, &exitOne, nil, stringPointer("git:head"), nil); err != nil {
-		t.Fatalf("complete first attempt: %v", err)
-	}
+	completeCommandAttemptWithOutput(t, d, first, CommandOutcomeFail, &exitOne, nil, stringPointer("git:head"), nil)
 
 	retryReason := CommandRetryReasonUnchangedAfterRepair
 	second, err := d.StartCommandAttempt(CommandAttempt{
@@ -185,9 +181,7 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 		t.Fatal("identical executions were deduplicated")
 	}
 	exitZero := 0
-	if err := d.CompleteCommandAttempt(second.ID, CommandOutcomePass, &exitZero, nil, stringPointer("git:head"), stringPointer("head")); err != nil {
-		t.Fatalf("complete retry: %v", err)
-	}
+	completeCommandAttemptWithOutput(t, d, second, CommandOutcomePass, &exitZero, nil, stringPointer("git:head"), stringPointer("head"))
 
 	attempts, err := d.GetCommandAttemptsByRun(run.ID)
 	if err != nil {
@@ -226,9 +220,7 @@ func TestCommandAttemptsRetainIdenticalExecutionsAndValidateRetries(t *testing.T
 	if err != nil {
 		t.Fatalf("start third attempt: %v", err)
 	}
-	if err := d.CompleteCommandAttempt(third.ID, CommandOutcomeTimeout, nil, nil, stringPointer("git:dirty"), nil); err != nil {
-		t.Fatalf("complete third attempt: %v", err)
-	}
+	completeCommandAttemptWithOutput(t, d, third, CommandOutcomeTimeout, nil, nil, stringPointer("git:dirty"), nil)
 	if _, err := d.sql.Exec(`UPDATE command_attempts SET started_at = CASE sequence WHEN 1 THEN 300 WHEN 2 THEN 100 WHEN 3 THEN 200 END WHERE run_id = ?`, run.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -323,9 +315,7 @@ func TestCommandAttemptRetryUsesLatestMatchingOperationAcrossRounds(t *testing.T
 	completeFailure := func(attempt *CommandAttempt, state string) {
 		t.Helper()
 		exit := 1
-		if err := d.CompleteCommandAttempt(attempt.ID, CommandOutcomeFail, &exit, nil, stringPointer(state), nil); err != nil {
-			t.Fatalf("complete attempt: %v", err)
-		}
+		completeCommandAttemptWithOutput(t, d, attempt, CommandOutcomeFail, &exit, nil, stringPointer(state), nil)
 	}
 
 	first := start(firstRound.ID, 1, definition.ID, "git:head", nil)
@@ -382,9 +372,7 @@ func TestCompleteCommandAttemptAllowsObservedProcessExitAndRejectsFailedTestedHe
 
 	processError := newAttempt(1)
 	exitZero := 0
-	if err := d.CompleteCommandAttempt(processError.ID, CommandOutcomeProcessError, &exitZero, nil, stringPointer("git:head"), nil); err != nil {
-		t.Fatalf("complete process error with observed exit: %v", err)
-	}
+	completeCommandAttemptWithOutput(t, d, processError, CommandOutcomeProcessError, &exitZero, nil, stringPointer("git:head"), nil)
 	stored, err := d.getCommandAttempt(processError.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -403,7 +391,7 @@ func TestCompleteCommandAttemptAllowsObservedProcessExitAndRejectsFailedTestedHe
 		{outcome: CommandOutcomeTimeout, exitCode: intPointer(137)},
 	} {
 		attempt := newAttempt(index + 2)
-		if err := d.CompleteCommandAttempt(attempt.ID, tc.outcome, tc.exitCode, nil, stringPointer("git:head"), stringPointer("head")); err == nil || !strings.Contains(err.Error(), "tested commit requires passing outcome") {
+		if _, err := d.CompleteCommandAttemptWithOutputArtifact(attempt.ID, tc.outcome, tc.exitCode, nil, stringPointer("git:head"), stringPointer("head"), commandOutputArtifactForAttempt(attempt)); err == nil || !strings.Contains(err.Error(), "tested commit requires passing outcome") {
 			t.Fatalf("%s tested-head error = %v", tc.outcome, err)
 		}
 	}
@@ -443,7 +431,7 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', 1, 1);
 		INSERT INTO command_definitions VALUES ('run', 'definition', 'printf test', 'linux', 'sh', '["-c"]', 'base', 1, 'default', '5.9');
 		INSERT INTO command_attempts (id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha, started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason)
-		VALUES ('attempt', 'run', 'definition', 'step', 'round', 1, 'test', 'controller', 'initial', 'head', NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+		VALUES ('attempt', 'run', 'definition', 'step', 'round', 1, 'test', 'controller', 'initial', 'head', NULL, 1, 2, 1, 'pass', 0, NULL, NULL, NULL);
 	`); err != nil {
 		legacy.Close()
 		t.Fatal(err)
@@ -510,9 +498,13 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 	if foreignKeyCount == 0 {
 		t.Fatal("command attempt foreign key was not preserved")
 	}
+	var completedAt *int64
 	var outputArtifactID *string
-	if err := database.sql.QueryRow(`SELECT output_artifact_id FROM command_attempts WHERE id = 'attempt'`).Scan(&outputArtifactID); err != nil {
-		t.Fatalf("migrated output artifact link: %v", err)
+	if err := database.sql.QueryRow(`SELECT completed_at, output_artifact_id FROM command_attempts WHERE id = 'attempt'`).Scan(&completedAt, &outputArtifactID); err != nil {
+		t.Fatalf("migrated terminal attempt: %v", err)
+	}
+	if completedAt == nil {
+		t.Fatal("migrated legacy attempt is no longer terminal")
 	}
 	if outputArtifactID != nil {
 		t.Fatalf("legacy attempt output artifact = %q, want nil", *outputArtifactID)
@@ -565,6 +557,21 @@ func TestCommandDefinitionColumnRemovalMigrationRunsOnlyOnce(t *testing.T) {
 	if sourceColumns != 1 {
 		t.Fatalf("source columns after completed migration = %d, want 1", sourceColumns)
 	}
+}
+
+func completeCommandAttemptWithOutput(t *testing.T, d *DB, attempt *CommandAttempt, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) {
+	t.Helper()
+	if _, err := d.CompleteCommandAttemptWithOutputArtifact(attempt.ID, outcome, exitCode, signal, resultStateID, testedSHA, commandOutputArtifactForAttempt(attempt)); err != nil {
+		t.Fatalf("complete command attempt with output: %v", err)
+	}
+}
+
+func commandOutputArtifactForAttempt(attempt *CommandAttempt) Artifact {
+	return commandOutputArtifact(
+		filepath.ToSlash(filepath.Join(attempt.RunID, "command-output", attempt.ID+".log")),
+		"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+		11,
+	)
 }
 
 func stringPointer(value string) *string { return &value }

@@ -162,7 +162,7 @@ func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, err
 }
 
 // StartCommandAttempt persists the execution identity before launching the
-// command. Completion fields are filled exactly once by CompleteCommandAttempt.
+// command. Completion fields are filled exactly once with its output artifact.
 func (d *DB) StartCommandAttempt(attempt CommandAttempt) (*CommandAttempt, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -302,37 +302,6 @@ func sameOptionalString(left, right *string) bool {
 
 func OptionalStringsEqual(left, right *string) bool {
 	return sameOptionalString(left, right)
-}
-
-// CompleteCommandAttempt stores the controller-observed terminal result once.
-// testedSHA is accepted only when the exact clean repository state observed
-// before and after execution is unchanged.
-func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) error {
-	attempt, err := d.getCommandAttempt(id)
-	if err != nil {
-		return fmt.Errorf("complete command attempt: %w", err)
-	}
-	if err := validateCommandAttemptCompletion(attempt, outcome, exitCode, signal, resultStateID, testedSHA); err != nil {
-		return err
-	}
-	completedAt := time.Now().UnixMilli()
-	result, err := d.sql.Exec(
-		`UPDATE command_attempts
-		 SET completed_at = ?, duration_ms = MAX(0, ? - started_at), outcome = ?, exit_code = ?, signal = ?, result_state_id = ?, tested_sha = ?
-		 WHERE id = ? AND completed_at IS NULL`,
-		completedAt, completedAt, outcome, exitCode, signal, resultStateID, testedSHA, id,
-	)
-	if err != nil {
-		return fmt.Errorf("complete command attempt: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("complete command attempt: rows affected: %w", err)
-	}
-	if rows != 1 {
-		return fmt.Errorf("complete command attempt: attempt is missing or already complete")
-	}
-	return nil
 }
 
 // CompleteCommandAttemptWithOutputArtifact atomically persists a terminal
