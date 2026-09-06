@@ -237,6 +237,9 @@ Rules:
 				findings = Findings{Summary: result.Text}
 			}
 		}
+		if err := registerTestEvidenceArtifacts(sctx, findings.Artifacts); err != nil {
+			return nil, fmt.Errorf("register test evidence artifact: %w", err)
+		}
 		if len(tested) > 0 {
 			findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 		}

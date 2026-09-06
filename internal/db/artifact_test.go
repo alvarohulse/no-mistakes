@@ -125,6 +125,58 @@ func TestCompleteCommandAttemptWithOutputArtifactRejectsNonNormalizedPathWithout
 	}
 }
 
+func TestRegisterArtifactKeepsOneStableRowPerPhysicalPath(t *testing.T) {
+	d := openTestDB(t)
+	attempt, _, step, round := newCommandArtifactAttemptFixture(t, d)
+	candidate := testEvidenceArtifact(
+		filepath.ToSlash(filepath.Join(attempt.RunID, "screenshots", "checkout.html")),
+		attempt.RunID,
+		step.ID,
+		round.ID,
+	)
+
+	stored, err := d.RegisterArtifact(candidate)
+	if err != nil {
+		t.Fatalf("register evidence artifact: %v", err)
+	}
+	if stored.ID == "" || stored.StepID == nil || *stored.StepID != step.ID || stored.RoundID == nil || *stored.RoundID != round.ID {
+		t.Fatalf("registered artifact = %+v", stored)
+	}
+	fetched, err := d.GetArtifact(stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched == nil || fetched.RelativePath != candidate.RelativePath || fetched.SHA256 != candidate.SHA256 || fetched.SourceBytes != candidate.SourceBytes {
+		t.Fatalf("fetched artifact = %+v", fetched)
+	}
+
+	duplicate, err := d.RegisterArtifact(candidate)
+	if err != nil {
+		t.Fatalf("register duplicate evidence artifact: %v", err)
+	}
+	if duplicate.ID != stored.ID {
+		t.Fatalf("duplicate artifact ID = %q, want %q", duplicate.ID, stored.ID)
+	}
+	artifacts, err := d.GetArtifactsByRun(attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].ID != stored.ID {
+		t.Fatalf("artifacts = %+v, want one stable row", artifacts)
+	}
+
+	conflicting := candidate
+	conflicting.Label = "Different evidence label"
+	if _, err := d.RegisterArtifact(conflicting); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("conflicting duplicate error = %v", err)
+	}
+	wrongRunPath := candidate
+	wrongRunPath.RelativePath = "other-run/screenshots/checkout.html"
+	if _, err := d.RegisterArtifact(wrongRunPath); err == nil || !strings.Contains(err.Error(), "run ID") {
+		t.Fatalf("wrong run path error = %v", err)
+	}
+}
+
 func newCommandArtifactAttemptFixture(t *testing.T, d *DB) (*CommandAttempt, *CommandDefinition, *StepResult, *StepRound) {
 	t.Helper()
 	repo, err := d.InsertRepo("/home/user/command-artifact", "git@github.com:user/command-artifact.git", "main")
@@ -180,6 +232,24 @@ func commandOutputArtifact(relativePath, digest string, size int64) Artifact {
 		Encoding:     "utf-8",
 		SHA256:       digest,
 		SourceBytes:  size,
+		State:        ArtifactStateAvailable,
+	}
+}
+
+func testEvidenceArtifact(relativePath, runID, stepID, roundID string) Artifact {
+	return Artifact{
+		RunID:        runID,
+		StepID:       stringPointer(stepID),
+		RoundID:      stringPointer(roundID),
+		Purpose:      "test_evidence",
+		Label:        "Checkout screenshot",
+		StorageRoot:  ArtifactStorageRootEvidence,
+		RelativePath: relativePath,
+		Kind:         "screenshot",
+		MediaType:    "text/html",
+		Encoding:     "utf-8",
+		SHA256:       "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+		SourceBytes:  11,
 		State:        ArtifactStateAvailable,
 	}
 }

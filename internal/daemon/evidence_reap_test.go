@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,10 +10,12 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	runstats "github.com/kunchenguid/no-mistakes/internal/stats"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -46,6 +49,27 @@ func newEvidenceFixture(t *testing.T) *evidenceFixture {
 		t.Fatal(err)
 	}
 	return &evidenceFixture{t: t, db: d, p: p, repo: repo, root: root}
+}
+
+func (f *evidenceFixture) indexEvidence(runID, name string) *db.Artifact {
+	f.t.Helper()
+	store, err := artifact.NewStore(f.p, "")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	indexed, err := store.IndexEvidenceFile(runID, filepath.Join(f.root, runID, name))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	indexed.RunID = runID
+	indexed.Purpose = db.ArtifactPurposeTestEvidence
+	indexed.Label = "Indexed test evidence"
+	indexed.Kind = "evidence"
+	stored, err := f.db.RegisterArtifact(indexed)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return stored
 }
 
 // seed creates a run in the given status plus its evidence directory, aged by
@@ -92,6 +116,8 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 
 	stale := f.seed("stale", types.RunCompleted, 30*24*time.Hour, artifact)
 	writeRunArtifactFiles(t, f.p, stale, "PRIVATE-EFFECTIVE-CONFIG", "PRIVATE-EFFECTIVE-CONFIG-DIGEST")
+	commandOutput := writeCommandOutputArtifact(t, f.p, stale, "command output")
+	f.indexEvidence(stale, "screenshot.png")
 	activePending := f.seed("active-pending", types.RunPending, 30*24*time.Hour, artifact)
 	activeRunning := f.seed("active-running", types.RunRunning, 30*24*time.Hour, artifact)
 	for index := 0; index < 50; index++ {
@@ -117,6 +143,12 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(f.p.RunDir(stale)); !os.IsNotExist(err) {
 		t.Fatalf("effective config artifacts survived rich-run archival: %v", err)
+	}
+	if _, err := os.Stat(commandOutput); !os.IsNotExist(err) {
+		t.Fatalf("command output artifact survived rich-run archival: %v", err)
+	}
+	if artifacts, err := f.db.GetArtifactsByRun(stale); err != nil || len(artifacts) != 0 {
+		t.Fatalf("archived run retained indexed evidence rows: %+v, %v", artifacts, err)
 	}
 	receipt, err := f.db.GetRunMetricReceipt(stale)
 	if err != nil {
@@ -186,6 +218,8 @@ func TestReapEvidenceRetainsPinnedAndNewestFiftyOldRuns(t *testing.T) {
 	}
 	pinned := f.seed("pinned", types.RunCompleted, 30*24*time.Hour, artifact)
 	writeRunArtifactFiles(t, f.p, pinned, "pinned-yaml", "pinned-meta")
+	pinnedOutput := writeCommandOutputArtifact(t, f.p, pinned, "pinned command output")
+	pinnedEvidence := f.indexEvidence(pinned, "log.txt")
 	if _, err := f.db.SetRunPinned(pinned, true); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +244,59 @@ func TestReapEvidenceRetainsPinnedAndNewestFiftyOldRuns(t *testing.T) {
 			t.Fatalf("pinned effective config artifact was removed: %v", err)
 		}
 	}
+	for _, path := range []string{pinnedOutput, filepath.Join(f.root, pinned, "log.txt")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("pinned artifact was removed: %v", err)
+		}
+	}
+	if stored, err := f.db.GetArtifact(pinnedEvidence.ID); err != nil || stored == nil {
+		t.Fatalf("pinned indexed evidence row was removed: %+v, %v", stored, err)
+	}
+}
+
+func TestRichRunRetentionRetriesCommandOutputAndIndexedEvidenceUsingPersistedTargets(t *testing.T) {
+	f := newEvidenceFixture(t)
+	runID := f.seed("stale", types.RunCompleted, 30*24*time.Hour, map[string]string{"evidence.html": "<p>evidence</p>"})
+	commandOutput := writeCommandOutputArtifact(t, f.p, runID, "command output")
+	evidencePath := filepath.Join(f.root, runID, "evidence.html")
+	f.indexEvidence(runID, "evidence.html")
+	for index := 0; index < 50; index++ {
+		run, err := f.db.InsertRun(f.repo.ID, "newer", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	currentEvidenceRoot := f.root
+	removeCalls := 0
+	cleanup := &runstats.RunArtifactCleanup{
+		Targets: func(id string) []string {
+			return richRunArtifactTargets(f.p, currentEvidenceRoot, id)
+		},
+		Remove: func(id string, targets []string) error {
+			removeCalls++
+			if removeCalls == 1 {
+				return errors.New("simulated cleanup interruption")
+			}
+			return runstats.RemoveRunArtifactTargets(id, targets)
+		},
+	}
+	now := time.Now().Add(30 * 24 * time.Hour)
+	if pruned, err := runstats.PruneRichRunData(f.db, now, runstats.RichRunRetentionAge, runstats.RichRunRetentionFloor, cleanup); pruned != 1 || err == nil {
+		t.Fatalf("initial archival = pruned %d error %v, want archived run with pending cleanup", pruned, err)
+	}
+	currentEvidenceRoot = t.TempDir()
+	if pruned, err := runstats.PruneRichRunData(f.db, now, runstats.RichRunRetentionAge, runstats.RichRunRetentionFloor, cleanup); pruned != 0 || err != nil {
+		t.Fatalf("persisted cleanup retry = pruned %d error %v", pruned, err)
+	}
+	for _, path := range []string{commandOutput, evidencePath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("persisted cleanup target survived: %s: %v", path, err)
+		}
+	}
 }
 
 func writeRunArtifactFiles(t *testing.T, p *paths.Paths, runID, yamlBody, metaBody string) {
@@ -223,6 +310,18 @@ func writeRunArtifactFiles(t *testing.T, p *paths.Paths, runID, yamlBody, metaBo
 	if err := os.WriteFile(p.EffectiveConfigMeta(runID), []byte(metaBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeCommandOutputArtifact(t *testing.T, p *paths.Paths, runID, contents string) string {
+	t.Helper()
+	path := filepath.Join(p.RunDir(runID), "command-output", "attempt.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // TestReapEvidenceKeepsEverythingWhenBothBoundsAreDisabled proves the operator

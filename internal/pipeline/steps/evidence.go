@@ -1,6 +1,14 @@
 package steps
 
-import "github.com/kunchenguid/no-mistakes/internal/pipeline"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 // testEvidenceDir is where the test step writes a run's evidence artifacts.
 //
@@ -19,4 +27,52 @@ func testEvidenceDir(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return sctx.EvidenceDir
+}
+
+// registerTestEvidenceArtifacts indexes agent-reported files in place. URL and
+// inline-content artifacts remain part of the findings payload only because
+// they have no owner-local file to verify or retain.
+func registerTestEvidenceArtifacts(sctx *pipeline.StepContext, reported []types.TestArtifact) error {
+	var paths []types.TestArtifact
+	for _, candidate := range reported {
+		if strings.TrimSpace(candidate.Path) != "" {
+			paths = append(paths, candidate)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	if sctx == nil || sctx.Run == nil || sctx.Paths == nil || sctx.DB == nil || sctx.StepResultID == "" || sctx.RoundID == "" {
+		return fmt.Errorf("durable run, step, round, paths, and database are required")
+	}
+	configuredEvidenceRoot := ""
+	if sctx.Config != nil {
+		configuredEvidenceRoot = sctx.Config.Test.Evidence.LocalRoot
+	}
+	store, err := artifact.NewStore(sctx.Paths, configuredEvidenceRoot)
+	if err != nil {
+		return err
+	}
+	stepID := sctx.StepResultID
+	roundID := sctx.RoundID
+	for _, candidate := range paths {
+		indexed, err := store.IndexEvidenceFile(sctx.Run.ID, candidate.Path)
+		if err != nil {
+			return fmt.Errorf("index %q: %w", candidate.Path, err)
+		}
+		kind := strings.TrimSpace(candidate.Kind)
+		if kind == "" {
+			kind = "file"
+		}
+		indexed.RunID = sctx.Run.ID
+		indexed.StepID = &stepID
+		indexed.RoundID = &roundID
+		indexed.Purpose = db.ArtifactPurposeTestEvidence
+		indexed.Label = candidate.Label
+		indexed.Kind = kind
+		if _, err := sctx.DB.RegisterArtifact(indexed); err != nil {
+			return fmt.Errorf("register %q: %w", candidate.Path, err)
+		}
+	}
+	return nil
 }

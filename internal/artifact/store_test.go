@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -75,6 +76,85 @@ func TestStoreCreatesAndReadsEmptyCommandOutput(t *testing.T) {
 	}
 	if len(contents) != 0 {
 		t.Fatalf("empty command output = %q", contents)
+	}
+}
+
+func TestStoreIndexesExistingEvidenceFileWithoutChangingIt(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contents := []byte("<h1>tested checkout</h1>\n")
+	runID := "run-evidence"
+	evidencePath := filepath.Join(p.RunEvidenceDir("", runID), "rendered", "checkout.html")
+	if err := os.MkdirAll(filepath.Dir(evidencePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexed, err := store.IndexEvidenceFile(runID, evidencePath)
+	if err != nil {
+		t.Fatalf("index evidence file: %v", err)
+	}
+	if indexed.StorageRoot != db.ArtifactStorageRootEvidence || indexed.RelativePath != "run-evidence/rendered/checkout.html" || indexed.SourceBytes != int64(len(contents)) || indexed.MediaType != "text/html" || indexed.Encoding != "utf-8" {
+		t.Fatalf("indexed evidence = %+v", indexed)
+	}
+	stored, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, contents) {
+		t.Fatalf("evidence contents changed: got %q, want %q", stored, contents)
+	}
+	read, err := store.Read(&indexed)
+	if err != nil {
+		t.Fatalf("read indexed evidence: %v", err)
+	}
+	if !bytes.Equal(read, contents) {
+		t.Fatalf("indexed contents = %q, want %q", read, contents)
+	}
+}
+
+func TestStoreRejectsEvidenceOutsideItsRunRootAndSymlinks(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := "run-evidence"
+	runDir := p.RunEvidenceDir("", runID)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IndexEvidenceFile(runID, outside); err == nil {
+		t.Fatal("outside evidence file was indexed")
+	}
+	if _, err := store.IndexEvidenceFile(runID, filepath.Join(runDir, "..", "outside.txt")); err == nil {
+		t.Fatal("traversal evidence file was indexed")
+	}
+	if _, err := store.IndexEvidenceFile(runID, filepath.Join(runDir, "missing.txt")); err == nil {
+		t.Fatal("missing evidence file was indexed")
+	}
+	if _, err := store.IndexEvidenceFile(runID, runDir); err == nil {
+		t.Fatal("evidence directory was indexed as a file")
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	escapedDir := filepath.Join(runDir, "escaped")
+	if err := os.Symlink(filepath.Dir(outside), escapedDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IndexEvidenceFile(runID, filepath.Join(escapedDir, filepath.Base(outside))); err == nil {
+		t.Fatal("symlinked evidence path was indexed")
 	}
 }
 

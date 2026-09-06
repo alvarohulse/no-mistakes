@@ -8,10 +8,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"mime"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -118,6 +121,85 @@ func (s *Store) CreateCommandOutput(runID, attemptID string, output []byte) (art
 		SourceBytes:  int64(len(output)),
 		State:        db.ArtifactStateAvailable,
 	}, nil
+}
+
+// IndexEvidenceFile reads an existing test-evidence file without moving or
+// modifying it, returning verified metadata rooted at the configured evidence
+// directory. The file must belong to the named run and every path component
+// below the evidence root must be a real directory or regular file.
+func (s *Store) IndexEvidenceFile(runID, reportedPath string) (db.Artifact, error) {
+	if err := validatePathComponent("run ID", runID); err != nil {
+		return db.Artifact{}, err
+	}
+	relativePath, err := s.evidenceRelativePath(runID, reportedPath)
+	if err != nil {
+		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
+	}
+	target, info, err := secureRegularArtifactPath(s.evidenceRoot, relativePath)
+	if err != nil {
+		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
+	}
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		return db.Artifact{}, fmt.Errorf("index evidence file: read file: %w", err)
+	}
+	if int64(len(contents)) != info.Size() {
+		return db.Artifact{}, fmt.Errorf("index evidence file: file changed while reading")
+	}
+	digest := sha256.Sum256(contents)
+	mediaType, encoding := evidenceFileFormat(target, contents)
+	return db.Artifact{
+		StorageRoot:  db.ArtifactStorageRootEvidence,
+		RelativePath: relativePath,
+		MediaType:    mediaType,
+		Encoding:     encoding,
+		SHA256:       hex.EncodeToString(digest[:]),
+		SourceBytes:  int64(len(contents)),
+		State:        db.ArtifactStateAvailable,
+	}, nil
+}
+
+func (s *Store) evidenceRelativePath(runID, reportedPath string) (string, error) {
+	if strings.TrimSpace(reportedPath) == "" {
+		return "", fmt.Errorf("evidence path is empty")
+	}
+	target := reportedPath
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(s.evidenceRoot, runID, target)
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve reported path: %w", err)
+	}
+	relativePath, err := filepath.Rel(s.evidenceRoot, filepath.Clean(absTarget))
+	if err != nil {
+		return "", fmt.Errorf("compare evidence root: %w", err)
+	}
+	normalized, err := strictRelativePath(filepath.ToSlash(relativePath))
+	if err != nil {
+		return "", fmt.Errorf("evidence path must stay within the evidence root: %w", err)
+	}
+	if normalized == runID || !strings.HasPrefix(normalized, runID+"/") {
+		return "", fmt.Errorf("evidence path must stay within run %q", runID)
+	}
+	return normalized, nil
+}
+
+func evidenceFileFormat(filePath string, contents []byte) (mediaType, encoding string) {
+	mediaType = mime.TypeByExtension(strings.ToLower(filepath.Ext(filePath)))
+	if mediaType == "" {
+		mediaType = http.DetectContentType(contents)
+	}
+	if parsed, _, err := mime.ParseMediaType(mediaType); err == nil && parsed != "" {
+		mediaType = parsed
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	if utf8.Valid(contents) {
+		return mediaType, "utf-8"
+	}
+	return mediaType, "binary"
 }
 
 // Read validates a registered artifact's physical containment, file kind,
