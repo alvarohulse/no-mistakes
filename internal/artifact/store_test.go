@@ -79,6 +79,31 @@ func TestStoreCreatesAndReadsEmptyCommandOutput(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesAndReadsBinaryCommandOutput(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := []byte{0xff, 0x00, 'o', 'k', '\n'}
+
+	artifact, err := store.CreateCommandOutput("run-binary", "attempt-binary", output)
+	if err != nil {
+		t.Fatalf("create binary command output: %v", err)
+	}
+	digest := sha256.Sum256(output)
+	if artifact.MediaType != "application/octet-stream" || artifact.Encoding != "binary" || artifact.SHA256 != hex.EncodeToString(digest[:]) || artifact.SourceBytes != int64(len(output)) {
+		t.Fatalf("binary command output metadata = %+v", artifact)
+	}
+	contents, err := store.Read(&artifact)
+	if err != nil {
+		t.Fatalf("read binary command output: %v", err)
+	}
+	if !bytes.Equal(contents, output) {
+		t.Fatalf("binary command output = %x, want %x", contents, output)
+	}
+}
+
 func TestStoreIndexesExistingEvidenceFileWithoutChangingIt(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	store, err := NewStore(p, "")

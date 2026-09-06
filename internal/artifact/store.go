@@ -110,18 +110,26 @@ func (s *Store) CreateCommandOutput(runID, attemptID string, output []byte) (art
 	}
 	published = true
 	digest := sha256.Sum256(output)
+	mediaType, encoding := commandOutputFormat(output)
 	return db.Artifact{
 		StorageRoot:  db.ArtifactStorageRootRun,
 		RelativePath: relativePath,
 		Purpose:      db.ArtifactPurposeCommandOutput,
 		Label:        "Command output",
 		Kind:         db.ArtifactKindCommandOutput,
-		MediaType:    "text/plain",
-		Encoding:     "utf-8",
+		MediaType:    mediaType,
+		Encoding:     encoding,
 		SHA256:       hex.EncodeToString(digest[:]),
 		SourceBytes:  int64(len(output)),
 		State:        db.ArtifactStateAvailable,
 	}, nil
+}
+
+func commandOutputFormat(output []byte) (mediaType, encoding string) {
+	if utf8.Valid(output) {
+		return "text/plain", "utf-8"
+	}
+	return "application/octet-stream", "binary"
 }
 
 // IndexEvidenceFile reads an existing test-evidence file without moving or
