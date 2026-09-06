@@ -510,6 +510,20 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 	if foreignKeyCount == 0 {
 		t.Fatal("command attempt foreign key was not preserved")
 	}
+	var outputArtifactID *string
+	if err := database.sql.QueryRow(`SELECT output_artifact_id FROM command_attempts WHERE id = 'attempt'`).Scan(&outputArtifactID); err != nil {
+		t.Fatalf("migrated output artifact link: %v", err)
+	}
+	if outputArtifactID != nil {
+		t.Fatalf("legacy attempt output artifact = %q, want nil", *outputArtifactID)
+	}
+	artifacts, err := database.GetArtifactsByRun("run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("legacy artifacts = %+v, want none", artifacts)
+	}
 	reopened, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("reopen migrated database: %v", err)

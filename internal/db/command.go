@@ -66,6 +66,7 @@ type CommandAttempt struct {
 	Signal              *string
 	RetryOfAttemptID    *string
 	RetryReason         *string
+	OutputArtifactID    *string
 }
 
 type commandIdentity struct {
@@ -307,29 +308,12 @@ func OptionalStringsEqual(left, right *string) bool {
 // testedSHA is accepted only when the exact clean repository state observed
 // before and after execution is unchanged.
 func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) error {
-	if !validCommandOutcome(outcome) {
-		return fmt.Errorf("complete command attempt: invalid outcome %q", outcome)
-	}
-	if signal != nil && exitCode != nil {
-		return fmt.Errorf("complete command attempt: exit code and signal are mutually exclusive")
-	}
-	if outcome == CommandOutcomePass && (exitCode == nil || *exitCode != 0 || signal != nil) {
-		return fmt.Errorf("complete command attempt: passing outcome requires exit code zero")
-	}
-	if outcome == CommandOutcomeFail && (exitCode == nil || *exitCode == 0) && signal == nil {
-		return fmt.Errorf("complete command attempt: failing outcome requires non-zero exit code or signal")
-	}
 	attempt, err := d.getCommandAttempt(id)
 	if err != nil {
 		return fmt.Errorf("complete command attempt: %w", err)
 	}
-	if testedSHA != nil && outcome != CommandOutcomePass {
-		return fmt.Errorf("complete command attempt: tested commit requires passing outcome")
-	}
-	if testedSHA != nil {
-		if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != *resultStateID || *testedSHA != attempt.BeforeSHA {
-			return fmt.Errorf("complete command attempt: tested commit requires unchanged input state")
-		}
+	if err := validateCommandAttemptCompletion(attempt, outcome, exitCode, signal, resultStateID, testedSHA); err != nil {
+		return err
 	}
 	completedAt := time.Now().UnixMilli()
 	result, err := d.sql.Exec(
@@ -347,6 +331,102 @@ func (d *DB) CompleteCommandAttempt(id, outcome string, exitCode *int, signal, r
 	}
 	if rows != 1 {
 		return fmt.Errorf("complete command attempt: attempt is missing or already complete")
+	}
+	return nil
+}
+
+// CompleteCommandAttemptWithOutputArtifact atomically persists a terminal
+// controller observation and the attempt's only output artifact. An attempt
+// cannot gain an output artifact after it is terminal.
+func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string, artifact Artifact) (*Artifact, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	attempt, err := getCommandAttempt(tx, id)
+	if err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: %w", err)
+	}
+	if err := validateCommandAttemptCompletion(attempt, outcome, exitCode, signal, resultStateID, testedSHA); err != nil {
+		return nil, err
+	}
+	if attempt.CompletedAt != nil || attempt.OutputArtifactID != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: attempt is already complete")
+	}
+	if artifact.CommandAttemptID != nil && *artifact.CommandAttemptID != id {
+		return nil, fmt.Errorf("complete command attempt with output artifact: artifact belongs to a different attempt")
+	}
+	if artifact.InvocationID != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: command output must not declare an invocation producer")
+	}
+	artifact.ID = newID()
+	artifact.RunID = attempt.RunID
+	artifact.StepID = &attempt.StepID
+	artifact.RoundID = &attempt.RoundID
+	artifact.CommandAttemptID = &attempt.ID
+	artifact.CreatedAt = time.Now().UnixMilli()
+	if err := validateArtifactForInsert(artifact); err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: %w", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO artifacts
+		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, purpose, label, description,
+		  storage_root, relative_path, kind, media_type, encoding, sha256, source_bytes, state, reason,
+		  publication_state, publication_url, publication_commit_sha, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		artifact.ID, artifact.RunID, artifact.StepID, artifact.RoundID, artifact.InvocationID, artifact.CommandAttemptID,
+		artifact.Purpose, artifact.Label, artifact.Description, artifact.StorageRoot, artifact.RelativePath,
+		artifact.Kind, artifact.MediaType, artifact.Encoding, artifact.SHA256, artifact.SourceBytes, artifact.State,
+		artifact.Reason, artifact.PublicationState, artifact.PublicationURL, artifact.PublicationCommitSHA, artifact.CreatedAt,
+	); err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: insert artifact: %w", err)
+	}
+
+	completedAt := time.Now().UnixMilli()
+	result, err := tx.Exec(
+		`UPDATE command_attempts
+		 SET completed_at = ?, duration_ms = MAX(0, ? - started_at), outcome = ?, exit_code = ?, signal = ?, result_state_id = ?, tested_sha = ?, output_artifact_id = ?
+		 WHERE id = ? AND completed_at IS NULL AND output_artifact_id IS NULL`,
+		completedAt, completedAt, outcome, exitCode, signal, resultStateID, testedSHA, artifact.ID, id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: update attempt: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: rows affected: %w", err)
+	}
+	if rows != 1 {
+		return nil, fmt.Errorf("complete command attempt with output artifact: attempt is missing or already complete")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: commit: %w", err)
+	}
+	return &artifact, nil
+}
+
+func validateCommandAttemptCompletion(attempt *CommandAttempt, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) error {
+	if !validCommandOutcome(outcome) {
+		return fmt.Errorf("complete command attempt: invalid outcome %q", outcome)
+	}
+	if signal != nil && exitCode != nil {
+		return fmt.Errorf("complete command attempt: exit code and signal are mutually exclusive")
+	}
+	if outcome == CommandOutcomePass && (exitCode == nil || *exitCode != 0 || signal != nil) {
+		return fmt.Errorf("complete command attempt: passing outcome requires exit code zero")
+	}
+	if outcome == CommandOutcomeFail && (exitCode == nil || *exitCode == 0) && signal == nil {
+		return fmt.Errorf("complete command attempt: failing outcome requires non-zero exit code or signal")
+	}
+	if testedSHA != nil && outcome != CommandOutcomePass {
+		return fmt.Errorf("complete command attempt: tested commit requires passing outcome")
+	}
+	if testedSHA != nil {
+		if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != *resultStateID || *testedSHA != attempt.BeforeSHA {
+			return fmt.Errorf("complete command attempt: tested commit requires unchanged input state")
+		}
 	}
 	return nil
 }
@@ -369,7 +449,7 @@ func getCommandAttempt(q commandAttemptQuerier, id string) (*CommandAttempt, err
 	if err := scanCommandAttempt(q.QueryRow(
 		`SELECT id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
 		        command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
-		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason
+		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason, output_artifact_id
 		 FROM command_attempts WHERE id = ?`, id,
 	), attempt); err != nil {
 		return nil, fmt.Errorf("get command attempt: %w", err)
@@ -383,7 +463,7 @@ func (d *DB) GetCommandAttemptsByRun(runID string) ([]*CommandAttempt, error) {
 	rows, err := d.sql.Query(
 		`SELECT ca.id, ca.run_id, ca.command_id, ca.step_id, ca.round_id, ca.sequence, ca.purpose, ca.observer, ca.trigger_type, ca.before_sha, ca.tested_sha,
 		        ca.command_source, ca.runner_schema_version, ca.runner_source, ca.runner_version, ca.input_state_id, ca.result_state_id,
-		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason
+		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason, ca.output_artifact_id
 		 FROM command_attempts ca
 		 JOIN step_results sr ON sr.id = ca.step_id
 		 JOIN step_rounds r ON r.id = ca.round_id
@@ -413,5 +493,6 @@ func scanCommandAttempt(row interface{ Scan(...any) error }, attempt *CommandAtt
 		&attempt.InputStateID, &attempt.ResultStateID, &attempt.StartedAt,
 		&attempt.CompletedAt, &attempt.DurationMS, &attempt.Outcome, &attempt.ExitCode,
 		&attempt.Signal, &attempt.RetryOfAttemptID, &attempt.RetryReason,
+		&attempt.OutputArtifactID,
 	)
 }
