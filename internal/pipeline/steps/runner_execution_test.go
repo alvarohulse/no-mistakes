@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
@@ -215,6 +217,152 @@ func TestRunStepRunnerCommandRetainsCompleteOutputForStepLogging(t *testing.T) {
 	}
 }
 
+func TestRunStepRunnerCommandPersistsImmutableOutputArtifacts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	tests := []struct {
+		name          string
+		command       string
+		wantOutput    string
+		wantExitCode  int
+		wantOutcome   string
+		wantTestedSHA bool
+	}{
+		{
+			name:          "non-empty success",
+			command:       "printf output",
+			wantOutput:    "output",
+			wantExitCode:  0,
+			wantOutcome:   db.CommandOutcomePass,
+			wantTestedSHA: true,
+		},
+		{
+			name:          "empty success",
+			command:       ":",
+			wantOutput:    "",
+			wantExitCode:  0,
+			wantOutcome:   db.CommandOutcomePass,
+			wantTestedSHA: true,
+		},
+		{
+			name:         "non-zero failure",
+			command:      "printf failure; exit 7",
+			wantOutput:   "failure",
+			wantExitCode: 7,
+			wantOutcome:  db.CommandOutcomeFail,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = step.ID
+			sctx.Round = 1
+			sctx.RoundID = round.ID
+			sctx.RoundTrigger = "initial"
+
+			output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: tt.command}, "test")
+			if err != nil || exitCode != tt.wantExitCode || output != tt.wantOutput {
+				t.Fatalf("command result = output %q exit %d error %v, want output %q exit %d", output, exitCode, err, tt.wantOutput, tt.wantExitCode)
+			}
+
+			attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attempts) != 1 {
+				t.Fatalf("command attempts = %+v, want one", attempts)
+			}
+			attempt := attempts[0]
+			if attempt.OutputArtifactID == nil || attempt.CompletedAt == nil || attempt.Outcome == nil || *attempt.Outcome != tt.wantOutcome {
+				t.Fatalf("command attempt = %+v", attempt)
+			}
+			if (attempt.TestedSHA != nil) != tt.wantTestedSHA {
+				t.Fatalf("tested SHA = %v, want present=%t", attempt.TestedSHA, tt.wantTestedSHA)
+			}
+
+			stored, err := sctx.DB.GetArtifact(*attempt.OutputArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored == nil {
+				t.Fatal("output artifact was not registered")
+			}
+			if stored.RunID != sctx.Run.ID || stored.StepID == nil || *stored.StepID != step.ID || stored.RoundID == nil || *stored.RoundID != round.ID || stored.CommandAttemptID == nil || *stored.CommandAttemptID != attempt.ID || stored.Purpose != db.ArtifactPurposeCommandOutput || stored.Kind != db.ArtifactKindCommandOutput || stored.StorageRoot != db.ArtifactStorageRootRun || stored.RelativePath != path.Join(sctx.Run.ID, "command-output", attempt.ID+".log") || stored.SourceBytes != int64(len(tt.wantOutput)) {
+				t.Fatalf("output artifact metadata = %+v", stored)
+			}
+			store, err := artifact.NewStore(sctx.Paths, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, err := store.Read(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != tt.wantOutput {
+				t.Fatalf("output artifact contents = %q, want %q", contents, tt.wantOutput)
+			}
+			artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(artifacts) != 1 || artifacts[0].ID != stored.ID {
+				t.Fatalf("run artifacts = %+v, want output artifact %q", artifacts, stored.ID)
+			}
+		})
+	}
+}
+
+func TestRunStepRunnerCommandFailsClosedWhenOutputArtifactCannotBeCreated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX runner fixture")
+	}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	sctx.Paths = nil
+
+	output, exitCode, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf output"}, "test")
+	if output != "output" || exitCode != 0 || err == nil || !errors.Is(err, errCommandPersistence) || !strings.Contains(err.Error(), "new artifact store: paths are nil") {
+		t.Fatalf("command result = output %q exit %d error %v", output, exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].CompletedAt != nil || attempts[0].OutputArtifactID != nil {
+		t.Fatalf("command attempts = %+v, want one incomplete unlinked attempt", attempts)
+	}
+	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("run artifacts = %+v, want none after artifact creation failure", artifacts)
+	}
+}
+
 func TestRunStepRunnerCommandPersistsSignalWithoutFabricatedExitCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX signal fixture")
@@ -242,8 +390,23 @@ func TestRunStepRunnerCommandPersistsSignalWithoutFabricatedExitCode(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode != nil || attempts[0].Signal == nil {
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != "fail" || attempts[0].ExitCode != nil || attempts[0].Signal == nil || attempts[0].OutputArtifactID == nil {
 		t.Fatalf("signal attempt = %+v", attempts)
+	}
+	stored, err := sctx.DB.GetArtifact(*attempts[0].OutputArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := store.Read(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "" {
+		t.Fatalf("signal output artifact contents = %q, want empty", contents)
 	}
 }
 
