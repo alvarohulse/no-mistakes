@@ -125,6 +125,132 @@ func TestCompleteCommandAttemptWithOutputArtifactRejectsNonNormalizedPathWithout
 	}
 }
 
+func TestCompleteCommandAttemptWithOutputArtifactRejectsNonCommandOutputMetadataWithoutTerminalizing(t *testing.T) {
+	tests := []struct {
+		name     string
+		artifact func(*CommandAttempt, *StepResult, *StepRound) Artifact
+		wantErr  string
+	}{
+		{
+			name: "test evidence",
+			artifact: func(attempt *CommandAttempt, step *StepResult, round *StepRound) Artifact {
+				return testEvidenceArtifact(
+					filepath.ToSlash(filepath.Join(attempt.RunID, "screenshots", "checkout.html")),
+					attempt.RunID,
+					step.ID,
+					round.ID,
+				)
+			},
+			wantErr: "purpose must be \"command_output\"",
+		},
+		{
+			name: "different kind",
+			artifact: func(attempt *CommandAttempt, _ *StepResult, _ *StepRound) Artifact {
+				artifact := commandOutputArtifactForAttempt(attempt)
+				artifact.Kind = "log"
+				return artifact
+			},
+			wantErr: "kind must be \"command-output\"",
+		},
+		{
+			name: "evidence storage root",
+			artifact: func(attempt *CommandAttempt, _ *StepResult, _ *StepRound) Artifact {
+				artifact := commandOutputArtifactForAttempt(attempt)
+				artifact.StorageRoot = ArtifactStorageRootEvidence
+				return artifact
+			},
+			wantErr: "storage root must be \"run\"",
+		},
+		{
+			name: "different output path",
+			artifact: func(attempt *CommandAttempt, _ *StepResult, _ *StepRound) Artifact {
+				artifact := commandOutputArtifactForAttempt(attempt)
+				artifact.RelativePath = filepath.ToSlash(filepath.Join(attempt.RunID, "command-output", "other.log"))
+				return artifact
+			},
+			wantErr: "relative path must be",
+		},
+		{
+			name: "text media with binary encoding",
+			artifact: func(attempt *CommandAttempt, _ *StepResult, _ *StepRound) Artifact {
+				artifact := commandOutputArtifactForAttempt(attempt)
+				artifact.Encoding = "binary"
+				return artifact
+			},
+			wantErr: "media type and encoding must be",
+		},
+		{
+			name: "binary media with utf-8 encoding",
+			artifact: func(attempt *CommandAttempt, _ *StepResult, _ *StepRound) Artifact {
+				artifact := commandOutputArtifactForAttempt(attempt)
+				artifact.MediaType = "application/octet-stream"
+				return artifact
+			},
+			wantErr: "media type and encoding must be",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			attempt, _, step, round := newCommandArtifactAttemptFixture(t, d)
+			exit := 0
+			_, err := d.CompleteCommandAttemptWithOutputArtifact(
+				attempt.ID,
+				CommandOutcomePass,
+				&exit,
+				nil,
+				stringPointer("git:head"),
+				stringPointer("head"),
+				tt.artifact(attempt, step, round),
+			)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("completion error = %v, want %q", err, tt.wantErr)
+			}
+
+			stored, err := d.getCommandAttempt(attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.CompletedAt != nil || stored.OutputArtifactID != nil {
+				t.Fatalf("rejected artifact terminalized attempt: %+v", stored)
+			}
+			artifacts, err := d.GetArtifactsByRun(attempt.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(artifacts) != 0 {
+				t.Fatalf("rejected artifact created rows: %+v", artifacts)
+			}
+		})
+	}
+}
+
+func TestCompleteCommandAttemptWithOutputArtifactAcceptsBinaryOutput(t *testing.T) {
+	d := openTestDB(t)
+	attempt, _, _, _ := newCommandArtifactAttemptFixture(t, d)
+	output := commandOutputArtifactForAttempt(attempt)
+	output.MediaType = "application/octet-stream"
+	output.Encoding = "binary"
+	exit := 0
+
+	stored, err := d.CompleteCommandAttemptWithOutputArtifact(
+		attempt.ID,
+		CommandOutcomePass,
+		&exit,
+		nil,
+		stringPointer("git:head"),
+		stringPointer("head"),
+		output,
+	)
+	if err != nil {
+		t.Fatalf("complete binary command output: %v", err)
+	}
+	if stored.MediaType != output.MediaType || stored.Encoding != output.Encoding {
+		t.Fatalf("stored binary output metadata = %+v", stored)
+	}
+}
+
 func TestCompleteCommandAttemptWithOutputArtifactRejectsMissingOutputWithoutTerminalizing(t *testing.T) {
 	d := openTestDB(t)
 	attempt, _, _, _ := newCommandArtifactAttemptFixture(t, d)

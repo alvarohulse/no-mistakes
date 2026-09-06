@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -339,6 +340,9 @@ func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 	if err := validateArtifactForInsert(artifact); err != nil {
 		return nil, fmt.Errorf("complete command attempt with output artifact: %w", err)
 	}
+	if err := validateCommandOutputArtifact(attempt, artifact); err != nil {
+		return nil, fmt.Errorf("complete command attempt with output artifact: %w", err)
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO artifacts
 		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, purpose, label, description,
@@ -374,6 +378,27 @@ func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 		return nil, fmt.Errorf("complete command attempt with output artifact: commit: %w", err)
 	}
 	return &artifact, nil
+}
+
+func validateCommandOutputArtifact(attempt *CommandAttempt, artifact Artifact) error {
+	if artifact.Purpose != ArtifactPurposeCommandOutput {
+		return fmt.Errorf("command output artifact: purpose must be %q, got %q", ArtifactPurposeCommandOutput, artifact.Purpose)
+	}
+	if artifact.Kind != ArtifactKindCommandOutput {
+		return fmt.Errorf("command output artifact: kind must be %q, got %q", ArtifactKindCommandOutput, artifact.Kind)
+	}
+	if artifact.StorageRoot != ArtifactStorageRootRun {
+		return fmt.Errorf("command output artifact: storage root must be %q, got %q", ArtifactStorageRootRun, artifact.StorageRoot)
+	}
+	expectedPath := path.Join(attempt.RunID, "command-output", attempt.ID+".log")
+	if artifact.RelativePath != expectedPath {
+		return fmt.Errorf("command output artifact: relative path must be %q, got %q", expectedPath, artifact.RelativePath)
+	}
+	if artifact.MediaType == "text/plain" && artifact.Encoding == "utf-8" ||
+		artifact.MediaType == "application/octet-stream" && artifact.Encoding == "binary" {
+		return nil
+	}
+	return fmt.Errorf("command output artifact: media type and encoding must be text/plain + utf-8 or application/octet-stream + binary, got %q + %q", artifact.MediaType, artifact.Encoding)
 }
 
 func validateCommandAttemptCompletion(attempt *CommandAttempt, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) error {
