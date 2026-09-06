@@ -1,0 +1,150 @@
+//go:build windows
+
+package artifact
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+// openRegularArtifactFile resolves every path component relative to an open
+// directory handle. Reparse points are opened as themselves and rejected, so
+// they cannot redirect the final read outside the supplied root.
+func openRegularArtifactFile(root, relativePath string) (*os.File, fs.FileInfo, error) {
+	if _, err := strictRelativePath(relativePath); err != nil {
+		return nil, nil, err
+	}
+
+	directory, err := openNoFollowArtifactRoot(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = windows.CloseHandle(directory) }()
+
+	components := strings.Split(relativePath, "/")
+	for index, component := range components {
+		isFinal := index == len(components)-1
+		next, err := openNoFollowArtifactComponent(directory, component, !isFinal)
+		if err != nil {
+			return nil, nil, err
+		}
+		if isFinal {
+			file := os.NewFile(uintptr(next), component)
+			info, err := file.Stat()
+			if err != nil {
+				_ = file.Close()
+				return nil, nil, fmt.Errorf("stat artifact path component %q: %w", component, err)
+			}
+			if !info.Mode().IsRegular() {
+				_ = file.Close()
+				return nil, nil, fmt.Errorf("artifact is not a regular file")
+			}
+			return file, info, nil
+		}
+		windows.CloseHandle(directory)
+		directory = next
+	}
+
+	return nil, nil, fmt.Errorf("artifact path is empty")
+}
+
+func openNoFollowArtifactRoot(root string) (windows.Handle, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("resolve supplied root: %w", err)
+	}
+	if !filepath.IsAbs(resolvedRoot) {
+		return windows.InvalidHandle, fmt.Errorf("supplied root is not absolute")
+	}
+
+	volume := filepath.VolumeName(resolvedRoot)
+	if volume == "" {
+		return windows.InvalidHandle, fmt.Errorf("supplied root has no volume")
+	}
+	volumeRoot := volume + string(filepath.Separator)
+	directory, err := windows.CreateFile(
+		windows.StringToUTF16Ptr(volumeRoot),
+		windows.FILE_GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
+	if err != nil {
+		return windows.InvalidHandle, fmt.Errorf("open filesystem root: %w", err)
+	}
+
+	relativeRoot := strings.TrimPrefix(resolvedRoot, volume)
+	for _, component := range strings.FieldsFunc(relativeRoot, func(r rune) bool { return r == '/' || r == '\\' }) {
+		next, err := openNoFollowArtifactComponent(directory, component, true)
+		if err != nil {
+			windows.CloseHandle(directory)
+			return windows.InvalidHandle, fmt.Errorf("open supplied root component %q: %w", component, err)
+		}
+		windows.CloseHandle(directory)
+		directory = next
+	}
+	return directory, nil
+}
+
+func openNoFollowArtifactComponent(parent windows.Handle, component string, directory bool) (windows.Handle, error) {
+	name, err := windows.NewNTUnicodeString(component)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: parent,
+		ObjectName:    name,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	options := uint32(windows.FILE_OPEN_REPARSE_POINT | windows.FILE_SYNCHRONOUS_IO_NONALERT)
+	if directory {
+		options |= windows.FILE_DIRECTORY_FILE
+	} else {
+		options |= windows.FILE_NON_DIRECTORY_FILE
+	}
+
+	var status windows.IO_STATUS_BLOCK
+	var handle windows.Handle
+	if err := windows.NtCreateFile(
+		&handle,
+		windows.FILE_GENERIC_READ,
+		&attributes,
+		&status,
+		nil,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		options,
+		0,
+		0,
+	); err != nil {
+		return windows.InvalidHandle, fmt.Errorf("open artifact path component %q: %w", component, err)
+	}
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		windows.CloseHandle(handle)
+		return windows.InvalidHandle, fmt.Errorf("stat artifact path component %q: %w", component, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		windows.CloseHandle(handle)
+		return windows.InvalidHandle, fmt.Errorf("artifact path contains a reparse point")
+	}
+	if directory != (info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) {
+		windows.CloseHandle(handle)
+		if directory {
+			return windows.InvalidHandle, fmt.Errorf("artifact path component %q is not a directory", component)
+		}
+		return windows.InvalidHandle, fmt.Errorf("artifact is not a regular file")
+	}
+	return handle, nil
+}

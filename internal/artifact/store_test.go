@@ -158,6 +158,98 @@ func TestStoreRejectsEvidenceOutsideItsRunRootAndSymlinks(t *testing.T) {
 	}
 }
 
+func TestStoreIndexesEvidenceThroughValidatedDescriptorAfterPathSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires Windows developer mode or elevated privileges")
+	}
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const runID = "run-swap"
+	inside := []byte("inside!")
+	outside := []byte("secret!")
+	target := filepath.Join(p.RunEvidenceDir("", runID), "report.txt")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, inside, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "external.txt")
+	if err := os.WriteFile(external, outside, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store.afterArtifactDescriptorOpen = func() {
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	indexed, err := store.IndexEvidenceFile(runID, target)
+	if err != nil {
+		t.Fatalf("index evidence after swap: %v", err)
+	}
+	want := sha256.Sum256(inside)
+	if indexed.SourceBytes != int64(len(inside)) || indexed.SHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("indexed swapped evidence = %+v, want bytes and digest for %q", indexed, inside)
+	}
+}
+
+func TestStoreReadsArtifactThroughValidatedDescriptorAfterPathSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires Windows developer mode or elevated privileges")
+	}
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inside := []byte("inside!")
+	outside := []byte("secret!")
+	target := filepath.Join(p.RunsDir(), "run-swap", "output.log")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, inside, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "external.txt")
+	if err := os.WriteFile(external, outside, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(inside)
+	artifact := &db.Artifact{
+		StorageRoot:  db.ArtifactStorageRootRun,
+		RelativePath: "run-swap/output.log",
+		SourceBytes:  int64(len(inside)),
+		SHA256:       hex.EncodeToString(digest[:]),
+		State:        db.ArtifactStateAvailable,
+	}
+	store.afterArtifactDescriptorOpen = func() {
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	contents, err := store.Read(artifact)
+	if err != nil {
+		t.Fatalf("read artifact after swap: %v", err)
+	}
+	if !bytes.Equal(contents, inside) {
+		t.Fatalf("read swapped artifact = %q, want %q", contents, inside)
+	}
+}
+
 func TestStoreRejectsUnsafeMissingAndTamperedArtifacts(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	store, err := NewStore(p, "")

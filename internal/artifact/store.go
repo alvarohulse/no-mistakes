@@ -7,7 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -26,8 +26,9 @@ const commandOutputDirectory = "command-output"
 // Evidence may use a configured external root, while command output always
 // uses the managed run-artifact root.
 type Store struct {
-	runRoot      string
-	evidenceRoot string
+	runRoot                     string
+	evidenceRoot                string
+	afterArtifactDescriptorOpen func()
 }
 
 // NewStore constructs an artifact store for the application paths. It does
@@ -135,19 +136,15 @@ func (s *Store) IndexEvidenceFile(runID, reportedPath string) (db.Artifact, erro
 	if err != nil {
 		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
 	}
-	target, info, err := secureRegularArtifactPath(s.evidenceRoot, relativePath)
+	contents, info, err := s.readRegularArtifactFile(s.evidenceRoot, relativePath)
 	if err != nil {
 		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
-	}
-	contents, err := os.ReadFile(target)
-	if err != nil {
-		return db.Artifact{}, fmt.Errorf("index evidence file: read file: %w", err)
 	}
 	if int64(len(contents)) != info.Size() {
 		return db.Artifact{}, fmt.Errorf("index evidence file: file changed while reading")
 	}
 	digest := sha256.Sum256(contents)
-	mediaType, encoding := evidenceFileFormat(target, contents)
+	mediaType, encoding := evidenceFileFormat(relativePath, contents)
 	return db.Artifact{
 		StorageRoot:  db.ArtifactStorageRootEvidence,
 		RelativePath: relativePath,
@@ -224,16 +221,12 @@ func (s *Store) Read(artifact *db.Artifact) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, info, err := secureRegularArtifactPath(root, artifact.RelativePath)
+	contents, info, err := s.readRegularArtifactFile(root, artifact.RelativePath)
 	if err != nil {
 		return nil, fmt.Errorf("read artifact: %w", err)
 	}
 	if info.Size() != artifact.SourceBytes {
 		return nil, fmt.Errorf("read artifact: source byte count mismatch: got %d, want %d", info.Size(), artifact.SourceBytes)
-	}
-	contents, err := os.ReadFile(target)
-	if err != nil {
-		return nil, fmt.Errorf("read artifact: read file: %w", err)
 	}
 	if int64(len(contents)) != artifact.SourceBytes {
 		return nil, fmt.Errorf("read artifact: byte count changed while reading")
@@ -243,6 +236,25 @@ func (s *Store) Read(artifact *db.Artifact) ([]byte, error) {
 		return nil, fmt.Errorf("read artifact: SHA-256 digest mismatch")
 	}
 	return contents, nil
+}
+
+// readRegularArtifactFile reads only the descriptor returned by the
+// no-follow path walk. The test hook models an agent replacing the pathname
+// after descriptor validation; it cannot change the already-open file.
+func (s *Store) readRegularArtifactFile(root, relativePath string) ([]byte, os.FileInfo, error) {
+	file, info, err := openRegularArtifactFile(root, relativePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	if s.afterArtifactDescriptorOpen != nil {
+		s.afterArtifactDescriptorOpen()
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read file: %w", err)
+	}
+	return contents, info, nil
 }
 
 func (s *Store) rootFor(storageRoot string) (string, error) {
@@ -272,46 +284,6 @@ func strictRelativePath(value string) (string, error) {
 		return "", fmt.Errorf("must stay within the supplied root")
 	}
 	return normalized, nil
-}
-
-func secureRegularArtifactPath(root, relativePath string) (string, fs.FileInfo, error) {
-	if _, err := strictRelativePath(relativePath); err != nil {
-		return "", nil, err
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve supplied root: %w", err)
-	}
-	current := root
-	for _, component := range strings.Split(relativePath, "/") {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return "", nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", nil, fmt.Errorf("artifact path contains a symlink")
-		}
-	}
-	info, err := os.Stat(current)
-	if err != nil {
-		return "", nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return "", nil, fmt.Errorf("artifact is not a regular file")
-	}
-	resolvedTarget, err := filepath.EvalSymlinks(current)
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve artifact path: %w", err)
-	}
-	within, err := filepath.Rel(resolvedRoot, resolvedTarget)
-	if err != nil {
-		return "", nil, fmt.Errorf("compare supplied root: %w", err)
-	}
-	if within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) || filepath.IsAbs(within) {
-		return "", nil, fmt.Errorf("artifact escapes supplied root")
-	}
-	return current, info, nil
 }
 
 func ensurePrivateDirectory(directory string) error {
