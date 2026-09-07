@@ -20,7 +20,6 @@ import (
 // for review instead of silently widening the PR.
 func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 	t.Parallel()
-	lockRefreshGitFixture(t)
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 
@@ -94,7 +93,6 @@ func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommits(t *testing.T) {
 
 func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsWhenStacked(t *testing.T) {
 	t.Parallel()
-	lockRefreshGitFixture(t)
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 
@@ -158,7 +156,6 @@ func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsWhenStacked(t *test
 
 func TestRefreshStep_DetectsUnpushedLocalDefaultBranchCommitsOnForcePush(t *testing.T) {
 	t.Parallel()
-	lockRefreshGitFixture(t)
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 

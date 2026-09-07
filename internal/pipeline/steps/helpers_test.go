@@ -31,17 +31,6 @@ type mockAgent struct {
 	calls []agent.RunOpts
 }
 
-// refreshGitFixtureMu serializes refresh fixtures that repeatedly create and
-// clone repositories. Concurrent Git processes occasionally stall on Windows
-// hosted runners despite each fixture using a separate temporary directory.
-var refreshGitFixtureMu sync.Mutex
-
-func lockRefreshGitFixture(t *testing.T) {
-	t.Helper()
-	refreshGitFixtureMu.Lock()
-	t.Cleanup(refreshGitFixtureMu.Unlock)
-}
-
 func (m *mockAgent) Name() string { return m.name }
 
 func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
