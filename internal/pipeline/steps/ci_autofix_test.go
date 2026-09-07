@@ -477,8 +477,15 @@ func TestCIStep_RecoveredLegacyBudgetAllowsOnlyExplicitUserFix(t *testing.T) {
 	if fixCount.Load() != 1 || repairResult != pipeline.RepairResultAttemptLimit {
 		t.Fatalf("recovered legacy CI fixes = %d repair result = %q, want explicit fix only and exhausted automatic budget", fixCount.Load(), repairResult)
 	}
-	if err := executor.Respond(types.StepCI, types.ActionAbort, nil); err != nil {
-		t.Fatal(err)
+	abortDeadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := executor.Respond(types.StepCI, types.ActionAbort, nil); err == nil {
+			break
+		}
+		if time.Now().After(abortDeadline) {
+			t.Fatal("recovered legacy CI gate did not reach the final approval")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	select {
 	case err := <-done:

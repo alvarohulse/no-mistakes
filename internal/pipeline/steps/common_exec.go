@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -407,8 +408,16 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 		if result.Signal != nil {
 			attemptExitCode = nil
 		}
-		if persistErr := sctx.DB.CompleteCommandAttempt(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA); persistErr != nil {
-			completionErr = fmt.Errorf("%w: persist command attempt completion: %w", errCommandPersistence, persistErr)
+		store, storeErr := artifact.NewStore(sctx.Paths, "")
+		if storeErr != nil {
+			completionErr = fmt.Errorf("%w: create command output store: %w", errCommandPersistence, storeErr)
+		} else {
+			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(result.Output))
+			if artifactErr != nil {
+				completionErr = fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr)
+			} else if _, persistErr := sctx.DB.CompleteCommandAttemptWithOutputArtifact(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
+				completionErr = fmt.Errorf("%w: persist command attempt completion with output artifact: %w", errCommandPersistence, persistErr)
+			}
 		}
 		if resultStateErr != nil {
 			err = errors.Join(err, resultStateErr)

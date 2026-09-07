@@ -143,12 +143,42 @@ CREATE TABLE IF NOT EXISTS command_attempts (
     signal                TEXT,
     retry_of_attempt_id   TEXT REFERENCES command_attempts(id),
     retry_reason          TEXT,
+    output_artifact_id    TEXT REFERENCES artifacts(id),
     FOREIGN KEY (run_id, command_id) REFERENCES command_definitions(run_id, id) ON DELETE CASCADE,
     UNIQUE (round_id, sequence)
 );
 
 CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id
     ON command_attempts (run_id, started_at, id);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    id                     TEXT PRIMARY KEY,
+    run_id                 TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_id                TEXT REFERENCES step_results(id) ON DELETE CASCADE,
+    round_id               TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
+    invocation_id          TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
+    command_attempt_id     TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+    purpose                TEXT NOT NULL,
+    label                  TEXT NOT NULL,
+    description            TEXT,
+    storage_root           TEXT NOT NULL CHECK (storage_root IN ('run', 'evidence')),
+    relative_path          TEXT NOT NULL,
+    kind                   TEXT NOT NULL,
+    media_type             TEXT NOT NULL,
+    encoding               TEXT NOT NULL,
+    sha256                 TEXT NOT NULL,
+    source_bytes           INTEGER NOT NULL CHECK (source_bytes >= 0),
+    state                  TEXT NOT NULL,
+    reason                 TEXT,
+    publication_state      TEXT,
+    publication_url        TEXT,
+    publication_commit_sha TEXT,
+    created_at             INTEGER NOT NULL,
+    UNIQUE (storage_root, relative_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
+    ON artifacts (run_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
@@ -339,7 +369,35 @@ var migrationStatements = []string{
 		UNIQUE (round_id, sequence)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_command_attempts_run_started_id ON command_attempts (run_id, started_at, id)`,
+	`CREATE TABLE IF NOT EXISTS artifacts (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		step_id TEXT REFERENCES step_results(id) ON DELETE CASCADE,
+		round_id TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
+		invocation_id TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
+		command_attempt_id TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+		purpose TEXT NOT NULL,
+		label TEXT NOT NULL,
+		description TEXT,
+		storage_root TEXT NOT NULL CHECK (storage_root IN ('run', 'evidence')),
+		relative_path TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		media_type TEXT NOT NULL,
+		encoding TEXT NOT NULL,
+		sha256 TEXT NOT NULL,
+		source_bytes INTEGER NOT NULL CHECK (source_bytes >= 0),
+		state TEXT NOT NULL,
+		reason TEXT,
+		publication_state TEXT,
+		publication_url TEXT,
+		publication_commit_sha TEXT,
+		created_at INTEGER NOT NULL,
+		UNIQUE (storage_root, relative_path)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id ON artifacts (run_id, created_at, id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_retry_of ON command_attempts (retry_of_attempt_id) WHERE retry_of_attempt_id IS NOT NULL`,
+	`ALTER TABLE command_attempts ADD COLUMN output_artifact_id TEXT REFERENCES artifacts(id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_output_artifact ON command_attempts (output_artifact_id) WHERE output_artifact_id IS NOT NULL`,
 	`ALTER TABLE command_attempts ADD COLUMN command_source TEXT NOT NULL DEFAULT 'legacy'`,
 	`ALTER TABLE command_attempts ADD COLUMN runner_schema_version INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE command_attempts ADD COLUMN runner_source TEXT NOT NULL DEFAULT 'legacy'`,

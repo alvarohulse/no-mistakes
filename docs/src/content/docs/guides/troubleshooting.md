@@ -161,6 +161,10 @@ Symptom: a run stops with a failed step.
 Check the per-step log at `~/.no-mistakes/logs/<runID>/<step>.log`.
 Fatal step errors are appended to that log, so failures such as rejected pushes include the returned error output there instead of only appearing in `daemon.log`.
 
+### Inspect command output and test evidence
+
+Terminal configured and planned command attempts keep output at `<NM_HOME>/runs/<run-id>/command-output/<attempt-id>.log`; a zero-byte file is valid. [The Gate Model](/no-mistakes/concepts/gate-model/#database) owns the storage and integrity guarantees. Test evidence stays under its configured [`test.evidence` root](/no-mistakes/reference/global-config/#testevidence), where files are indexed in place rather than copied into the run-artifact directory.
+
 ### Recovery reports an invalid effective-config artifact
 
 The saved snapshot is missing, incomplete, corrupt, or does not match the run that launched it, so recovery stops before reading configuration that may have changed. Inspect the durable reason with `no-mistakes axi status --run <id>` and the owner-local files with `no-mistakes config explain --run <id>` when validation still succeeds. Do not recreate or edit the files: start a new run from the intended branch state. A legacy run reports configuration unavailable only when neither artifact exists; a partial legacy pair is invalid. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns the artifact validation and recovery contract.

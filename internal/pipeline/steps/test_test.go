@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -471,6 +472,203 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	t.Logf("evidence findings JSON: %s", outcome.Findings)
 	if len(findings.Tested) != 2 || findings.Tested[0] != testCmd || findings.Tested[1] != "manual screenshot review" {
 		t.Fatalf("expected baseline command and agent-tested evidence to be recorded, got %+v", findings.Tested)
+	}
+}
+
+func TestTestStepIndexesReportedLocalEvidenceFiles(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var evidencePath string
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(Findings{
+				Items:          []Finding{},
+				Summary:        "evidence demonstrates checkout",
+				Tested:         []string{"manual checkout verification"},
+				TestingSummary: "rendered checkout result",
+				Artifacts: []types.TestArtifact{
+					{Kind: "rendered-html", Label: "Checkout result", Path: evidencePath},
+					{Kind: "link", Label: "Hosted preview", URL: "https://example.com/preview"},
+					{Kind: "log", Label: "Inline transcript", Content: "checkout completed"},
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	sctx.UserIntent = "Show users a checkout confirmation"
+	sctx.EvidenceDir = sctx.Paths.RunEvidenceDir("", sctx.Run.ID)
+	evidencePath = filepath.Join(sctx.EvidenceDir, "checkout.html")
+	evidenceContents := []byte("<h1>Checkout complete</h1>\n")
+	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, evidenceContents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute test step: %v", err)
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Artifacts) != 3 || findings.Artifacts[0].Path != evidencePath || findings.Artifacts[1].URL != "https://example.com/preview" || findings.Artifacts[2].Content != "checkout completed" {
+		t.Fatalf("findings artifacts changed: %+v", findings.Artifacts)
+	}
+
+	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 2 {
+		t.Fatalf("registered artifacts = %+v, want configured command output plus one local file", artifacts)
+	}
+	var stored *db.Artifact
+	for _, candidate := range artifacts {
+		if candidate.Purpose == db.ArtifactPurposeTestEvidence {
+			stored = candidate
+			break
+		}
+	}
+	if stored == nil {
+		t.Fatalf("registered artifacts = %+v, want test evidence", artifacts)
+	}
+	if stored.StepID == nil || *stored.StepID != step.ID || stored.RoundID == nil || *stored.RoundID != round.ID || stored.Purpose != db.ArtifactPurposeTestEvidence || stored.Label != "Checkout result" || stored.Kind != "rendered-html" || stored.MediaType != "text/html" || stored.Encoding != "utf-8" || stored.Description != nil || stored.PublicationState != nil || stored.PublicationURL != nil || stored.PublicationCommitSHA != nil {
+		t.Fatalf("registered evidence artifact = %+v", stored)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := store.Read(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != string(evidenceContents) {
+		t.Fatalf("indexed evidence contents = %q, want %q", contents, evidenceContents)
+	}
+}
+
+func TestTestStepPreservesRepositoryRelativeEvidenceArtifacts(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	repositoryArtifact := filepath.Join(dir, "artifacts", "server.log")
+	if err := os.MkdirAll(filepath.Dir(repositoryArtifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repositoryArtifact, []byte("server started\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(Findings{
+				Items:          []Finding{},
+				Summary:        "repository log demonstrates server startup",
+				Tested:         []string{"server startup"},
+				TestingSummary: "checked repository output",
+				Artifacts:      []types.TestArtifact{{Kind: "log", Label: "Server log", Path: "artifacts/server.log"}},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	sctx.UserIntent = "Validate server startup"
+	sctx.EvidenceDir = sctx.Paths.RunEvidenceDir("", sctx.Run.ID)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute test step: %v", err)
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != "artifacts/server.log" {
+		t.Fatalf("repository artifact was not preserved: %+v", findings.Artifacts)
+	}
+	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Purpose != db.ArtifactPurposeCommandOutput {
+		t.Fatalf("repository artifact was incorrectly indexed: %+v", artifacts)
+	}
+}
+
+func TestTestStepFailsForEscapingReportedEvidenceFile(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	escapingPath := filepath.Join(t.TempDir(), "outside.html")
+	if err := os.WriteFile(escapingPath, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(Findings{
+				Items:          []Finding{},
+				Summary:        "evidence",
+				Tested:         []string{"manual check"},
+				TestingSummary: "checked result",
+				Artifacts:      []types.TestArtifact{{Kind: "rendered-html", Label: "Escaped artifact", Path: escapingPath}},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	sctx.UserIntent = "Show users a checkout confirmation"
+	sctx.EvidenceDir = sctx.Paths.RunEvidenceDir("", sctx.Run.ID)
+
+	_, err = (&TestStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "register test evidence artifact") || !strings.Contains(err.Error(), "evidence root") {
+		t.Fatalf("test step error = %v", err)
 	}
 }
 
