@@ -335,6 +335,93 @@ func TestRegisterArtifactKeepsOneStableRowPerPhysicalPath(t *testing.T) {
 	}
 }
 
+func TestRegisterArtifactRejectsMissingAndForeignProducers(t *testing.T) {
+	d := openTestDB(t)
+	attempt, _, step, round := newCommandArtifactAttemptFixture(t, d)
+	run, err := d.GetRun(attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRun, err := d.InsertRun(run.RepoID, "other-branch", "other-head", "other-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignStep, err := d.InsertStepResult(foreignRun.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRound, err := d.InsertStepRound(foreignStep.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignInvocation, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: foreignRun.ID, StepName: string(types.StepTest), Round: 1, Purpose: "test-evidence", Agent: "test",
+		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := testEvidenceArtifact(
+		filepath.ToSlash(filepath.Join(attempt.RunID, "evidence", "report.txt")),
+		attempt.RunID,
+		step.ID,
+		round.ID,
+	)
+	tests := []struct {
+		name    string
+		mutate  func(*Artifact)
+		wantErr string
+	}{
+		{
+			name: "missing producer",
+			mutate: func(artifact *Artifact) {
+				artifact.StepID = nil
+				artifact.RoundID = nil
+			},
+			wantErr: "producer metadata is required",
+		},
+		{
+			name: "foreign step",
+			mutate: func(artifact *Artifact) {
+				artifact.StepID = &foreignStep.ID
+			},
+			wantErr: "step producer does not belong to run",
+		},
+		{
+			name: "foreign round",
+			mutate: func(artifact *Artifact) {
+				artifact.RoundID = &foreignRound.ID
+			},
+			wantErr: "round producer does not belong to run",
+		},
+		{
+			name: "foreign invocation",
+			mutate: func(artifact *Artifact) {
+				artifact.InvocationID = &foreignInvocation.ID
+			},
+			wantErr: "invocation producer does not belong to run",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := base
+			tt.mutate(&candidate)
+			if _, err := d.RegisterArtifact(candidate); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("register artifact error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	artifacts, err := d.GetArtifactsByRun(attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("invalid registrations created artifacts: %+v", artifacts)
+	}
+}
+
 func newCommandArtifactAttemptFixture(t *testing.T, d *DB) (*CommandAttempt, *CommandDefinition, *StepResult, *StepRound) {
 	t.Helper()
 	repo, err := d.InsertRepo("/home/user/command-artifact", "git@github.com:user/command-artifact.git", "main")

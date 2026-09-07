@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/artifact"
@@ -35,7 +36,7 @@ func testEvidenceDir(sctx *pipeline.StepContext) string {
 func registerTestEvidenceArtifacts(sctx *pipeline.StepContext, reported []types.TestArtifact) error {
 	var paths []types.TestArtifact
 	for _, candidate := range reported {
-		if strings.TrimSpace(candidate.Path) != "" {
+		if strings.TrimSpace(candidate.Path) != "" && filepath.IsAbs(candidate.Path) {
 			paths = append(paths, candidate)
 		}
 	}
@@ -49,6 +50,7 @@ func registerTestEvidenceArtifacts(sctx *pipeline.StepContext, reported []types.
 	if sctx.Config != nil {
 		configuredEvidenceRoot = sctx.Config.Test.Evidence.LocalRoot
 	}
+	evidenceRoot := sctx.Paths.EvidenceRoot(configuredEvidenceRoot)
 	store, err := artifact.NewStore(sctx.Paths, configuredEvidenceRoot)
 	if err != nil {
 		return err
@@ -56,6 +58,12 @@ func registerTestEvidenceArtifacts(sctx *pipeline.StepContext, reported []types.
 	stepID := sctx.StepResultID
 	roundID := sctx.RoundID
 	for _, candidate := range paths {
+		if !pathWithinRoot(candidate.Path, evidenceRoot) {
+			if pathWithinRoot(candidate.Path, sctx.WorkDir) {
+				continue
+			}
+			return fmt.Errorf("index %q: evidence file must stay within the evidence root", candidate.Path)
+		}
 		indexed, err := store.IndexEvidenceFile(sctx.Run.ID, candidate.Path)
 		if err != nil {
 			return fmt.Errorf("index %q: %w", candidate.Path, err)
@@ -75,4 +83,20 @@ func registerTestEvidenceArtifacts(sctx *pipeline.StepContext, reported []types.
 		}
 	}
 	return nil
+}
+
+func pathWithinRoot(target, root string) bool {
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(filepath.Clean(rootAbs), filepath.Clean(targetAbs))
+	if err != nil || relative == "." || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }

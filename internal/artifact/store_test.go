@@ -104,6 +104,58 @@ func TestStoreCreatesAndReadsBinaryCommandOutput(t *testing.T) {
 	}
 }
 
+func TestStoreClassifiesNULCommandOutputAsBinary(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.CreateCommandOutput("run-nul", "attempt-nul", []byte("before\x00after"))
+	if err != nil {
+		t.Fatalf("create NUL command output: %v", err)
+	}
+	if artifact.MediaType != "application/octet-stream" || artifact.Encoding != "binary" {
+		t.Fatalf("NUL command output metadata = %+v", artifact)
+	}
+}
+
+func TestStoreCreatesCommandOutputThroughOpenedDirectoryAfterPathSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires Windows developer mode or elevated privileges")
+	}
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	runDir := filepath.Join(p.RunsDir(), "run-swap")
+	originalDirectory := filepath.Join(runDir, commandOutputDirectory)
+	relocatedDirectory := filepath.Join(runDir, "relocated-command-output")
+	store.afterCommandDirectoryOpen = func() {
+		if err := os.Rename(originalDirectory, relocatedDirectory); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, originalDirectory); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := store.CreateCommandOutput("run-swap", "attempt-swap", []byte("inside")); err != nil {
+		t.Fatalf("create output after path swap: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "attempt-swap.log")); !os.IsNotExist(err) {
+		t.Fatalf("path swap wrote outside the run root: %v", err)
+	}
+	contents, err := os.ReadFile(filepath.Join(relocatedDirectory, "attempt-swap.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "inside" {
+		t.Fatalf("output through relocated directory = %q", contents)
+	}
+}
+
 func TestStoreIndexesExistingEvidenceFileWithoutChangingIt(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	store, err := NewStore(p, "")
@@ -141,6 +193,32 @@ func TestStoreIndexesExistingEvidenceFileWithoutChangingIt(t *testing.T) {
 	}
 	if !bytes.Equal(read, contents) {
 		t.Fatalf("indexed contents = %q, want %q", read, contents)
+	}
+}
+
+func TestStoreIndexesEvidenceAcrossUTF8ReadBoundaries(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := append(bytes.Repeat([]byte("a"), 32*1024-1), []byte("é")...)
+	runID := "run-evidence-boundary"
+	evidencePath := filepath.Join(p.RunEvidenceDir("", runID), "report.txt")
+	if err := os.MkdirAll(filepath.Dir(evidencePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	indexed, err := store.IndexEvidenceFile(runID, evidencePath)
+	if err != nil {
+		t.Fatalf("index evidence file: %v", err)
+	}
+	want := sha256.Sum256(contents)
+	if indexed.MediaType != "text/plain" || indexed.Encoding != "utf-8" || indexed.SourceBytes != int64(len(contents)) || indexed.SHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("indexed evidence metadata = %+v", indexed)
 	}
 }
 

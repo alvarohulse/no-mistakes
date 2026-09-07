@@ -62,6 +62,16 @@ func (f *evidenceFixture) indexEvidence(runID, name string) *db.Artifact {
 		f.t.Fatal(err)
 	}
 	indexed.RunID = runID
+	step, err := f.db.InsertStepResult(runID, types.StepTest)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	round, err := f.db.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	indexed.StepID = &step.ID
+	indexed.RoundID = &round.ID
 	indexed.Purpose = db.ArtifactPurposeTestEvidence
 	indexed.Label = "Indexed test evidence"
 	indexed.Kind = "evidence"

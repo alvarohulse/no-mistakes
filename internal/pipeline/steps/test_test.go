@@ -567,6 +567,67 @@ func TestTestStepIndexesReportedLocalEvidenceFiles(t *testing.T) {
 	}
 }
 
+func TestTestStepPreservesRepositoryRelativeEvidenceArtifacts(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	repositoryArtifact := filepath.Join(dir, "artifacts", "server.log")
+	if err := os.MkdirAll(filepath.Dir(repositoryArtifact), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repositoryArtifact, []byte("server started\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			payload, err := json.Marshal(Findings{
+				Items:          []Finding{},
+				Summary:        "repository log demonstrates server startup",
+				Tested:         []string{"server startup"},
+				TestingSummary: "checked repository output",
+				Artifacts:      []types.TestArtifact{{Kind: "log", Label: "Server log", Path: "artifacts/server.log"}},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Round = 1
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	sctx.UserIntent = "Validate server startup"
+	sctx.EvidenceDir = sctx.Paths.RunEvidenceDir("", sctx.Run.ID)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("execute test step: %v", err)
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Artifacts) != 1 || findings.Artifacts[0].Path != "artifacts/server.log" {
+		t.Fatalf("repository artifact was not preserved: %+v", findings.Artifacts)
+	}
+	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Purpose != db.ArtifactPurposeCommandOutput {
+		t.Fatalf("repository artifact was incorrectly indexed: %+v", artifacts)
+	}
+}
+
 func TestTestStepFailsForEscapingReportedEvidenceFile(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	escapingPath := filepath.Join(t.TempDir(), "outside.html")

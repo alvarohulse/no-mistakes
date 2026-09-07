@@ -3,6 +3,7 @@
 package artifact
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,6 +12,87 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+type commandOutputFile struct {
+	file      *os.File
+	directory *os.File
+	name      string
+}
+
+func createCommandOutputFile(root, runID, name string, afterCommandDirectoryOpen func()) (*commandOutputFile, error) {
+	rootDirectory, err := openOrCreateNoFollowArtifactRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer rootDirectory.Close()
+
+	runDirectory, err := openOrCreatePrivateArtifactDirectory(rootDirectory, runID)
+	if err != nil {
+		return nil, fmt.Errorf("open run directory: %w", err)
+	}
+	defer runDirectory.Close()
+
+	commandDirectory, err := openOrCreatePrivateArtifactDirectory(runDirectory, commandOutputDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("open command output directory: %w", err)
+	}
+	if afterCommandDirectoryOpen != nil {
+		afterCommandDirectoryOpen()
+	}
+	fd, err := unix.Openat(
+		int(commandDirectory.Fd()),
+		name,
+		unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_EXCL,
+		0o600,
+	)
+	if err != nil {
+		_ = commandDirectory.Close()
+		return nil, fmt.Errorf("create output file: %w", err)
+	}
+	return &commandOutputFile{
+		file:      os.NewFile(uintptr(fd), name),
+		directory: commandDirectory,
+		name:      name,
+	}, nil
+}
+
+func (f *commandOutputFile) protect() error {
+	return f.file.Chmod(0o600)
+}
+
+func (f *commandOutputFile) closeAndSync() error {
+	if f.file != nil {
+		if err := f.file.Close(); err != nil {
+			return err
+		}
+		f.file = nil
+	}
+	if f.directory == nil {
+		return nil
+	}
+	if err := f.directory.Sync(); err != nil {
+		return err
+	}
+	err := f.directory.Close()
+	f.directory = nil
+	return err
+}
+
+func (f *commandOutputFile) discard() error {
+	var errs []error
+	if f.file != nil {
+		errs = append(errs, f.file.Close())
+		f.file = nil
+	}
+	if f.directory != nil {
+		if err := unix.Unlinkat(int(f.directory.Fd()), f.name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			errs = append(errs, err)
+		}
+		errs = append(errs, f.directory.Close())
+		f.directory = nil
+	}
+	return errors.Join(errs...)
+}
 
 // openRegularArtifactFile resolves every path component from a directory
 // descriptor. O_NOFOLLOW on every open prevents a replacement symlink from
@@ -62,31 +144,79 @@ func openRegularArtifactFile(root, relativePath string) (*os.File, fs.FileInfo, 
 }
 
 func openNoFollowArtifactRoot(root string) (*os.File, error) {
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return nil, fmt.Errorf("resolve supplied root: %w", err)
-	}
-	if !filepath.IsAbs(resolvedRoot) {
+	return openArtifactRoot(root, false)
+}
+
+func openOrCreateNoFollowArtifactRoot(root string) (*os.File, error) {
+	return openArtifactRoot(root, true)
+}
+
+func openArtifactRoot(root string, create bool) (*os.File, error) {
+	if !filepath.IsAbs(root) {
 		return nil, fmt.Errorf("supplied root is not absolute")
 	}
-
 	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open filesystem root: %w", err)
 	}
 	current := os.NewFile(uintptr(fd), string(filepath.Separator))
-	for _, component := range strings.Split(strings.TrimPrefix(filepath.Clean(resolvedRoot), string(filepath.Separator)), string(filepath.Separator)) {
+	components := strings.Split(strings.TrimPrefix(filepath.Clean(root), string(filepath.Separator)), string(filepath.Separator))
+	for index, component := range components {
 		if component == "" {
 			continue
 		}
-		nextFD, err := unix.Openat(int(current.Fd()), component, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+		var next *os.File
+		if create {
+			next, err = openOrCreateArtifactDirectory(current, component, index == len(components)-1)
+		} else {
+			next, err = openNoFollowArtifactDirectory(current, component)
+		}
 		if err != nil {
 			_ = current.Close()
 			return nil, fmt.Errorf("open supplied root component %q: %w", component, err)
 		}
-		next := os.NewFile(uintptr(nextFD), component)
 		_ = current.Close()
 		current = next
 	}
 	return current, nil
+}
+
+func openOrCreatePrivateArtifactDirectory(parent *os.File, name string) (*os.File, error) {
+	return openOrCreateArtifactDirectory(parent, name, true)
+}
+
+func openOrCreateArtifactDirectory(parent *os.File, name string, private bool) (*os.File, error) {
+	directory, err := openNoFollowArtifactDirectory(parent, name)
+	if err != nil && !errors.Is(err, unix.ENOENT) {
+		return nil, err
+	}
+	if errors.Is(err, unix.ENOENT) {
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+			return nil, err
+		}
+		directory, err = openNoFollowArtifactDirectory(parent, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if private {
+		if err := directory.Chmod(0o700); err != nil {
+			_ = directory.Close()
+			return nil, err
+		}
+	}
+	return directory, nil
+}
+
+func openNoFollowArtifactDirectory(parent *os.File, name string) (*os.File, error) {
+	fd, err := unix.Openat(
+		int(parent.Fd()),
+		name,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
 }

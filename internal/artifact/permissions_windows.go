@@ -4,24 +4,32 @@ package artifact
 
 import "golang.org/x/sys/windows"
 
-func protectArtifactDirectory(path string) error {
-	return restrictArtifactACL(path)
-}
-
-func protectArtifactFile(path string) error {
-	return restrictArtifactACL(path)
-}
-
-func restrictArtifactACL(path string) error {
-	token, err := windows.OpenCurrentProcessToken()
+func restrictArtifactACLHandle(handle windows.Handle) error {
+	acl, err := currentUserArtifactACL()
 	if err != nil {
 		return err
+	}
+	return windows.SetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	)
+}
+
+func currentUserArtifactACL() (*windows.ACL, error) {
+	token, err := windows.OpenCurrentProcessToken()
+	if err != nil {
+		return nil, err
 	}
 	defer token.Close()
 
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	access := []windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
@@ -35,15 +43,7 @@ func restrictArtifactACL(path string) error {
 	}}
 	acl, err := windows.ACLFromEntries(access, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return windows.SetNamedSecurityInfo(
-		path,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	)
+	return acl, nil
 }

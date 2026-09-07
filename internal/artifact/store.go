@@ -4,6 +4,7 @@
 package artifact
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -29,6 +30,7 @@ type Store struct {
 	runRoot                     string
 	evidenceRoot                string
 	afterArtifactDescriptorOpen func()
+	afterCommandDirectoryOpen   func()
 }
 
 // NewStore constructs an artifact store for the application paths. It does
@@ -68,45 +70,30 @@ func (s *Store) CreateCommandOutput(runID, attemptID string, output []byte) (art
 	if err := validatePathComponent("attempt ID", attemptID); err != nil {
 		return db.Artifact{}, err
 	}
-	if err := ensurePrivateDirectory(s.runRoot); err != nil {
-		return db.Artifact{}, fmt.Errorf("create command output: prepare runs root: %w", err)
-	}
-	runDir, err := ensurePrivateChildDirectory(s.runRoot, runID)
-	if err != nil {
-		return db.Artifact{}, fmt.Errorf("create command output: prepare run directory: %w", err)
-	}
-	commandDir, err := ensurePrivateChildDirectory(runDir, commandOutputDirectory)
-	if err != nil {
-		return db.Artifact{}, fmt.Errorf("create command output: prepare command output directory: %w", err)
-	}
-
 	relativePath := path.Join(runID, commandOutputDirectory, attemptID+".log")
-	target := filepath.Join(commandDir, attemptID+".log")
-	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	outputFile, err := createCommandOutputFile(s.runRoot, runID, attemptID+".log", s.afterCommandDirectoryOpen)
 	if err != nil {
 		return db.Artifact{}, fmt.Errorf("create command output: create immutable file: %w", err)
 	}
 	published := false
 	defer func() {
 		if !published {
-			_ = file.Close()
-			_ = os.Remove(target)
+			_ = outputFile.discard()
 		}
 	}()
-	if err := protectArtifactFile(target); err != nil {
+	if err := outputFile.protect(); err != nil {
 		return db.Artifact{}, fmt.Errorf("create command output: protect file: %w", err)
 	}
-	if _, err := file.Write(output); err != nil {
+	if written, err := outputFile.file.Write(output); err != nil {
 		return db.Artifact{}, fmt.Errorf("create command output: write file: %w", err)
+	} else if written != len(output) {
+		return db.Artifact{}, fmt.Errorf("create command output: write file: %w", io.ErrShortWrite)
 	}
-	if err := file.Sync(); err != nil {
+	if err := outputFile.file.Sync(); err != nil {
 		return db.Artifact{}, fmt.Errorf("create command output: sync file: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		return db.Artifact{}, fmt.Errorf("create command output: close file: %w", err)
-	}
-	if err := syncArtifactDirectory(commandDir); err != nil {
-		return db.Artifact{}, fmt.Errorf("create command output: sync output directory: %w", err)
+	if err := outputFile.closeAndSync(); err != nil {
+		return db.Artifact{}, fmt.Errorf("create command output: close output file: %w", err)
 	}
 	published = true
 	digest := sha256.Sum256(output)
@@ -126,7 +113,7 @@ func (s *Store) CreateCommandOutput(runID, attemptID string, output []byte) (art
 }
 
 func commandOutputFormat(output []byte) (mediaType, encoding string) {
-	if utf8.Valid(output) {
+	if looksLikeTextArtifact(output) {
 		return "text/plain", "utf-8"
 	}
 	return "application/octet-stream", "binary"
@@ -144,22 +131,18 @@ func (s *Store) IndexEvidenceFile(runID, reportedPath string) (db.Artifact, erro
 	if err != nil {
 		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
 	}
-	contents, info, err := s.readRegularArtifactFile(s.evidenceRoot, relativePath)
+	metadata, err := s.inspectRegularArtifactFile(s.evidenceRoot, relativePath)
 	if err != nil {
 		return db.Artifact{}, fmt.Errorf("index evidence file: %w", err)
 	}
-	if int64(len(contents)) != info.Size() {
-		return db.Artifact{}, fmt.Errorf("index evidence file: file changed while reading")
-	}
-	digest := sha256.Sum256(contents)
-	mediaType, encoding := evidenceFileFormat(relativePath, contents)
+	mediaType, encoding := evidenceFileFormat(relativePath, metadata.contentTypeSniff, metadata.isText)
 	return db.Artifact{
 		StorageRoot:  db.ArtifactStorageRootEvidence,
 		RelativePath: relativePath,
 		MediaType:    mediaType,
 		Encoding:     encoding,
-		SHA256:       hex.EncodeToString(digest[:]),
-		SourceBytes:  int64(len(contents)),
+		SHA256:       metadata.sha256,
+		SourceBytes:  metadata.sourceBytes,
 		State:        db.ArtifactStateAvailable,
 	}, nil
 }
@@ -190,10 +173,10 @@ func (s *Store) evidenceRelativePath(runID, reportedPath string) (string, error)
 	return normalized, nil
 }
 
-func evidenceFileFormat(filePath string, contents []byte) (mediaType, encoding string) {
+func evidenceFileFormat(filePath string, contentTypeSniff []byte, isText bool) (mediaType, encoding string) {
 	mediaType = mime.TypeByExtension(strings.ToLower(filepath.Ext(filePath)))
 	if mediaType == "" {
-		mediaType = http.DetectContentType(contents)
+		mediaType = http.DetectContentType(contentTypeSniff)
 	}
 	if parsed, _, err := mime.ParseMediaType(mediaType); err == nil && parsed != "" {
 		mediaType = parsed
@@ -201,7 +184,7 @@ func evidenceFileFormat(filePath string, contents []byte) (mediaType, encoding s
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	if utf8.Valid(contents) {
+	if isText {
 		return mediaType, "utf-8"
 	}
 	return mediaType, "binary"
@@ -265,6 +248,124 @@ func (s *Store) readRegularArtifactFile(root, relativePath string) ([]byte, os.F
 	return contents, info, nil
 }
 
+const contentTypeSniffBytes = 512
+
+type artifactFileMetadata struct {
+	contentTypeSniff []byte
+	isText           bool
+	sha256           string
+	sourceBytes      int64
+}
+
+func (s *Store) inspectRegularArtifactFile(root, relativePath string) (artifactFileMetadata, error) {
+	file, info, err := openRegularArtifactFile(root, relativePath)
+	if err != nil {
+		return artifactFileMetadata{}, err
+	}
+	defer file.Close()
+	if s.afterArtifactDescriptorOpen != nil {
+		s.afterArtifactDescriptorOpen()
+	}
+
+	digest := sha256.New()
+	inspector := textArtifactInspector{validUTF8: true}
+	sniff := make([]byte, 0, contentTypeSniffBytes)
+	buffer := make([]byte, 32*1024)
+	var sourceBytes int64
+	for {
+		read, readErr := file.Read(buffer)
+		if read > 0 {
+			chunk := buffer[:read]
+			if remaining := contentTypeSniffBytes - len(sniff); remaining > 0 {
+				if remaining > len(chunk) {
+					remaining = len(chunk)
+				}
+				sniff = append(sniff, chunk[:remaining]...)
+			}
+			if _, err := digest.Write(chunk); err != nil {
+				return artifactFileMetadata{}, fmt.Errorf("digest file: %w", err)
+			}
+			inspector.Write(chunk)
+			sourceBytes += int64(read)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return artifactFileMetadata{}, fmt.Errorf("read file: %w", readErr)
+		}
+		if read == 0 {
+			return artifactFileMetadata{}, fmt.Errorf("read file: %w", io.ErrNoProgress)
+		}
+	}
+	if sourceBytes != info.Size() {
+		return artifactFileMetadata{}, fmt.Errorf("file changed while reading")
+	}
+	return artifactFileMetadata{
+		contentTypeSniff: sniff,
+		isText:           inspector.IsText(),
+		sha256:           hex.EncodeToString(digest.Sum(nil)),
+		sourceBytes:      sourceBytes,
+	}, nil
+}
+
+type textArtifactInspector struct {
+	hasNUL    bool
+	pending   []byte
+	validUTF8 bool
+}
+
+func looksLikeTextArtifact(contents []byte) bool {
+	return bytes.IndexByte(contents, 0) == -1 && utf8.Valid(contents)
+}
+
+func (i *textArtifactInspector) Write(contents []byte) {
+	if bytes.IndexByte(contents, 0) >= 0 {
+		i.hasNUL = true
+	}
+	if !i.validUTF8 {
+		return
+	}
+	if len(i.pending) > 0 {
+		for len(contents) > 0 && !utf8.FullRune(i.pending) {
+			i.pending = append(i.pending, contents[0])
+			contents = contents[1:]
+		}
+		if !utf8.FullRune(i.pending) {
+			return
+		}
+		if !utf8.Valid(i.pending) {
+			i.validUTF8 = false
+			return
+		}
+		i.pending = i.pending[:0]
+	}
+	complete := completeUTF8Prefix(contents)
+	if !utf8.Valid(contents[:complete]) {
+		i.validUTF8 = false
+		return
+	}
+	i.pending = append(i.pending[:0], contents[complete:]...)
+}
+
+func (i *textArtifactInspector) IsText() bool {
+	return i.validUTF8 && !i.hasNUL && len(i.pending) == 0
+}
+
+func completeUTF8Prefix(contents []byte) int {
+	if len(contents) == 0 {
+		return 0
+	}
+	start := len(contents) - 1
+	for start > 0 && contents[start]&0xc0 == 0x80 {
+		start--
+	}
+	if !utf8.FullRune(contents[start:]) {
+		return start
+	}
+	return len(contents)
+}
+
 func (s *Store) rootFor(storageRoot string) (string, error) {
 	switch storageRoot {
 	case db.ArtifactStorageRootRun:
@@ -292,38 +393,6 @@ func strictRelativePath(value string) (string, error) {
 		return "", fmt.Errorf("must stay within the supplied root")
 	}
 	return normalized, nil
-}
-
-func ensurePrivateDirectory(directory string) error {
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return fmt.Errorf("path is not a real directory")
-	}
-	return protectArtifactDirectory(directory)
-}
-
-func ensurePrivateChildDirectory(parent, name string) (string, error) {
-	child := filepath.Join(parent, name)
-	if err := os.Mkdir(child, 0o700); err != nil && !os.IsExist(err) {
-		return "", err
-	}
-	info, err := os.Lstat(child)
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("path is not a real directory")
-	}
-	if err := protectArtifactDirectory(child); err != nil {
-		return "", err
-	}
-	return child, nil
 }
 
 func validSHA256(value string) bool {

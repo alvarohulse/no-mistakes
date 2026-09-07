@@ -110,7 +110,15 @@ func (d *DB) RegisterArtifact(artifact Artifact) (*Artifact, error) {
 	if err := validateArtifactForInsert(artifact); err != nil {
 		return nil, fmt.Errorf("register artifact: %w", err)
 	}
-	if existing, err := d.getArtifactByStoragePath(artifact.StorageRoot, artifact.RelativePath); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("register artifact: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := validateArtifactProducer(tx, artifact); err != nil {
+		return nil, fmt.Errorf("register artifact: %w", err)
+	}
+	if existing, err := getArtifactByStoragePath(tx, artifact.StorageRoot, artifact.RelativePath); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return resolveArtifactRegistration(existing, artifact)
@@ -118,7 +126,7 @@ func (d *DB) RegisterArtifact(artifact Artifact) (*Artifact, error) {
 
 	artifact.ID = newID()
 	artifact.CreatedAt = time.Now().UnixMilli()
-	if _, err := d.sql.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO artifacts
 		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, purpose, label, description,
 		  storage_root, relative_path, kind, media_type, encoding, sha256, source_bytes, state, reason,
@@ -129,7 +137,7 @@ func (d *DB) RegisterArtifact(artifact Artifact) (*Artifact, error) {
 		artifact.Kind, artifact.MediaType, artifact.Encoding, artifact.SHA256, artifact.SourceBytes, artifact.State,
 		artifact.Reason, artifact.PublicationState, artifact.PublicationURL, artifact.PublicationCommitSHA, artifact.CreatedAt,
 	); err != nil {
-		existing, lookupErr := d.getArtifactByStoragePath(artifact.StorageRoot, artifact.RelativePath)
+		existing, lookupErr := getArtifactByStoragePath(tx, artifact.StorageRoot, artifact.RelativePath)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("register artifact: insert: %w", err)
 		}
@@ -138,12 +146,23 @@ func (d *DB) RegisterArtifact(artifact Artifact) (*Artifact, error) {
 		}
 		return nil, fmt.Errorf("register artifact: insert: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("register artifact: commit: %w", err)
+	}
 	return &artifact, nil
 }
 
+type artifactQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func (d *DB) getArtifactByStoragePath(storageRoot, relativePath string) (*Artifact, error) {
+	return getArtifactByStoragePath(d.sql, storageRoot, relativePath)
+}
+
+func getArtifactByStoragePath(q artifactQuerier, storageRoot, relativePath string) (*Artifact, error) {
 	artifact := &Artifact{}
-	if err := scanArtifact(d.sql.QueryRow(
+	if err := scanArtifact(q.QueryRow(
 		`SELECT `+artifactSelectColumns+` FROM artifacts WHERE storage_root = ? AND relative_path = ?`,
 		storageRoot, relativePath,
 	), artifact); err != nil {
@@ -153,6 +172,81 @@ func (d *DB) getArtifactByStoragePath(storageRoot, relativePath string) (*Artifa
 		return nil, fmt.Errorf("get artifact by storage path: %w", err)
 	}
 	return artifact, nil
+}
+
+func validateArtifactProducer(q artifactQuerier, artifact Artifact) error {
+	if artifact.StepID == nil && artifact.RoundID == nil && artifact.InvocationID == nil {
+		return fmt.Errorf("artifact: producer metadata is required")
+	}
+
+	var stepName string
+	if artifact.StepID != nil {
+		var runID string
+		err := q.QueryRow(`SELECT run_id, step_name FROM step_results WHERE id = ?`, *artifact.StepID).Scan(&runID, &stepName)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("artifact: step producer %q does not exist", *artifact.StepID)
+		}
+		if err != nil {
+			return fmt.Errorf("artifact: load step producer: %w", err)
+		}
+		if runID != artifact.RunID {
+			return fmt.Errorf("artifact: step producer does not belong to run")
+		}
+	}
+
+	var roundNumber int
+	if artifact.RoundID != nil {
+		var runID, roundStepID, roundStepName string
+		err := q.QueryRow(
+			`SELECT s.run_id, s.id, s.step_name, r.round
+			 FROM step_rounds r
+			 JOIN step_results s ON s.id = r.step_result_id
+			 WHERE r.id = ?`,
+			*artifact.RoundID,
+		).Scan(&runID, &roundStepID, &roundStepName, &roundNumber)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("artifact: round producer %q does not exist", *artifact.RoundID)
+		}
+		if err != nil {
+			return fmt.Errorf("artifact: load round producer: %w", err)
+		}
+		if runID != artifact.RunID {
+			return fmt.Errorf("artifact: round producer does not belong to run")
+		}
+		if artifact.StepID != nil && roundStepID != *artifact.StepID {
+			return fmt.Errorf("artifact: step and round producers are not connected")
+		}
+		if artifact.StepID == nil {
+			stepName = roundStepName
+		}
+	}
+
+	if artifact.InvocationID != nil {
+		var runID, invocationStepName string
+		var invocationRound int
+		err := q.QueryRow(
+			`SELECT run_id, step_name, round FROM agent_invocations WHERE id = ?`,
+			*artifact.InvocationID,
+		).Scan(&runID, &invocationStepName, &invocationRound)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("artifact: invocation producer %q does not exist", *artifact.InvocationID)
+		}
+		if err != nil {
+			return fmt.Errorf("artifact: load invocation producer: %w", err)
+		}
+		if runID != artifact.RunID {
+			return fmt.Errorf("artifact: invocation producer does not belong to run")
+		}
+		if artifact.StepID != nil || artifact.RoundID != nil {
+			if invocationStepName != stepName {
+				return fmt.Errorf("artifact: invocation and step producers are not connected")
+			}
+		}
+		if artifact.RoundID != nil && invocationRound != roundNumber {
+			return fmt.Errorf("artifact: invocation and round producers are not connected")
+		}
+	}
+	return nil
 }
 
 func resolveArtifactRegistration(existing *Artifact, incoming Artifact) (*Artifact, error) {
