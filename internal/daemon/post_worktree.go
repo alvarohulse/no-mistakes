@@ -22,7 +22,7 @@ func (m *RunManager) parkPostWorktreeFailure(ctx context.Context, run *db.Run, r
 	errMsg := hookErr.Error()
 	if err := m.db.ParkRunForEnvironmentFailure(run.ID, errMsg); err != nil {
 		failureMessage := fmt.Sprintf("park post-worktree hook failure: %v", err)
-		if dbErr := m.db.UpdateRunErrorStatus(run.ID, failureMessage, types.RunFailed); dbErr != nil {
+		if dbErr := m.db.FailRunAfterEnvironmentParkFailure(run.ID, failureMessage); dbErr != nil {
 			return errors.Join(errors.New(failureMessage), fmt.Errorf("persist failed post-worktree hook run: %w", dbErr))
 		}
 		run.Status = types.RunFailed

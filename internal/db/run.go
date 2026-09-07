@@ -832,6 +832,21 @@ func (d *DB) ParkRunForEnvironmentFailure(id, errMsg string) error {
 	return nil
 }
 
+// FailRunAfterEnvironmentParkFailure records a terminal fallback when the
+// environment-failure park could not be written. The failed park never made
+// the run await an agent, so this must not touch awaiting-agent accounting.
+func (d *DB) FailRunAfterEnvironmentParkFailure(id, errMsg string) error {
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, push_active = 0,
+			terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`,
+		errMsg, types.RunFailed, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("fail run after environment park failure: %w", err)
+	}
+	return nil
+}
+
 // SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
 // stamping awaiting_agent_since with the current time. Called by the executor
 // when a step enters a gate (awaiting_approval / fix_review). Launch-time
