@@ -1046,6 +1046,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fixSummaryPtr = &s
 		}
 		var dbErr error
+		autoFixTransitionPersisted := false
 		if !structuredRoundEligible(stepName) {
 			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
 		} else {
@@ -1076,7 +1077,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 						subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
 					}
 				}
-				if sctx.Fixing && willStartAutoFix {
+				if willStartAutoFix {
 					idsJSON := findingIDsJSON(fixableFindings)
 					if idsJSON == "" {
 						dbErr = fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum)
@@ -1085,6 +1086,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 							FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
 							Result:             roundStringPointer(finalRepairAudit.Result),
 						})
+						autoFixTransitionPersisted = dbErr == nil
 					}
 				} else if finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "" {
 					dbErr = e.db.CompleteStepRoundStructuredWithRepairAudit(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration, db.StepRoundRepair{
@@ -1114,7 +1116,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				if idsJSON == "" {
 					return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum))
 				}
-				if !sctx.Fixing {
+				if !sctx.Fixing && !autoFixTransitionPersisted {
 					attemptedRepair := db.StepRoundRepair{
 						FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
 						Result:             roundStringPointer(finalRepairAudit.Result),

@@ -167,10 +167,10 @@ func (d *DB) CompleteStepRoundStructuredWithRepairAudit(roundID string, evaluati
 	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil)
 }
 
-// CompleteStepRoundStructuredAndStartAutoFix atomically completes an auto-fix
-// round and records the next automatic repair's decision, attempted audit, and
-// fixing transition. The completed round is never left without the audit that
-// authorized its successor.
+// CompleteStepRoundStructuredAndStartAutoFix atomically completes a structured
+// round that starts automatic repair and records the selected decision,
+// attempted audit, and fixing transition. The completed round is never left
+// without the audit that authorized its successor.
 func (d *DB) CompleteStepRoundStructuredAndStartAutoFix(stepResultID, roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, selectedFindingIDs *string, attemptedRepair StepRoundRepair) error {
 	if attemptedRepair.FailureFingerprint == nil || attemptedRepair.Result == nil || *attemptedRepair.Result != RoundRepairAttempted {
 		return fmt.Errorf("complete structured step round: automatic repair audit must record an attempted fingerprint")
