@@ -13,10 +13,12 @@ const (
 	ArtifactStorageRootRun      = "run"
 	ArtifactStorageRootEvidence = "evidence"
 
-	ArtifactPurposeCommandOutput = "command_output"
-	ArtifactPurposeTestEvidence  = "test_evidence"
-	ArtifactKindCommandOutput    = "command-output"
-	ArtifactStateAvailable       = "available"
+	ArtifactPurposeCommandOutput       = "command_output"
+	ArtifactPurposeTestEvidence        = "test_evidence"
+	ArtifactPurposeOperationDiagnostic = "operation_diagnostic"
+	ArtifactKindCommandOutput          = "command-output"
+	ArtifactKindOperationDiagnostic    = "operation-diagnostic"
+	ArtifactStateAvailable             = "available"
 )
 
 // Artifact is an immutable formatter-readable file registered for one run.

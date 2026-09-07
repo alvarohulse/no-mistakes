@@ -128,6 +128,28 @@ func TestStoreCreatesAndReadsEmptyCommandOutput(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesAndReadsOperationDiagnostic(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	store, err := NewStore(p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.CreateOperationDiagnostic("run-diagnostic", "refresh-refused", []byte("redacted diagnostic\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Purpose != db.ArtifactPurposeOperationDiagnostic || artifact.Kind != db.ArtifactKindOperationDiagnostic || artifact.RelativePath != "run-diagnostic/diagnostics/refresh-refused.log" {
+		t.Fatalf("operation diagnostic metadata = %+v", artifact)
+	}
+	contents, err := store.Read(&artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(contents), "redacted diagnostic\n"; got != want {
+		t.Fatalf("operation diagnostic contents = %q, want %q", got, want)
+	}
+}
+
 func TestStoreCreatesAndReadsBinaryCommandOutput(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	store, err := NewStore(p, "")

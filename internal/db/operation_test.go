@@ -151,6 +151,23 @@ func TestInsertRefreshOperationRejectsInvalidReferencesAndDecisions(t *testing.T
 	}
 }
 
+func TestInsertRefreshOperationRequiresOperationDiagnosticArtifact(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, artifact := newRefreshOperationFixture(t, d)
+
+	if _, err := d.sql.Exec(
+		`UPDATE artifacts SET purpose = ?, kind = ? WHERE id = ?`,
+		ArtifactPurposeTestEvidence,
+		"evidence-file",
+		artifact.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertRefreshOperation(receipt); err == nil || !strings.Contains(err.Error(), "diagnostic artifact") {
+		t.Fatalf("insert error = %v, want diagnostic artifact rejection", err)
+	}
+}
+
 func TestOpenAddsOperationsWithoutFabricatingLegacyRefreshReceipts(t *testing.T) {
 	d := openPreOperationsTestDB(t)
 	for _, table := range []string{"operations", "refresh_operations", "operation_command_attempts"} {
@@ -290,7 +307,7 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 	}
 	firstAttempt := startAttempt(1)
 	secondAttempt := startAttempt(2)
-	artifact, err := d.RegisterArtifact(testEvidenceArtifact(filepath.ToSlash(filepath.Join(run.ID, "diagnostics", "refresh.txt")), run.ID, step.ID, round.ID))
+	artifact, err := d.RegisterArtifact(operationDiagnosticArtifact(filepath.ToSlash(filepath.Join(run.ID, "diagnostics", "refresh.txt")), run.ID, step.ID, round.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,6 +345,16 @@ func refreshCommandDefinition() runner.Resolved {
 			Args:          []string{"-c"},
 		},
 	}
+}
+
+func operationDiagnosticArtifact(relativePath, runID, stepID, roundID string) Artifact {
+	artifact := testEvidenceArtifact(relativePath, runID, stepID, roundID)
+	artifact.Purpose = ArtifactPurposeOperationDiagnostic
+	artifact.Kind = ArtifactKindOperationDiagnostic
+	artifact.Label = "Operation diagnostic"
+	artifact.StorageRoot = ArtifactStorageRootRun
+	artifact.RelativePath = filepath.ToSlash(filepath.Join(runID, "diagnostics", filepath.Base(relativePath)))
+	return artifact
 }
 
 func mustRepoForRun(t *testing.T, d *DB, runID string) *Repo {
