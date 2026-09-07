@@ -480,11 +480,19 @@ func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 		if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
 			selectionSource = &source
 		}
-		if _, err := tx.Exec(
+		result, err := tx.Exec(
 			`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`,
 			selectedFindingIDs, selectionSource, userFindingsJSON, roundID,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("persist step round fix decision: update legacy decision: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("persist step round fix decision: legacy decision rows affected: %w", err)
+		}
+		if changed != 1 {
+			return fmt.Errorf("persist step round fix decision: expected one legacy decision, updated %d", changed)
 		}
 	}
 	if attemptedRepair != nil {
@@ -514,11 +522,19 @@ func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 			// Refresh and Push rounds intentionally stay on the legacy receipt
 			// path. Keep their repair audit in step_rounds as well; inserting a
 			// normalized round_repairs row would create an orphan graph record.
-			if _, err := tx.Exec(
+			result, err := tx.Exec(
 				`UPDATE step_rounds SET repair_failure_fingerprint = ?, repair_result = ? WHERE id = ?`,
 				attemptedRepair.FailureFingerprint, attemptedRepair.Result, roundID,
-			); err != nil {
+			)
+			if err != nil {
 				return fmt.Errorf("persist step round fix decision: update legacy repair audit: %w", err)
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("persist step round fix decision: legacy repair audit rows affected: %w", err)
+			}
+			if changed != 1 {
+				return fmt.Errorf("persist step round fix decision: expected one legacy repair audit, updated %d", changed)
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -460,6 +461,91 @@ func TestSetStepRoundUserDecision(t *testing.T) {
 	}
 	if rounds[0].UserFindingsJSON != nil {
 		t.Errorf("expected nil user_findings_json after clear, got %v", rounds[0].UserFindingsJSON)
+	}
+}
+
+func TestPersistStepRoundFixDecisionAndMarkStepFixingRollsBackOnIgnoredLegacyReceipts(t *testing.T) {
+	tests := []struct {
+		name          string
+		stepName      types.StepName
+		ignoredFields string
+		wantError     string
+		persist       func(*DB, *StepResult, *StepRound, *string) error
+	}{
+		{
+			name:          "decision",
+			stepName:      types.StepRefresh,
+			ignoredFields: "selected_finding_ids, selection_source, user_findings_json",
+			wantError:     "expected one legacy decision, updated 0",
+			persist: func(database *DB, step *StepResult, round *StepRound, selected *string) error {
+				userFindings := `{"findings":[{"id":"legacy","description":"fix refresh"}]}`
+				return database.PersistStepRoundFixDecisionAndMarkStepFixing(step.ID, round.ID, selected, RoundSelectionSourceUser, &userFindings)
+			},
+		},
+		{
+			name:          "attempted audit",
+			stepName:      types.StepPush,
+			ignoredFields: "repair_failure_fingerprint, repair_result",
+			wantError:     "expected one legacy repair audit, updated 0",
+			persist: func(database *DB, step *StepResult, round *StepRound, selected *string) error {
+				fingerprint, result := "sha256:legacy", RoundRepairAttempted
+				return database.PersistStepRoundAutoFixDecisionAndMarkStepFixing(step.ID, round.ID, selected, StepRoundRepair{
+					FailureFingerprint: &fingerprint,
+					Result:             &result,
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, err := database.InsertRepo("/tmp/legacy-receipt-rollback", "https://example.com/repo.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(run.ID, tt.stepName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := database.InsertStepRound(step.ID, 1, RoundTriggerInitial, nil, nil, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.sql.Exec(`CREATE TRIGGER ignore_legacy_` + strings.ReplaceAll(tt.name, " ", "_") + `
+				BEFORE UPDATE OF ` + tt.ignoredFields + ` ON step_rounds
+				WHEN NEW.id = '` + round.ID + `'
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`); err != nil {
+				t.Fatal(err)
+			}
+
+			selected := `["legacy"]`
+			err = tt.persist(database, step, round, &selected)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("persist legacy receipt error = %v, want %q", err, tt.wantError)
+			}
+
+			rounds, err := database.GetRoundsByStep(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 || rounds[0].SelectedFindingIDs != nil || rounds[0].SelectionSource != nil || rounds[0].UserFindingsJSON != nil || rounds[0].RepairFailureFingerprint != nil || rounds[0].RepairResult != nil {
+				t.Fatalf("legacy receipt after ignored update = %#v, want no selection or audit", rounds)
+			}
+			persistedStep, err := database.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persistedStep.Status != types.StepStatusPending {
+				t.Fatalf("step status after ignored update = %q, want %q", persistedStep.Status, types.StepStatusPending)
+			}
+		})
 	}
 }
 
