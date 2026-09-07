@@ -57,6 +57,55 @@ func TestStoreCreatesAndReadsOneImmutableCommandOutput(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesOutputWhenManagedRootParentUsesSymlinkAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires Windows developer mode or elevated privileges")
+	}
+	physicalParent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "temporary-root-alias")
+	if err := os.Symlink(physicalParent, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := NewStore(paths.WithRoot(alias), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.CreateCommandOutput("run-alias", "attempt-alias", []byte("output"))
+	if err != nil {
+		t.Fatalf("create output through root alias: %v", err)
+	}
+	contents, err := store.Read(&created)
+	if err != nil {
+		t.Fatalf("read output through root alias: %v", err)
+	}
+	if string(contents) != "output" {
+		t.Fatalf("output through root alias = %q, want %q", contents, "output")
+	}
+	if _, err := os.Stat(filepath.Join(physicalParent, "runs", filepath.FromSlash(created.RelativePath))); err != nil {
+		t.Fatalf("output was not created below resolved managed root: %v", err)
+	}
+
+	evidencePath := filepath.Join(alias, "evidence", "run-alias", "report.txt")
+	if err := os.MkdirAll(filepath.Dir(evidencePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, []byte("evidence"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := store.IndexEvidenceFile("run-alias", evidencePath)
+	if err != nil {
+		t.Fatalf("index evidence through root alias: %v", err)
+	}
+	indexedContents, err := store.Read(&indexed)
+	if err != nil {
+		t.Fatalf("read indexed evidence through root alias: %v", err)
+	}
+	if string(indexedContents) != "evidence" {
+		t.Fatalf("indexed evidence through root alias = %q, want %q", indexedContents, "evidence")
+	}
+}
+
 func TestStoreCreatesAndReadsEmptyCommandOutput(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	store, err := NewStore(p, "")

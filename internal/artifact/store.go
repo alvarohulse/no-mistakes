@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -39,11 +40,11 @@ func NewStore(p *paths.Paths, configuredEvidenceRoot string) (*Store, error) {
 	if p == nil {
 		return nil, fmt.Errorf("new artifact store: paths are nil")
 	}
-	runRoot, err := absoluteCleanPath(p.RunsDir())
+	runRoot, err := canonicalArtifactRoot(p.RunsDir())
 	if err != nil {
 		return nil, fmt.Errorf("new artifact store: run root: %w", err)
 	}
-	evidenceRoot, err := absoluteCleanPath(p.EvidenceRoot(configuredEvidenceRoot))
+	evidenceRoot, err := canonicalArtifactRoot(p.EvidenceRoot(configuredEvidenceRoot))
 	if err != nil {
 		return nil, fmt.Errorf("new artifact store: evidence root: %w", err)
 	}
@@ -59,6 +60,55 @@ func absoluteCleanPath(value string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
+}
+
+// canonicalArtifactRoot resolves aliases in the existing parent path while
+// preserving the artifact root itself for descriptor-based no-follow checks.
+// macOS commonly exposes temporary directories through /var, which is a
+// system symlink to /private/var; opening that alias with O_NOFOLLOW would
+// otherwise reject a valid managed root before any artifact can be written.
+func canonicalArtifactRoot(value string) (string, error) {
+	root, err := absoluteCleanPath(value)
+	if err != nil {
+		return "", err
+	}
+	parent, err := canonicalExistingDirectory(filepath.Dir(root))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(root)), nil
+}
+
+// canonicalExistingDirectory resolves the longest existing directory prefix,
+// retaining any missing suffix so NewStore remains side-effect free.
+func canonicalExistingDirectory(value string) (string, error) {
+	current := value
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			info, err := os.Stat(resolved)
+			if err != nil {
+				return "", err
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("supplied root parent %q is not a directory", current)
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 // CreateCommandOutput writes one command attempt's output exactly once. Empty
@@ -156,6 +206,10 @@ func (s *Store) evidenceRelativePath(runID, reportedPath string) (string, error)
 		target = filepath.Join(s.evidenceRoot, runID, target)
 	}
 	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve reported path: %w", err)
+	}
+	absTarget, err = canonicalArtifactRoot(absTarget)
 	if err != nil {
 		return "", fmt.Errorf("resolve reported path: %w", err)
 	}
