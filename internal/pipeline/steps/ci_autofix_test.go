@@ -64,10 +64,29 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	env := fakeCIGH(t, "OPEN", checksJSON)
 
 	agentCalled := false
+	var repairContext *pipeline.StepContext
+	var ciRoundID string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			agentCalled = true
+			if repairContext == nil || ciRoundID == "" {
+				t.Fatal("CI repair agent started without a persisted round context")
+			}
+			persistedRun, err := repairContext.DB.GetRun(repairContext.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persistedRun.CIFixAttempts == nil || *persistedRun.CIFixAttempts != 1 {
+				t.Fatalf("CI repair started with attempts = %#v, want durable reservation of one", persistedRun.CIFixAttempts)
+			}
+			repair, err := repairContext.DB.GetRoundRepair(ciRoundID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repair == nil || repair.Result == nil || *repair.Result != pipeline.RepairResultAttempted || repair.FailureFingerprint == nil {
+				t.Fatalf("CI repair started without attempted receipt: %#v", repair)
+			}
 			if len(opts.JSONSchema) == 0 {
 				t.Fatal("CI repair agent did not receive the commit summary schema")
 			}
@@ -90,6 +109,37 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	sctx.UserIntent = "user wanted CI autofix to preserve the extracted intent"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
+	persistedRepo, err := sctx.DB.InsertRepoWithID(sctx.Repo.ID, dir, upstream, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedRun, err := sctx.DB.InsertRun(persistedRepo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunPRURL(persistedRun.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	persistedRun.PRURL = &prURL
+	sctx.Repo = persistedRepo
+	sctx.Run = persistedRun
+	stepResult, err := sctx.DB.InsertStepResult(persistedRun.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.BeginStepRound(stepResult.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.Round = 1
+	sctx.RoundTrigger = "initial"
+	repairContext = sctx
+	ciRoundID = round.ID
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -108,13 +158,27 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
+	_, err = step.Execute(sctx)
 	// Expect explicit context cancellation after the second poll, once the post-fix wait path is exercised.
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 	if !agentCalled {
 		t.Error("expected agent to be called for CI auto-fix")
+	}
+	persistedRun, err = sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedRun.CIFixAttempts == nil || *persistedRun.CIFixAttempts != 1 {
+		t.Fatalf("cancelled CI repair attempts = %#v, want one spent attempt", persistedRun.CIFixAttempts)
+	}
+	repair, err := sctx.DB.GetRoundRepair(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair == nil || repair.Result == nil || *repair.Result != pipeline.RepairResultAttempted || repair.FailureFingerprint == nil {
+		t.Fatalf("cancelled CI repair receipt = %#v, want durable attempted receipt", repair)
 	}
 
 	if len(ag.calls) == 0 {
@@ -344,7 +408,17 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := sctx.DB.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.BeginStepRound(stepResult.ID, 1, "initial")
+	if err != nil {
+		t.Fatal(err)
+	}
 	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.Round = 1
+	sctx.RoundTrigger = "initial"
 	sctx.Env = fakeCIGHSequence(t, "OPEN", []string{failed, pending, failed})
 
 	first := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
@@ -354,6 +428,13 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 	}
 	if !firstOutcome.NeedsApproval || fixCount != 1 {
 		t.Fatalf("initial CI outcome = %+v, fixes = %d; want parked after one automatic fix", firstOutcome, fixCount)
+	}
+	reservedRepair, err := sctx.DB.GetRoundRepair(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservedRepair == nil || reservedRepair.Result == nil || *reservedRepair.Result != pipeline.RepairResultAttempted || reservedRepair.FailureFingerprint == nil {
+		t.Fatalf("parked CI repair receipt = %#v, want durable attempted receipt", reservedRepair)
 	}
 
 	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)

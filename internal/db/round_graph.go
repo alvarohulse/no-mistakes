@@ -370,8 +370,11 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		if repair.Result != nil && !validRoundRepairResult(*repair.Result) {
 			return fmt.Errorf("complete structured step round: invalid repair result %q", *repair.Result)
 		}
-		if err := insertRoundRepair(tx, repair); err != nil {
-			return fmt.Errorf("complete structured step round: insert repair: %w", err)
+		// A CI repair reserves its receipt before invoking the agent. Completion
+		// must finalize that same row with the evaluation and observed subject,
+		// while ordinary fix rounds still insert their first receipt here.
+		if err := upsertRoundRepair(tx, repair); err != nil {
+			return fmt.Errorf("complete structured step round: persist repair: %w", err)
 		}
 	}
 	if afterComplete != nil {
@@ -502,6 +505,71 @@ func (d *DB) SetStepRoundStructuredRepair(repair StepRoundRepair) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("set structured round repair: commit: %w", err)
+	}
+	return nil
+}
+
+// ReserveCIFixAttemptAndRecordRoundRepair spends one automatic CI repair
+// attempt and records the attempted receipt in one transaction. It runs before
+// the repair agent starts: a crash after this point never refunds the budget or
+// loses the audit record that explains the spent attempt.
+func (d *DB) ReserveCIFixAttemptAndRecordRoundRepair(runID, roundID string, attempts int, repair StepRoundRepair) error {
+	if attempts <= 0 {
+		return fmt.Errorf("reserve CI repair attempt: attempts must be positive")
+	}
+	if repair.FailureFingerprint == nil || repair.Result == nil || *repair.Result != RoundRepairAttempted {
+		return fmt.Errorf("reserve CI repair attempt: repair audit must record an attempted fingerprint")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("reserve CI repair attempt: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, stepName, status string
+	if err := tx.QueryRow(`SELECT s.run_id, s.step_name, r.status
+		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = ?`, roundID).Scan(&recordedRunID, &stepName, &status); err != nil {
+		return fmt.Errorf("reserve CI repair attempt: load round: %w", err)
+	}
+	if recordedRunID != runID || stepName != string(types.StepCI) || status != RoundStatusActive {
+		return fmt.Errorf("reserve CI repair attempt: round is not an active CI round for run")
+	}
+
+	var persisted sql.NullInt64
+	if err := tx.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, runID).Scan(&persisted); err != nil {
+		return fmt.Errorf("reserve CI repair attempt: load run budget: %w", err)
+	}
+	if !persisted.Valid {
+		return fmt.Errorf("reserve CI repair attempt: run has unknown CI repair budget")
+	}
+	if persisted.Int64 >= int64(attempts) {
+		return fmt.Errorf("reserve CI repair attempt: attempt %d does not advance persisted budget %d", attempts, persisted.Int64)
+	}
+
+	if _, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID); err != nil {
+		return fmt.Errorf("reserve CI repair attempt: update run budget: %w", err)
+	}
+	if repair.ID == "" {
+		repair.ID = newID()
+	}
+	if repair.RunID == "" {
+		repair.RunID = runID
+	}
+	if repair.RoundID == "" {
+		repair.RoundID = roundID
+	}
+	if repair.RunID != runID || repair.RoundID != roundID {
+		return fmt.Errorf("reserve CI repair attempt: repair audit does not belong to round")
+	}
+	if repair.CreatedAt == 0 {
+		repair.CreatedAt = now()
+	}
+	if err := upsertRoundRepair(tx, repair); err != nil {
+		return fmt.Errorf("reserve CI repair attempt: persist attempted receipt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("reserve CI repair attempt: commit: %w", err)
 	}
 	return nil
 }
@@ -709,12 +777,6 @@ func replaceRoundDecision(tx *sql.Tx, decision StepRoundDecision, findings []Ste
 		}
 	}
 	return nil
-}
-
-func insertRoundRepair(tx *sql.Tx, repair StepRoundRepair) error {
-	_, err := tx.Exec(`INSERT INTO round_repairs (id, run_id, round_id, fix_summary, failure_fingerprint, result, resulting_head_sha, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, repair.ID, repair.RunID, repair.RoundID, repair.FixSummary, repair.FailureFingerprint, repair.Result, repair.ResultingHeadSHA, repair.CreatedAt)
-	return err
 }
 
 func upsertRoundRepair(tx *sql.Tx, repair StepRoundRepair) error {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -106,16 +107,29 @@ func (s *CIStep) loadCIFixAttempts(sctx *pipeline.StepContext) error {
 	return nil
 }
 
-func (s *CIStep) persistCIFixAttempts(sctx *pipeline.StepContext, attempts int) error {
+func (s *CIStep) reserveCIFixAttempt(sctx *pipeline.StepContext, attempts int, audit pipeline.RepairAudit) error {
 	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
 		return nil
 	}
-	if err := sctx.DB.SetRunCIFixAttempts(sctx.Run.ID, attempts); err != nil {
+	if sctx.RoundID == "" {
+		return fmt.Errorf("current CI round identity is missing")
+	}
+	if err := sctx.DB.ReserveCIFixAttemptAndRecordRoundRepair(sctx.Run.ID, sctx.RoundID, attempts, db.StepRoundRepair{
+		FailureFingerprint: optionalCIFixAuditValue(audit.FailureFingerprint),
+		Result:             optionalCIFixAuditValue(audit.Result),
+	}); err != nil {
 		return err
 	}
 	persisted := attempts
 	sctx.Run.CIFixAttempts = &persisted
 	return nil
+}
+
+func optionalCIFixAuditValue(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 // ReconcileApprovalGate re-checks the PR after the CI step has parked at an
@@ -556,7 +570,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						sctx.Log(fmt.Sprintf("issues detected: %s - %s, waiting for manual intervention...", issueDesc, decision.Message))
 						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
 					}
-					if err := s.persistCIFixAttempts(sctx, decision.AttemptNumber); err != nil {
+					if err := s.reserveCIFixAttempt(sctx, decision.AttemptNumber, decision.Audit); err != nil {
 						return nil, fmt.Errorf("reserve CI repair attempt: %w", err)
 					}
 					s.ciFixAttempts = decision.AttemptNumber
