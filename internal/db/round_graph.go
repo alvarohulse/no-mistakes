@@ -290,7 +290,7 @@ func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEva
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
 	}
-	if trigger == RoundTriggerAutoFix {
+	if trigger == RoundTriggerAutoFix || (fixSummary != nil && strings.TrimSpace(*fixSummary) != "") {
 		if err := insertRoundRepair(tx, StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}); err != nil {
 			return fmt.Errorf("complete structured step round: insert repair: %w", err)
 		}
@@ -831,15 +831,17 @@ func (d *DB) hydrateRoundGraph(round *StepRound) error {
 			byID[finding.ID] = finding
 		}
 		userFindings := types.Findings{}
+		hasUserOverride := false
 		for _, reference := range orderedSelectedDecisionFindings(decision) {
 			finding, found := byID[reference.FindingID]
 			if !found {
 				return fmt.Errorf("hydrate round decision: missing finding %q", reference.FindingID)
 			}
 			selected = append(selected, finding.ExternalID)
-			if finding.Source == types.FindingSourceUser || reference.UserInstructions != "" {
-				userFindings.Items = append(userFindings.Items, types.Finding{ID: finding.ExternalID, Severity: finding.Severity, File: finding.File, Line: finding.Line, Description: finding.Description, Action: finding.Action, Source: finding.Source, UserInstructions: reference.UserInstructions, ReviewScope: finding.ReviewScope})
+			if finding.Source == types.FindingSourceUser || reference.Edited || reference.UserInstructions != "" {
+				hasUserOverride = true
 			}
+			userFindings.Items = append(userFindings.Items, types.Finding{ID: finding.ExternalID, Severity: finding.Severity, File: finding.File, Line: finding.Line, Description: finding.Description, Action: finding.Action, Source: finding.Source, UserInstructions: reference.UserInstructions, ReviewScope: finding.ReviewScope})
 		}
 		if decision.ExplicitEmpty || len(selected) > 0 {
 			raw, err := json.Marshal(selected)
@@ -849,7 +851,7 @@ func (d *DB) hydrateRoundGraph(round *StepRound) error {
 			value := string(raw)
 			round.SelectedFindingIDs = &value
 		}
-		if len(userFindings.Items) > 0 {
+		if hasUserOverride {
 			raw, err := types.MarshalFindingsJSON(userFindings)
 			if err != nil {
 				return fmt.Errorf("hydrate round user findings projection: %w", err)

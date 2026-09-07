@@ -133,6 +133,20 @@ func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t 
 	if evaluation == nil || len(evaluation.Findings) != 4 || evaluation.Findings[2].ExternalID != "user-2" || evaluation.Findings[3].ExternalID != "user-1" || evaluation.Findings[0].UserInstructions != "touch parser only" {
 		t.Fatalf("evaluation after user decision = %#v", evaluation)
 	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].UserFindingsJSON == nil {
+		t.Fatalf("round user findings projection = %#v", rounds)
+	}
+	projected, err := types.ParseFindingsJSON(*rounds[0].UserFindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.Items) != 3 || projected.Items[0].ID != "review-1" || projected.Items[1].ID != "user-1" || projected.Items[2].ID != "user-2" || projected.Items[0].UserInstructions != "touch parser only" {
+		t.Fatalf("user findings projection = %#v", projected.Items)
+	}
 
 	declinedRound, _ := database.BeginStepRound(step.ID, 2, RoundTriggerAutoFix)
 	if err := database.CompleteStepRoundStructured(declinedRound.ID, StepRoundEvaluation{Kind: RoundEvaluationRereview}, StructuredRoundSubject{}, nil, 1); err != nil {
@@ -306,12 +320,13 @@ func TestStructuredRoundHydratesLinkedInvocationAttemptAndArtifactIDs(t *testing
 	}
 }
 
-func TestStructuredRoundRepairsOnlyAutoFixRounds(t *testing.T) {
+func TestStructuredRoundPersistsRepairsForInitialDocumentUpdates(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-repair", "https://example.com/repo.git", "main")
 	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
 	step, _ := database.InsertStepResult(run.ID, types.StepDocument)
 	summary := "document the change"
+	resulting := "documented-head"
 
 	initial, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
 	if err != nil {
@@ -319,13 +334,13 @@ func TestStructuredRoundRepairsOnlyAutoFixRounds(t *testing.T) {
 	}
 	if err := database.CompleteStepRoundStructured(initial.ID, StepRoundEvaluation{
 		Kind: RoundEvaluationDocumentation,
-	}, StructuredRoundSubject{}, &summary, 1); err != nil {
+	}, StructuredRoundSubject{ResultingHeadSHA: &resulting}, &summary, 1); err != nil {
 		t.Fatal(err)
 	}
 	if repair, err := database.GetRoundRepair(initial.ID); err != nil {
 		t.Fatal(err)
-	} else if repair != nil {
-		t.Fatalf("initial documentation round fabricated repair = %#v", repair)
+	} else if repair == nil || repair.FixSummary == nil || *repair.FixSummary != summary || repair.ResultingHeadSHA == nil || *repair.ResultingHeadSHA != resulting {
+		t.Fatalf("initial documentation repair = %#v", repair)
 	}
 
 	fixRound, err := database.BeginStepRound(step.ID, 2, RoundTriggerAutoFix)
