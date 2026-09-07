@@ -386,14 +386,24 @@ func (d *DB) clearStructuredRoundDecision(roundID string) error {
 }
 
 func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
-	if !validRoundDecisionSource(source) {
-		return fmt.Errorf("set structured round decision: invalid source %q", source)
-	}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("set structured round decision: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set structured round decision: commit: %w", err)
+	}
+	return nil
+}
+
+func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
+	if !validRoundDecisionSource(source) {
+		return fmt.Errorf("set structured round decision: invalid source %q", source)
+	}
 	evaluation, err := getRoundEvaluation(tx, roundID)
 	if err != nil {
 		return err
@@ -480,9 +490,6 @@ func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []st
 	decision := StepRoundDecision{ID: newID(), RunID: evaluation.RunID, RoundID: roundID, Source: source, ExplicitEmpty: explicitEmpty, CreatedAt: now()}
 	if err := replaceRoundDecision(tx, decision, evaluation.Findings, references); err != nil {
 		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("set structured round decision: commit: %w", err)
 	}
 	return nil
 }

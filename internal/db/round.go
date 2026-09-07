@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
@@ -381,6 +383,69 @@ func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, sou
 		selectedFindingIDs, selectionSource, userFindingsJSON, id,
 	); err != nil {
 		return fmt.Errorf("set step round user decision: %w", err)
+	}
+	return nil
+}
+
+// PersistStepRoundFixDecisionAndMarkStepFixing records the decision that
+// authorizes a repair and exposes the step as fixing in one transaction. A
+// repair must never begin from a decision that is absent or only partly stored.
+func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, source string, userFindingsJSON *string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if !validRoundDecisionSource(source) {
+		return fmt.Errorf("persist step round fix decision: invalid source %q", source)
+	}
+	if err := tx.QueryRow(`SELECT 1 FROM step_rounds WHERE id = ? AND step_result_id = ?`, roundID, stepResultID).Scan(new(int)); err != nil {
+		return fmt.Errorf("persist step round fix decision: load round: %w", err)
+	}
+
+	var selected []string
+	if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+		if err := json.Unmarshal([]byte(*selectedFindingIDs), &selected); err != nil {
+			return fmt.Errorf("persist step round fix decision: decode selected finding IDs: %w", err)
+		}
+	}
+	evaluation, err := getRoundEvaluation(tx, roundID)
+	if err != nil {
+		return err
+	}
+	if evaluation != nil {
+		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false); err != nil {
+			return err
+		}
+	} else {
+		var selectionSource *string
+		if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+			selectionSource = &source
+		}
+		if _, err := tx.Exec(
+			`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`,
+			selectedFindingIDs, selectionSource, userFindingsJSON, roundID,
+		); err != nil {
+			return fmt.Errorf("persist step round fix decision: update legacy decision: %w", err)
+		}
+	}
+	result, err := tx.Exec(
+		`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
+		types.StepStatusFixing, now(), fmt.Sprintf("status: %s", types.StepStatusFixing), stepResultID,
+	)
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: mark step fixing: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: mark step fixing rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("persist step round fix decision: expected one step result, updated %d", changed)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("persist step round fix decision: commit: %w", err)
 	}
 	return nil
 }
