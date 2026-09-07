@@ -1089,8 +1089,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fixSummaryPtr = &s
 		}
 		var dbErr error
+		completingRound := false
 		autoFixTransitionPersisted := false
 		if !structuredRoundEligible(stepName) {
+			completingRound = true
 			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
 			if dbErr == nil && !willStartAutoFix && (finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "") {
 				dbErr = e.db.SetStepRoundRepairAudit(currentRoundID, finalRepairAudit.FailureFingerprint, finalRepairAudit.Result)
@@ -1100,6 +1102,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if evaluationErr != nil {
 				dbErr = evaluationErr
 			} else {
+				completingRound = true
 				var resultingHead string
 				if observed, headErr := git.HeadSHA(ctx, workDir); headErr == nil && observed != "" {
 					resultingHead = observed
@@ -1154,7 +1157,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if dbErr != nil {
-			return failActiveStepRound(fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr))
+			err := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)
+			if completingRound && outcome.CIFixRepairPendingCompletion {
+				return false, NewCIFixRepairDurabilityError(err)
+			}
+			return failActiveStepRound(err)
 		}
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.

@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -28,6 +29,28 @@ type recoveredCIEnvStep struct {
 
 func ciRepairResult() *agent.Result {
 	return &agent.Result{Output: json.RawMessage(`{"summary":"repair failing checks"}`)}
+}
+
+func newCIPersistedTestContext(t *testing.T, ag agent.Agent, workDir, upstream, baseSHA, headSHA string) *pipeline.StepContext {
+	t.Helper()
+	sctx := newTestContext(t, ag, workDir, baseSHA, headSHA, config.Commands{})
+	database, err := db.Open(sctx.Paths.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	sctx.DB = database
+	repo, err := sctx.DB.InsertRepo(workDir, upstream, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := sctx.DB.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo = repo
+	sctx.Run = run
+	return sctx
 }
 
 func (s *recoveredCIEnvStep) Name() types.StepName { return types.StepCI }
@@ -332,6 +355,216 @@ func TestCIStep_StopsWhenPushedRepairHeadAndReceiptCannotPersist(t *testing.T) {
 	}
 	if len(rounds) != 2 || rounds[1].Status != db.RoundStatusActive || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary != nil || rounds[1].Repair.ResultingHeadSHA != nil {
 		t.Fatalf("CI repair rounds after receipt failure = %#v, want attempted repair without applied data", rounds)
+	}
+}
+
+func TestCIStep_RetainsVerifiedRepairWhenReceiptFinalizationFails(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		checks       []string
+		trigger      string
+		repairStatus string
+	}{
+		{
+			name: "repair round completion",
+			checks: []string{
+				`[{"name":"test","state":"FAILURE","bucket":"fail"}]`,
+			},
+			trigger: `CREATE TRIGGER reject_pushed_ci_repair_completion
+				BEFORE UPDATE OF status ON step_rounds
+				WHEN NEW.status = 'completed' AND OLD.trigger_type = 'auto_fix'
+				BEGIN
+					SELECT RAISE(FAIL, 'injected CI repair round completion failure');
+				END`,
+			repairStatus: db.RoundStatusActive,
+		},
+		{
+			name: "resolved repair outcome",
+			checks: []string{
+				`[{"name":"test","state":"FAILURE","bucket":"fail"}]`,
+				`[{"name":"test","state":"SUCCESS","bucket":"pass"}]`,
+			},
+			trigger: `CREATE TRIGGER reject_pushed_ci_repair_resolution
+				BEFORE UPDATE OF result ON round_repairs
+				WHEN OLD.result = 'attempted' AND NEW.result = 'resolved'
+				BEGIN
+					SELECT RAISE(FAIL, 'injected CI repair outcome failure');
+				END`,
+			repairStatus: db.RoundStatusCompleted,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+			prURL := "https://github.com/test/repo/pull/42"
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "finalization-failure.txt"), []byte("fixed"), 0o644); err != nil {
+						return nil, err
+					}
+					return ciRepairResult(), nil
+				},
+			}
+			sctx := newCIPersistedTestContext(t, ag, dir, upstream, baseSHA, headSHA)
+			sctx.Run.PRURL = &prURL
+			sctx.Repo.UpstreamURL = upstream
+			sctx.Run.Branch = "refs/heads/feature"
+			sctx.Config.CITimeout = time.Minute
+			sctx.Config.AutoFix = config.AutoFix{CI: 1}
+
+			raw, err := sql.Open("sqlite", sctx.Paths.DB()+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(tt.trigger); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			var events []ipc.Event
+			step := &recoveredCIEnvStep{
+				inner: &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }},
+				env:   fakeCIGHSequence(t, "OPEN", tt.checks),
+			}
+			executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, sctx.Agent, []pipeline.Step{step}, func(event ipc.Event) {
+				events = append(events, event)
+			})
+			err = executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir)
+			if !pipeline.IsCIFixRepairDurabilityError(err) {
+				t.Fatalf("executor error = %T %v, want CI repair durability uncertainty", err, err)
+			}
+			if !strings.Contains(err.Error(), "injected CI repair") {
+				t.Fatalf("executor error = %v, want injected repair finalization failure", err)
+			}
+
+			remoteFields := strings.Fields(gitCmd(t, dir, "ls-remote", upstream, "refs/heads/feature"))
+			if len(remoteFields) == 0 || remoteFields[0] == headSHA {
+				t.Fatalf("remote CI repair head = %q, want verified pushed repair", remoteFields)
+			}
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != types.RunRunning {
+				t.Fatalf("run status = %s, want running", run.Status)
+			}
+			stepResults, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stepResults) != 1 || stepResults[0].Status != types.StepStatusRunning {
+				t.Fatalf("step results = %#v, want active CI step", stepResults)
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(stepResults[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 2 || rounds[0].Status != db.RoundStatusActive || rounds[1].Status != tt.repairStatus || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary == nil || rounds[1].Repair.ResultingHeadSHA == nil {
+				t.Fatalf("CI repair rounds = %#v, want active monitor and retained repair receipt", rounds)
+			}
+			for _, event := range events {
+				if event.Type == ipc.EventRunCompleted {
+					t.Fatalf("receipt finalization failure emitted terminal event: %#v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestCIStep_RetainsVerifiedManualRepairWhenOwningRoundCompletionFails(t *testing.T) {
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "manual-finalization-failure.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return ciRepairResult(), nil
+		},
+	}
+	sctx := newCIPersistedTestContext(t, ag, dir, upstream, baseSHA, headSHA)
+	sctx.Run.PRURL = &prURL
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = time.Millisecond
+	sctx.Config.AutoFix = config.AutoFix{CI: 0}
+
+	raw, err := sql.Open("sqlite", sctx.Paths.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TRIGGER reject_manual_pushed_ci_repair_completion
+		BEFORE UPDATE OF status ON step_rounds
+		WHEN NEW.status = 'completed' AND OLD.trigger_type = 'auto_fix'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected manual CI repair round completion failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	clock := time.Now()
+	var events []ipc.Event
+	step := &recoveredCIEnvStep{
+		inner: &CIStep{
+			now: func() time.Time { return clock },
+			waitForNextPoll: func(context.Context, time.Duration) error {
+				clock = clock.Add(time.Second)
+				return nil
+			},
+		},
+		env: fakeCIGHSequence(t, "OPEN", []string{
+			`[{"name":"test","state":"FAILURE","bucket":"fail"}]`,
+			`[{"name":"test","state":"FAILURE","bucket":"fail"}]`,
+		}),
+	}
+	executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, sctx.Agent, []pipeline.Step{step}, func(event ipc.Event) {
+		events = append(events, event)
+	})
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir) }()
+
+	respondToCIApproval(t, executor, types.ActionFix, []string{"ci-1"})
+	err = <-done
+	if !pipeline.IsCIFixRepairDurabilityError(err) {
+		t.Fatalf("executor error = %T %v, want CI repair durability uncertainty", err, err)
+	}
+	if !strings.Contains(err.Error(), "injected manual CI repair round completion failure") {
+		t.Fatalf("executor error = %v, want injected manual repair completion failure", err)
+	}
+
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != types.RunRunning {
+		t.Fatalf("run status = %s, want running", run.Status)
+	}
+	stepResults, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stepResults) != 1 || stepResults[0].Status != types.StepStatusFixing {
+		t.Fatalf("step results = %#v, want active CI fix step", stepResults)
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(stepResults[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Status != db.RoundStatusCompleted || rounds[1].Status != db.RoundStatusActive || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary == nil || rounds[1].Repair.ResultingHeadSHA == nil {
+		t.Fatalf("manual CI repair rounds = %#v, want retained active repair round", rounds)
+	}
+	for _, event := range events {
+		if event.Type == ipc.EventRunCompleted {
+			t.Fatalf("manual receipt finalization failure emitted terminal event: %#v", event)
+		}
 	}
 }
 

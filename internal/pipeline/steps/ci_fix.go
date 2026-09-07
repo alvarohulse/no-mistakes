@@ -129,6 +129,7 @@ CI logs:
 	var persistRepairPush func(string, string, db.PushBinding) error
 	if repairRound != nil {
 		persistRepairPush = func(headSHA, summary string, binding db.PushBinding) error {
+			repairRound.verifiedPush = true
 			if err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding); err != nil {
 				return pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
 			}

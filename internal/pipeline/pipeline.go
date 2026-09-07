@@ -249,9 +249,10 @@ type StepOutcome struct {
 	// RepairAudit carries only a normalized failure hash and low-cardinality
 	// progress result. The executor persists it with the round after the step
 	// returns; raw prompts, findings, diffs, and paths are never duplicated.
-	RepairAudit             RepairAudit
-	RepairReceiptsPersisted bool
-	RoundCursor             int
+	RepairAudit                  RepairAudit
+	RepairReceiptsPersisted      bool
+	RoundCursor                  int
+	CIFixRepairPendingCompletion bool
 	// ReviewApprovedHeadSHA is set only by a successfully executed full review
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.
