@@ -414,8 +414,8 @@ func (d *DB) SetStepRoundStructuredRepair(repair StepRoundRepair) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(round_id) DO UPDATE SET
 		fix_summary = COALESCE(excluded.fix_summary, round_repairs.fix_summary),
-		failure_fingerprint = COALESCE(excluded.failure_fingerprint, round_repairs.failure_fingerprint),
-		result = COALESCE(excluded.result, round_repairs.result),
+		failure_fingerprint = excluded.failure_fingerprint,
+		result = excluded.result,
 		resulting_head_sha = COALESCE(excluded.resulting_head_sha, round_repairs.resulting_head_sha)`,
 		repair.ID, repair.RunID, repair.RoundID, repair.FixSummary, repair.FailureFingerprint, repair.Result, repair.ResultingHeadSHA, repair.CreatedAt); err != nil {
 		return fmt.Errorf("set structured round repair: persist repair: %w", err)

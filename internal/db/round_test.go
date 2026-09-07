@@ -487,3 +487,66 @@ func TestSetStepRoundRepairAudit(t *testing.T) {
 		t.Fatalf("repair result = %#v", rounds[0].RepairResult)
 	}
 }
+
+func TestSetStepRoundRepairAuditClearsStructuredRepairFields(t *testing.T) {
+	tests := []struct {
+		name                       string
+		failureFingerprint, result string
+		wantFingerprint            string
+		wantResult                 string
+		wantFingerprintSet         bool
+		wantResultSet              bool
+	}{
+		{
+			name: "both fields",
+		},
+		{
+			name:          "fingerprint only",
+			result:        RoundRepairResolved,
+			wantResult:    RoundRepairResolved,
+			wantResultSet: true,
+		},
+		{
+			name:               "result only",
+			failureFingerprint: "sha256:replacement",
+			wantFingerprint:    "sha256:replacement",
+			wantFingerprintSet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, _ := database.InsertRepo("/tmp/structured-repair-audit", "https://example.com/repo.git", "main")
+			run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := database.InsertStepResult(run.ID, types.StepTest)
+			summary := "fix the test"
+			resultingHead := "repaired-head"
+			round, err := database.BeginStepRound(step.ID, 1, RoundTriggerAutoFix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{Kind: RoundEvaluationValidation}, StructuredRoundSubject{ResultingHeadSHA: &resultingHead}, &summary, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepRoundRepairAudit(round.ID, "sha256:stale", RoundRepairStoppedNoProgress); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepRoundRepairAudit(round.ID, tt.failureFingerprint, tt.result); err != nil {
+				t.Fatal(err)
+			}
+
+			repair, err := database.GetRoundRepair(round.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repair == nil || repair.FixSummary == nil || *repair.FixSummary != summary || repair.ResultingHeadSHA == nil || *repair.ResultingHeadSHA != resultingHead {
+				t.Fatalf("repair preserved fields = %#v", repair)
+			}
+			if (repair.FailureFingerprint != nil) != tt.wantFingerprintSet || (repair.FailureFingerprint != nil && *repair.FailureFingerprint != tt.wantFingerprint) ||
+				(repair.Result != nil) != tt.wantResultSet || (repair.Result != nil && *repair.Result != tt.wantResult) {
+				t.Fatalf("repair audit = %#v, want fingerprint %v and result %v", repair, tt.wantFingerprint, tt.wantResult)
+			}
+		})
+	}
+}
