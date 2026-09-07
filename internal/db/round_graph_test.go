@@ -376,6 +376,33 @@ func TestStructuredRoundRepairsOnlyAutoFixRounds(t *testing.T) {
 	}
 }
 
+func TestStructuredRoundInitialRepairAuditPersists(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/initial-repair-audit", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, result := "sha256:initial-repair", RoundRepairResolved
+	if err := database.CompleteStepRoundStructuredWithRepairAudit(round.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationValidation,
+	}, StructuredRoundSubject{}, nil, 1, StepRoundRepair{
+		FailureFingerprint: &fingerprint,
+		Result:             &result,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repair, err := database.GetRoundRepair(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair == nil || repair.FailureFingerprint == nil || *repair.FailureFingerprint != fingerprint || repair.Result == nil || *repair.Result != result {
+		t.Fatalf("initial repair audit = %#v", repair)
+	}
+}
+
 func TestStructuredRoundDecisionPreservesSubmittedSelectionOrder(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-selection-order", "https://example.com/repo.git", "main")

@@ -161,8 +161,8 @@ func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEva
 	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, nil, nil)
 }
 
-// CompleteStepRoundStructuredWithRepairAudit atomically completes an auto-fix
-// round with its evaluation, subject, fix summary, and final repair audit.
+// CompleteStepRoundStructuredWithRepairAudit atomically completes a round with
+// its evaluation, subject, fix summary, and final repair audit.
 func (d *DB) CompleteStepRoundStructuredWithRepairAudit(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit StepRoundRepair) error {
 	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil)
 }
@@ -341,10 +341,7 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
 	}
-	if repairAudit != nil && trigger != RoundTriggerAutoFix {
-		return fmt.Errorf("complete structured step round: repair audit requires an auto-fix round")
-	}
-	if trigger == RoundTriggerAutoFix {
+	if trigger == RoundTriggerAutoFix || repairAudit != nil {
 		repair := StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}
 		if repairAudit != nil {
 			repair = *repairAudit

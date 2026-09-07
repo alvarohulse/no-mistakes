@@ -391,3 +391,55 @@ func TestExecutor_AutoFixRoundCompletionAndFinalAuditAreAtomic(t *testing.T) {
 		t.Fatalf("auto-fix round retained an incomplete repair receipt: %#v", rounds[1])
 	}
 }
+
+func TestExecutor_InitialRoundCompletionAndFinalAuditAreAtomic(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TRIGGER reject_initial_round_repair
+		BEFORE INSERT ON round_repairs
+		WHEN (SELECT trigger_type FROM step_rounds WHERE id = NEW.round_id) = 'initial'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected initial repair write failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				RepairAudit: RepairAudit{
+					FailureFingerprint: "sha256:ci-repair",
+					Result:             RepairResultResolved,
+				},
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	err = exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "injected initial repair write failure") {
+		t.Fatalf("Execute() error = %v, want initial repair persistence failure", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status = %#v, want failed", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil || rounds[0].Repair != nil {
+		t.Fatalf("round retained partial initial repair receipt: %#v", rounds)
+	}
+}

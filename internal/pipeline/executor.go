@@ -943,6 +943,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redacted, &duration)
 		return false, err
 	}
+	failActiveStepRound := func(err error) (bool, error) {
+		roundDuration := time.Since(phaseStart).Milliseconds()
+		if currentRoundID != "" {
+			if dbErr := e.db.FailStepRound(currentRoundID, roundDuration); dbErr != nil {
+				slog.Warn("failed to complete errored step round", "step", stepName, "round", sctx.Round, "error", dbErr)
+			}
+		}
+		redactedErr := safeurl.RedactText(err.Error())
+		fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
+		touchLogActivity("error: "+redactedErr, true)
+		return failStepPersistence(err)
+	}
 
 	nextTrigger := "initial"
 	if sctx.Fixing {
@@ -972,24 +984,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
-			durationMS := executionMS + roundDuration
-			if dbErr := e.db.FailStepRound(currentRoundID, roundDuration); dbErr != nil {
-				slog.Warn("failed to complete errored step round", "step", stepName, "round", roundNum, "error", dbErr)
-			}
-			// Persist the failure reason to the step's own log file. The error
-			// often carries the only detail of why the step failed (e.g. git
-			// stderr from a rejected push); without this the step log shows the
-			// work starting but never why it stopped. Redact defensively so a
-			// credentialled upstream URL that slipped into a wrapped error can
-			// never land in the log file.
-			redactedErr := safeurl.RedactText(err.Error())
-			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
-			touchLogActivity("error: "+redactedErr, true)
-			if dbErr := e.db.FailStep(sr.ID, redactedErr, durationMS); dbErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
-			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
+			return failActiveStepRound(fmt.Errorf("step %s failed: %s", stepName, safeurl.RedactText(err.Error())))
 		}
 
 		if stepName == types.StepReview {
@@ -1007,7 +1002,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		if outcome.AutoFixable && autoFixLimit > 0 && fixableFindings != "" {
 			decision, progressErr := repairProgress.Next(ctx, workDir, repairFailureFindings, autoFixLimit)
 			if progressErr != nil {
-				return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
+				return failActiveStepRound(fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr))
 			}
 			repairProgressChecked = true
 			nextRepairDecision = &decision
@@ -1021,7 +1016,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			} else if !repairProgressChecked {
 				decision, progressErr := repairProgress.Observe(ctx, workDir, repairFailureFindings)
 				if progressErr != nil {
-					return false, fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr)
+					return failActiveStepRound(fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr))
 				}
 				if decision.Audit.Result != "" {
 					finalRepairAudit = decision.Audit
@@ -1091,7 +1086,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 							Result:             roundStringPointer(finalRepairAudit.Result),
 						})
 					}
-				} else if sctx.Fixing && (finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "") {
+				} else if finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "" {
 					dbErr = e.db.CompleteStepRoundStructuredWithRepairAudit(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration, db.StepRoundRepair{
 						FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
 						Result:             roundStringPointer(finalRepairAudit.Result),
@@ -1102,33 +1097,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if dbErr != nil {
-			roundErr := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)
-			if failErr := e.db.FailStepRound(currentRoundID, roundDuration); failErr != nil {
-				roundErr = errors.Join(roundErr, fmt.Errorf("mark round failed: %w", failErr))
-			}
-			redactedErr := safeurl.RedactText(roundErr.Error())
-			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
-			touchLogActivity("error: "+redactedErr, true)
-			durationMS := executionMS + roundDuration
-			if failErr := e.db.FailStep(sr.ID, redactedErr, durationMS); failErr != nil {
-				roundErr = errors.Join(roundErr, fmt.Errorf("mark step failed: %w", failErr))
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
-			return false, roundErr
-		}
-		persistRepairAudit := func(audit RepairAudit) error {
-			if currentRoundID == "" || (audit.FailureFingerprint == "" && audit.Result == "") {
-				return nil
-			}
-			if dbErr := e.db.SetStepRoundRepairAudit(currentRoundID, audit.FailureFingerprint, audit.Result); dbErr != nil {
-				return fmt.Errorf("persist %s repair audit for round %d: %w", stepName, roundNum, dbErr)
-			}
-			return nil
-		}
-		if !sctx.Fixing && !willStartAutoFix {
-			if err := persistRepairAudit(finalRepairAudit); err != nil {
-				return failStepPersistence(err)
-			}
+			return failActiveStepRound(fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr))
 		}
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.

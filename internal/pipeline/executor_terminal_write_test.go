@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -115,6 +116,39 @@ func TestExecutor_TerminalizesStepAndRoundWhenRoundCompletionFails(t *testing.T)
 	}
 	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed {
 		t.Fatalf("rounds = %+v, want failed active round", rounds)
+	}
+}
+
+func TestExecutor_TerminalizesStepAndRoundWhenRepairProgressFails(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				AutoFixable: true,
+				Findings:    `{"findings":[{"id":"review-1","severity":"error","description":"repair me","action":"auto-fix"}]}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+
+	err := exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "evaluate review repair progress") {
+		t.Fatalf("Execute() error = %v, want repair-progress failure", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status = %#v, want failed", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed {
+		t.Fatalf("rounds = %#v, want failed active round", rounds)
 	}
 }
 
