@@ -321,6 +321,11 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	targets := refreshTargetsForBranch(branch, baseBranch, branchTarget)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
+		if branchTarget != "" && branch != baseBranch {
+			if receiptErr := receipts.begin(branchTarget).finish(db.RefreshDecisionSkipped, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); receiptErr != nil {
+				return nil, receiptErr
+			}
+		}
 		targets = forcePushRefreshTargets(branch, baseBranch)
 	}
 
@@ -880,7 +885,8 @@ func runRefreshPrimary(ctx context.Context, sctx *pipeline.StepContext, operatio
 	if err != nil {
 		return "", err
 	}
-	output, exitCode, err := runStepRunnerCommand(sctx, runnerCommand(command), string(types.StepRefresh))
+	env := git.NonInteractiveEnvFrom(sctx.Env, sctx.WorkDir)
+	output, exitCode, err := runStepRunnerCommandWithEnv(sctx, runnerCommand(command), string(types.StepRefresh), env)
 	if captureErr := operation.captureAttemptsStartedAfter(before); captureErr != nil {
 		err = errors.Join(err, captureErr)
 	}

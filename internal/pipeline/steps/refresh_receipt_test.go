@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,6 +100,50 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	}
 	if _, err := store.Read(registered); err != nil {
 		t.Fatalf("read refresh output artifact: %v", err)
+	}
+}
+
+func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
+	dir, upstream, featureHead := setupStackedRefreshRepo(t)
+
+	t.Setenv("GIT_EDITOR", "vim")
+	t.Setenv("GIT_SEQUENCE_EDITOR", "vim")
+	t.Setenv("GIT_TERMINAL_PROMPT", "1")
+	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential \"https://github.com\"]\n\thelper = !gh auth git-credential\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "git")
+	logFile := filepath.Join(t.TempDir(), "git.log")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.RefreshStrategy = types.RefreshStrategyRebase
+	sctx.Run.StackedOn = "dependency"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Env = fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":     "git-require-noninteractive-env",
+		"FAKE_CLI_REAL_GIT": realGit,
+		"FAKE_CLI_LOG":      logFile,
+	})
+	beginRefreshReceiptRound(t, sctx)
+
+	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	log, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "rebase origin/dependency") {
+		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
 	}
 }
 
@@ -238,13 +284,57 @@ func TestRefreshStepPreparationFailureDoesNotBorrowPriorCommandAttempt(t *testin
 	t.Fatalf("missing preparation-failure receipt: %+v", operations)
 }
 
-func TestRefreshGitCommandScopesBareRepositoriesExplicitly(t *testing.T) {
+func TestRefreshPrimaryRunsBareRepositoryCommandAndRecordsReceipt(t *testing.T) {
 	t.Parallel()
 	bare := t.TempDir()
 	gitCmd(t, bare, "init", "--bare")
+	source := t.TempDir()
+	gitCmd(t, source, "init")
+	gitCmd(t, source, "config", "user.name", "test")
+	gitCmd(t, source, "config", "user.email", "test@test.com")
+	gitCmd(t, source, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, source, "add", "base.txt")
+	gitCmd(t, source, "commit", "-m", "base")
+	headSHA := gitCmd(t, source, "rev-parse", "HEAD")
+	gitCmd(t, source, "push", bare, "main")
+	gitCmd(t, bare, "symbolic-ref", "HEAD", "refs/heads/main")
 
-	command := refreshGitCommand(&pipeline.StepContext{WorkDir: bare}, "rev-parse", "HEAD")
-	if !strings.Contains(command, "--git-dir="+bare) {
-		t.Fatalf("bare refresh command = %q, want explicit git-dir", command)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, bare, headSHA, headSHA, config.Commands{})
+	sctx.Env = []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=safe.bareRepository",
+		"GIT_CONFIG_VALUE_0=explicit",
+	}
+	beginRefreshReceiptRound(t, sctx)
+	receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/main", "origin/main")
+	receipts.authoritativeBaseSHA = refreshStringPointer(headSHA)
+	operation := receipts.begin("HEAD")
+
+	output, err := runRefreshPrimary(sctx.Ctx, sctx, operation, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("run refresh primary: %v", err)
+	}
+	if strings.TrimSpace(output) != headSHA {
+		t.Fatalf("bare refresh output = %q, want %q", output, headSHA)
+	}
+	if err := operation.finish(db.RefreshDecisionSkipped, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionSkipped || len(operations[0].CommandAttemptIDs) != 1 {
+		t.Fatalf("bare refresh receipt = %+v", operations)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].ID != operations[0].CommandAttemptIDs[0] || attempts[0].OutputArtifactID == nil {
+		t.Fatalf("bare refresh command attempt = %+v", attempts)
 	}
 }

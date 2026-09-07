@@ -62,6 +62,7 @@ func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, autofixSHA, userCommitSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
@@ -87,6 +88,20 @@ func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	if mergeBase != originMain {
 		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/feature" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionSkipped || operation.ConflictState != db.RefreshConflictStateNone || operation.RepairState != db.RefreshRepairStateNotNeeded || len(operation.CommandAttemptIDs) != 0 {
+			t.Fatalf("force-push skipped receipt = %+v", operation)
+		}
+		return
+	}
+	t.Fatalf("missing force-push skipped receipt: %+v", operations)
 }
 
 func TestRefreshStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
