@@ -187,25 +187,29 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 		}
 		diagnosticRequired = true
 	}
+	var diagnosticErr error
 	if o.diagnosticArtifactID == nil && diagnosticRequired && o.recorder.sctx.Paths != nil {
 		store, err := artifact.NewStore(o.recorder.sctx.Paths, "")
 		if err != nil {
-			return fmt.Errorf("create refresh diagnostic store: %w", err)
+			diagnosticErr = fmt.Errorf("create refresh diagnostic store: %w", err)
+		} else {
+			targetDigest := sha256.Sum256([]byte(o.targetRef))
+			name := fmt.Sprintf("refresh-%s-%x", o.recorder.sctx.RoundID, targetDigest[:8])
+			metadata, err := store.CreateOperationDiagnostic(o.recorder.sctx.Run.ID, name, boundedRefreshDiagnostic(diagnostic))
+			if err != nil {
+				diagnosticErr = fmt.Errorf("create refresh diagnostic: %w", err)
+			} else {
+				metadata.RunID = o.recorder.sctx.Run.ID
+				metadata.StepID = refreshStringPointer(o.recorder.sctx.StepResultID)
+				metadata.RoundID = refreshStringPointer(o.recorder.sctx.RoundID)
+				registered, err := o.recorder.sctx.DB.RegisterArtifact(metadata)
+				if err != nil {
+					diagnosticErr = fmt.Errorf("register refresh diagnostic: %w", err)
+				} else {
+					o.diagnosticArtifactID = &registered.ID
+				}
+			}
 		}
-		targetDigest := sha256.Sum256([]byte(o.targetRef))
-		name := fmt.Sprintf("refresh-%s-%x", o.recorder.sctx.RoundID, targetDigest[:8])
-		metadata, err := store.CreateOperationDiagnostic(o.recorder.sctx.Run.ID, name, boundedRefreshDiagnostic(diagnostic))
-		if err != nil {
-			return fmt.Errorf("create refresh diagnostic: %w", err)
-		}
-		metadata.RunID = o.recorder.sctx.Run.ID
-		metadata.StepID = refreshStringPointer(o.recorder.sctx.StepResultID)
-		metadata.RoundID = refreshStringPointer(o.recorder.sctx.RoundID)
-		registered, err := o.recorder.sctx.DB.RegisterArtifact(metadata)
-		if err != nil {
-			return fmt.Errorf("register refresh diagnostic: %w", err)
-		}
-		o.diagnosticArtifactID = &registered.ID
 	}
 	completedAt := time.Now()
 	operation := db.RefreshOperation{
@@ -229,9 +233,9 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 		DiagnosticArtifactID: o.diagnosticArtifactID,
 	}
 	if _, err := o.recorder.sctx.DB.InsertRefreshOperation(operation); err != nil {
-		return fmt.Errorf("insert refresh receipt: %w", err)
+		return errors.Join(diagnosticErr, fmt.Errorf("insert refresh receipt: %w", err))
 	}
-	return nil
+	return diagnosticErr
 }
 
 func (o *refreshOperationBuilder) missingCommandOutputArtifacts() ([]string, error) {

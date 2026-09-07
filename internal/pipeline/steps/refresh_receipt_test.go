@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -388,11 +389,12 @@ func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *
 
 func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 	tests := []struct {
-		name               string
-		strategy           types.RefreshStrategy
-		repair             bool
-		breakReceipt       func(t *testing.T, sctx *pipeline.StepContext)
-		wantErrorSubstring string
+		name                string
+		strategy            types.RefreshStrategy
+		repair              bool
+		breakReceipt        func(t *testing.T, sctx *pipeline.StepContext)
+		wantErrorSubstrings []string
+		wantNoDiagnostic    bool
 	}{
 		{
 			name:     "approval returns output artifact failure",
@@ -401,6 +403,25 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 				t.Helper()
 				sctx.Paths = nil
 			},
+		},
+		{
+			name:     "approval joins output and diagnostic artifact failures",
+			strategy: types.RefreshStrategyRebase,
+			breakReceipt: func(t *testing.T, sctx *pipeline.StepContext) {
+				rejectRefreshArtifactWrites(t, sctx)
+			},
+			wantErrorSubstrings: []string{"create command output artifact", "create refresh diagnostic"},
+			wantNoDiagnostic:    true,
+		},
+		{
+			name:     "repair joins output and diagnostic artifact failures",
+			strategy: types.RefreshStrategyRebase,
+			repair:   true,
+			breakReceipt: func(t *testing.T, sctx *pipeline.StepContext) {
+				rejectRefreshArtifactWrites(t, sctx)
+			},
+			wantErrorSubstrings: []string{"create command output artifact", "create refresh diagnostic"},
+			wantNoDiagnostic:    true,
 		},
 		{
 			name:     "repair returns output artifact failure",
@@ -424,7 +445,7 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 					completeControllerCommandAttemptWithOutputArtifact = originalComplete
 				})
 			},
-			wantErrorSubstring: "injected attempt completion failure",
+			wantErrorSubstrings: []string{"injected attempt completion failure"},
 		},
 		{
 			name:     "repair returns attempt completion failure",
@@ -440,7 +461,7 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 					completeControllerCommandAttemptWithOutputArtifact = originalComplete
 				})
 			},
-			wantErrorSubstring: "injected attempt completion failure",
+			wantErrorSubstrings: []string{"injected attempt completion failure"},
 		},
 	}
 
@@ -470,8 +491,10 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 			if !errors.Is(err, errCommandPersistence) {
 				t.Fatalf("refresh error = %v, want command persistence failure", err)
 			}
-			if tt.wantErrorSubstring != "" && !strings.Contains(err.Error(), tt.wantErrorSubstring) {
-				t.Fatalf("refresh error = %v, want %q", err, tt.wantErrorSubstring)
+			for _, want := range tt.wantErrorSubstrings {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refresh error = %v, want %q", err, want)
+				}
 			}
 
 			operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
@@ -485,6 +508,9 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 			if len(operation.CommandAttemptIDs) != 1 || operation.ResultingHeadSHA == nil {
 				t.Fatalf("refresh operation = %+v", operation)
 			}
+			if tt.wantNoDiagnostic && operation.DiagnosticArtifactID != nil {
+				t.Fatalf("refresh operation diagnostic = %q, want unavailable", *operation.DiagnosticArtifactID)
+			}
 			if tt.repair {
 				if operation.Decision != db.RefreshDecisionRepaired || operation.ConflictState != db.RefreshConflictStateResolved || operation.RepairState != db.RefreshRepairStateSucceeded || *operation.ResultingHeadSHA == featureHead {
 					t.Fatalf("repaired refresh operation = %+v, want a changed terminal head", operation)
@@ -494,6 +520,15 @@ func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func rejectRefreshArtifactWrites(t *testing.T, sctx *pipeline.StepContext) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "runs"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Paths = paths.WithRoot(root)
 }
 
 func resolvingRefreshConflictAgent(t *testing.T, dir string, strategy types.RefreshStrategy) *mockAgent {
