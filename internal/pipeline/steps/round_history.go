@@ -119,6 +119,22 @@ func renderRoundHistoryEntry(r *db.StepRound) string {
 				b.WriteString(line)
 			}
 		}
+	case db.RoundSelectionSourceUserSkipped:
+		if unselected != nil {
+			b.WriteString("\nuser_chose_to_skip:")
+			for _, line := range unselected {
+				b.WriteString("\n  - ")
+				b.WriteString(line)
+			}
+		}
+	case db.RoundSelectionSourceUserAborted:
+		if unselected != nil {
+			b.WriteString("\nuser_chose_to_abort:")
+			for _, line := range unselected {
+				b.WriteString("\n  - ")
+				b.WriteString(line)
+			}
+		}
 	}
 
 	return b.String()

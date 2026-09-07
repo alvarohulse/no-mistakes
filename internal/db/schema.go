@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS round_decisions (
     id             TEXT PRIMARY KEY,
     run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     round_id       TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
-    source         TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined')),
+    source         TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined', 'user_skipped', 'user_aborted')),
     explicit_empty INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL
 );
@@ -609,7 +609,7 @@ var migrationStatements = []string{
 		id TEXT PRIMARY KEY,
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 		round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
-		source TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined')),
+		source TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined', 'user_skipped', 'user_aborted')),
 		explicit_empty INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL
 	)`,

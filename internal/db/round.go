@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	RoundSelectionSourceUser       = "user"
-	RoundSelectionSourceAutoFix    = "auto_fix"
-	RoundSelectionSourceUserWaived = "user_declined"
+	RoundSelectionSourceUser        = "user"
+	RoundSelectionSourceAutoFix     = "auto_fix"
+	RoundSelectionSourceUserWaived  = "user_declined"
+	RoundSelectionSourceUserSkipped = "user_skipped"
+	RoundSelectionSourceUserAborted = "user_aborted"
 	// RoundSelectionSourceUserDeclined records that a human resolved the
 	// approval gate without selecting a finding to fix. The explicit empty
 	// selection distinguishes this decision from an unresolved round.
@@ -367,20 +369,27 @@ func (d *DB) SetStepRoundWaived(id string) error {
 }
 
 func setStepRoundWaivedTx(tx *sql.Tx, id string) error {
+	return setStepRoundExplicitEmptyDecisionTx(tx, id, RoundSelectionSourceUserWaived)
+}
+
+func setStepRoundExplicitEmptyDecisionTx(tx *sql.Tx, id, source string) error {
+	if !validRoundDecisionSource(source) {
+		return fmt.Errorf("set step round decision: invalid source %q", source)
+	}
 	evaluation, err := getRoundEvaluation(tx, id)
 	if err != nil {
 		return err
 	}
 	if evaluation != nil {
-		return setStructuredDecisionByExternalIDsTx(tx, id, nil, RoundSelectionSourceUserWaived, nil, true, true)
+		return setStructuredDecisionByExternalIDsTx(tx, id, nil, source, nil, true, true)
 	}
 	declined := DeclinedSelectionJSON
 	if _, err := tx.Exec(
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
 		  WHERE id = ? AND selection_source IS NULL`,
-		declined, RoundSelectionSourceUserWaived, id,
+		declined, source, id,
 	); err != nil {
-		return fmt.Errorf("set step round declined: %w", err)
+		return fmt.Errorf("set step round decision: %w", err)
 	}
 	return nil
 }

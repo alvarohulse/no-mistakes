@@ -232,7 +232,7 @@ func TestExecutor_ApprovingValidationFindingsPersistsWaiver(t *testing.T) {
 	}
 }
 
-func TestExecutor_SkipAndAbortDoNotPersistWaivers(t *testing.T) {
+func TestExecutor_SkipAndAbortPersistDistinctDecisionReceipts(t *testing.T) {
 	for _, action := range []types.ApprovalAction{types.ActionSkip, types.ActionAbort} {
 		t.Run(string(action), func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
@@ -275,8 +275,60 @@ func TestExecutor_SkipAndAbortDoNotPersistWaivers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(rounds) != 1 || rounds[0].Decision != nil {
-				t.Fatalf("non-waiver action recorded a decision: %#v", rounds)
+			if len(rounds) != 1 {
+				t.Fatalf("rounds = %#v, want one terminal-decision round", rounds)
+			}
+			wantSource := db.RoundSelectionSourceUserSkipped
+			if action == types.ActionAbort {
+				wantSource = db.RoundSelectionSourceUserAborted
+			}
+			decision := rounds[0].Decision
+			if decision == nil || decision.Source != wantSource || !decision.ExplicitEmpty || len(decision.Findings) != 1 || decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+				t.Fatalf("terminal action decision = %#v, want explicit empty %s receipt", decision, wantSource)
+			}
+		})
+	}
+}
+
+func TestExecutor_ResumeSkipAndAbortPersistDistinctDecisionReceipts(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionSkip, types.ActionAbort} {
+		t.Run(string(action), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			run, stepResult := persistStructuredParkedBuildGate(t, database, run)
+			executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+			done := make(chan error, 1)
+			go func() {
+				done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if err := executor.Respond(types.StepBuild, action, nil); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("recovered gate never accepted response")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := <-done; (action == types.ActionAbort && err == nil) || (action == types.ActionSkip && err != nil) {
+				t.Fatalf("recovered %s result = %v", action, err)
+			}
+
+			rounds, err := database.GetRoundsByStep(stepResult.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 {
+				t.Fatalf("rounds = %#v, want one terminal-decision round", rounds)
+			}
+			wantSource := db.RoundSelectionSourceUserSkipped
+			if action == types.ActionAbort {
+				wantSource = db.RoundSelectionSourceUserAborted
+			}
+			decision := rounds[0].Decision
+			if decision == nil || decision.Source != wantSource || !decision.ExplicitEmpty || len(decision.Findings) != 1 || decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+				t.Fatalf("recovered terminal action decision = %#v, want explicit empty %s receipt", decision, wantSource)
 			}
 		})
 	}
@@ -787,6 +839,8 @@ func TestExecutor_ResumeTerminalizesGateWhenDecisionPersistenceFails(t *testing.
 		findingIDs []string
 	}{
 		{name: "waiver", action: types.ActionApprove},
+		{name: "skip", action: types.ActionSkip},
+		{name: "abort", action: types.ActionAbort},
 		{name: "user fix", action: types.ActionFix, findingIDs: []string{"build-1"}},
 	}
 	for _, test := range tests {

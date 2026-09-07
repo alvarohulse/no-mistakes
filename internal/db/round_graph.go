@@ -135,7 +135,12 @@ func validRoundEvaluationKind(kind string) bool {
 }
 
 func validRoundDecisionSource(source string) bool {
-	return source == RoundSelectionSourceUser || source == RoundSelectionSourceAutoFix || source == RoundSelectionSourceUserDeclined
+	switch source {
+	case RoundSelectionSourceUser, RoundSelectionSourceAutoFix, RoundSelectionSourceUserDeclined, RoundSelectionSourceUserSkipped, RoundSelectionSourceUserAborted:
+		return true
+	default:
+		return false
+	}
 }
 
 func validRoundRepairResult(result string) bool {

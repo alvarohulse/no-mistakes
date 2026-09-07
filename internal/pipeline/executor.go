@@ -519,15 +519,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	case types.ActionSkip:
-		e.recordSkipExplanation(gate.stepResult.ID, "Step was skipped by the user at its approval gate.")
-		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
+		if err := e.db.CompleteStepWithUserSkipDecision(gate.lastRoundID, gate.stepResult.ID, run.ID, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			return failRecoveredGatePersistence(fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err))
 		}
+		e.recordSkipExplanation(gate.stepResult.ID, "Step was skipped by the user at its approval gate.")
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	case types.ActionAbort:
-		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
+		if err := e.db.FailStepWithUserAbortDecision(gate.lastRoundID, gate.stepResult.ID, run.ID, duration); err != nil {
+			return failRecoveredGatePersistence(fmt.Errorf("abort recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
@@ -1293,16 +1293,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		case types.ActionSkip:
 			// Skip - mark step skipped and return (not an error)
-			e.recordSkipExplanation(sr.ID, "Step was skipped by the user at its approval gate.")
-			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
-				return false, fmt.Errorf("complete step %s (skip): %w", stepName, err)
+			if err := e.db.CompleteStepWithUserSkipDecision(currentRoundID, sr.ID, run.ID, finalExitCode, executionMS, logPath); err != nil {
+				return failStepPersistence(fmt.Errorf("complete step %s (skip): %w", stepName, err))
 			}
+			e.recordSkipExplanation(sr.ID, "Step was skipped by the user at its approval gate.")
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", &executionMS)
 			return false, nil
 
 		case types.ActionAbort:
-			if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
-				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+			if err := e.db.FailStepWithUserAbortDecision(currentRoundID, sr.ID, run.ID, executionMS); err != nil {
+				return failStepPersistence(fmt.Errorf("abort step %s: %w", stepName, err))
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
 			return false, fmt.Errorf("step %s: aborted by user", stepName)
