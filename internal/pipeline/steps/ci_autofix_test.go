@@ -1020,8 +1020,13 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 	if fixCount != 2 {
 		t.Fatalf("CI fixes across restart = %d, want one automatic plus the explicit user fix", fixCount)
 	}
-	if resumedOutcome.RepairAudit.Result != pipeline.RepairResultAttemptLimit {
-		t.Fatalf("recovered repair audit = %+v, want exhausted persisted budget", resumedOutcome.RepairAudit)
+	rounds, err = sctx.DB.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := rounds[len(rounds)-1]
+	if latest.Trigger != db.RoundTriggerAutoFix || latest.Repair == nil || latest.Repair.Result == nil || *latest.Repair.Result != pipeline.RepairResultAttemptLimit {
+		t.Fatalf("latest persisted repair = %#v, want exhausted persisted budget", latest.Repair)
 	}
 }
 
@@ -1112,9 +1117,12 @@ func TestCIStep_RecoveredLegacyBudgetAllowsOnlyExplicitUserFix(t *testing.T) {
 		if roundsErr != nil {
 			t.Fatal(roundsErr)
 		}
-		if len(rounds) >= 2 && rounds[len(rounds)-1].RepairResult != nil {
-			repairResult = *rounds[len(rounds)-1].RepairResult
-			break
+		if fixCount.Load() == 1 && len(rounds) >= 2 {
+			repair := rounds[len(rounds)-1].Repair
+			if repair != nil && repair.Result != nil && *repair.Result == pipeline.RepairResultAttemptLimit {
+				repairResult = *repair.Result
+				break
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
