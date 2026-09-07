@@ -2,18 +2,25 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runner"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -26,6 +33,198 @@ func (s *RefreshStep) Name() types.StepName { return types.StepRefresh }
 
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
+const maxRefreshDiagnosticBytes = 32 * 1024
+
+type refreshCommandExitError struct {
+	command string
+	code    int
+	output  string
+}
+
+func (e *refreshCommandExitError) Error() string {
+	if strings.TrimSpace(e.output) == "" {
+		return fmt.Sprintf("git %s exited with code %d", e.command, e.code)
+	}
+	return fmt.Sprintf("git %s exited with code %d: %s", e.command, e.code, safeurl.RedactText(strings.TrimSpace(e.output)))
+}
+
+func (e *refreshCommandExitError) ExitCode() int { return e.code }
+
+type refreshReceiptRecorder struct {
+	sctx                 *pipeline.StepContext
+	strategy             types.RefreshStrategy
+	sourceRef            string
+	authoritativeBaseRef string
+	authoritativeBaseSHA string
+	enabled              bool
+}
+
+type refreshOperationBuilder struct {
+	recorder             *refreshReceiptRecorder
+	targetRef            string
+	startingHeadSHA      string
+	startedAt            time.Time
+	commandAttemptIDs    []string
+	diagnosticArtifactID *string
+}
+
+func newRefreshReceiptRecorder(sctx *pipeline.StepContext, strategy types.RefreshStrategy, sourceRef, authoritativeBaseRef, authoritativeBaseSHA string) *refreshReceiptRecorder {
+	return &refreshReceiptRecorder{
+		sctx:                 sctx,
+		strategy:             strategy.OrDefault(),
+		sourceRef:            sourceRef,
+		authoritativeBaseRef: authoritativeBaseRef,
+		authoritativeBaseSHA: authoritativeBaseSHA,
+		enabled:              sctx != nil && sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" && sctx.Paths != nil,
+	}
+}
+
+func (r *refreshReceiptRecorder) begin(targetRef string) *refreshOperationBuilder {
+	startingHead := ""
+	if r != nil && r.sctx != nil {
+		startingHead = strings.TrimSpace(r.sctx.Run.HeadSHA)
+		if headSHA, err := git.HeadSHA(r.sctx.Ctx, r.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
+			startingHead = strings.TrimSpace(headSHA)
+		}
+	}
+	if startingHead == "" {
+		startingHead = git.EmptyTreeSHA
+	}
+	return &refreshOperationBuilder{
+		recorder:        r,
+		targetRef:       targetRef,
+		startingHeadSHA: startingHead,
+		startedAt:       time.Now(),
+	}
+}
+
+func (r *refreshReceiptRecorder) recordRefusal(targetRef string, decision db.RefreshDecision, reason string) error {
+	operation := r.begin(targetRef)
+	return operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, reason)
+}
+
+func (o *refreshOperationBuilder) refreshScopeAttemptIDs() (map[string]struct{}, error) {
+	ids := make(map[string]struct{})
+	if o == nil || o.recorder == nil || !o.recorder.enabled {
+		return ids, nil
+	}
+	attempts, err := o.recorder.sctx.DB.GetCommandAttemptsByRun(o.recorder.sctx.Run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load refresh command attempts: %w", err)
+	}
+	for _, attempt := range attempts {
+		if attempt.StepID != o.recorder.sctx.StepResultID || attempt.RoundID != o.recorder.sctx.RoundID {
+			continue
+		}
+		ids[attempt.ID] = struct{}{}
+	}
+	return ids, nil
+}
+
+func (o *refreshOperationBuilder) captureAttemptsStartedAfter(before map[string]struct{}) error {
+	if o == nil || o.recorder == nil || !o.recorder.enabled {
+		return nil
+	}
+	after, err := o.refreshScopeAttemptIDs()
+	if err != nil {
+		return err
+	}
+	for attemptID := range after {
+		if _, alreadyPresent := before[attemptID]; alreadyPresent {
+			continue
+		}
+		alreadyLinked := false
+		for _, existingID := range o.commandAttemptIDs {
+			if existingID == attemptID {
+				alreadyLinked = true
+				break
+			}
+		}
+		if alreadyLinked {
+			continue
+		}
+		o.commandAttemptIDs = append(o.commandAttemptIDs, attemptID)
+	}
+	return nil
+}
+
+func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictState db.RefreshConflictState, repairState db.RefreshRepairState, diagnostic string) error {
+	if o == nil || o.recorder == nil || !o.recorder.enabled {
+		return nil
+	}
+	resultingHead := o.startingHeadSHA
+	if headSHA, err := git.HeadSHA(o.recorder.sctx.Ctx, o.recorder.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
+		resultingHead = strings.TrimSpace(headSHA)
+	}
+	if o.diagnosticArtifactID == nil && len(o.commandAttemptIDs) == 0 && strings.TrimSpace(diagnostic) != "" {
+		store, err := artifact.NewStore(o.recorder.sctx.Paths, "")
+		if err != nil {
+			return fmt.Errorf("create refresh diagnostic store: %w", err)
+		}
+		targetDigest := sha256.Sum256([]byte(o.targetRef))
+		name := fmt.Sprintf("refresh-%s-%x", o.recorder.sctx.RoundID, targetDigest[:8])
+		metadata, err := store.CreateOperationDiagnostic(o.recorder.sctx.Run.ID, name, boundedRefreshDiagnostic(diagnostic))
+		if err != nil {
+			return fmt.Errorf("create refresh diagnostic: %w", err)
+		}
+		metadata.RunID = o.recorder.sctx.Run.ID
+		metadata.StepID = refreshStringPointer(o.recorder.sctx.StepResultID)
+		metadata.RoundID = refreshStringPointer(o.recorder.sctx.RoundID)
+		registered, err := o.recorder.sctx.DB.RegisterArtifact(metadata)
+		if err != nil {
+			return fmt.Errorf("register refresh diagnostic: %w", err)
+		}
+		o.diagnosticArtifactID = &registered.ID
+	}
+	completedAt := time.Now()
+	operation := db.RefreshOperation{
+		RunID:                o.recorder.sctx.Run.ID,
+		StepID:               o.recorder.sctx.StepResultID,
+		RoundID:              o.recorder.sctx.RoundID,
+		Strategy:             o.recorder.strategy,
+		SourceRef:            o.recorder.sourceRef,
+		DestinationRef:       o.targetRef,
+		AuthoritativeBaseRef: o.recorder.authoritativeBaseRef,
+		AuthoritativeBaseSHA: o.recorder.authoritativeBaseSHA,
+		StartingHeadSHA:      o.startingHeadSHA,
+		Decision:             decision,
+		ResultingHeadSHA:     resultingHead,
+		ConflictState:        conflictState,
+		RepairState:          repairState,
+		CommandAttemptIDs:    append([]string(nil), o.commandAttemptIDs...),
+		StartedAt:            o.startedAt.UnixMilli(),
+		CompletedAt:          completedAt.UnixMilli(),
+		DurationMS:           maxInt64(0, completedAt.Sub(o.startedAt).Milliseconds()),
+		DiagnosticArtifactID: o.diagnosticArtifactID,
+	}
+	if _, err := o.recorder.sctx.DB.InsertRefreshOperation(operation); err != nil {
+		return fmt.Errorf("insert refresh receipt: %w", err)
+	}
+	return nil
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func refreshStringPointer(value string) *string { return &value }
+
+func boundedRefreshDiagnostic(value string) []byte {
+	value = safeurl.RedactText(strings.TrimSpace(value))
+	if len(value) <= maxRefreshDiagnosticBytes {
+		return []byte(value)
+	}
+	marker := "\n… [refresh diagnostic truncated]"
+	limit := maxRefreshDiagnosticBytes - len(marker)
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return []byte(value[:limit] + marker)
+}
+
 func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
@@ -35,6 +234,16 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	}
 	baseBranch := refreshBaseBranch(sctx, defaultBranch)
 	strategy := sctx.Run.RefreshStrategy.OrDefault()
+	sourceRef := strings.TrimSpace(sctx.Run.Branch)
+	if sourceRef == "" {
+		sourceRef = "HEAD"
+	}
+	authoritativeBaseRef := "origin/" + baseBranch
+	authoritativeBaseSHA := strings.TrimSpace(sctx.Run.BaseSHA)
+	if authoritativeBaseSHA == "" || git.IsZeroSHA(authoritativeBaseSHA) {
+		authoritativeBaseSHA = git.EmptyTreeSHA
+	}
+	receipts := newRefreshReceiptRecorder(sctx, strategy, sourceRef, authoritativeBaseRef, authoritativeBaseSHA)
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -53,7 +262,18 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 
 	sctx.Log("fetching latest upstream state...")
 	if err := fetchRunUpstreamBranch(ctx, sctx, baseBranch); err != nil {
-		return nil, fmt.Errorf("fetch authoritative base origin/%s: %w", baseBranch, err)
+		wrappedErr := fmt.Errorf("fetch authoritative base origin/%s: %w", baseBranch, err)
+		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionError, wrappedErr.Error()); receiptErr != nil {
+			wrappedErr = errors.Join(wrappedErr, receiptErr)
+		}
+		return nil, wrappedErr
+	}
+	if baseSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", authoritativeBaseRef+"^{commit}"); err == nil && strings.TrimSpace(baseSHA) != "" {
+		receipts.authoritativeBaseSHA = strings.TrimSpace(baseSHA)
+	} else if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionError, fmt.Sprintf("resolve authoritative base %s: %v", authoritativeBaseRef, err)); receiptErr != nil {
+		return nil, errors.Join(fmt.Errorf("resolve authoritative base %s: %w", authoritativeBaseRef, err), receiptErr)
+	} else {
+		return nil, fmt.Errorf("resolve authoritative base %s: %w", authoritativeBaseRef, err)
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
 	// onto it (a normal push). On a force push we deliberately skip both the fetch
@@ -80,6 +300,9 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	// origin/<default>. The check also applies to stacked branches unless their
 	// effective base already carries those commits.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, baseBranch); outcome != nil {
+		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionRefused, outcome.Findings); receiptErr != nil {
+			return nil, receiptErr
+		}
 		return outcome, nil
 	}
 	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
@@ -91,6 +314,9 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 			}},
 			Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
 		})
+		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionRefused, string(findingsJSON)); receiptErr != nil {
+			return nil, receiptErr
+		}
 		return &pipeline.StepOutcome{
 			NeedsApproval: true,
 			Findings:      string(findingsJSON),
@@ -105,7 +331,7 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 
 	if sctx.Fixing {
 		for _, target := range targets {
-			if err := refreshWithAgent(ctx, sctx, strategy, target); err != nil {
+			if err := refreshWithAgent(ctx, sctx, strategy, target, receipts); err != nil {
 				return nil, err
 			}
 		}
@@ -116,7 +342,7 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	var conflictTargets []string
 	var conflictFindings []Finding
 	for _, target := range targets {
-		conflictFiles, err := tryRefresh(ctx, sctx, strategy, target)
+		conflictFiles, err := tryRefresh(ctx, sctx, strategy, target, receipts)
 		if err != nil {
 			return nil, err
 		}
@@ -362,23 +588,23 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
-func tryRefresh(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string) ([]string, error) {
+func tryRefresh(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string, receipts *refreshReceiptRecorder) ([]string, error) {
 	switch strategy.OrDefault() {
 	case types.RefreshStrategyRebase:
-		return tryRebase(ctx, sctx, targetRef)
+		return tryRebase(ctx, sctx, targetRef, receipts)
 	case types.RefreshStrategyMerge:
-		return tryMerge(ctx, sctx, targetRef)
+		return tryMerge(ctx, sctx, targetRef, receipts)
 	default:
 		return nil, fmt.Errorf("unsupported refresh strategy %q", strategy)
 	}
 }
 
-func refreshWithAgent(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string) error {
+func refreshWithAgent(ctx context.Context, sctx *pipeline.StepContext, strategy types.RefreshStrategy, targetRef string, receipts *refreshReceiptRecorder) error {
 	switch strategy.OrDefault() {
 	case types.RefreshStrategyRebase:
-		return rebaseWithAgent(ctx, sctx, targetRef)
+		return rebaseWithAgent(ctx, sctx, targetRef, receipts)
 	case types.RefreshStrategyMerge:
-		return mergeWithAgent(ctx, sctx, targetRef)
+		return mergeWithAgent(ctx, sctx, targetRef, receipts)
 	default:
 		return fmt.Errorf("unsupported refresh strategy %q", strategy)
 	}
@@ -393,53 +619,71 @@ func refreshConflictDescription(strategy types.RefreshStrategy, targetRef string
 
 // tryRebase attempts a rebase onto targetRef. Returns conflicted files when the
 // rebase stops on merge conflicts. The rebase is aborted before returning.
-func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
-	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string, receipts *refreshReceiptRecorder) ([]string, error) {
+	operation := receipts.begin(targetRef)
+	decision, err := prepareRefreshTarget(ctx, sctx, targetRef, operation)
 	if err != nil {
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, err.Error()); receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+		}
 		return nil, err
 	}
-	if skip {
+	if decision != "" {
+		if receiptErr := operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); receiptErr != nil {
+			return nil, receiptErr
+		}
 		return nil, nil
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	rebaseCommand := "git rebase " + targetRef
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
-		recordRefreshCommand(sctx, rebaseCommand, err)
+	if _, err := runRefreshPrimary(ctx, sctx, operation, "rebase", targetRef); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
 		if len(conflictFiles) == 0 {
+			if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, err.Error()); receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+			}
 			return nil, fmt.Errorf("rebase onto %s: %w", targetRef, err)
+		}
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""); receiptErr != nil {
+			return nil, receiptErr
 		}
 		return conflictFiles, nil
 	}
-	recordRefreshCommand(sctx, rebaseCommand, nil)
+	if receiptErr := operation.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); receiptErr != nil {
+		return nil, receiptErr
+	}
 	return nil, nil
 }
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
-func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string, receipts *refreshReceiptRecorder) error {
+	operation := receipts.begin(targetRef)
+	decision, err := prepareRefreshTarget(ctx, sctx, targetRef, operation)
 	if err != nil {
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateFailed, err.Error()); receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+		}
 		return err
 	}
-	if skip {
-		return nil
+	if decision != "" {
+		return operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, "")
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	rebaseCommand := "git rebase " + targetRef
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
-		recordRefreshCommand(sctx, rebaseCommand, nil)
-		return nil
-	} else {
-		recordRefreshCommand(sctx, rebaseCommand, err)
+	_, err = runRefreshPrimary(ctx, sctx, operation, "rebase", targetRef)
+	if err == nil {
+		return operation.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, "")
 	}
 
 	if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		return fmt.Errorf("rebase onto %s failed (no conflicts detected)", targetRef)
+		operationErr := fmt.Errorf("rebase onto %s failed (no conflicts detected): %w", targetRef, err)
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateFailed, operationErr.Error()); receiptErr != nil {
+			operationErr = errors.Join(operationErr, receiptErr)
+		}
+		return operationErr
 	}
 	sctx.Log("conflicts detected, asking agent to resolve...")
 	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
@@ -477,65 +721,91 @@ Instructions:
 	})
 	if err != nil {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		return fmt.Errorf("agent resolve conflicts: %w", err)
+		repairErr := fmt.Errorf("agent resolve conflicts: %w", err)
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
+			repairErr = errors.Join(repairErr, receiptErr)
+		}
+		return repairErr
 	}
 
 	// Verify rebase completed (no rebase still in progress)
 	if rebaseInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		return fmt.Errorf("agent did not complete the rebase")
+		repairErr := fmt.Errorf("agent did not complete the rebase")
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
+			repairErr = errors.Join(repairErr, receiptErr)
+		}
+		return repairErr
 	}
 
 	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the rebase conflicts onto %s; no rebase remained in progress.", targetRef))
-	return nil
+	return operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, "")
 }
 
-func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
-	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string, receipts *refreshReceiptRecorder) ([]string, error) {
+	operation := receipts.begin(targetRef)
+	decision, err := prepareRefreshTarget(ctx, sctx, targetRef, operation)
 	if err != nil {
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, err.Error()); receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+		}
 		return nil, err
 	}
-	if skip {
+	if decision != "" {
+		if receiptErr := operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); receiptErr != nil {
+			return nil, receiptErr
+		}
 		return nil, nil
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	mergeCommand := "git merge --no-edit " + targetRef
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err != nil {
-		recordRefreshCommand(sctx, mergeCommand, err)
+	if _, err := runRefreshPrimary(ctx, sctx, operation, "merge", "--no-edit", targetRef); err != nil {
 		conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		if len(conflictFiles) == 0 {
+			if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, err.Error()); receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+			}
 			return nil, fmt.Errorf("merge %s: %w", targetRef, err)
+		}
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""); receiptErr != nil {
+			return nil, receiptErr
 		}
 		return conflictFiles, nil
 	}
-	recordRefreshCommand(sctx, mergeCommand, nil)
+	if receiptErr := operation.finish(db.RefreshDecisionMerged, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); receiptErr != nil {
+		return nil, receiptErr
+	}
 	return nil, nil
 }
 
-func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := prepareRefreshTarget(ctx, sctx, targetRef)
+func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string, receipts *refreshReceiptRecorder) error {
+	operation := receipts.begin(targetRef)
+	decision, err := prepareRefreshTarget(ctx, sctx, targetRef, operation)
 	if err != nil {
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateFailed, err.Error()); receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+		}
 		return err
 	}
-	if skip {
-		return nil
+	if decision != "" {
+		return operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, "")
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	mergeCommand := "git merge --no-edit " + targetRef
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge", "--no-edit", targetRef); err == nil {
-		recordRefreshCommand(sctx, mergeCommand, nil)
-		return nil
-	} else {
-		recordRefreshCommand(sctx, mergeCommand, err)
+	_, err = runRefreshPrimary(ctx, sctx, operation, "merge", "--no-edit", targetRef)
+	if err == nil {
+		return operation.finish(db.RefreshDecisionMerged, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, "")
 	}
 
 	conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
 	if len(conflictFiles) == 0 {
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
-		return fmt.Errorf("merge %s failed (no conflicts detected)", targetRef)
+		operationErr := fmt.Errorf("merge %s failed (no conflicts detected): %w", targetRef, err)
+		if receiptErr := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateFailed, operationErr.Error()); receiptErr != nil {
+			operationErr = errors.Join(operationErr, receiptErr)
+		}
+		return operationErr
 	}
 	sctx.Log("conflicts detected, asking agent to resolve...")
 	prompt := fmt.Sprintf(
@@ -570,14 +840,22 @@ Instructions:
 	})
 	if err != nil {
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
-		return fmt.Errorf("agent resolve conflicts: %w", err)
+		repairErr := fmt.Errorf("agent resolve conflicts: %w", err)
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
+			repairErr = errors.Join(repairErr, receiptErr)
+		}
+		return repairErr
 	}
 	if mergeInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
-		return fmt.Errorf("agent did not complete the merge")
+		repairErr := fmt.Errorf("agent did not complete the merge")
+		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
+			repairErr = errors.Join(repairErr, receiptErr)
+		}
+		return repairErr
 	}
 	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the merge conflicts from %s; no merge remained in progress.", targetRef))
-	return nil
+	return operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, "")
 }
 
 func recordRefreshCommand(sctx *pipeline.StepContext, command string, runErr error) {
@@ -586,7 +864,7 @@ func recordRefreshCommand(sctx *pipeline.StepContext, command string, runErr err
 		sctx.RecordCommand(command, &zero, nil)
 		return
 	}
-	var exitErr *exec.ExitError
+	var exitErr interface{ ExitCode() int }
 	if errors.As(runErr, &exitErr) {
 		exitCode := exitErr.ExitCode()
 		sctx.RecordCommand(command, &exitCode, nil)
@@ -595,36 +873,120 @@ func recordRefreshCommand(sctx *pipeline.StepContext, command string, runErr err
 	sctx.RecordCommand(command, nil, runErr)
 }
 
+func runRefreshPrimary(ctx context.Context, sctx *pipeline.StepContext, operation *refreshOperationBuilder, args ...string) (string, error) {
+	command := refreshGitCommand(sctx, args...)
+	if operation == nil || operation.recorder == nil || !operation.recorder.enabled {
+		output, err := git.Run(ctx, sctx.WorkDir, args...)
+		recordRefreshCommand(sctx, command, err)
+		return output, err
+	}
+
+	before, err := operation.refreshScopeAttemptIDs()
+	if err != nil {
+		return "", err
+	}
+	output, exitCode, err := runStepRunnerCommand(sctx, runnerCommand(command), string(types.StepRefresh))
+	if captureErr := operation.captureAttemptsStartedAfter(before); captureErr != nil {
+		err = errors.Join(err, captureErr)
+	}
+	if err != nil {
+		return output, err
+	}
+	if exitCode != 0 {
+		return output, &refreshCommandExitError{command: strings.TrimPrefix(command, "git "), code: exitCode, output: output}
+	}
+	return output, nil
+}
+
+func runnerCommand(command string) runner.Command {
+	return runner.Command{Run: command}
+}
+
+func refreshGitCommand(sctx *pipeline.StepContext, args ...string) string {
+	parts := []string{"git"}
+	powershell := runtime.GOOS == "windows"
+	if sctx != nil && sctx.Config != nil {
+		switch strings.ToLower(strings.TrimSpace(sctx.Config.Runner.Executable)) {
+		case "pwsh", "powershell":
+			powershell = true
+		case "sh", "bash", "zsh":
+			powershell = false
+		}
+	}
+	gitArgs := args
+	if sctx != nil && git.LooksLikeBareRepository(sctx.WorkDir) {
+		gitArgs = append([]string{"--git-dir=" + sctx.WorkDir}, gitArgs...)
+	}
+	for _, arg := range gitArgs {
+		if refreshShellWordSafe(arg) {
+			parts = append(parts, arg)
+			continue
+		}
+		if powershell {
+			parts = append(parts, refreshPowerShellQuote(arg))
+		} else {
+			parts = append(parts, refreshPOSIXQuote(arg))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func refreshShellWordSafe(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '/', '.', '_', ':', '@', '+', ',', '-', '=', '%':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func refreshPOSIXQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func refreshPowerShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 // prepareRefreshTarget checks whether incorporating targetRef can be skipped.
-// Returns true if targetRef doesn't exist, is already merged, or can be fast-forwarded.
-func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, error) {
+// Returns a semantic decision when no rebase or merge remains necessary.
+func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targetRef string, operation *refreshOperationBuilder) (db.RefreshDecision, error) {
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", targetRef); err != nil {
-		return true, nil
+		return db.RefreshDecisionSkipped, nil
 	}
 	localSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return false, fmt.Errorf("get local head: %w", err)
+		return "", fmt.Errorf("get local head: %w", err)
 	}
 	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
 	if err != nil {
-		return false, fmt.Errorf("get target head %s: %w", targetRef, err)
+		return "", fmt.Errorf("get target head %s: %w", targetRef, err)
 	}
 	if localSHA == targetSHA {
 		sctx.Log(fmt.Sprintf("already up-to-date with %s", targetRef))
-		return true, nil
+		return db.RefreshDecisionSkipped, nil
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err == nil {
 		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
-		return true, nil
+		return db.RefreshDecisionSkipped, nil
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
-		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetRef); err != nil {
-			return false, fmt.Errorf("fast-forward to %s: %w", targetRef, err)
+		if _, err := runRefreshPrimary(ctx, sctx, operation, "reset", "--hard", targetRef); err != nil {
+			return "", fmt.Errorf("fast-forward to %s: %w", targetRef, err)
 		}
-		return true, nil
+		return db.RefreshDecisionFastForwarded, nil
 	}
-	return false, nil
+	return "", nil
 }
 
 // rebaseInProgress returns true if a git rebase is currently in progress.
