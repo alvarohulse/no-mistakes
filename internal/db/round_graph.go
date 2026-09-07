@@ -797,9 +797,6 @@ func CompatibilityFindingsJSON(evaluation *StepRoundEvaluation) (*string, error)
 	for _, item := range evaluation.Findings {
 		findings.Items = append(findings.Items, types.Finding{ID: item.ExternalID, Severity: item.Severity, File: item.File, Line: item.Line, Description: item.Description, Action: item.Action, Source: item.Source, UserInstructions: item.UserInstructions, ReviewScope: item.ReviewScope})
 	}
-	if len(findings.Items) == 0 && findings.Summary == "" && len(findings.Tested) == 0 && len(findings.Artifacts) == 0 && findings.TestingSummary == "" && findings.RiskLevel == "" && findings.RiskRationale == "" && findings.RiskScope == "" {
-		return nil, nil
-	}
 	raw, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return nil, err

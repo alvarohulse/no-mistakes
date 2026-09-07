@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,6 +137,52 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != db.DeclinedSelectionJSON {
 		t.Fatalf("approved review selection = %#v, want explicit empty selection", rounds[0].SelectedFindingIDs)
+	}
+}
+
+func TestExecutorRecoveredGateKeepsEmptyStructuredFindingsAsArray(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(stepResult.ID, 1, db.RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(round.ID, db.StepRoundEvaluation{
+		Kind:     db.RoundEvaluationValidation,
+		Findings: []db.StepRoundFinding{},
+	}, db.StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].FindingsJSON == nil {
+		t.Fatalf("structured empty findings projection = %#v", rounds)
+	}
+	if strings.Contains(*rounds[0].FindingsJSON, `"findings":null`) || !strings.Contains(*rounds[0].FindingsJSON, `"findings":[]`) {
+		t.Fatalf("empty findings projection = %s, want findings array", *rounds[0].FindingsJSON)
+	}
+	if err := database.SetStepFindings(stepResult.ID, *rounds[0].FindingsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+	gate, err := executor.recoveredGate(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.findings != *rounds[0].FindingsJSON {
+		t.Fatalf("recovered findings = %q, want %q", gate.findings, *rounds[0].FindingsJSON)
 	}
 }
 
