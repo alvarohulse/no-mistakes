@@ -53,11 +53,9 @@ func (m *RunManager) parkPostWorktreeFailure(ctx context.Context, run *db.Run, r
 	if terminalMessage == types.RunCancelReasonAbortedByUser || terminalMessage == types.RunCancelReasonSuperseded {
 		terminalStatus = types.RunCancelled
 	}
-	if err := m.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkedAt).Milliseconds()); err != nil {
-		slog.Warn("failed to complete post-worktree hook park", "run_id", run.ID, "error", err)
-	}
-	if err := m.db.UpdateRunErrorStatus(run.ID, terminalMessage, terminalStatus); err != nil {
+	if err := m.db.TerminalizeAwaitingRun(run.ID, terminalMessage, terminalStatus, time.Since(parkedAt).Milliseconds()); err != nil {
 		slog.Error("failed to finish post-worktree hook park", "run_id", run.ID, "error", err)
+		return errors.Join(errors.New(terminalMessage), fmt.Errorf("persist terminal post-worktree hook park: %w", err))
 	}
 	run.Status = terminalStatus
 	run.Error = &terminalMessage

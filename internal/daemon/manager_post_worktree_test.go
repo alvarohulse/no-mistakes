@@ -172,6 +172,56 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 			t.Fatalf("failed fallback broadcast false terminal event: %+v", event)
 		}
 	})
+
+	t.Run("terminal write failure keeps successful park authoritative", func(t *testing.T) {
+		p, database := newRefreshRunFixture(t)
+		repo, _ := database.InsertRepo("/tmp/post-worktree-terminal", "https://github.com/test/terminal", "main")
+		run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		installRunUpdateTrigger(t, p.DB(), `
+			CREATE TRIGGER reject_post_worktree_terminalization
+			BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled'
+			BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;
+		`)
+
+		manager := NewRunManager(database, p, nil)
+		subscription, err := manager.Subscribe(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer subscription.Close()
+		if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+			t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+		}
+
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errors.New(types.RunCancelReasonAbortedByUser))
+		if err := manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed")); err == nil {
+			t.Fatal("parkPostWorktreeFailure() error = nil")
+		}
+
+		got, err := database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.RunRunning || got.AwaitingAgentSince == nil || got.Error == nil || *got.Error != "hook failed" {
+			t.Fatalf("terminal write failure persisted status=%s awaiting=%v error=%v, want running parked hook failure", got.Status, got.AwaitingAgentSince, got.Error)
+		}
+		if run.Status != types.RunRunning || run.Error == nil || *run.Error != "hook failed" {
+			t.Fatalf("terminal write failure mutated in-memory run: status=%s error=%v", run.Status, run.Error)
+		}
+
+		if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventRunUpdated {
+			t.Fatalf("park event = (%+v, %v), want updated parked state", event, ok)
+		}
+		readCtx, stopRead := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer stopRead()
+		if event, ok := subscription.Next(readCtx); ok {
+			t.Fatalf("terminal write failure broadcast false terminal event: %+v", event)
+		}
+	})
 }
 
 type assertPostWorktreeEffectStep struct {

@@ -901,6 +901,29 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 	return nil
 }
 
+// TerminalizeAwaitingRun durably completes a parked run in one write. Its
+// status, diagnostic, awaiting marker, and parked duration must move together:
+// a caller must never observe a terminal event for a run whose park remains.
+func (d *DB) TerminalizeAwaitingRun(id, errMsg string, status types.RunStatus, ms int64) error {
+	if status != types.RunCompleted && status != types.RunFailed && status != types.RunCancelled {
+		return fmt.Errorf("terminalize awaiting run: status %q is not terminal", status)
+	}
+	if ms < 0 {
+		ms = 0
+	}
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, push_active = 0,
+			terminal_head_verified_at = NULL,
+			parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
+			awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`,
+		errMsg, status, ms, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("terminalize awaiting run: %w", err)
+	}
+	return nil
+}
+
 // RecoverStaleRuns marks any runs stuck in pending/running status as failed
 // and fails any in-progress steps. This is called at daemon startup to clean
 // up after a previous crash. Returns the number of recovered runs.

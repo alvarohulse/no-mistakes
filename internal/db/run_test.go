@@ -462,6 +462,43 @@ func TestParkRunForEnvironmentFailureIsActiveAndStepIndependent(t *testing.T) {
 	}
 }
 
+func TestTerminalizeAwaitingRunClearsParkAndAccruesDurationOnce(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/terminal-park", "git@github.com:user/terminal-park.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkRunForEnvironmentFailure(run.ID, "post-worktree hook failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.TerminalizeAwaitingRun(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, 1_500); err != nil {
+		t.Fatalf("terminalize parked run: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCancelled || got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("terminalized run = status %s error %v, want cancelled with terminal error", got.Status, got.Error)
+	}
+	if got.AwaitingAgentSince != nil || got.ParkedMS != 1_500 {
+		t.Fatalf("terminalized park = awaiting %v parked_ms %d, want nil/1500", got.AwaitingAgentSince, got.ParkedMS)
+	}
+
+	if err := d.TerminalizeAwaitingRun(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, 1_500); err != nil {
+		t.Fatalf("repeat terminalization: %v", err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParkedMS != 1_500 {
+		t.Fatalf("repeat terminalization added parked time: %d, want 1500", got.ParkedMS)
+	}
+}
+
 func TestRecoverStaleRunsClearsAwaitingAgent(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
