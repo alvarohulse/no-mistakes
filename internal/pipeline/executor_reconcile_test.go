@@ -21,6 +21,7 @@ type reconcilingApprovalStep struct {
 	err       atomic.Pointer[error]
 	block     bool
 	started   chan struct{}
+	timedOut  chan struct{}
 	callStart chan int64
 	release   chan struct{}
 	startOnce atomic.Bool
@@ -48,6 +49,9 @@ func (s *reconcilingApprovalStep) ReconcileApprovalGate(sctx *StepContext) (bool
 	}
 	if s.block {
 		<-sctx.Ctx.Done()
+		if s.timedOut != nil {
+			close(s.timedOut)
+		}
 		return false, sctx.Ctx.Err()
 	}
 	if ptr := s.err.Load(); ptr != nil {
@@ -421,7 +425,7 @@ func TestExecutorResumeRemovesUnusedPreservedCommandPlanningWorkspace(t *testing
 
 func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	step := &reconcilingApprovalStep{name: types.StepCI, block: true, started: make(chan struct{})}
+	step := &reconcilingApprovalStep{name: types.StepCI, block: true, timedOut: make(chan struct{})}
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	exec.SetGateReconcileTimings(time.Hour, 25*time.Millisecond)
 
@@ -429,9 +433,9 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 	done := make(chan error, 1)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 	select {
-	case <-step.started:
+	case <-step.timedOut:
 	case <-time.After(3 * time.Second):
-		t.Fatal("gate reconciliation did not start")
+		t.Fatal("gate reconciliation deadline was not observed")
 	}
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
@@ -441,8 +445,8 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("blocking provider check was not bounded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("approved gate did not complete")
 	}
 }
 
