@@ -849,6 +849,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	repairProgress := NewRepairProgress(autoFixAttempts)
 	roundNum := state.roundNum
+	currentRoundID := state.currentRoundID
 
 	instrumentAgent := func(inner agent.Agent, reviewCandidatePool []db.ReviewCandidateReceipt) agent.Agent {
 		if inner == nil {
@@ -863,6 +864,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			runID:               run.ID,
 			stepName:            stepName,
 			round:               func() int { return roundNum + 1 },
+			roundID:             func() string { return currentRoundID },
 			reviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), reviewCandidatePool...),
 		}
 	}
@@ -932,7 +934,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	skipRemaining := false
 	stepSkipped := false
-	currentRoundID := state.currentRoundID
 	var reviewApprovedHeadSHA string
 
 	// Execute with possible fix loop
@@ -1002,15 +1003,35 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			s := outcome.FixSummary
 			fixSummaryPtr = &s
 		}
+		evaluation, evaluationErr := structuredRoundEvaluation(currentRoundID, run.ID, stepName, sctx.Fixing, outcome.Findings)
 		var dbErr error
-		if stepName == types.StepReview {
-			if e.config != nil && e.config.CaptureEvalProvenance {
-				dbErr = e.db.CompleteReviewStepRound(currentRoundID, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayConfigJSON, nil, nil, roundDuration)
-			} else {
-				dbErr = e.db.CompleteReviewStepRound(currentRoundID, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, "", "", nil, nil, nil, roundDuration)
-			}
+		if evaluationErr != nil {
+			dbErr = evaluationErr
 		} else {
-			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
+			resultingHead := run.HeadSHA
+			if observed, headErr := git.HeadSHA(ctx, workDir); headErr == nil && observed != "" {
+				resultingHead = observed
+			}
+			evaluatedHead := resultingHead
+			if stepName == types.StepReview {
+				// Only the Review outcome provides a candidate that may later be
+				// promoted by the existing completion/approval transaction.
+				evaluatedHead = reviewApprovedHeadSHA
+			}
+			subject := db.StructuredRoundSubject{
+				StartingHeadSHA:  roundStringPointer(reviewStartingHeadSHA),
+				ResultingHeadSHA: roundStringPointer(resultingHead),
+				EvaluatedHeadSHA: roundStringPointer(evaluatedHead),
+			}
+			if e.config != nil {
+				if e.config.TrustedConfigSHA != "" {
+					subject.TrustedConfigSHA = roundStringPointer(e.config.TrustedConfigSHA)
+				}
+				if stepName == types.StepReview && e.config.CaptureEvalProvenance {
+					subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
+				}
+			}
+			dbErr = e.db.CompleteStepRoundStructured(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration)
 		}
 		if dbErr != nil {
 			roundErr := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)

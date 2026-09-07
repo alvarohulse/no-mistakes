@@ -605,8 +605,14 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 	if rounds[0].Trigger != "initial" {
 		t.Fatalf("round 1 trigger = %q, want %q", rounds[0].Trigger, "initial")
 	}
+	if rounds[0].Evaluation == nil || rounds[0].Evaluation.Kind != db.RoundEvaluationInitialReview {
+		t.Fatalf("round 1 evaluation = %#v, want initial_review", rounds[0].Evaluation)
+	}
 	if rounds[1].Trigger != "auto_fix" {
 		t.Fatalf("round 2 trigger = %q, want %q", rounds[1].Trigger, "auto_fix")
+	}
+	if rounds[1].Evaluation == nil || rounds[1].Evaluation.Kind != db.RoundEvaluationRereview {
+		t.Fatalf("round 2 evaluation = %#v, want rereview", rounds[1].Evaluation)
 	}
 }
 

@@ -29,6 +29,9 @@ type perfRecordingAgent struct {
 	reviewCandidatePool []db.ReviewCandidateReceipt
 	// round returns the 1-based round the current invocation belongs to.
 	round func() int
+	// roundID returns the durable round identity. Standalone instrumentation
+	// may leave it nil, preserving historical invocation rows.
+	roundID func() string
 }
 
 func (a *perfRecordingAgent) Name() string { return a.inner.Name() }
@@ -155,6 +158,9 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 		DurationMS:          completedAt.Sub(startedAt).Milliseconds(),
 		ExitStatus:          "ok",
 		ReviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), a.reviewCandidatePool...),
+	}
+	if a.roundID != nil {
+		inv.RoundID = a.roundID()
 	}
 	configuredModel := agent.ConfiguredModel(a.inner)
 	inv.Model = configuredModel.Name

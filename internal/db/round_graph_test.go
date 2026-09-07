@@ -182,3 +182,30 @@ func TestLegacyUserFixNormalizesOnReadWithoutFabricatingEvaluation(t *testing.T)
 		t.Fatalf("legacy projection = %#v", rounds[0])
 	}
 }
+
+func TestStructuredRoundHydratesLinkedInvocationAttemptAndArtifactIDs(t *testing.T) {
+	database := openTestDB(t)
+	run, step, round, attempt := newAcceptedCommandProofFixture(t, database, true)
+	invocation, err := database.InsertAgentInvocation(AgentInvocation{
+		RunID: run.ID, StepName: string(types.StepTest), Round: 1, RoundID: round.ID,
+		Purpose: "test", Agent: "codex", SessionMode: InvocationModeCold,
+		StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{Kind: RoundEvaluationValidation}, StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 {
+		t.Fatalf("rounds = %#v", rounds)
+	}
+	got := rounds[0]
+	if len(got.InvocationIDs) != 1 || got.InvocationIDs[0] != invocation.ID || len(got.CommandAttemptIDs) != 1 || got.CommandAttemptIDs[0] != attempt.ID || len(got.ArtifactIDs) != 1 {
+		t.Fatalf("round references = %#v", got)
+	}
+}
