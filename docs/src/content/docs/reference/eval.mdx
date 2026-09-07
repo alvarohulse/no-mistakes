@@ -60,19 +60,14 @@ The replay configuration excludes commands, hooks, machine paths, agent argument
 
 The unit of truth is whether a review **finding** was a real issue, scored with scientific terms, not whether the run parked or passed.
 
-Capture writes gold from recorded gate evidence: human Fix and add-finding
-decisions, plus the merge-derived auto-fix and shipped-unfixed rules below. It
-reads the normalized round graph; the legacy field names below are compatibility
-projections of those records. A merged PR is not a case-level pass or fail:
+Capture writes gold from recorded gate evidence: human Fix and add-finding decisions, plus the merge-derived auto-fix and shipped-unfixed rules below. A merged PR is not a case-level pass or fail:
 
 - A finding the human selected for Fix (`selected_finding_ids` with a user source) is **true-positive** gold: that finding is a true issue. Merge is not required.
 - A finding the human added (`user_findings_json`, source `user`) is **false-negative** gold: the original review missed a real issue.
 - A finding selected by auto-fix on a source run that later **merged** is **true-positive** gold (`recorded-auto-fix-merged`). A later Review round does not rewrite that recorded decision. Closed-not-merged and still-open runs stay unlabeled.
 - A finding that was not selected for fixing in a round with a recorded gate decision and then **shipped in a merged PR** is **false-positive** gold (`recorded-shipped-unfixed`). Each round keeps its own decision even when a later round rewrites, re-raises, or drops the issue. Informational `no-op` findings are not labeled this way.
 - A confirmed post-PR miss ingested with `eval miss ingest` is also **false-negative** gold (`recorded-post-pr-miss`): review passed green, and a later vetted finding showed a real defect.
-- On an unmerged PR, an approved findings gate's explicit-empty `user_declined`
-  waiver, a skip or abort inferred from the step outcome, and a round with no
-  recorded decision stay **unlabeled / pending** until stronger evidence exists.
+- A persisted decline on an unmerged PR and a round with no recorded decision stay **unlabeled / pending** until stronger evidence exists.
 - A later replay that raises a new issue absent from the gold set is queued as an unmatched candidate finding. It is never auto-scored as a false positive.
 
 If a PR merges after the first capture, already-captured cases are relabeled. The daemon does this best-effort when it observes the merge; `eval relabel [run-id]` or recapture is the CLI path. Relabel recomputes merge-derived labels from each round's immutable recorded decision and drops obsolete derived labels when that decision or merge state no longer supports them. Adjudicated, user-fix, ingested post-PR-miss labels, and historical evaluation receipts are never overwritten.
