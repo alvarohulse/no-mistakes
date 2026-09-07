@@ -96,7 +96,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
 		}
 	}
-	for _, table := range []string{"round_evaluations", "round_findings", "round_decisions", "round_decision_findings", "round_repairs"} {
+	for _, table := range []string{"round_evaluations", "round_findings", "round_evaluation_artifacts", "round_decisions", "round_decision_findings", "round_repairs"} {
 		if err := d.sql.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
 			t.Fatalf("%s table missing: %v", table, err)
 		}

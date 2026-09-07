@@ -149,6 +149,22 @@ CREATE TABLE IF NOT EXISTS round_findings (
 CREATE INDEX IF NOT EXISTS idx_round_findings_evaluation_ordinal
     ON round_findings (evaluation_id, ordinal);
 
+CREATE TABLE IF NOT EXISTS round_evaluation_artifacts (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    evaluation_id  TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+    ordinal        INTEGER NOT NULL CHECK (ordinal >= 0),
+    kind           TEXT NOT NULL DEFAULT '',
+    label          TEXT NOT NULL DEFAULT '',
+    path           TEXT NOT NULL DEFAULT '',
+    url            TEXT NOT NULL DEFAULT '',
+    content        TEXT NOT NULL DEFAULT '',
+    UNIQUE (evaluation_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_evaluation_artifacts_evaluation_ordinal
+    ON round_evaluation_artifacts (evaluation_id, ordinal);
+
 CREATE TABLE IF NOT EXISTS round_decisions (
     id             TEXT PRIMARY KEY,
     run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -575,6 +591,19 @@ var migrationStatements = []string{
 		UNIQUE (evaluation_id, external_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_round_findings_evaluation_ordinal ON round_findings (evaluation_id, ordinal)`,
+	`CREATE TABLE IF NOT EXISTS round_evaluation_artifacts (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		evaluation_id TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+		kind TEXT NOT NULL DEFAULT '',
+		label TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
+		UNIQUE (evaluation_id, ordinal)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_evaluation_artifacts_evaluation_ordinal ON round_evaluation_artifacts (evaluation_id, ordinal)`,
 	`CREATE TABLE IF NOT EXISTS round_decisions (
 		id TEXT PRIMARY KEY,
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

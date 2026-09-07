@@ -33,6 +33,11 @@ func TestStructuredRoundPersistsOrderedEvaluationAndSubjectWithoutRoundJSON(t *t
 			{Ordinal: 0, ExternalID: "review-1", Severity: "error", File: "a.go", Line: 4, Description: "first", Action: types.ActionAutoFix},
 			{Ordinal: 1, ExternalID: "review-2", Severity: "warning", File: "b.go", Line: 8, Description: "second", Action: types.ActionAskUser},
 		},
+		Artifacts: []StepRoundEvaluationArtifact{
+			{Ordinal: 0, Kind: "html", Label: "local evidence", Path: "evidence/result.html"},
+			{Ordinal: 1, Kind: "link", Label: "hosted evidence", URL: "https://example.com/result"},
+			{Ordinal: 2, Kind: "log", Label: "inline transcript", Content: "result passed"},
+		},
 	}, StructuredRoundSubject{
 		StartingHeadSHA: &starting, ResultingHeadSHA: &resulting, EvaluatedHeadSHA: &evaluated, TrustedConfigSHA: &trusted,
 	}, nil, 12); err != nil {
@@ -61,6 +66,9 @@ func TestStructuredRoundPersistsOrderedEvaluationAndSubjectWithoutRoundJSON(t *t
 	if len(got.Evaluation.Findings) != 2 || got.Evaluation.Findings[0].ExternalID != "review-1" || got.Evaluation.Findings[1].ExternalID != "review-2" {
 		t.Fatalf("finding order = %#v", got.Evaluation.Findings)
 	}
+	if len(got.Evaluation.Artifacts) != 3 || got.Evaluation.Artifacts[0].ID == "" || got.Evaluation.Artifacts[0].EvaluationID != got.Evaluation.ID || got.Evaluation.Artifacts[0].Path != "evidence/result.html" || got.Evaluation.Artifacts[1].URL != "https://example.com/result" || got.Evaluation.Artifacts[2].Content != "result passed" {
+		t.Fatalf("evaluation artifacts = %#v", got.Evaluation.Artifacts)
+	}
 	if got.FindingsJSON == nil {
 		t.Fatal("expected in-memory compatibility projection")
 	}
@@ -70,6 +78,9 @@ func TestStructuredRoundPersistsOrderedEvaluationAndSubjectWithoutRoundJSON(t *t
 	}
 	if len(projected.Items) != 2 || projected.Items[0].ID != "review-1" || projected.Items[1].ID != "review-2" {
 		t.Fatalf("projected findings = %#v", projected.Items)
+	}
+	if len(projected.Artifacts) != 3 || projected.Artifacts[0].Path != "evidence/result.html" || projected.Artifacts[1].URL != "https://example.com/result" || projected.Artifacts[2].Content != "result passed" {
+		t.Fatalf("projected artifacts = %#v", projected.Artifacts)
 	}
 }
 

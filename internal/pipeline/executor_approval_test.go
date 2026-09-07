@@ -138,6 +138,102 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 }
 
+func TestExecutor_ApprovingValidationFindingsPersistsWaiver(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"test-1","severity":"error","description":"validation failed","action":"ask-user"}],"summary":"validation failed"}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, t.TempDir())
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Decision == nil || rounds[0].Decision.Source != db.RoundSelectionSourceUserWaived || !rounds[0].Decision.ExplicitEmpty {
+		t.Fatalf("validation waiver = %#v", rounds)
+	}
+	if len(rounds[0].Decision.Findings) != 1 || rounds[0].Decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+		t.Fatalf("validation waiver findings = %#v", rounds[0].Decision.Findings)
+	}
+}
+
+func TestExecutor_SkipAndAbortDoNotPersistWaivers(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionSkip, types.ActionAbort} {
+		t.Run(string(action), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &adaptiveCallStep{
+				name: types.StepTest,
+				fn: func(*StepContext) (*StepOutcome, error) {
+					return &StepOutcome{
+						NeedsApproval: true,
+						Findings:      `{"findings":[{"id":"test-1","severity":"error","description":"validation failed","action":"ask-user"}],"summary":"validation failed"}`,
+					}, nil
+				},
+			}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			done := make(chan error, 1)
+			go func() {
+				done <- exec.Execute(context.Background(), run, repo, t.TempDir())
+			}()
+
+			waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(types.StepTest, action, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if action == types.ActionAbort && err == nil {
+					t.Fatal("abort completed without an error")
+				}
+				if action == types.ActionSkip && err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("executor timed out")
+			}
+
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := database.GetRoundsByStep(steps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 || rounds[0].Decision != nil {
+				t.Fatalf("non-waiver action recorded a decision: %#v", rounds)
+			}
+		})
+	}
+}
+
 func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {

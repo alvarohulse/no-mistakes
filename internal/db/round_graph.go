@@ -46,6 +46,7 @@ type StepRoundEvaluation struct {
 	RiskRationale  string
 	RiskScope      string
 	Findings       []StepRoundFinding
+	Artifacts      []StepRoundEvaluationArtifact
 	CreatedAt      int64
 }
 
@@ -65,6 +66,17 @@ type StepRoundFinding struct {
 	UserInstructions    string
 	ReviewScope         string
 	RequiresHumanReview bool
+}
+
+type StepRoundEvaluationArtifact struct {
+	ID           string
+	EvaluationID string
+	Ordinal      int
+	Kind         string
+	Label        string
+	Path         string
+	URL          string
+	Content      string
 }
 
 // StepRoundDecision records a selection after an evaluation. Each finding is
@@ -234,6 +246,31 @@ func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEva
 			finding.ID, runID, evaluation.ID, finding.Ordinal, finding.ExternalID, finding.Severity, finding.File, finding.Line,
 			finding.Description, finding.Action, finding.Source, finding.UserInstructions, finding.ReviewScope, finding.RequiresHumanReview); err != nil {
 			return fmt.Errorf("complete structured step round: insert finding %q: %w", finding.ID, err)
+		}
+	}
+
+	seenArtifactIDs := make(map[string]struct{}, len(evaluation.Artifacts))
+	for ordinal := range evaluation.Artifacts {
+		artifact := &evaluation.Artifacts[ordinal]
+		if artifact.ID == "" {
+			artifact.ID = newID()
+		}
+		if _, exists := seenArtifactIDs[artifact.ID]; exists {
+			return fmt.Errorf("complete structured step round: duplicate evaluation artifact identity %q", artifact.ID)
+		}
+		if artifact.EvaluationID == "" {
+			artifact.EvaluationID = evaluation.ID
+		}
+		if artifact.EvaluationID != evaluation.ID {
+			return fmt.Errorf("complete structured step round: artifact %q does not belong to evaluation", artifact.ID)
+		}
+		artifact.Ordinal = ordinal
+		seenArtifactIDs[artifact.ID] = struct{}{}
+		if _, err := tx.Exec(`INSERT INTO round_evaluation_artifacts
+			(id, run_id, evaluation_id, ordinal, kind, label, path, url, content)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			artifact.ID, runID, evaluation.ID, artifact.Ordinal, artifact.Kind, artifact.Label, artifact.Path, artifact.URL, artifact.Content); err != nil {
+			return fmt.Errorf("complete structured step round: insert artifact %q: %w", artifact.ID, err)
 		}
 	}
 
@@ -560,6 +597,22 @@ func getRoundEvaluation(q roundGraphQuerier, roundID string) (*StepRoundEvaluati
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate round evaluation findings: %w", err)
 	}
+	artifactRows, err := q.Query(`SELECT id, evaluation_id, ordinal, kind, label, path, url, content
+		FROM round_evaluation_artifacts WHERE evaluation_id = ? ORDER BY ordinal`, evaluation.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get round evaluation artifacts: %w", err)
+	}
+	defer artifactRows.Close()
+	for artifactRows.Next() {
+		artifact := StepRoundEvaluationArtifact{}
+		if err := artifactRows.Scan(&artifact.ID, &artifact.EvaluationID, &artifact.Ordinal, &artifact.Kind, &artifact.Label, &artifact.Path, &artifact.URL, &artifact.Content); err != nil {
+			return nil, fmt.Errorf("scan round evaluation artifact: %w", err)
+		}
+		evaluation.Artifacts = append(evaluation.Artifacts, artifact)
+	}
+	if err := artifactRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate round evaluation artifacts: %w", err)
+	}
 	return evaluation, nil
 }
 
@@ -620,10 +673,15 @@ func CompatibilityFindingsJSON(evaluation *StepRoundEvaluation) (*string, error)
 		Summary: evaluation.Summary, Tested: append([]string(nil), evaluation.Tested...), TestingSummary: evaluation.TestingSummary,
 		RiskLevel: evaluation.RiskLevel, RiskRationale: evaluation.RiskRationale, RiskScope: evaluation.RiskScope,
 	}
+	for _, artifact := range evaluation.Artifacts {
+		findings.Artifacts = append(findings.Artifacts, types.TestArtifact{
+			Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL, Content: artifact.Content,
+		})
+	}
 	for _, item := range evaluation.Findings {
 		findings.Items = append(findings.Items, types.Finding{ID: item.ExternalID, Severity: item.Severity, File: item.File, Line: item.Line, Description: item.Description, Action: item.Action, Source: item.Source, UserInstructions: item.UserInstructions, ReviewScope: item.ReviewScope})
 	}
-	if len(findings.Items) == 0 && findings.Summary == "" && len(findings.Tested) == 0 && findings.TestingSummary == "" && findings.RiskLevel == "" && findings.RiskRationale == "" && findings.RiskScope == "" {
+	if len(findings.Items) == 0 && findings.Summary == "" && len(findings.Tested) == 0 && len(findings.Artifacts) == 0 && findings.TestingSummary == "" && findings.RiskLevel == "" && findings.RiskRationale == "" && findings.RiskScope == "" {
 		return nil, nil
 	}
 	raw, err := types.MarshalFindingsJSON(findings)

@@ -40,6 +40,11 @@ func structuredRoundEvaluation(roundID, runID string, stepName types.StepName, f
 	evaluation.RiskLevel = findings.RiskLevel
 	evaluation.RiskRationale = findings.RiskRationale
 	evaluation.RiskScope = findings.RiskScope
+	for ordinal, artifact := range findings.Artifacts {
+		evaluation.Artifacts = append(evaluation.Artifacts, db.StepRoundEvaluationArtifact{
+			Ordinal: ordinal, Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL, Content: artifact.Content,
+		})
+	}
 	for ordinal, item := range findings.Items {
 		action := item.ActionOrDefault()
 		evaluation.Findings = append(evaluation.Findings, db.StepRoundFinding{

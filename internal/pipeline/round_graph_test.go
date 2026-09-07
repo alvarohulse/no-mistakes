@@ -22,7 +22,7 @@ func TestStructuredRoundEvaluationClassifiesAndPreservesOrderedFindings(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			evaluation, err := structuredRoundEvaluation("round-1", "run-1", test.step, test.fixing, `{"findings":[{"id":"first","description":"one","action":"auto-fix"},{"id":"second","description":"two","action":"ask-user"}],"tested":["go test ./internal/pipeline"],"testing_summary":"targeted"}`)
+			evaluation, err := structuredRoundEvaluation("round-1", "run-1", test.step, test.fixing, `{"findings":[{"id":"first","description":"one","action":"auto-fix"},{"id":"second","description":"two","action":"ask-user"}],"tested":["go test ./internal/pipeline"],"testing_summary":"targeted","artifacts":[{"kind":"html","label":"local evidence","path":"evidence/result.html"},{"kind":"link","label":"hosted evidence","url":"https://example.com/result"},{"kind":"log","label":"inline transcript","content":"result passed"}]}`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -34,6 +34,9 @@ func TestStructuredRoundEvaluationClassifiesAndPreservesOrderedFindings(t *testi
 			}
 			if !evaluation.Findings[1].RequiresHumanReview || len(evaluation.Tested) != 1 || evaluation.TestingSummary != "targeted" {
 				t.Fatalf("evaluation details = %#v", evaluation)
+			}
+			if len(evaluation.Artifacts) != 3 || evaluation.Artifacts[0].Path != "evidence/result.html" || evaluation.Artifacts[1].URL != "https://example.com/result" || evaluation.Artifacts[2].Content != "result passed" {
+				t.Fatalf("evaluation artifacts = %#v", evaluation.Artifacts)
 			}
 		})
 	}
