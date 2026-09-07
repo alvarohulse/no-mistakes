@@ -785,6 +785,18 @@ func CompatibilityFindingsJSON(evaluation *StepRoundEvaluation) (*string, error)
 	if evaluation == nil {
 		return nil, nil
 	}
+	findings := findingsMetadataFromEvaluation(evaluation)
+	for _, item := range evaluation.Findings {
+		findings.Items = append(findings.Items, types.Finding{ID: item.ExternalID, Severity: item.Severity, File: item.File, Line: item.Line, Description: item.Description, Action: item.Action, Source: item.Source, UserInstructions: item.UserInstructions, ReviewScope: item.ReviewScope})
+	}
+	raw, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return nil, err
+	}
+	return &raw, nil
+}
+
+func findingsMetadataFromEvaluation(evaluation *StepRoundEvaluation) types.Findings {
 	findings := types.Findings{
 		Summary: evaluation.Summary, Tested: append([]string(nil), evaluation.Tested...), TestingSummary: evaluation.TestingSummary,
 		RiskLevel: evaluation.RiskLevel, RiskRationale: evaluation.RiskRationale, RiskScope: evaluation.RiskScope,
@@ -794,14 +806,7 @@ func CompatibilityFindingsJSON(evaluation *StepRoundEvaluation) (*string, error)
 			Kind: artifact.Kind, Label: artifact.Label, Path: artifact.Path, URL: artifact.URL, Content: artifact.Content,
 		})
 	}
-	for _, item := range evaluation.Findings {
-		findings.Items = append(findings.Items, types.Finding{ID: item.ExternalID, Severity: item.Severity, File: item.File, Line: item.Line, Description: item.Description, Action: item.Action, Source: item.Source, UserInstructions: item.UserInstructions, ReviewScope: item.ReviewScope})
-	}
-	raw, err := types.MarshalFindingsJSON(findings)
-	if err != nil {
-		return nil, err
-	}
-	return &raw, nil
+	return findings
 }
 
 func (d *DB) hydrateRoundGraph(round *StepRound) error {
@@ -830,7 +835,7 @@ func (d *DB) hydrateRoundGraph(round *StepRound) error {
 		for _, finding := range evaluation.Findings {
 			byID[finding.ID] = finding
 		}
-		userFindings := types.Findings{}
+		userFindings := findingsMetadataFromEvaluation(evaluation)
 		hasUserOverride := false
 		for _, reference := range orderedSelectedDecisionFindings(decision) {
 			finding, found := byID[reference.FindingID]

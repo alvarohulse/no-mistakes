@@ -91,7 +91,16 @@ func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t 
 	step, _ := database.InsertStepResult(run.ID, types.StepReview)
 	round, _ := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
 	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
-		Kind: RoundEvaluationInitialReview,
+		Kind:           RoundEvaluationInitialReview,
+		Summary:        "evaluation summary",
+		Tested:         []string{"go test ./internal/db"},
+		TestingSummary: "database tests passed",
+		RiskLevel:      "low",
+		RiskRationale:  "isolated persistence change",
+		RiskScope:      "internal/db",
+		Artifacts: []StepRoundEvaluationArtifact{
+			{Kind: "log", Label: "test output", Content: "PASS"},
+		},
 		Findings: []StepRoundFinding{
 			{ExternalID: "review-1", Description: "first", Action: types.ActionAutoFix},
 			{ExternalID: "review-2", Description: "second", Action: types.ActionAskUser},
@@ -146,6 +155,12 @@ func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t 
 	}
 	if len(projected.Items) != 3 || projected.Items[0].ID != "review-1" || projected.Items[1].ID != "user-1" || projected.Items[2].ID != "user-2" || projected.Items[0].UserInstructions != "touch parser only" {
 		t.Fatalf("user findings projection = %#v", projected.Items)
+	}
+	if projected.Summary != "evaluation summary" || len(projected.Tested) != 1 || projected.Tested[0] != "go test ./internal/db" || projected.TestingSummary != "database tests passed" || projected.RiskLevel != "low" || projected.RiskRationale != "isolated persistence change" || projected.RiskScope != "internal/db" {
+		t.Fatalf("user findings metadata = %#v", projected)
+	}
+	if len(projected.Artifacts) != 1 || projected.Artifacts[0].Kind != "log" || projected.Artifacts[0].Label != "test output" || projected.Artifacts[0].Content != "PASS" {
+		t.Fatalf("user findings artifacts = %#v", projected.Artifacts)
 	}
 
 	declinedRound, _ := database.BeginStepRound(step.ID, 2, RoundTriggerAutoFix)
