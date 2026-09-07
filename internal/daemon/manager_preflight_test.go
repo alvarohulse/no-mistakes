@@ -16,6 +16,23 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+type cancellationBlockedStep struct {
+	name      types.StepName
+	started   chan struct{}
+	cancelled chan struct{}
+	release   <-chan struct{}
+}
+
+func (s *cancellationBlockedStep) Name() types.StepName { return s.name }
+
+func (s *cancellationBlockedStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	close(s.started)
+	<-sctx.Ctx.Done()
+	close(s.cancelled)
+	<-s.release
+	return nil, context.Cause(sctx.Ctx)
+}
+
 func TestPreflightRunsInOrderBeforeRunCreation(t *testing.T) {
 	t.Setenv("NM_DEMO", "1")
 	p, database, repo, marker := newPolicyResolutionFixture(t, "preflight-success")
@@ -150,6 +167,95 @@ func TestPreflightFailureDoesNotSupersedeActiveRun(t *testing.T) {
 	}
 	if active == nil || active.Status != types.RunRunning {
 		t.Fatalf("active run status = %v, want running", active)
+	}
+}
+
+func TestStartRunQuarantineAfterAdmissionKeepsReplacement(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database, repo, marker := newPolicyResolutionFixture(t, "admission-reservation")
+	head := writePreflightPolicyCommit(t, repo, marker, []string{"echo ready"})
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	blocked := &cancellationBlockedStep{
+		name:      types.StepReview,
+		started:   started,
+		cancelled: cancelled,
+		release:   release,
+	}
+	launches := 0
+	manager := NewRunManager(database, p, func() []pipeline.Step {
+		if launches == 0 {
+			launches++
+			return []pipeline.Step{blocked}
+		}
+		launches++
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	t.Cleanup(manager.Shutdown)
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	activeID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "active run", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("active run did not start")
+	}
+
+	replacement := make(chan struct {
+		runID string
+		err   error
+	}, 1)
+	go func() {
+		runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "replacement", "", "", "")
+		replacement <- struct {
+			runID string
+			err   error
+		}{runID, err}
+	}()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not supersede active run")
+	}
+
+	quarantined := make(chan error, 1)
+	go func() {
+		quarantined <- manager.unresolvedPostWorktreeRun(errors.New("unresolved post-worktree terminalization"))
+	}()
+	releaseOnce.Do(func() { close(release) })
+
+	var result struct {
+		runID string
+		err   error
+	}
+	select {
+	case result = <-replacement:
+	case <-time.After(time.Second):
+		t.Fatal("replacement admission did not complete")
+	}
+	if result.err != nil {
+		t.Fatalf("replacement admission = %v, want success", result.err)
+	}
+	if result.runID == "" || result.runID == activeID {
+		t.Fatalf("replacement run ID = %q, active run ID = %q", result.runID, activeID)
+	}
+	if run, err := database.GetRun(result.runID); err != nil || run == nil {
+		t.Fatalf("replacement run = %v, %v", run, err)
+	}
+	select {
+	case err := <-quarantined:
+		var unresolvedErr *unresolvedPostWorktreeRunError
+		if !errors.As(err, &unresolvedErr) {
+			t.Fatalf("quarantine result = %T %v, want unresolved post-worktree error", err, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("quarantine did not complete after replacement admission")
 	}
 }
 
