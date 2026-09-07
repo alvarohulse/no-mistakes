@@ -352,15 +352,23 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 	if stepName == string(types.StepReview) {
 		reviewedHead = subject.EvaluatedHeadSHA
 	}
-	if _, err := tx.Exec(`UPDATE step_rounds SET
+	result, err = tx.Exec(`UPDATE step_rounds SET
 		findings_json = NULL, user_findings_json = NULL, selected_finding_ids = NULL, selection_source = NULL,
 		fix_summary = NULL, repair_failure_fingerprint = NULL, repair_result = NULL,
 		reviewed_head_sha = ?, starting_head_sha = ?, trusted_config_sha = ?, replay_config_json = ?,
 		resulting_head_sha = ?, evaluated_head_sha = ?, duration_ms = ?, status = ?
 		WHERE id = ? AND status = ?`,
 		reviewedHead, subject.StartingHeadSHA, subject.TrustedConfigSHA, subject.ReplayConfigJSON,
-		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
+		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive)
+	if err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("complete structured step round: update round rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("complete structured step round: expected one round, updated %d", changed)
 	}
 	if (includeImplicitRepair && trigger == RoundTriggerAutoFix) || repairAudit != nil {
 		repair := StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}
@@ -641,8 +649,16 @@ func (d *DB) ReserveCIFixAttemptAndRecordRoundRepair(runID, roundID string, atte
 		return fmt.Errorf("reserve CI repair attempt: attempt %d does not advance persisted budget %d", attempts, persisted.Int64)
 	}
 
-	if _, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID); err != nil {
+	result, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID)
+	if err != nil {
 		return fmt.Errorf("reserve CI repair attempt: update run budget: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("reserve CI repair attempt: update run budget rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("reserve CI repair attempt: expected one run, updated %d", changed)
 	}
 	if repair.ID == "" {
 		repair.ID = newID()
@@ -703,8 +719,16 @@ func (d *DB) BeginCIFixRepairRound(stepResultID, runID string, attempts int, rep
 		if persisted.Int64 >= int64(attempts) {
 			return nil, fmt.Errorf("begin CI repair round: attempt %d does not advance persisted budget %d", attempts, persisted.Int64)
 		}
-		if _, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID); err != nil {
+		result, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID)
+		if err != nil {
 			return nil, fmt.Errorf("begin CI repair round: update run budget: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("begin CI repair round: update run budget rows affected: %w", err)
+		}
+		if changed != 1 {
+			return nil, fmt.Errorf("begin CI repair round: expected one run, updated %d", changed)
 		}
 	}
 
@@ -995,7 +1019,7 @@ func replaceRoundDecision(tx *sql.Tx, decision StepRoundDecision, findings []Ste
 }
 
 func upsertRoundRepair(tx *sql.Tx, repair StepRoundRepair) error {
-	_, err := tx.Exec(`INSERT INTO round_repairs (id, run_id, round_id, fix_summary, failure_fingerprint, result, resulting_head_sha, created_at)
+	result, err := tx.Exec(`INSERT INTO round_repairs (id, run_id, round_id, fix_summary, failure_fingerprint, result, resulting_head_sha, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(round_id) DO UPDATE SET
 		fix_summary = COALESCE(excluded.fix_summary, round_repairs.fix_summary),
@@ -1003,7 +1027,17 @@ func upsertRoundRepair(tx *sql.Tx, repair StepRoundRepair) error {
 		result = excluded.result,
 		resulting_head_sha = COALESCE(excluded.resulting_head_sha, round_repairs.resulting_head_sha)`,
 		repair.ID, repair.RunID, repair.RoundID, repair.FixSummary, repair.FailureFingerprint, repair.Result, repair.ResultingHeadSHA, repair.CreatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("round repair rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("round repair expected one receipt, updated %d", changed)
+	}
+	return nil
 }
 
 type roundGraphQuerier interface {

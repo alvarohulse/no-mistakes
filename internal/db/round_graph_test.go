@@ -133,6 +133,57 @@ func TestStructuredRoundCompletionRollsBackCompatibilityProjection(t *testing.T)
 	}
 }
 
+func TestStructuredRoundCompletionRollsBackOnIgnoredRoundUpdate(t *testing.T) {
+	database := openTestDB(t)
+	repo, err := database.InsertRepo("/tmp/structured-round-ignored-update", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`CREATE TRIGGER ignore_structured_round_completion
+		BEFORE UPDATE OF status ON step_rounds
+		WHEN NEW.id = '` + round.ID + `'
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	err = database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind:     RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{{ExternalID: "review-1", Description: "needs review", Action: types.ActionAskUser}},
+	}, StructuredRoundSubject{}, nil, 1)
+	if err == nil || !strings.Contains(err.Error(), "expected one round, updated 0") {
+		t.Fatalf("complete structured round error = %v", err)
+	}
+
+	gotStep, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.FindingsJSON != nil {
+		t.Fatalf("step findings survived rolled-back completion: %q", *gotStep.FindingsJSON)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusActive || rounds[0].Evaluation != nil {
+		t.Fatalf("round after ignored update = %#v, want active without evaluation", rounds)
+	}
+}
+
 func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-decision", "https://example.com/repo.git", "main")
@@ -495,6 +546,129 @@ func TestReserveCIFixAttemptAndRecordRoundRepairRollsBackOnReceiptFailure(t *tes
 	}
 }
 
+func TestReserveCIFixAttemptAndRecordRoundRepairRollsBackOnIgnoredBudgetUpdate(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-reservation-ignored-budget", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`CREATE TRIGGER ignore_ci_repair_reservation_budget
+		BEFORE UPDATE OF ci_fix_attempts ON runs
+		WHEN NEW.id = '` + run.ID + `'
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	fingerprint, result := "sha256:ci-repair", RoundRepairAttempted
+	err = database.ReserveCIFixAttemptAndRecordRoundRepair(run.ID, round.ID, 1, StepRoundRepair{
+		FailureFingerprint: &fingerprint,
+		Result:             &result,
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected one run, updated 0") {
+		t.Fatalf("reserve CI repair attempt error = %v", err)
+	}
+
+	gotRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRun.CIFixAttempts == nil || *gotRun.CIFixAttempts != 0 {
+		t.Fatalf("CI fix attempts after ignored reservation = %#v, want durable zero", gotRun.CIFixAttempts)
+	}
+	repair, err := database.GetRoundRepair(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair != nil {
+		t.Fatalf("repair after ignored reservation = %#v, want none", repair)
+	}
+}
+
+func TestBeginCIFixRepairRoundRollsBackOnIgnoredBudgetUpdate(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-begin-ignored-budget", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	if _, err := database.sql.Exec(`CREATE TRIGGER ignore_ci_repair_begin_budget
+		BEFORE UPDATE OF ci_fix_attempts ON runs
+		WHEN NEW.id = '` + run.ID + `'
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	fingerprint, result := "sha256:ci-repair", RoundRepairAttempted
+	round, err := database.BeginCIFixRepairRound(step.ID, run.ID, 1, StepRoundRepair{
+		FailureFingerprint: &fingerprint,
+		Result:             &result,
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected one run, updated 0") {
+		t.Fatalf("begin CI repair round error = %v", err)
+	}
+	if round != nil {
+		t.Fatalf("CI repair round = %#v, want none", round)
+	}
+
+	gotRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRun.CIFixAttempts == nil || *gotRun.CIFixAttempts != 0 {
+		t.Fatalf("CI fix attempts after ignored begin = %#v, want durable zero", gotRun.CIFixAttempts)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 0 {
+		t.Fatalf("CI repair rounds after ignored begin = %#v, want none", rounds)
+	}
+}
+
+func TestBeginCIFixRepairRoundRollsBackOnIgnoredRepairReceipt(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-begin-ignored-receipt", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	if _, err := database.sql.Exec(`CREATE TRIGGER ignore_ci_repair_begin_receipt
+		BEFORE INSERT ON round_repairs
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	result := RoundRepairAttempted
+	round, err := database.BeginCIFixRepairRound(step.ID, run.ID, 0, StepRoundRepair{Result: &result})
+	if err == nil || !strings.Contains(err.Error(), "expected one receipt, updated 0") {
+		t.Fatalf("begin CI repair round error = %v", err)
+	}
+	if round != nil {
+		t.Fatalf("CI repair round = %#v, want none", round)
+	}
+
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 0 {
+		t.Fatalf("CI repair rounds after ignored receipt = %#v, want none", rounds)
+	}
+	var repairCount int
+	if err := database.sql.QueryRow(`SELECT COUNT(*) FROM round_repairs WHERE run_id = ?`, run.ID).Scan(&repairCount); err != nil {
+		t.Fatal(err)
+	}
+	if repairCount != 0 {
+		t.Fatalf("repair receipts after ignored insert = %d, want none", repairCount)
+	}
+}
+
 func TestCompleteStructuredRoundUpdatesReservedCIFixRepair(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/ci-repair-completion", "https://example.com/repo.git", "main")
@@ -603,6 +777,59 @@ func TestCompleteStructuredRoundRetainsReservedCIFixRepairOnFinalWriteFailure(t 
 	}
 	if len(rounds) != 1 || rounds[0].Status != RoundStatusActive || rounds[0].Evaluation != nil || rounds[0].ResultingHeadSHA != nil {
 		t.Fatalf("round after failed final completion = %#v, want incomplete active round", rounds)
+	}
+}
+
+func TestCompleteStructuredRoundRollsBackOnIgnoredRepairReceiptUpdate(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-completion-ignored-receipt", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fingerprint, attempted := "sha256:ci-repair", RoundRepairAttempted
+	if err := database.ReserveCIFixAttemptAndRecordRoundRepair(run.ID, round.ID, 1, StepRoundRepair{
+		FailureFingerprint: &fingerprint,
+		Result:             &attempted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`CREATE TRIGGER ignore_ci_repair_completion_receipt
+		BEFORE UPDATE ON round_repairs
+		WHEN NEW.round_id = '` + round.ID + `'
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, resulting := RoundRepairResolved, "fixed-head"
+	err = database.CompleteStepRoundStructuredWithRepairAudit(round.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationValidation,
+	}, StructuredRoundSubject{ResultingHeadSHA: &resulting}, nil, 1, StepRoundRepair{
+		FailureFingerprint: &fingerprint,
+		Result:             &resolved,
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected one receipt, updated 0") {
+		t.Fatalf("complete CI round error = %v", err)
+	}
+
+	repair, err := database.GetRoundRepair(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair == nil || repair.Result == nil || *repair.Result != RoundRepairAttempted || repair.ResultingHeadSHA != nil {
+		t.Fatalf("repair after ignored final completion = %#v, want original attempted receipt", repair)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusActive || rounds[0].Evaluation != nil || rounds[0].ResultingHeadSHA != nil {
+		t.Fatalf("round after ignored final completion = %#v, want incomplete active round", rounds)
 	}
 }
 
