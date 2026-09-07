@@ -36,6 +36,12 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	if !hasColumn(t, database, "round_decision_findings", "selection_ordinal") {
+		t.Fatal("legacy migration did not create round_decision_findings.selection_ordinal")
+	}
+	if !hasUniquePartialIndex(t, database, "round_decision_findings", "idx_round_decision_findings_selection_ordinal") {
+		t.Fatal("legacy migration did not create the unique partial selection-order index")
+	}
 	rounds, err := database.GetRoundsByStep("step")
 	if err != nil {
 		t.Fatal(err)

@@ -101,6 +101,9 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("%s table missing: %v", table, err)
 		}
 	}
+	if !hasColumn(t, d, "round_decision_findings", "selection_ordinal") {
+		t.Fatal("round_decision_findings.selection_ordinal column missing from fresh schema")
+	}
 	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {
 		if hasColumn(t, d, "agent_invocations", removed) {
 			t.Fatalf("agent_invocations.%s should be absent from fresh schema", removed)
@@ -470,6 +473,29 @@ func hasColumn(t *testing.T, d *DB, table, column string) bool {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate table_info: %v", err)
+	}
+	return false
+}
+
+func hasUniquePartialIndex(t *testing.T, d *DB, table, index string) bool {
+	t.Helper()
+	rows, err := d.sql.Query(`SELECT name, "unique", partial FROM pragma_index_list(?)`, table)
+	if err != nil {
+		t.Fatalf("pragma index_list(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var unique, partial int
+		if err := rows.Scan(&name, &unique, &partial); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		if name == index && unique != 0 && partial != 0 {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
 	}
 	return false
 }

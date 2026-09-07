@@ -624,7 +624,6 @@ var migrationStatements = []string{
 		PRIMARY KEY (decision_id, finding_id),
 		UNIQUE (decision_id, ordinal)
 	)`,
-	`ALTER TABLE round_decision_findings ADD COLUMN selection_ordinal INTEGER`,
 	`CREATE INDEX IF NOT EXISTS idx_round_decision_findings_finding ON round_decision_findings (finding_id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_round_decision_findings_selection_ordinal ON round_decision_findings (decision_id, selection_ordinal) WHERE selection_ordinal IS NOT NULL`,
 	`CREATE TABLE IF NOT EXISTS round_repairs (
