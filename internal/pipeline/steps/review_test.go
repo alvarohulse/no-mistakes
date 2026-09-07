@@ -83,16 +83,14 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected review fix prompt to prefer root-cause fixes over bandaids")
 	}
-	for i, call := range ag.calls {
-		if !strings.Contains(call.Prompt, "shared prompt config") {
-			t.Fatalf("agent call %d missing shared prompt config:\n%s", i, call.Prompt)
-		}
-		if !strings.Contains(call.Prompt, "review prompt config") {
-			t.Fatalf("agent call %d missing review prompt config:\n%s", i, call.Prompt)
-		}
-		if strings.Index(call.Prompt, "shared prompt config") > strings.Index(call.Prompt, "review prompt config") {
-			t.Fatalf("agent call %d prompt config order is wrong:\n%s", i, call.Prompt)
-		}
+	if !strings.Contains(ag.calls[0].Prompt, "shared prompt config") || !strings.Contains(ag.calls[0].Prompt, "review prompt config") {
+		t.Fatalf("review fixer prompt missing configured additions:\n%s", ag.calls[0].Prompt)
+	}
+	if strings.Index(ag.calls[0].Prompt, "shared prompt config") > strings.Index(ag.calls[0].Prompt, "review prompt config") {
+		t.Fatalf("review fixer prompt config order is wrong:\n%s", ag.calls[0].Prompt)
+	}
+	if strings.Contains(ag.calls[1].Prompt, "shared prompt config") || strings.Contains(ag.calls[1].Prompt, "review prompt config") {
+		t.Fatalf("reviewer prompt must remain identical to upstream built-in guidance:\n%s", ag.calls[1].Prompt)
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "deeper design, abstraction, validation, ownership, or test-coverage flaw") {
 		t.Error("expected review fix prompt to require root-cause diagnosis before editing")
@@ -119,8 +117,18 @@ func TestReviewStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[1].Prompt, "inspect surrounding code, call sites, shared helpers, tests, and invariants") {
 		t.Error("expected review prompt to allow surrounding-code inspection for root cause")
 	}
-	if !strings.Contains(ag.calls[1].Prompt, "GitHub-flavored Markdown") || !strings.Contains(ag.calls[1].Prompt, "`AlertMessage.close`") {
-		t.Error("expected risk rationale prompt to require Markdown formatting for identifiers")
+	for _, want := range []string{
+		"When changed behavior reads, writes, returns, indexes, caches, logs, or otherwise processes potentially protected resources or user data",
+		"Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage",
+		"Classify by the remedy, not only by the topic",
+		"Simplification (a dedicated pass over what the change introduced, in addition to the findings above)",
+	} {
+		if !strings.Contains(ag.calls[1].Prompt, want) {
+			t.Errorf("reviewer prompt missing upstream guidance %q", want)
+		}
+	}
+	if strings.Contains(ag.calls[1].Prompt, "/review-changes") {
+		t.Error("reviewer prompt must not depend on the removed user-level review skill")
 	}
 	assertTestQualityRulePrompt(t, ag.calls[1].Prompt)
 	assertTestQualityReviewerAction(t, ag.calls[1].Prompt)

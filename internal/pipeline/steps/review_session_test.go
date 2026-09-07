@@ -195,8 +195,8 @@ func TestReviewLoop_IndependentReviewTurnsOneFixerSession(t *testing.T) {
 		if !strings.Contains(call.Prompt, "Review the code changes") {
 			t.Fatalf("review round %d prompt is not a full review prompt:\n%s", i+1, call.Prompt)
 		}
-		if !strings.Contains(call.Prompt, "/review-changes") {
-			t.Fatalf("review round %d prompt lost the review-changes contract:\n%s", i+1, call.Prompt)
+		if !strings.Contains(call.Prompt, "Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage") {
+			t.Fatalf("review round %d prompt lost the upstream intended-usage evidence threshold:\n%s", i+1, call.Prompt)
 		}
 	}
 
