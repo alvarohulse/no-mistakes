@@ -81,7 +81,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
+	for _, column := range []string{"trigger_provenance", "reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result", "resulting_head_sha", "evaluated_head_sha"} {
 		if !hasColumn(t, d, "step_rounds", column) {
 			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
 		}
@@ -91,9 +91,14 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd"} {
+	for _, column := range []string{"round_id", "delta_cache_creation_tokens", "reported_cost_usd"} {
 		if !hasColumn(t, d, "agent_invocations", column) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
+		}
+	}
+	for _, table := range []string{"round_evaluations", "round_findings", "round_decisions", "round_decision_findings", "round_repairs"} {
+		if err := d.sql.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("%s table missing: %v", table, err)
 		}
 	}
 	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {

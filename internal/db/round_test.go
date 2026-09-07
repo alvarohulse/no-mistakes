@@ -22,7 +22,7 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 		INSERT INTO repos VALUES ('repo', '/tmp/legacy-rounds', 'https://example.com/repo.git', 'main', 1);
 		INSERT INTO runs VALUES ('run', 'repo', 'feature', 'head', 'base', 'completed', 1, 1);
 		INSERT INTO step_results VALUES ('step', 'run', 'review', 3, 'completed');
-		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', '{"findings":[{"id":"r1","severity":"warning","description":"legacy"}]}', 10, 1);
+		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'user_fix', '{"findings":[{"id":"r1","severity":"warning","description":"legacy"}]}', 10, 1);
 	`); err != nil {
 		legacy.Close()
 		t.Fatal(err)
@@ -42,6 +42,12 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 	}
 	if len(rounds) != 1 || rounds[0].Status != RoundStatusCompleted {
 		t.Fatalf("migrated rounds = %+v", rounds)
+	}
+	if rounds[0].Trigger != RoundTriggerAutoFix || rounds[0].TriggerProvenance == nil || *rounds[0].TriggerProvenance != RoundTriggerProvenanceLegacyUserFix {
+		t.Fatalf("migrated trigger = %#v", rounds[0])
+	}
+	if rounds[0].Evaluation != nil || rounds[0].FindingsJSON == nil {
+		t.Fatalf("migration fabricated structured history: %#v", rounds[0])
 	}
 	stats, err := database.StepFindingStats(&StepResult{ID: "step", StepName: types.StepReview})
 	if err != nil {
