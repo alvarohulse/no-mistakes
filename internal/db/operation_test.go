@@ -21,7 +21,7 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindRefresh {
 		t.Fatalf("stored operation identity = %+v", stored)
 	}
-	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA == nil || *stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
+	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA == nil || *stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA == nil || *stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
 		t.Fatalf("stored receipt fields = %+v", stored)
 	}
 	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
@@ -436,7 +436,7 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		DestinationRef:       "refs/remotes/origin/main",
 		AuthoritativeBaseRef: "refs/remotes/origin/main",
 		AuthoritativeBaseSHA: stringPointer("authoritative-base"),
-		StartingHeadSHA:      "starting-head",
+		StartingHeadSHA:      stringPointer("starting-head"),
 		Decision:             RefreshDecisionMerged,
 		ResultingHeadSHA:     stringPointer("resulting-head"),
 		ConflictState:        RefreshConflictStateNone,

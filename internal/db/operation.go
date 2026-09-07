@@ -59,7 +59,7 @@ type RefreshOperation struct {
 	DestinationRef       string
 	AuthoritativeBaseRef string
 	AuthoritativeBaseSHA *string
-	StartingHeadSHA      string
+	StartingHeadSHA      *string
 	Decision             RefreshDecision
 	ResultingHeadSHA     *string
 	ConflictState        RefreshConflictState
@@ -139,9 +139,11 @@ type operationQuerier interface {
 func validateRefreshOperation(q operationQuerier, operation RefreshOperation) error {
 	if strings.TrimSpace(operation.RunID) == "" || strings.TrimSpace(operation.StepID) == "" || strings.TrimSpace(operation.RoundID) == "" ||
 		strings.TrimSpace(operation.SourceRef) == "" || strings.TrimSpace(operation.DestinationRef) == "" ||
-		strings.TrimSpace(operation.AuthoritativeBaseRef) == "" ||
-		strings.TrimSpace(operation.StartingHeadSHA) == "" {
+		strings.TrimSpace(operation.AuthoritativeBaseRef) == "" {
 		return fmt.Errorf("insert refresh operation: required receipt identity is incomplete")
+	}
+	if operation.StartingHeadSHA != nil && strings.TrimSpace(*operation.StartingHeadSHA) == "" {
+		return fmt.Errorf("insert refresh operation: starting head SHA is empty")
 	}
 	if operation.Strategy != types.RefreshStrategyRebase && operation.Strategy != types.RefreshStrategyMerge {
 		return fmt.Errorf("insert refresh operation: unsupported strategy %q", operation.Strategy)
@@ -319,11 +321,11 @@ func (d *DB) GetRefreshOperationsByRun(runID string) ([]*RefreshOperation, error
 func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperation, error) {
 	operation := &RefreshOperation{}
 	var kind, strategy, decision, conflictState, repairState string
-	var authoritativeBaseSHA, resultingHeadSHA sql.NullString
+	var authoritativeBaseSHA, startingHeadSHA, resultingHeadSHA sql.NullString
 	if err := row.Scan(
 		&operation.ID, &operation.RunID, &kind, &operation.StepID, &operation.RoundID,
 		&strategy, &operation.SourceRef, &operation.DestinationRef, &operation.AuthoritativeBaseRef, &authoritativeBaseSHA,
-		&operation.StartingHeadSHA, &decision, &resultingHeadSHA, &conflictState, &repairState,
+		&startingHeadSHA, &decision, &resultingHeadSHA, &conflictState, &repairState,
 		&operation.StartedAt, &operation.CompletedAt, &operation.DurationMS, &operation.DiagnosticArtifactID,
 	); err != nil {
 		return nil, err
@@ -335,6 +337,9 @@ func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperatio
 	operation.RepairState = RefreshRepairState(repairState)
 	if authoritativeBaseSHA.Valid {
 		operation.AuthoritativeBaseSHA = &authoritativeBaseSHA.String
+	}
+	if startingHeadSHA.Valid {
+		operation.StartingHeadSHA = &startingHeadSHA.String
 	}
 	if resultingHeadSHA.Valid {
 		operation.ResultingHeadSHA = &resultingHeadSHA.String

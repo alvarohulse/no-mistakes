@@ -93,7 +93,7 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	if rebased == nil || rebased.Decision != db.RefreshDecisionRebased || rebased.ConflictState != db.RefreshConflictStateNone || len(rebased.CommandAttemptIDs) != 1 {
 		t.Fatalf("base refresh receipt = %+v", rebased)
 	}
-	if rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == nil || *rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
+	if rebased.StartingHeadSHA == nil || *rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == nil || *rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
 		t.Fatalf("base refresh identities = %+v", rebased)
 	}
 
@@ -313,7 +313,7 @@ func TestRefreshReceiptUsesLiveStartingHeadForNextTargetAfterCancellation(t *tes
 		if operation.DestinationRef != "origin/second" {
 			continue
 		}
-		if operation.StartingHeadSHA != afterFirstTargetSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != afterFirstTargetSHA {
+		if operation.StartingHeadSHA == nil || *operation.StartingHeadSHA != afterFirstTargetSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != afterFirstTargetSHA {
 			t.Fatalf("second target receipt = %+v, want live head %s", operation, afterFirstTargetSHA)
 		}
 		return
@@ -321,7 +321,7 @@ func TestRefreshReceiptUsesLiveStartingHeadForNextTargetAfterCancellation(t *tes
 	t.Fatalf("missing second target receipt: %+v", operations)
 }
 
-func TestRefreshReceiptMarksUnreadableResultingHeadUnavailable(t *testing.T) {
+func TestRefreshReceiptMarksUnreadableHeadsUnavailable(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
 	beginRefreshReceiptRound(t, sctx)
 	operation := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main").begin("origin/main")
@@ -334,8 +334,8 @@ func TestRefreshReceiptMarksUnreadableResultingHeadUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].ResultingHeadSHA != nil {
-		t.Fatalf("unreadable resulting head = %+v, want unavailable", operations)
+	if len(operations) != 1 || operations[0].StartingHeadSHA != nil || operations[0].ResultingHeadSHA != nil {
+		t.Fatalf("unreadable receipt heads = %+v, want unavailable", operations)
 	}
 }
 

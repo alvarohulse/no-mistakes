@@ -351,7 +351,7 @@ func TestRefreshStep_NormalPushSyncsOriginBranch(t *testing.T) {
 		if operation.DestinationRef != "origin/feature" {
 			continue
 		}
-		if operation.Decision != db.RefreshDecisionFastForwarded || len(operation.CommandAttemptIDs) != 1 || operation.StartingHeadSHA != headSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != originFeatureSHA {
+		if operation.Decision != db.RefreshDecisionFastForwarded || len(operation.CommandAttemptIDs) != 1 || operation.StartingHeadSHA == nil || *operation.StartingHeadSHA != headSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != originFeatureSHA {
 			t.Fatalf("fast-forward receipt = %+v", operation)
 		}
 		attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
