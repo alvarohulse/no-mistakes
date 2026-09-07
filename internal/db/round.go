@@ -275,6 +275,7 @@ func (d *DB) insertReviewStepRoundWithConfig(stepResultID string, round int, tri
 func (d *DB) insertStepRound(stepResultID string, round int, trigger, status string, findingsJSON *string, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA *string, replayConfigJSON, globalConfigYAML, repoConfigYAML []byte, durationMS int64) (*StepRound, error) {
 	var triggerProvenance *string
 	if trigger == RoundTriggerUserFix {
+		trigger = RoundTriggerAutoFix
 		legacy := RoundTriggerProvenanceLegacyUserFix
 		triggerProvenance = &legacy
 	}

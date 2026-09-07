@@ -171,6 +171,13 @@ func TestLegacyUserFixNormalizesOnReadWithoutFabricatingEvaluation(t *testing.T)
 	if _, err := database.InsertStepRound(step.ID, 1, RoundTriggerUserFix, &findings, nil, 1); err != nil {
 		t.Fatal(err)
 	}
+	var storedTrigger string
+	if err := database.sql.QueryRow(`SELECT trigger_type FROM step_rounds WHERE step_result_id = ?`, step.ID).Scan(&storedTrigger); err != nil {
+		t.Fatal(err)
+	}
+	if storedTrigger != RoundTriggerAutoFix {
+		t.Fatalf("new round stored trigger = %q, want %q", storedTrigger, RoundTriggerAutoFix)
+	}
 	rounds, err := database.GetRoundsByStep(step.ID)
 	if err != nil {
 		t.Fatal(err)
