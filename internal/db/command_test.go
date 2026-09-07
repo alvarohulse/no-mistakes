@@ -428,17 +428,17 @@ func TestCommandAttemptsPersistOnlyObservedPassingProofForExactTestedSHA(t *test
 
 	controllerPass := start(1, CommandObserverController, "tested-controller")
 	exitZero := 0
-	completeCommandAttemptWithOutput(t, d, controllerPass, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-controller"), stringPointer("tested-controller"))
+	completeControllerCommandAttemptWithOutput(t, d, controllerPass, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-controller"), stringPointer("tested-controller"))
 
 	controllerFail := start(2, CommandObserverController, "tested-failure")
 	exitOne := 1
-	completeCommandAttemptWithOutput(t, d, controllerFail, CommandOutcomeFail, &exitOne, nil, stringPointer("git:tested-failure"), nil)
+	completeControllerCommandAttemptWithOutput(t, d, controllerFail, CommandOutcomeFail, &exitOne, nil, stringPointer("git:tested-failure"), nil)
 
 	agentClaim := start(3, "agent", "tested-agent")
-	completeCommandAttemptWithOutput(t, d, agentClaim, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-agent"), stringPointer("tested-agent"))
+	completeControllerCommandAttemptWithOutput(t, d, agentClaim, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-agent"), stringPointer("tested-agent"))
 
 	providerPass := start(4, CommandObserverProvider, "tested-provider")
-	completeCommandAttemptWithOutput(t, d, providerPass, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-provider"), stringPointer("tested-provider"))
+	completeControllerCommandAttemptWithOutput(t, d, providerPass, CommandOutcomePass, &exitZero, nil, stringPointer("git:tested-provider"), stringPointer("tested-provider"))
 
 	rows, err := d.sql.Query(`SELECT id, accepted_as_proof, proof_reason FROM command_attempts WHERE run_id = ? ORDER BY sequence`, run.ID)
 	if err != nil {
@@ -476,6 +476,9 @@ func TestCommandAttemptsPersistOnlyObservedPassingProofForExactTestedSHA(t *test
 			t.Fatalf("unaccepted history for %s = %+v", attempt.ID, stored)
 		}
 	}
+	if err := d.UpdateStepStatus(step.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
 
 	proofs, err := d.GetAcceptedCommandAttemptsByTestedSHA(run.ID, "tested-controller")
 	if err != nil {
@@ -506,6 +509,88 @@ func TestCommandAttemptsPersistOnlyObservedPassingProofForExactTestedSHA(t *test
 	}
 	if len(history) != 4 || history[1].AcceptedAsProof || history[2].AcceptedAsProof || history[1].ProofReason != nil || history[2].ProofReason != nil {
 		t.Fatalf("attempt history = %+v", history)
+	}
+}
+
+func TestGetAcceptedCommandAttemptsByTestedSHARequiresCompletedValidationExecution(t *testing.T) {
+	tests := []struct {
+		name        string
+		activeRound bool
+		mutate      func(t *testing.T, d *DB, run *Run, step *StepResult, round *StepRound)
+		wantProof   bool
+	}{
+		{name: "running run with completed step and round", wantProof: true},
+		{name: "active round", activeRound: true},
+		{
+			name:        "failed round",
+			activeRound: true,
+			mutate: func(t *testing.T, d *DB, _ *Run, _ *StepResult, round *StepRound) {
+				t.Helper()
+				if err := d.FailStepRound(round.ID, 1); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "failed step",
+			mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult, _ *StepRound) {
+				t.Helper()
+				if err := d.UpdateStepStatus(step.ID, types.StepStatusFailed); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "skipped step",
+			mutate: func(t *testing.T, d *DB, _ *Run, step *StepResult, _ *StepRound) {
+				t.Helper()
+				if err := d.CompleteStepAsSkipped(step.ID, types.SkipSourceRunRequest); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "failed run",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult, _ *StepRound) {
+				t.Helper()
+				if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "cancelled run",
+			mutate: func(t *testing.T, d *DB, run *Run, _ *StepResult, _ *StepRound) {
+				t.Helper()
+				if err := d.UpdateRunStatus(run.ID, types.RunCancelled); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			run, step, round, _ := newAcceptedCommandProofFixture(t, d, tt.activeRound)
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateStepStatus(step.ID, types.StepStatusCompleted); err != nil {
+				t.Fatal(err)
+			}
+			if tt.mutate != nil {
+				tt.mutate(t, d, run, step, round)
+			}
+
+			proofs, err := d.GetAcceptedCommandAttemptsByTestedSHA(run.ID, "tested")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(proofs) == 1; got != tt.wantProof {
+				t.Fatalf("proof visible = %t, want %t; proofs = %+v", got, tt.wantProof, proofs)
+			}
+		})
 	}
 }
 
@@ -629,6 +714,19 @@ func TestOpenMigratesCommandReceiptTablesWithoutBackfillingLegacyRuns(t *testing
 	if acceptedAsProof || proofReason != nil {
 		t.Fatalf("legacy proof state = accepted %t reason %v, want unaccepted", acceptedAsProof, proofReason)
 	}
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{name: "accepted without reason", query: `UPDATE command_attempts SET accepted_as_proof = 1, proof_reason = NULL WHERE id = 'attempt'`},
+		{name: "unaccepted with reason", query: `UPDATE command_attempts SET accepted_as_proof = 0, proof_reason = 'observed_passing_attempt' WHERE id = 'attempt'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := database.sql.Exec(tc.query); err == nil {
+				t.Fatal("corrupt proof state was accepted")
+			}
+		})
+	}
 	artifacts, err := database.GetArtifactsByRun("run")
 	if err != nil {
 		t.Fatal(err)
@@ -684,6 +782,59 @@ func completeCommandAttemptWithOutput(t *testing.T, d *DB, attempt *CommandAttem
 	if _, err := d.CompleteCommandAttemptWithOutputArtifact(attempt.ID, outcome, exitCode, signal, resultStateID, testedSHA, commandOutputArtifactForAttempt(attempt)); err != nil {
 		t.Fatalf("complete command attempt with output: %v", err)
 	}
+}
+
+func completeControllerCommandAttemptWithOutput(t *testing.T, d *DB, attempt *CommandAttempt, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) {
+	t.Helper()
+	if _, err := d.CompleteControllerCommandAttemptWithOutputArtifact(attempt.ID, outcome, exitCode, signal, resultStateID, testedSHA, commandOutputArtifactForAttempt(attempt)); err != nil {
+		t.Fatalf("complete controller command attempt with output: %v", err)
+	}
+}
+
+func newAcceptedCommandProofFixture(t *testing.T, d *DB, activeRound bool) (*Run, *StepResult, *StepRound, *CommandAttempt) {
+	t.Helper()
+	repo, err := d.InsertRepo("/home/user/accepted-command-proof", "git@github.com:user/accepted-command-proof.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var round *StepRound
+	if activeRound {
+		round, err = d.BeginStepRound(step.ID, 1, "initial")
+	} else {
+		round, err = d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := d.EnsureCommandDefinition(run.ID, runner.Resolved{
+		Script:        "go test ./...",
+		CommandSource: runner.SourceBase,
+		Provenance:    runner.Provenance{SchemaVersion: runner.SchemaVersion, Platform: "linux", Source: runner.SourceDefault, Executable: "sh", Args: []string{"-c"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := d.StartCommandAttempt(CommandAttempt{
+		RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+		Sequence: 1, Purpose: "test", Observer: CommandObserverController, Trigger: "initial", BeforeSHA: "tested",
+		InputStateID: stringPointer("git:tested"), CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := 0
+	if _, err := d.CompleteControllerCommandAttemptWithOutputArtifact(attempt.ID, CommandOutcomePass, &exit, nil, stringPointer("git:tested"), stringPointer("tested"), commandOutputArtifactForAttempt(attempt)); err != nil {
+		t.Fatal(err)
+	}
+	return run, step, round, attempt
 }
 
 func commandOutputArtifactForAttempt(attempt *CommandAttempt) Artifact {

@@ -413,6 +413,22 @@ var migrationStatements = []string{
 	`ALTER TABLE command_attempts ADD COLUMN accepted_as_proof INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE command_attempts ADD COLUMN proof_reason TEXT`,
 	`CREATE INDEX IF NOT EXISTS idx_command_attempts_proof_by_tested_sha ON command_attempts (run_id, tested_sha) WHERE accepted_as_proof = 1`,
+	`CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_insert
+	BEFORE INSERT ON command_attempts
+	WHEN NEW.accepted_as_proof NOT IN (0, 1)
+	  OR (NEW.accepted_as_proof = 0 AND NEW.proof_reason IS NOT NULL)
+	  OR (NEW.accepted_as_proof = 1 AND NEW.proof_reason IS NULL)
+	BEGIN
+		SELECT RAISE(ABORT, 'command attempt proof state must pair acceptance and reason');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_update
+	BEFORE UPDATE OF accepted_as_proof, proof_reason ON command_attempts
+	WHEN NEW.accepted_as_proof NOT IN (0, 1)
+	  OR (NEW.accepted_as_proof = 0 AND NEW.proof_reason IS NOT NULL)
+	  OR (NEW.accepted_as_proof = 1 AND NEW.proof_reason IS NULL)
+	BEGIN
+		SELECT RAISE(ABORT, 'command attempt proof state must pair acceptance and reason');
+	END`,
 	`ALTER TABLE run_metric_receipts ADD COLUMN artifact_cleanup_pending INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS run_artifact_cleanup_journal (run_id TEXT PRIMARY KEY, targets_json TEXT NOT NULL)`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
