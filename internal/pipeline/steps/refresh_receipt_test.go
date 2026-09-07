@@ -1,11 +1,15 @@
 package steps
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -14,6 +18,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func refreshGitScriptEnv(t *testing.T, body string) ([]string, string) {
+	t.Helper()
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-started")
+	script := "#!/bin/sh\nprintf started > \"$REFRESH_MARKER\"\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{"PATH=" + binDir, "REFRESH_MARKER=" + marker}, marker
+}
 
 func beginRefreshReceiptRound(t *testing.T, sctx *pipeline.StepContext) *db.StepRound {
 	t.Helper()
@@ -157,6 +172,122 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "rebase origin/dependency") {
 		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
+	}
+}
+
+func TestRefreshPrimaryPersistsContextTermination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process termination fixture")
+	}
+	tests := []struct {
+		name      string
+		wantError error
+		wantState string
+		deadline  bool
+	}{
+		{name: "cancelled", wantError: context.Canceled, wantState: db.CommandOutcomeCancelled},
+		{name: "deadline", wantError: context.DeadlineExceeded, wantState: db.CommandOutcomeTimeout, deadline: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, _, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, headSHA, headSHA, config.Commands{})
+			sctx.Config.ProcessTerminationGrace = 25 * time.Millisecond
+			env, marker := refreshGitScriptEnv(t, "while :; do /bin/sleep 1; done")
+			sctx.Env = env
+			beginRefreshReceiptRound(t, sctx)
+			recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+			operation := recorder.begin("origin/main")
+
+			var cancel context.CancelFunc
+			if tt.deadline {
+				sctx.Ctx, cancel = context.WithTimeout(context.Background(), 500*time.Millisecond)
+			} else {
+				sctx.Ctx, cancel = context.WithCancel(context.Background())
+				go func() {
+					deadline := time.Now().Add(2 * time.Second)
+					for {
+						if _, err := os.Stat(marker); err == nil || time.Now().After(deadline) {
+							cancel()
+							return
+						}
+						time.Sleep(5 * time.Millisecond)
+					}
+				}()
+			}
+			defer cancel()
+
+			output, err := runRefreshPrimary(sctx.Ctx, sctx, operation, "rebase", "origin/main")
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("refresh error = %v, want %v; output = %q", err, tt.wantError, output)
+			}
+			var exitErr *refreshCommandExitError
+			if errors.As(err, &exitErr) {
+				t.Fatalf("refresh error = %v, must not be a refresh command exit", err)
+			}
+			if err := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, "refresh command terminated"); err != nil {
+				t.Fatal(err)
+			}
+
+			attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(attempts) != 1 {
+				t.Fatalf("command attempts = %+v, want one", attempts)
+			}
+			attempt := attempts[0]
+			if attempt.CompletedAt == nil || attempt.Outcome == nil || *attempt.Outcome != tt.wantState || attempt.OutputArtifactID == nil {
+				t.Fatalf("terminated command attempt = %+v", attempt)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("git fixture did not start: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunStepGitCommandPersistsSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process signal fixture")
+	}
+	dir, _, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, headSHA, headSHA, config.Commands{})
+	sctx.Env, _ = refreshGitScriptEnv(t, "kill -TERM $$")
+	beginRefreshReceiptRound(t, sctx)
+
+	output, exitCode, err := runStepGitCommand(sctx, "git signal", string(types.StepRefresh), "signal")
+	if err != nil || output != "" || exitCode != -1 {
+		t.Fatalf("signal command = output %q exit %d error %v", output, exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != db.CommandOutcomeFail || attempts[0].ExitCode != nil || attempts[0].Signal == nil || *attempts[0].Signal != "terminated" || attempts[0].OutputArtifactID == nil {
+		t.Fatalf("signal command attempt = %+v", attempts)
+	}
+}
+
+func TestRunStepGitCommandDoesNotFabricateSignalForExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process signal fixture")
+	}
+	dir, _, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, headSHA, headSHA, config.Commands{})
+	sctx.Env, _ = refreshGitScriptEnv(t, "exit 7")
+	beginRefreshReceiptRound(t, sctx)
+
+	output, exitCode, err := runStepGitCommand(sctx, "git exit", string(types.StepRefresh), "exit")
+	if err != nil || output != "" || exitCode != 7 {
+		t.Fatalf("exit command = output %q exit %d error %v", output, exitCode, err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].Outcome == nil || *attempts[0].Outcome != db.CommandOutcomeFail || attempts[0].ExitCode == nil || *attempts[0].ExitCode != 7 || attempts[0].Signal != nil || attempts[0].OutputArtifactID == nil {
+		t.Fatalf("exit command attempt = %+v", attempts)
 	}
 }
 
