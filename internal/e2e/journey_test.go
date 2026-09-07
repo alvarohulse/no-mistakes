@@ -1475,8 +1475,15 @@ func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	if !ok {
 		t.Fatal("expected lint step in configured command run")
 	}
-	if lintStep.FindingsJSON != nil {
-		t.Fatalf("expected configured passing lint command to record no findings, got %s", *lintStep.FindingsJSON)
+	if lintStep.FindingsJSON == nil {
+		t.Fatal("expected configured passing lint command to record an empty findings projection")
+	}
+	lintFindings, err := types.ParseFindingsJSON(*lintStep.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse configured lint findings: %v", err)
+	}
+	if len(lintFindings.Items) != 0 {
+		t.Fatalf("expected configured passing lint command to record no findings, got %+v", lintFindings.Items)
 	}
 	lintLogData, err := os.ReadFile(lintCommandLog)
 	if err != nil {
