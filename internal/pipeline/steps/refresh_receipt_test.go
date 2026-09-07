@@ -279,6 +279,48 @@ func TestRefreshReceiptCapturesResultingHeadAfterRunContextCancellation(t *testi
 	}
 }
 
+func TestRefreshReceiptUsesLiveStartingHeadForNextTargetAfterCancellation(t *testing.T) {
+	dir, baseSHA, startingHeadSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, startingHeadSHA, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	receipts.authoritativeBaseSHA = refreshStringPointer(baseSHA)
+
+	first := receipts.begin("origin/first")
+	if err := os.WriteFile(filepath.Join(dir, "after-first-target.txt"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "after-first-target.txt")
+	gitCmd(t, dir, "commit", "-m", "advance after first target")
+	afterFirstTargetSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := first.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	sctx.Ctx = cancelled
+	second := receipts.begin("origin/second")
+	if err := second.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, "cancelled before second target"); err != nil {
+		t.Fatal(err)
+	}
+
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/second" {
+			continue
+		}
+		if operation.StartingHeadSHA != afterFirstTargetSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != afterFirstTargetSHA {
+			t.Fatalf("second target receipt = %+v, want live head %s", operation, afterFirstTargetSHA)
+		}
+		return
+	}
+	t.Fatalf("missing second target receipt: %+v", operations)
+}
+
 func TestRefreshReceiptMarksUnreadableResultingHeadUnavailable(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
 	beginRefreshReceiptRound(t, sctx)
@@ -335,6 +377,73 @@ func TestTryRebasePinsResolvedTargetCommit(t *testing.T) {
 	}
 	if !isAncestor(context.Background(), dir, firstTargetSHA, "HEAD") || isAncestor(context.Background(), dir, movedTargetSHA, "HEAD") {
 		t.Fatalf("rebase did not preserve resolved target %s after ref moved to %s", firstTargetSHA, movedTargetSHA)
+	}
+}
+
+func TestTryRebaseClassifiesOnlyVerifiedMissingTargetAsSkipped(t *testing.T) {
+	tests := []struct {
+		name         string
+		targetRef    string
+		resolve      func(context.Context, string, string) (string, error)
+		wantErr      error
+		wantError    bool
+		wantDecision db.RefreshDecision
+	}{
+		{
+			name:         "missing target",
+			targetRef:    "refs/remotes/origin/missing",
+			wantDecision: db.RefreshDecisionSkipped,
+		},
+		{
+			name:      "resolution cancelled",
+			targetRef: "HEAD",
+			resolve: func(context.Context, string, string) (string, error) {
+				return "", context.Canceled
+			},
+			wantErr:      context.Canceled,
+			wantDecision: db.RefreshDecisionError,
+		},
+		{
+			name:      "malformed resolved commit",
+			targetRef: "HEAD",
+			resolve: func(context.Context, string, string) (string, error) {
+				return "not-a-commit", nil
+			},
+			wantError:    true,
+			wantDecision: db.RefreshDecisionError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			beginRefreshReceiptRound(t, sctx)
+			receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+			receipts.authoritativeBaseSHA = refreshStringPointer(baseSHA)
+			if tt.resolve != nil {
+				receipts.resolveTargetRef = tt.resolve
+			}
+
+			_, err := tryRebase(context.Background(), sctx, tt.targetRef, receipts)
+			if tt.wantErr == nil && !tt.wantError && err != nil {
+				t.Fatalf("try rebase error = %v", err)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("try rebase error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantError && err == nil {
+				t.Fatal("try rebase succeeded for malformed target resolution")
+			}
+
+			operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(operations) != 1 || operations[0].Decision != tt.wantDecision || len(operations[0].CommandAttemptIDs) != 0 {
+				t.Fatalf("target resolution receipt = %+v, want %s without command attempts", operations, tt.wantDecision)
+			}
+		})
 	}
 }
 
@@ -489,14 +598,15 @@ func TestRefreshReceiptRefusalStoresDiagnosticArtifact(t *testing.T) {
 	beginRefreshReceiptRound(t, sctx)
 	recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
 	reason := strings.Repeat("credentialed refusal details ", 2000)
-	if err := recorder.recordRefusal("origin/main", db.RefreshDecisionRefused, reason); err != nil {
+	startedAt := time.UnixMilli(1_725_000_000_000)
+	if err := recorder.recordRefusal(startedAt, "origin/main", db.RefreshDecisionRefused, reason); err != nil {
 		t.Fatal(err)
 	}
 	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionRefused || operations[0].DiagnosticArtifactID == nil {
+	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionRefused || operations[0].StartedAt != startedAt.UnixMilli() || operations[0].DiagnosticArtifactID == nil {
 		t.Fatalf("refusal receipt = %+v", operations)
 	}
 	registered, err := sctx.DB.GetArtifact(*operations[0].DiagnosticArtifactID)

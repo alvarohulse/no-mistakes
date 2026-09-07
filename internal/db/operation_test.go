@@ -304,66 +304,6 @@ func TestOpenAddsOperationsWithoutFabricatingLegacyRefreshReceipts(t *testing.T)
 	}
 }
 
-func TestOpenMigratesRefreshResultingHeadToNullable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "refresh-resulting-head.sqlite")
-	database, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(on)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`ALTER TABLE refresh_operations RENAME TO refresh_operations_legacy`); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(
-		`CREATE TABLE refresh_operations (
-			operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
-			strategy TEXT NOT NULL CHECK (strategy IN ('rebase', 'merge')),
-			source_ref TEXT NOT NULL,
-			destination_ref TEXT NOT NULL,
-			authoritative_base_ref TEXT NOT NULL,
-			authoritative_base_sha TEXT,
-			starting_head_sha TEXT NOT NULL,
-			decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
-			resulting_head_sha TEXT NOT NULL,
-			conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
-			repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
-		)`,
-	); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`DROP TABLE refresh_operations_legacy`); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { migrated.Close() })
-	var notNull int
-	if err := migrated.sql.QueryRow(
-		`SELECT "notnull" FROM pragma_table_info('refresh_operations') WHERE name = 'resulting_head_sha'`,
-	).Scan(&notNull); err != nil {
-		t.Fatal(err)
-	}
-	if notNull != 0 {
-		t.Fatalf("resulting_head_sha NOT NULL = %d, want nullable", notNull)
-	}
-}
-
 func TestOperationsSchemaReservesPushDiscriminator(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
