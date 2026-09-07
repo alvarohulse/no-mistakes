@@ -180,7 +180,7 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		installRunUpdateTrigger(t, p.DB(), `
+		raw := installRunUpdateTrigger(t, p.DB(), `
 			CREATE TRIGGER reject_post_worktree_terminalization
 			BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled'
 			BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;
@@ -198,10 +198,26 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 
 		ctx, cancel := context.WithCancelCause(context.Background())
 		cancel(errors.New(types.RunCancelReasonAbortedByUser))
-		if err := manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed")); err == nil {
-			t.Fatal("parkPostWorktreeFailure() error = nil")
+		result := make(chan error, 1)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			result <- manager.parkPostWorktreeFailure(ctx, run, repo, errors.New("hook failed"))
+		}()
+		t.Cleanup(func() {
+			_, _ = raw.Exec(`DROP TRIGGER IF EXISTS reject_post_worktree_terminalization`)
+			select {
+			case <-finished:
+			case <-time.After(time.Second):
+				t.Error("terminalization retry did not finish after database recovery")
+			}
+		})
+
+		if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventRunUpdated {
+			t.Fatalf("park event = (%+v, %v), want updated parked state", event, ok)
 		}
 
+		time.Sleep(2 * postWorktreeTerminalizeRetryInterval)
 		got, err := database.GetRun(run.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -212,14 +228,31 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 		if run.Status != types.RunRunning || run.Error == nil || *run.Error != "hook failed" {
 			t.Fatalf("terminal write failure mutated in-memory run: status=%s error=%v", run.Status, run.Error)
 		}
-
-		if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventRunUpdated {
-			t.Fatalf("park event = (%+v, %v), want updated parked state", event, ok)
+		select {
+		case err := <-result:
+			t.Fatalf("parkPostWorktreeFailure() returned before terminalization persisted: %v", err)
+		default:
 		}
-		readCtx, stopRead := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		defer stopRead()
-		if event, ok := subscription.Next(readCtx); ok {
-			t.Fatalf("terminal write failure broadcast false terminal event: %+v", event)
+		if _, err := raw.Exec(`DROP TRIGGER reject_post_worktree_terminalization`); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-result:
+			if err == nil || !strings.Contains(err.Error(), types.RunCancelReasonAbortedByUser) {
+				t.Fatalf("parkPostWorktreeFailure() error = %v, want cancelled terminal error", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("terminalization retry did not finish after database recovery")
+		}
+		got, err = database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.RunCancelled || got.AwaitingAgentSince != nil || got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser {
+			t.Fatalf("terminalized run = status %s awaiting=%v error=%v, want cancelled terminal state", got.Status, got.AwaitingAgentSince, got.Error)
+		}
+		if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventRunCompleted {
+			t.Fatalf("terminal event = (%+v, %v), want completed terminal state", event, ok)
 		}
 	})
 }
@@ -315,7 +348,7 @@ func waitForRunStatus(t *testing.T, database *db.DB, runID string, status types.
 	return nil
 }
 
-func installRunUpdateTrigger(t *testing.T, databasePath, statement string) {
+func installRunUpdateTrigger(t *testing.T, databasePath, statement string) *sql.DB {
 	t.Helper()
 	raw, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -325,4 +358,5 @@ func installRunUpdateTrigger(t *testing.T, databasePath, statement string) {
 	if _, err := raw.Exec(statement); err != nil {
 		t.Fatal(err)
 	}
+	return raw
 }

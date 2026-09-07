@@ -18,6 +18,8 @@ func runPostWorktreeHook(ctx context.Context, workDir string, cfg *config.Config
 	return worktreehook.Run(ctx, workDir, cfg)
 }
 
+const postWorktreeTerminalizeRetryInterval = 100 * time.Millisecond
+
 func (m *RunManager) parkPostWorktreeFailure(ctx context.Context, run *db.Run, repo *db.Repo, hookErr error) error {
 	errMsg := hookErr.Error()
 	if err := m.db.ParkRunForEnvironmentFailure(run.ID, errMsg); err != nil {
@@ -53,9 +55,15 @@ func (m *RunManager) parkPostWorktreeFailure(ctx context.Context, run *db.Run, r
 	if terminalMessage == types.RunCancelReasonAbortedByUser || terminalMessage == types.RunCancelReasonSuperseded {
 		terminalStatus = types.RunCancelled
 	}
-	if err := m.db.TerminalizeAwaitingRun(run.ID, terminalMessage, terminalStatus, time.Since(parkedAt).Milliseconds()); err != nil {
-		slog.Error("failed to finish post-worktree hook park", "run_id", run.ID, "error", err)
-		return errors.Join(errors.New(terminalMessage), fmt.Errorf("persist terminal post-worktree hook park: %w", err))
+	terminalizationFailed := false
+	for {
+		if err := m.db.TerminalizeAwaitingRun(run.ID, terminalMessage, terminalStatus, time.Since(parkedAt).Milliseconds()); err == nil {
+			break
+		} else if !terminalizationFailed {
+			slog.Error("failed to finish post-worktree hook park; retaining run ownership until terminal state persists", "run_id", run.ID, "error", err)
+			terminalizationFailed = true
+		}
+		time.Sleep(postWorktreeTerminalizeRetryInterval)
 	}
 	run.Status = terminalStatus
 	run.Error = &terminalMessage
