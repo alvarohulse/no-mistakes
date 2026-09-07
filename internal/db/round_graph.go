@@ -373,7 +373,7 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		findings_json = NULL, user_findings_json = NULL, selected_finding_ids = NULL, selection_source = NULL,
 		fix_summary = NULL, repair_failure_fingerprint = NULL, repair_result = NULL,
 		reviewed_head_sha = ?, starting_head_sha = ?, trusted_config_sha = ?, replay_config_json = ?,
-		resulting_head_sha = ?, evaluated_head_sha = ?, duration_ms = ?, status = ?
+		resulting_head_sha = COALESCE(?, resulting_head_sha), evaluated_head_sha = ?, duration_ms = ?, status = ?
 		WHERE id = ? AND status = ?`,
 		reviewedHead, subject.StartingHeadSHA, subject.TrustedConfigSHA, subject.ReplayConfigJSON,
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive)
@@ -980,8 +980,14 @@ func replaceRoundDecision(tx *sql.Tx, decision StepRoundDecision, findings []Ste
 	if _, err := tx.Exec(`DELETE FROM round_decisions WHERE round_id = ?`, decision.RoundID); err != nil {
 		return fmt.Errorf("set structured round decision: clear prior decision: %w", err)
 	}
-	result, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, explicit_empty, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		decision.ID, decision.RunID, decision.RoundID, decision.Source, decision.ExplicitEmpty, decision.CreatedAt)
+	storedSource := decision.Source
+	var terminalSource *string
+	if decision.Source == RoundSelectionSourceUserSkipped || decision.Source == RoundSelectionSourceUserAborted {
+		storedSource = RoundSelectionSourceUserDeclined
+		terminalSource = &decision.Source
+	}
+	result, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, terminal_source, explicit_empty, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		decision.ID, decision.RunID, decision.RoundID, storedSource, terminalSource, decision.ExplicitEmpty, decision.CreatedAt)
 	if err := requireOneAffectedRow(result, err, "set structured round decision: insert decision"); err != nil {
 		return err
 	}
@@ -1082,12 +1088,16 @@ func getRoundEvaluation(q roundGraphQuerier, roundID string) (*StepRoundEvaluati
 func (d *DB) GetRoundDecision(roundID string) (*StepRoundDecision, error) {
 	decision := &StepRoundDecision{}
 	var explicit int
-	if err := d.sql.QueryRow(`SELECT id, run_id, round_id, source, explicit_empty, created_at FROM round_decisions WHERE round_id = ?`, roundID).Scan(
-		&decision.ID, &decision.RunID, &decision.RoundID, &decision.Source, &explicit, &decision.CreatedAt); err != nil {
+	var terminalSource sql.NullString
+	if err := d.sql.QueryRow(`SELECT id, run_id, round_id, source, terminal_source, explicit_empty, created_at FROM round_decisions WHERE round_id = ?`, roundID).Scan(
+		&decision.ID, &decision.RunID, &decision.RoundID, &decision.Source, &terminalSource, &explicit, &decision.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get round decision: %w", err)
+	}
+	if terminalSource.Valid {
+		decision.Source = terminalSource.String
 	}
 	decision.ExplicitEmpty = explicit != 0
 	rows, err := d.sql.Query(`SELECT finding_id, ordinal, selection_ordinal, state, user_instructions, edited FROM round_decision_findings WHERE decision_id = ? ORDER BY ordinal`, decision.ID)

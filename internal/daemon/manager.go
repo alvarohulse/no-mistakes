@@ -45,15 +45,13 @@ type RunManager struct {
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
-	admissionMu  sync.Mutex                         // linearizes shutdown/quarantine with run insertion; never hold alongside mu
+	admissionMu  sync.Mutex                         // linearizes shutdown with run insertion; never hold alongside mu
 	admissions   sync.WaitGroup
 	shutdownCtx  context.Context
 	shutdown     context.CancelCauseFunc
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
-
-	postWorktreeTerminalizationTimeout time.Duration
 
 	preflightTimeout time.Duration
 	preparePreflight func(context.Context, runner.Command, runner.Spec, runner.ExecuteOptions) (runner.Prepared, error)
@@ -97,17 +95,16 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	}
 	shutdownCtx, shutdown := context.WithCancelCause(context.Background())
 	return &RunManager{
-		executors:                          make(map[string]*pipeline.Executor),
-		cancels:                            make(map[string]context.CancelCauseFunc),
-		dones:                              make(map[string]chan struct{}),
-		shutdownCtx:                        shutdownCtx,
-		shutdown:                           shutdown,
-		db:                                 database,
-		paths:                              p,
-		steps:                              stepFactory,
-		postWorktreeTerminalizationTimeout: postWorktreeTerminalizationTimeout,
-		preflightTimeout:                   defaultPreflightTimeout,
-		preparePreflight:                   runner.Prepare,
+		executors:        make(map[string]*pipeline.Executor),
+		cancels:          make(map[string]context.CancelCauseFunc),
+		dones:            make(map[string]chan struct{}),
+		shutdownCtx:      shutdownCtx,
+		shutdown:         shutdown,
+		db:               database,
+		paths:            p,
+		steps:            stepFactory,
+		preflightTimeout: defaultPreflightTimeout,
+		preparePreflight: runner.Prepare,
 		executePreflight: func(ctx context.Context, prepared runner.Prepared, options runner.ExecuteOptions) (runner.Result, error) {
 			return prepared.Execute(ctx, options)
 		},
@@ -1480,10 +1477,6 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			executeErr = executor.Execute(runCtx, run, repo, wtDir)
 		}
 		if executeErr != nil {
-			var unresolvedErr *unresolvedPostWorktreeRunError
-			if errors.As(executeErr, &unresolvedErr) {
-				retainRunOwnership = true
-			}
 			if pipeline.IsCIFixRepairDurabilityError(executeErr) {
 				m.closeRunAdmission()
 				retainRunOwnership = true
