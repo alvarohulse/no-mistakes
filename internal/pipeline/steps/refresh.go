@@ -62,7 +62,7 @@ type refreshReceiptRecorder struct {
 type refreshOperationBuilder struct {
 	recorder             *refreshReceiptRecorder
 	targetRef            string
-	startingHeadSHA      string
+	startingHeadSHA      *string
 	startedAt            time.Time
 	commandAttemptIDs    []string
 	diagnosticArtifactID *string
@@ -84,12 +84,12 @@ func (r *refreshReceiptRecorder) begin(targetRef string) *refreshOperationBuilde
 }
 
 func (r *refreshReceiptRecorder) beginAt(targetRef string, startedAt time.Time) *refreshOperationBuilder {
-	startingHead := git.EmptyTreeSHA
+	var startingHead *string
 	if r != nil && r.sctx != nil {
 		headCtx, cancel := context.WithTimeout(context.Background(), refreshReceiptHeadResolveTimeout)
 		defer cancel()
 		if headSHA, err := git.HeadSHA(headCtx, r.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
-			startingHead = strings.TrimSpace(headSHA)
+			startingHead = refreshStringPointer(strings.TrimSpace(headSHA))
 		}
 	}
 	return &refreshOperationBuilder{
