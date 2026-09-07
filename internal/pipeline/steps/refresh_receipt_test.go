@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	if rebased == nil || rebased.Decision != db.RefreshDecisionRebased || rebased.ConflictState != db.RefreshConflictStateNone || len(rebased.CommandAttemptIDs) != 1 {
 		t.Fatalf("base refresh receipt = %+v", rebased)
 	}
-	if rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == "" {
+	if rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
 		t.Fatalf("base refresh identities = %+v", rebased)
 	}
 
@@ -143,7 +144,7 @@ func TestRefreshReceiptRefusalStoresDiagnosticArtifact(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
 	beginRefreshReceiptRound(t, sctx)
-	recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main", "base")
+	recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
 	reason := strings.Repeat("credentialed refusal details ", 2000)
 	if err := recorder.recordRefusal("origin/main", db.RefreshDecisionRefused, reason); err != nil {
 		t.Fatal(err)
@@ -172,6 +173,34 @@ func TestRefreshReceiptRefusalStoresDiagnosticArtifact(t *testing.T) {
 	}
 	if !strings.Contains(string(contents), "refresh diagnostic truncated") {
 		t.Fatalf("diagnostic contents missing truncation marker: %q", contents)
+	}
+}
+
+func TestRefreshStep_FailedFeatureFetchLeavesAuthoritativeBaseSHAUnavailable(t *testing.T) {
+	t.Parallel()
+	dir, _, featureHead := setupStackedRefreshRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = filepath.Join(t.TempDir(), "unreachable-upstream.git")
+	sctx.Repo.URLsVerified = true
+	beginRefreshReceiptRound(t, sctx)
+
+	if _, err := (&RefreshStep{}).Execute(sctx); err == nil {
+		t.Fatal("refresh succeeded despite an unreachable authoritative upstream")
+	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("fetch-failure receipts = %+v, want one authoritative-base error", operations)
+	}
+	receipt := operations[0]
+	if receipt.Decision != db.RefreshDecisionError || receipt.DestinationRef != "origin/main" {
+		t.Fatalf("fetch-failure receipt = %+v", receipt)
+	}
+	if receipt.AuthoritativeBaseSHA != nil {
+		t.Fatalf("fetch-failure receipt claimed authoritative base SHA %q before fetch resolution", *receipt.AuthoritativeBaseSHA)
 	}
 }
 
