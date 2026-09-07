@@ -320,7 +320,7 @@ func TestStructuredRoundHydratesLinkedInvocationAttemptAndArtifactIDs(t *testing
 	}
 }
 
-func TestStructuredRoundPersistsRepairsForInitialDocumentUpdates(t *testing.T) {
+func TestStructuredRoundRepairsOnlyAutoFixRounds(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-repair", "https://example.com/repo.git", "main")
 	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
@@ -339,8 +339,8 @@ func TestStructuredRoundPersistsRepairsForInitialDocumentUpdates(t *testing.T) {
 	}
 	if repair, err := database.GetRoundRepair(initial.ID); err != nil {
 		t.Fatal(err)
-	} else if repair == nil || repair.FixSummary == nil || *repair.FixSummary != summary || repair.ResultingHeadSHA == nil || *repair.ResultingHeadSHA != resulting {
-		t.Fatalf("initial documentation repair = %#v", repair)
+	} else if repair != nil {
+		t.Fatalf("initial documentation round fabricated repair = %#v", repair)
 	}
 
 	fixRound, err := database.BeginStepRound(step.ID, 2, RoundTriggerAutoFix)

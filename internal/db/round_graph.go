@@ -290,7 +290,7 @@ func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEva
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
 	}
-	if trigger == RoundTriggerAutoFix || (fixSummary != nil && strings.TrimSpace(*fixSummary) != "") {
+	if trigger == RoundTriggerAutoFix {
 		if err := insertRoundRepair(tx, StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}); err != nil {
 			return fmt.Errorf("complete structured step round: insert repair: %w", err)
 		}
