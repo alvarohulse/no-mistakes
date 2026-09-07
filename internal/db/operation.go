@@ -162,6 +162,9 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	if !validRefreshRepairState(operation.RepairState) {
 		return fmt.Errorf("insert refresh operation: unsupported repair state %q", operation.RepairState)
 	}
+	if !validRefreshOutcomeTriple(operation.Decision, operation.ConflictState, operation.RepairState) {
+		return fmt.Errorf("insert refresh operation: unsupported decision/conflict/repair combination (%q, %q, %q)", operation.Decision, operation.ConflictState, operation.RepairState)
+	}
 	if operation.StartedAt <= 0 || operation.CompletedAt < operation.StartedAt || operation.DurationMS < 0 {
 		return fmt.Errorf("insert refresh operation: timing is invalid")
 	}
@@ -247,6 +250,23 @@ func validRefreshRepairState(value RefreshRepairState) bool {
 	switch value {
 	case RefreshRepairStateNotNeeded, RefreshRepairStateNotAttempted, RefreshRepairStateSucceeded, RefreshRepairStateFailed:
 		return true
+	default:
+		return false
+	}
+}
+
+func validRefreshOutcomeTriple(decision RefreshDecision, conflict RefreshConflictState, repair RefreshRepairState) bool {
+	switch decision {
+	case RefreshDecisionSkipped, RefreshDecisionFastForwarded, RefreshDecisionRebased, RefreshDecisionMerged:
+		return conflict == RefreshConflictStateNone && repair == RefreshRepairStateNotNeeded
+	case RefreshDecisionConflicted:
+		return conflict == RefreshConflictStateDetected && (repair == RefreshRepairStateNotAttempted || repair == RefreshRepairStateFailed)
+	case RefreshDecisionRepaired:
+		return conflict == RefreshConflictStateResolved && repair == RefreshRepairStateSucceeded
+	case RefreshDecisionRefused:
+		return conflict == RefreshConflictStateNone && repair == RefreshRepairStateNotAttempted
+	case RefreshDecisionError:
+		return conflict == RefreshConflictStateNone && (repair == RefreshRepairStateNotAttempted || repair == RefreshRepairStateFailed)
 	default:
 		return false
 	}

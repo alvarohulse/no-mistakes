@@ -41,7 +41,9 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	t.Parallel()
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
-	sctx.Run.Branch = "refs/heads/feature"
+	// Push notifications may retain only the parsed branch name. Receipts still
+	// need to expose the canonical Git ref rather than a transport-specific form.
+	sctx.Run.Branch = "feature"
 	sctx.Run.RefreshStrategy = types.RefreshStrategyRebase
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
@@ -84,8 +86,15 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 1 || attempts[0].ID != rebased.CommandAttemptIDs[0] || attempts[0].OutputArtifactID == nil {
+	if len(attempts) != 1 || attempts[0].ID != rebased.CommandAttemptIDs[0] || attempts[0].OutputArtifactID == nil || attempts[0].RunnerSource != runner.SourceDirectGit {
 		t.Fatalf("refresh command attempts = %+v", attempts)
+	}
+	definitions, err := sctx.DB.GetCommandDefinitionsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions) != 1 || definitions[0].RunnerExecutable != "git" || len(definitions[0].RunnerArgs) != 0 {
+		t.Fatalf("refresh command definitions = %+v", definitions)
 	}
 	registered, err := sctx.DB.GetArtifact(*attempts[0].OutputArtifactID)
 	if err != nil {
@@ -114,6 +123,9 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential \"https://github.com\"]\n\thelper = !gh auth git-credential\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte("export GIT_EDITOR=profile\nexport GIT_SEQUENCE_EDITOR=profile\nexport GIT_TERMINAL_PROMPT=1\nexport GIT_OPTIONAL_LOCKS=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -128,6 +140,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	sctx.Run.RefreshStrategy = types.RefreshStrategyRebase
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
+	sctx.Config.Runner = runner.Spec{Executable: "bash", Args: []string{"-lc"}}
 	sctx.Env = fakeCLIEnv(binDir, map[string]string{
 		"FAKE_CLI_MODE":     "git-require-noninteractive-env",
 		"FAKE_CLI_REAL_GIT": realGit,
@@ -144,6 +157,68 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	}
 	if !strings.Contains(string(log), "rebase origin/dependency") {
 		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
+	}
+}
+
+func TestRefreshReceiptAddsDiagnosticWhenCommandOutputIsMissing(t *testing.T) {
+	t.Parallel()
+	dir, _, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, headSHA, headSHA, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+
+	definition, err := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, runner.Resolved{
+		Script:        "git rebase origin/main",
+		CommandSource: runner.SourceBase,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      "test",
+			Source:        runner.SourceDefault,
+			Executable:    "git",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputState := "git:" + headSHA
+	attempt, err := sctx.DB.StartCommandAttempt(db.CommandAttempt{
+		RunID: sctx.Run.ID, CommandID: definition.ID, StepID: sctx.StepResultID, RoundID: sctx.RoundID,
+		Sequence: 1, Purpose: string(types.StepRefresh), Observer: db.CommandObserverController,
+		Trigger: sctx.RoundTrigger, BeforeSHA: headSHA, InputStateID: &inputState,
+		CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	recorder.authoritativeBaseSHA = refreshStringPointer(headSHA)
+	operation := recorder.begin("origin/main")
+	operation.commandAttemptIDs = []string{attempt.ID}
+	if err := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].DiagnosticArtifactID == nil {
+		t.Fatalf("receipt missing output diagnostic = %+v", operations)
+	}
+	registered, err := sctx.DB.GetArtifact(*operations[0].DiagnosticArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostic, err := store.Read(registered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diagnostic), "no output artifact") {
+		t.Fatalf("missing-output diagnostic = %q", diagnostic)
 	}
 }
 
@@ -250,7 +325,7 @@ func TestRefreshStep_FailedFeatureFetchLeavesAuthoritativeBaseSHAUnavailable(t *
 	}
 }
 
-func TestRefreshStepPreparationFailureDoesNotBorrowPriorCommandAttempt(t *testing.T) {
+func TestRefreshStepBypassesUnrelatedRunnerConfiguration(t *testing.T) {
 	t.Parallel()
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
@@ -263,10 +338,13 @@ func TestRefreshStepPreparationFailureDoesNotBorrowPriorCommandAttempt(t *testin
 	if _, _, err := runStepRunnerCommand(sctx, runner.Command{Run: "printf prior"}, string(types.StepRefresh)); err != nil {
 		t.Fatalf("record prior command: %v", err)
 	}
+	// Refresh Git commands are controller-owned direct invocations. An invalid
+	// configured shell must neither block them nor lend their receipts an
+	// unrelated prior shell attempt.
 	sctx.Config.Runner = runner.Spec{Executable: "not-a-supported-shell", Args: []string{"-c"}}
 
-	if _, err := (&RefreshStep{}).Execute(sctx); err == nil {
-		t.Fatal("expected refresh command preparation failure")
+	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
+		t.Fatalf("refresh with an unrelated invalid runner: %v", err)
 	}
 	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
 	if err != nil {
@@ -276,12 +354,21 @@ func TestRefreshStepPreparationFailureDoesNotBorrowPriorCommandAttempt(t *testin
 		if operation.DestinationRef != "origin/dependency" {
 			continue
 		}
-		if operation.Decision != db.RefreshDecisionError || len(operation.CommandAttemptIDs) != 0 || operation.DiagnosticArtifactID == nil {
-			t.Fatalf("preparation-failure receipt = %+v", operation)
+		if operation.Decision != db.RefreshDecisionRebased || len(operation.CommandAttemptIDs) != 1 || operation.CommandAttemptIDs[0] == "" {
+			t.Fatalf("direct refresh receipt = %+v", operation)
 		}
-		return
+		attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, attempt := range attempts {
+			if attempt.ID == operation.CommandAttemptIDs[0] && attempt.RunnerSource == runner.SourceDirectGit {
+				return
+			}
+		}
+		t.Fatalf("refresh receipt did not link a direct Git attempt: %+v", attempts)
 	}
-	t.Fatalf("missing preparation-failure receipt: %+v", operations)
+	t.Fatalf("missing direct refresh receipt: %+v", operations)
 }
 
 func TestRefreshPrimaryRunsBareRepositoryCommandAndRecordsReceipt(t *testing.T) {
