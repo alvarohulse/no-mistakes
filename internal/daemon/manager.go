@@ -49,6 +49,8 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
+	postWorktreeTerminalizationTimeout time.Duration
+
 	preflightTimeout time.Duration
 	preparePreflight func(context.Context, runner.Command, runner.Spec, runner.ExecuteOptions) (runner.Prepared, error)
 	executePreflight func(context.Context, runner.Prepared, runner.ExecuteOptions) (runner.Result, error)
@@ -90,14 +92,15 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:        make(map[string]*pipeline.Executor),
-		cancels:          make(map[string]context.CancelCauseFunc),
-		dones:            make(map[string]chan struct{}),
-		db:               database,
-		paths:            p,
-		steps:            stepFactory,
-		preflightTimeout: defaultPreflightTimeout,
-		preparePreflight: runner.Prepare,
+		executors:                          make(map[string]*pipeline.Executor),
+		cancels:                            make(map[string]context.CancelCauseFunc),
+		dones:                              make(map[string]chan struct{}),
+		db:                                 database,
+		paths:                              p,
+		steps:                              stepFactory,
+		postWorktreeTerminalizationTimeout: postWorktreeTerminalizationTimeout,
+		preflightTimeout:                   defaultPreflightTimeout,
+		preparePreflight:                   runner.Prepare,
 		executePreflight: func(ctx context.Context, prepared runner.Prepared, options runner.ExecuteOptions) (runner.Result, error) {
 			return prepared.Execute(ctx, options)
 		},
@@ -1366,6 +1369,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// Background goroutine now owns worktree cleanup.
 	bgOwnsWorktree = true
 	policyRefOwnedByRun = true
+	retainRunOwnership := false
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1400,10 +1404,18 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 			cancel(nil)
 			_ = agents.Close()
+			m.sweepRunWorktreeProcesses(wtDir)
+			if retainRunOwnership {
+				// The active database row and its recovery material must remain
+				// together. Startup recovery will fail this run closed after the
+				// daemon is restarted; deleting any part here would make that
+				// recovery unsafe.
+				slog.Error("retaining unresolved post-worktree run and quarantining daemon", "run_id", run.ID)
+				return
+			}
 			resolved.releaseTrustedRef(context.Background())
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.sweepRunWorktreeProcesses(wtDir)
 			// Clean up worktree.
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
@@ -1424,6 +1436,10 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			executeErr = executor.Execute(runCtx, run, repo, wtDir)
 		}
 		if executeErr != nil {
+			var unresolvedErr *unresolvedPostWorktreeRunError
+			if errors.As(executeErr, &unresolvedErr) {
+				retainRunOwnership = true
+			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -1460,7 +1476,9 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		// exactly what reaching this point means. It is last on purpose: the
 		// pipeline's own outcome is already decided and reported above, so
 		// nothing below can change it.
-		m.autoCaptureEvalCase(runCtx, cfg, run.ID)
+		if !retainRunOwnership {
+			m.autoCaptureEvalCase(runCtx, cfg, run.ID)
+		}
 	}()
 
 	return run.ID, nil

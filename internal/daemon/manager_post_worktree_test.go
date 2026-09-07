@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -97,6 +98,275 @@ func TestRunStartParksPostWorktreeHookFailureBeforeStepRecords(t *testing.T) {
 	cancelled := waitForRunStatus(t, database, runID, types.RunCancelled)
 	if cancelled.AwaitingAgentSince != nil {
 		t.Fatalf("cancelled run remained parked: %v", cancelled.AwaitingAgentSince)
+	}
+}
+
+func TestRunStartFallsBackAfterPostWorktreeTerminalizationBudget(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, _ := setupTestGitRepo(t, p, database, "post-worktree-terminal-fallback")
+	head := commitPostWorktreeHook(t, repo, postWorktreeFailingHook())
+	raw := installRunUpdateTrigger(t, p.DB(), `
+		CREATE TRIGGER reject_primary_post_worktree_terminalization
+		BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled' AND NEW.parked_ms < 5000
+		BEGIN SELECT RAISE(FAIL, 'injected primary terminalization failure'); END;
+	`)
+
+	manager := NewRunManager(database, p, nil)
+	manager.postWorktreeTerminalizationTimeout = 500 * time.Millisecond
+	t.Cleanup(manager.Shutdown)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree fallback", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	waitForPostWorktreePark(t, database, runID)
+	if _, err := raw.Exec(`UPDATE runs SET awaiting_agent_since = ? WHERE id = ?`, time.Now().Add(-10*time.Second).Unix(), runID); err != nil {
+		t.Fatal(err)
+	}
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+
+	manager.mu.Lock()
+	done := manager.dones[runID]
+	manager.mu.Unlock()
+	if done == nil {
+		t.Fatal("fallback run lost its completion handle")
+	}
+	if err := manager.HandleCancel(runID); err != nil {
+		t.Fatalf("cancel parked run: %v", err)
+	}
+	earlyReadCtx, stopEarlyRead := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if event, ok := subscription.Next(earlyReadCtx); ok {
+		t.Fatalf("fallback run broadcast terminal event before durable fallback: %+v", event)
+	}
+	stopEarlyRead()
+	if run, err := database.GetRun(runID); err != nil {
+		t.Fatal(err)
+	} else if run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+		t.Fatalf("fallback run before fallback = status %s awaiting=%v, want active parked row", run.Status, run.AwaitingAgentSince)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback run did not finish terminalization")
+	}
+	got, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCancelled || got.AwaitingAgentSince != nil || got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("fallback terminalized run = status %s awaiting=%v error=%v, want cancelled terminal state", got.Status, got.AwaitingAgentSince, got.Error)
+	}
+	if got.ParkedMS < 5000 {
+		t.Fatalf("fallback terminalized parked_ms = %d, want accrued parked duration", got.ParkedMS)
+	}
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventRunCompleted {
+		t.Fatalf("terminal event = (%+v, %v), want completed terminal state", event, ok)
+	}
+	active, err := database.GetActiveRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, activeRun := range active {
+		if activeRun.ID == runID {
+			t.Fatalf("fallback run remained active: %+v", activeRun)
+		}
+	}
+	if _, err := os.Stat(p.WorktreeDir(repo.ID, runID)); !os.IsNotExist(err) {
+		t.Fatalf("fallback run worktree = %v, want removed", err)
+	}
+	if _, err := git.RunBare(context.Background(), p.RepoDir(repo.ID), "rev-parse", "--verify", policyTrustedRunRef(runID)); err == nil {
+		t.Fatal("fallback run trusted ref was retained")
+	}
+	manager.mu.Lock()
+	_, executorRetained := manager.executors[runID]
+	_, cancelRetained := manager.cancels[runID]
+	_, doneRetained := manager.dones[runID]
+	manager.mu.Unlock()
+	if executorRetained || cancelRetained || doneRetained {
+		t.Fatalf("fallback run tracking retained = executor:%v cancel:%v done:%v, want all false", executorRetained, cancelRetained, doneRetained)
+	}
+}
+
+func TestRunStartRetainsUnresolvedPostWorktreeRunAndQuarantinesDaemon(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, _ := setupTestGitRepo(t, p, database, "post-worktree-unresolved")
+	head := commitPostWorktreeHook(t, repo, postWorktreeFailingHook())
+	installRunUpdateTrigger(t, p.DB(), `
+		CREATE TRIGGER reject_post_worktree_terminalization
+		BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled'
+		BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;
+	`)
+
+	manager := NewRunManager(database, p, nil)
+	manager.postWorktreeTerminalizationTimeout = 150 * time.Millisecond
+	t.Cleanup(manager.Shutdown)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree unresolved", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	waitForPostWorktreePark(t, database, runID)
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+	// The park may have been broadcast before Subscribe attached. Drain any
+	// queued update if present, but do not require it because the DB snapshot
+	// above is the authoritative park assertion.
+	parkReadCtx, stopParkRead := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if event, ok := subscription.Next(parkReadCtx); ok && event.Type != ipc.EventRunUpdated {
+		t.Fatalf("park subscription event = (%+v, %v), want updated parked state", event, ok)
+	}
+	stopParkRead()
+
+	if err := manager.HandleCancel(runID); err != nil {
+		t.Fatalf("cancel parked run: %v", err)
+	}
+	manager.mu.Lock()
+	done := manager.dones[runID]
+	manager.mu.Unlock()
+	if done == nil {
+		t.Fatal("unresolved run lost its completion handle")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("unresolved run did not finish its bounded terminalization attempt")
+	}
+
+	got, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunRunning || got.AwaitingAgentSince == nil {
+		t.Fatalf("unresolved run = status %s awaiting=%v, want active parked row", got.Status, got.AwaitingAgentSince)
+	}
+	worktree := p.WorktreeDir(repo.ID, runID)
+	if info, err := os.Stat(worktree); err != nil || !info.IsDir() {
+		t.Fatalf("unresolved run worktree = %v, want retained directory", err)
+	}
+	manager.mu.Lock()
+	_, executorRetained := manager.executors[runID]
+	_, cancelRetained := manager.cancels[runID]
+	_, doneRetained := manager.dones[runID]
+	manager.mu.Unlock()
+	if !executorRetained || !cancelRetained || !doneRetained {
+		t.Fatalf("unresolved run tracking retained = executor:%v cancel:%v done:%v, want all true", executorRetained, cancelRetained, doneRetained)
+	}
+	if _, err := os.Stat(p.EffectiveConfigYAML(runID)); err != nil {
+		t.Fatalf("unresolved run effective config artifact missing: %v", err)
+	}
+	if _, err := git.RunBare(context.Background(), p.RepoDir(repo.ID), "rev-parse", "--verify", policyTrustedRunRef(runID)); err != nil {
+		t.Fatalf("unresolved run trusted ref missing: %v", err)
+	}
+	if !manager.shuttingDown.Load() {
+		t.Fatal("unresolved run did not quarantine the daemon")
+	}
+
+	readCtx, stopRead := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopRead()
+	for {
+		event, ok := subscription.Next(readCtx)
+		if !ok {
+			break
+		}
+		if event.Type == ipc.EventRunCompleted {
+			t.Fatalf("unresolved run broadcast terminal event: %+v", event)
+		}
+	}
+	if _, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "blocked replacement", "", "", ""); err == nil || !strings.Contains(err.Error(), "daemon is shutting down") {
+		t.Fatalf("replacement start error = %v, want daemon quarantine refusal", err)
+	}
+}
+
+func TestRunStartQuarantinesWhenPostWorktreeTerminalStateCannotBeVerified(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, _ := setupTestGitRepo(t, p, database, "post-worktree-unverified")
+	head := commitPostWorktreeHook(t, repo, postWorktreeFailingHook())
+	installRunUpdateTrigger(t, p.DB(), `
+		CREATE TRIGGER ignore_post_worktree_terminalization
+		BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled'
+		BEGIN SELECT RAISE(IGNORE); END;
+	`)
+
+	manager := NewRunManager(database, p, nil)
+	manager.postWorktreeTerminalizationTimeout = 150 * time.Millisecond
+	t.Cleanup(manager.Shutdown)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "post-worktree unverified", "", "", "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	waitForPostWorktreePark(t, database, runID)
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+
+	manager.mu.Lock()
+	done := manager.dones[runID]
+	manager.mu.Unlock()
+	if done == nil {
+		t.Fatal("unverified run lost its completion handle")
+	}
+	if err := manager.HandleCancel(runID); err != nil {
+		t.Fatalf("cancel parked run: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("unverified run did not finish its bounded terminalization attempt")
+	}
+
+	got, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunRunning || got.AwaitingAgentSince == nil {
+		t.Fatalf("unverified run = status %s awaiting=%v, want active parked row", got.Status, got.AwaitingAgentSince)
+	}
+	if info, err := os.Stat(p.WorktreeDir(repo.ID, runID)); err != nil || !info.IsDir() {
+		t.Fatalf("unverified run worktree = %v, want retained directory", err)
+	}
+	if _, err := os.Stat(p.EffectiveConfigYAML(runID)); err != nil {
+		t.Fatalf("unverified run effective config artifact missing: %v", err)
+	}
+	if _, err := git.RunBare(context.Background(), p.RepoDir(repo.ID), "rev-parse", "--verify", policyTrustedRunRef(runID)); err != nil {
+		t.Fatalf("unverified run trusted ref missing: %v", err)
+	}
+	if !manager.shuttingDown.Load() {
+		t.Fatal("unverified run did not quarantine the daemon")
+	}
+
+	readCtx, stopRead := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopRead()
+	for {
+		event, ok := subscription.Next(readCtx)
+		if !ok {
+			break
+		}
+		if event.Type == ipc.EventRunCompleted {
+			t.Fatalf("unverified run broadcast terminal event: %+v", event)
+		}
 	}
 }
 
@@ -292,6 +562,10 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 		case terminalErr = <-result:
 		case <-time.After(time.Second):
 			t.Fatal("terminalization did not stop within the shortened retry budget")
+		}
+		var unresolvedErr *unresolvedPostWorktreeRunError
+		if !errors.As(terminalErr, &unresolvedErr) {
+			t.Fatalf("terminalization error = %T %v, want unresolved post-worktree error", terminalErr, terminalErr)
 		}
 		if !errors.Is(terminalErr, cancelCause) {
 			t.Fatalf("terminalization error = %v, want original cancellation cause", terminalErr)

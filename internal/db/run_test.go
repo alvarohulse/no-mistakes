@@ -3,6 +3,7 @@ package db
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -472,7 +473,6 @@ func TestTerminalizeAwaitingRunClearsParkAndAccruesDurationOnce(t *testing.T) {
 	if err := d.ParkRunForEnvironmentFailure(run.ID, "post-worktree hook failed"); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := d.TerminalizeAwaitingRun(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, 1_500); err != nil {
 		t.Fatalf("terminalize parked run: %v", err)
 	}
@@ -496,6 +496,38 @@ func TestTerminalizeAwaitingRunClearsParkAndAccruesDurationOnce(t *testing.T) {
 	}
 	if got.ParkedMS != 1_500 {
 		t.Fatalf("repeat terminalization added parked time: %d, want 1500", got.ParkedMS)
+	}
+}
+
+func TestUpdateRunErrorStatusClearsAwaitingPark(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/error-status-park", "git@github.com:user/error-status-park.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkRunForEnvironmentFailure(run.ID, "post-worktree hook failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ? WHERE id = ?`, time.Now().Unix()-2, run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.UpdateRunErrorStatus(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled); err != nil {
+		t.Fatalf("fallback terminalization: %v", err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCancelled || got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("fallback terminalization = status %s error %v, want cancelled with cancellation cause", got.Status, got.Error)
+	}
+	if got.AwaitingAgentSince != nil {
+		t.Fatalf("fallback terminalization left awaiting marker: %v", got.AwaitingAgentSince)
+	}
+	if got.ParkedMS <= 0 {
+		t.Fatalf("fallback terminalization parked_ms = %d, want accrued parked duration", got.ParkedMS)
 	}
 }
 
