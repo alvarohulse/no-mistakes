@@ -750,6 +750,7 @@ func TestExecutor_ResumeTerminalizesGateWhenDecisionPersistenceFails(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
+			rejectRunAwaitingCompletion(t, raw)
 			if _, err := raw.Exec(`CREATE TRIGGER reject_recovered_decision
 				BEFORE INSERT ON round_decisions
 				BEGIN
@@ -795,6 +796,66 @@ func TestExecutor_ResumeTerminalizesGateWhenDecisionPersistenceFails(t *testing.
 				t.Fatalf("run after recovered decision persistence failure = %#v", recoveredRun)
 			}
 		})
+	}
+}
+
+func TestExecutor_ResumeCompletesAfterAwaitingStatePersistenceFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	run, stepResult := persistStructuredParkedBuildGate(t, database, run)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectRunAwaitingCompletion(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepBuild, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered gate never accepted response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	completedStep, err := database.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedStep.Status != types.StepStatusCompleted {
+		t.Fatalf("step after awaiting-state persistence failure = %#v", completedStep)
+	}
+	recoveredRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredRun.Status != types.RunCompleted || recoveredRun.AwaitingAgentSince != nil {
+		t.Fatalf("run after awaiting-state persistence failure = %#v", recoveredRun)
+	}
+}
+
+func rejectRunAwaitingCompletion(t *testing.T, raw *sql.DB) {
+	t.Helper()
+	if _, err := raw.Exec(`CREATE TRIGGER reject_awaiting_completion
+		BEFORE UPDATE OF awaiting_agent_since ON runs
+		WHEN NEW.awaiting_agent_since IS NULL AND NEW.status = OLD.status
+		BEGIN
+			SELECT RAISE(FAIL, 'injected awaiting-agent completion failure');
+		END`); err != nil {
+		t.Fatal(err)
 	}
 }
 
