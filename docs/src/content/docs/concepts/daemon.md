@@ -123,6 +123,8 @@ Each process is asked to exit first and only forcibly killed if it is still runn
 A process can still escape that tree by detaching itself into its own session, so when a run finishes the daemon also terminates anything still standing in that run's worktree before removing the directory.
 That sweep is scoped by working directory: it never touches a worktree whose run is still active, and it can never reach a process working outside `~/.no-mistakes/worktrees/`.
 
+If a CI repair push has been verified but no-mistakes cannot durably reconcile its repair receipt or local ref, the daemon quarantines itself from new runs. It preserves the active run, worktree, trusted-policy ref, and launch artifacts without emitting a terminal result or cleaning them up. After a restart, normal crash recovery fails that unfinished run closed rather than inventing repair history.
+
 ## Concurrent push handling
 
 If you push to the same branch while a run is already active, the daemon:
