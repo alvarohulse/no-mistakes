@@ -34,13 +34,13 @@ type StepRound struct {
 	Status            string
 	// FindingsJSON is the compatibility projection of Evaluation. Structured
 	// rounds do not persist this embedded JSON; legacy rows retain it.
-	FindingsJSON      *string
-	ReviewedHeadSHA   *string // non-authoritative commit candidate captured by a review round
-	StartingHeadSHA   *string
-	TrustedConfigSHA  *string
-	ReplayConfigJSON  []byte
-	GlobalConfigYAML  []byte
-	RepoConfigYAML    []byte
+	FindingsJSON     *string
+	ReviewedHeadSHA  *string // non-authoritative commit candidate captured by a review round
+	StartingHeadSHA  *string
+	TrustedConfigSHA *string
+	ReplayConfigJSON []byte
+	GlobalConfigYAML []byte
+	RepoConfigYAML   []byte
 	// UserFindingsJSON is a compatibility projection. Structured rounds keep
 	// user additions and per-finding edits in Evaluation and Decision.
 	UserFindingsJSON *string
@@ -51,7 +51,7 @@ type StepRound struct {
 	SelectionSource    *string
 	// FixSummary, RepairFailureFingerprint, and RepairResult are compatibility
 	// projections of Repair.
-	FixSummary *string
+	FixSummary               *string
 	RepairFailureFingerprint *string
 	RepairResult             *string
 	ResultingHeadSHA         *string
