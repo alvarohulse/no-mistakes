@@ -310,7 +310,16 @@ func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, p
 		}
 		return "", -1, prepareErr
 	}
+	return runPersistedStepCommand(sctx, resolved, purpose, definitionSource, sequence, func() (runner.Result, error) {
+		return prepared.Execute(sctx.Ctx, options)
+	})
+}
 
+// runPersistedStepCommand runs an already-resolved command and records its
+// definition, attempt, output artifact, and observed outcome. Both configured
+// shell commands and controller-owned direct commands use this path so an
+// execution receipt never needs to pretend that a different process ran it.
+func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, execute func() (runner.Result, error)) (string, int, error) {
 	var attempt *db.CommandAttempt
 	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
 		definitionResolution := resolved
@@ -377,7 +386,7 @@ func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, p
 		}
 	}
 
-	result, err := prepared.Execute(sctx.Ctx, options)
+	result, err := execute()
 	if err != nil {
 		err = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, err)
 	}
@@ -438,7 +447,7 @@ func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, p
 		}
 		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, err)
 	} else {
-		sctx.RecordCommandAtSequence(command.Run, sequence, recordedExitCode, err)
+		sctx.RecordCommandAtSequence(resolved.Script, sequence, recordedExitCode, err)
 	}
 	if attempt != nil {
 		if completionErr != nil {
@@ -450,6 +459,57 @@ func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, p
 		}
 	}
 	return result.Output, result.ExitCode, err
+}
+
+// runStepGitCommand executes a controller-owned Git command without routing
+// it through the configurable shell. It retains the same command-attempt and
+// output-artifact contract as configured commands while preventing login
+// profiles from weakening the required non-interactive Git environment.
+func runStepGitCommand(sctx *pipeline.StepContext, command, purpose string, args ...string) (string, int, error) {
+	sequence := sctx.NextCommandSequence()
+	gitArgs := append([]string(nil), args...)
+	if git.LooksLikeBareRepository(sctx.WorkDir) {
+		gitArgs = append([]string{"--git-dir=" + sctx.WorkDir}, gitArgs...)
+	}
+	resolved := runner.Resolved{
+		Script:        command,
+		Argv:          append([]string{"git"}, gitArgs...),
+		CommandSource: runner.SourceBase,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      runtime.GOOS,
+			Source:        runner.SourceDirectGit,
+			Executable:    "git",
+		},
+	}
+	return runPersistedStepCommand(sctx, resolved, purpose, "", sequence, func() (runner.Result, error) {
+		return executeStepGitCommand(sctx, gitArgs)
+	})
+}
+
+func executeStepGitCommand(sctx *pipeline.StepContext, args []string) (runner.Result, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	grace := shellenv.DefaultProcessTerminationGrace
+	if sctx.Config != nil && sctx.Config.ProcessTerminationGrace > 0 {
+		grace = sctx.Config.ProcessTerminationGrace
+	}
+	shellenv.ConfigureShellCommand(cmd, grace)
+	output, err := shellenv.CombinedOutputShellCommand(cmd)
+	result := runner.Result{Output: string(output), ExitCode: 0}
+	if err == nil {
+		return result, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		return result, nil
+	}
+	result.ExitCode = -1
+	if ctxErr := sctx.Ctx.Err(); ctxErr != nil {
+		return result, ctxErr
+	}
+	return result, err
 }
 
 func cleanCommandStateID(ctx context.Context, dir, sha string) (*string, error) {

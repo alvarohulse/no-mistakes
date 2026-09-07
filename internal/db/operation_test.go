@@ -173,24 +173,31 @@ func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t
 	receipt, _, _, _ := newRefreshOperationFixture(t, d)
 	receipt.AuthoritativeBaseSHA = nil
 
-	for _, decision := range []RefreshDecision{
-		RefreshDecisionSkipped,
-		RefreshDecisionFastForwarded,
-		RefreshDecisionRebased,
-		RefreshDecisionMerged,
-		RefreshDecisionConflicted,
-		RefreshDecisionRepaired,
+	for _, outcome := range []struct {
+		decision RefreshDecision
+		conflict RefreshConflictState
+		repair   RefreshRepairState
+	}{
+		{RefreshDecisionSkipped, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionFastForwarded, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionRebased, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionMerged, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionConflicted, RefreshConflictStateDetected, RefreshRepairStateNotAttempted},
+		{RefreshDecisionRepaired, RefreshConflictStateResolved, RefreshRepairStateSucceeded},
 	} {
 		candidate := receipt
-		candidate.Decision = decision
+		candidate.Decision = outcome.decision
+		candidate.ConflictState = outcome.conflict
+		candidate.RepairState = outcome.repair
 		if _, err := d.InsertRefreshOperation(candidate); err == nil || !strings.Contains(err.Error(), "authoritative base SHA") {
-			t.Fatalf("insert %s receipt without authoritative base SHA error = %v", decision, err)
+			t.Fatalf("insert %s receipt without authoritative base SHA error = %v", outcome.decision, err)
 		}
 	}
 
 	for _, decision := range []RefreshDecision{RefreshDecisionRefused, RefreshDecisionError} {
 		candidate := receipt
 		candidate.Decision = decision
+		candidate.RepairState = RefreshRepairStateNotAttempted
 		stored, err := d.InsertRefreshOperation(candidate)
 		if err != nil {
 			t.Fatalf("insert %s pre-resolution receipt: %v", decision, err)
@@ -198,6 +205,61 @@ func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t
 		if stored.AuthoritativeBaseSHA != nil {
 			t.Fatalf("stored %s pre-resolution receipt base SHA = %q, want unavailable", decision, *stored.AuthoritativeBaseSHA)
 		}
+	}
+}
+
+func TestInsertRefreshOperationEnforcesDecisionConflictRepairTriples(t *testing.T) {
+	valid := []struct {
+		decision RefreshDecision
+		conflict RefreshConflictState
+		repair   RefreshRepairState
+	}{
+		{RefreshDecisionSkipped, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionFastForwarded, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionRebased, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionMerged, RefreshConflictStateNone, RefreshRepairStateNotNeeded},
+		{RefreshDecisionConflicted, RefreshConflictStateDetected, RefreshRepairStateNotAttempted},
+		{RefreshDecisionConflicted, RefreshConflictStateDetected, RefreshRepairStateFailed},
+		{RefreshDecisionRepaired, RefreshConflictStateResolved, RefreshRepairStateSucceeded},
+		{RefreshDecisionRefused, RefreshConflictStateNone, RefreshRepairStateNotAttempted},
+		{RefreshDecisionError, RefreshConflictStateNone, RefreshRepairStateNotAttempted},
+		{RefreshDecisionError, RefreshConflictStateNone, RefreshRepairStateFailed},
+	}
+	for _, tt := range valid {
+		t.Run(string(tt.decision)+"/"+string(tt.conflict)+"/"+string(tt.repair), func(t *testing.T) {
+			d := openTestDB(t)
+			receipt, _, _, _ := newRefreshOperationFixture(t, d)
+			receipt.Decision = tt.decision
+			receipt.ConflictState = tt.conflict
+			receipt.RepairState = tt.repair
+			if _, err := d.InsertRefreshOperation(receipt); err != nil {
+				t.Fatalf("insert valid refresh triple: %v", err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		decision RefreshDecision
+		conflict RefreshConflictState
+		repair   RefreshRepairState
+	}{
+		{RefreshDecisionMerged, RefreshConflictStateDetected, RefreshRepairStateNotNeeded},
+		{RefreshDecisionConflicted, RefreshConflictStateResolved, RefreshRepairStateNotAttempted},
+		{RefreshDecisionRepaired, RefreshConflictStateResolved, RefreshRepairStateFailed},
+		{RefreshDecisionRefused, RefreshConflictStateNone, RefreshRepairStateFailed},
+		{RefreshDecisionError, RefreshConflictStateDetected, RefreshRepairStateNotAttempted},
+	}
+	for _, tt := range invalid {
+		t.Run("reject/"+string(tt.decision)+"/"+string(tt.conflict)+"/"+string(tt.repair), func(t *testing.T) {
+			d := openTestDB(t)
+			receipt, _, _, _ := newRefreshOperationFixture(t, d)
+			receipt.Decision = tt.decision
+			receipt.ConflictState = tt.conflict
+			receipt.RepairState = tt.repair
+			if _, err := d.InsertRefreshOperation(receipt); err == nil || !strings.Contains(err.Error(), "combination") {
+				t.Fatalf("insert invalid refresh triple error = %v", err)
+			}
+		})
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,7 +18,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/runner"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -155,7 +153,21 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 	if headSHA, err := git.HeadSHA(o.recorder.sctx.Ctx, o.recorder.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
 		resultingHead = strings.TrimSpace(headSHA)
 	}
-	if o.diagnosticArtifactID == nil && len(o.commandAttemptIDs) == 0 && strings.TrimSpace(diagnostic) != "" {
+	diagnosticRequired := len(o.commandAttemptIDs) == 0 && strings.TrimSpace(diagnostic) != ""
+	missingOutputArtifacts, err := o.missingCommandOutputArtifacts()
+	if err != nil {
+		return err
+	}
+	if len(missingOutputArtifacts) > 0 {
+		missingDiagnostic := fmt.Sprintf("refresh command attempt(s) %s have no output artifact", strings.Join(missingOutputArtifacts, ", "))
+		if strings.TrimSpace(diagnostic) == "" {
+			diagnostic = missingDiagnostic
+		} else {
+			diagnostic += "\n" + missingDiagnostic
+		}
+		diagnosticRequired = true
+	}
+	if o.diagnosticArtifactID == nil && diagnosticRequired {
 		store, err := artifact.NewStore(o.recorder.sctx.Paths, "")
 		if err != nil {
 			return fmt.Errorf("create refresh diagnostic store: %w", err)
@@ -202,6 +214,28 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 	return nil
 }
 
+func (o *refreshOperationBuilder) missingCommandOutputArtifacts() ([]string, error) {
+	if len(o.commandAttemptIDs) == 0 {
+		return nil, nil
+	}
+	attempts, err := o.recorder.sctx.DB.GetCommandAttemptsByRun(o.recorder.sctx.Run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load refresh command attempts for output artifacts: %w", err)
+	}
+	byID := make(map[string]*db.CommandAttempt, len(attempts))
+	for _, attempt := range attempts {
+		byID[attempt.ID] = attempt
+	}
+	var missing []string
+	for _, attemptID := range o.commandAttemptIDs {
+		attempt, found := byID[attemptID]
+		if found && attempt.OutputArtifactID == nil {
+			missing = append(missing, attemptID)
+		}
+	}
+	return missing, nil
+}
+
 func maxInt64(left, right int64) int64 {
 	if left > right {
 		return left
@@ -233,9 +267,9 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	}
 	baseBranch := refreshBaseBranch(sctx, defaultBranch)
 	strategy := sctx.Run.RefreshStrategy.OrDefault()
-	sourceRef := strings.TrimSpace(sctx.Run.Branch)
-	if sourceRef == "" {
-		sourceRef = "HEAD"
+	sourceRef := "HEAD"
+	if branch != "" {
+		sourceRef = "refs/heads/" + branch
 	}
 	authoritativeBaseRef := "origin/" + baseBranch
 	receipts := newRefreshReceiptRecorder(sctx, strategy, sourceRef, authoritativeBaseRef)
@@ -885,8 +919,7 @@ func runRefreshPrimary(ctx context.Context, sctx *pipeline.StepContext, operatio
 	if err != nil {
 		return "", err
 	}
-	env := git.NonInteractiveEnvFrom(sctx.Env, sctx.WorkDir)
-	output, exitCode, err := runStepRunnerCommandWithEnv(sctx, runnerCommand(command), string(types.StepRefresh), env)
+	output, exitCode, err := runStepGitCommand(sctx, command, string(types.StepRefresh), args...)
 	if captureErr := operation.captureAttemptsStartedAfter(before); captureErr != nil {
 		err = errors.Join(err, captureErr)
 	}
@@ -899,21 +932,8 @@ func runRefreshPrimary(ctx context.Context, sctx *pipeline.StepContext, operatio
 	return output, nil
 }
 
-func runnerCommand(command string) runner.Command {
-	return runner.Command{Run: command}
-}
-
 func refreshGitCommand(sctx *pipeline.StepContext, args ...string) string {
 	parts := []string{"git"}
-	powershell := runtime.GOOS == "windows"
-	if sctx != nil && sctx.Config != nil {
-		switch strings.ToLower(strings.TrimSpace(sctx.Config.Runner.Executable)) {
-		case "pwsh", "powershell":
-			powershell = true
-		case "sh", "bash", "zsh":
-			powershell = false
-		}
-	}
 	gitArgs := args
 	if sctx != nil && git.LooksLikeBareRepository(sctx.WorkDir) {
 		gitArgs = append([]string{"--git-dir=" + sctx.WorkDir}, gitArgs...)
@@ -923,11 +943,7 @@ func refreshGitCommand(sctx *pipeline.StepContext, args ...string) string {
 			parts = append(parts, arg)
 			continue
 		}
-		if powershell {
-			parts = append(parts, refreshPowerShellQuote(arg))
-		} else {
-			parts = append(parts, refreshPOSIXQuote(arg))
-		}
+		parts = append(parts, refreshPOSIXQuote(arg))
 	}
 	return strings.Join(parts, " ")
 }
@@ -952,10 +968,6 @@ func refreshShellWordSafe(value string) bool {
 
 func refreshPOSIXQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
-func refreshPowerShellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // prepareRefreshTarget checks whether incorporating targetRef can be skipped.
