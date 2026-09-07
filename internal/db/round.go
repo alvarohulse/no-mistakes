@@ -331,7 +331,8 @@ func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source
 		if len(selected) == 0 && (selectedFindingIDs == nil || strings.TrimSpace(*selectedFindingIDs) == "") {
 			return d.clearStructuredRoundDecision(id)
 		}
-		return d.setStructuredDecisionByExternalIDs(id, selected, source, nil, false)
+		explicitEmpty := selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) == DeclinedSelectionJSON
+		return d.setStructuredDecisionByExternalIDs(id, selected, source, nil, explicitEmpty)
 	}
 	var selectionSource *string
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {

@@ -464,6 +464,50 @@ func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t 
 	}
 }
 
+func TestSetStepRoundSelectionPersistsExplicitEmptyNormalizedDecision(t *testing.T) {
+	database := openTestDB(t)
+	repo, err := database.InsertRepo("/tmp/structured-explicit-empty", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{
+			{ExternalID: "review-1", Description: "needs review", Action: types.ActionAskUser},
+		},
+	}, StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := DeclinedSelectionJSON
+	if err := database.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceUser); err != nil {
+		t.Fatal(err)
+	}
+
+	decision, err := database.GetRoundDecision(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision == nil || decision.Source != RoundSelectionSourceUser || !decision.ExplicitEmpty {
+		t.Fatalf("normalized empty decision = %#v, want user explicit-empty decision", decision)
+	}
+	if len(decision.Findings) != 1 || decision.Findings[0].State != RoundDecisionFindingUnselected {
+		t.Fatalf("normalized empty decision findings = %#v, want one unselected finding", decision.Findings)
+	}
+}
+
 func TestStructuredRoundRekeysCollidingUserFinding(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-decision-collision", "https://example.com/repo.git", "main")
