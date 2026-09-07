@@ -389,29 +389,12 @@ func TestCIStep_QuarantinesWhenPersistedRepairCannotUpdateLocalRef(t *testing.T)
 	sctx.RoundID = round.ID
 	sctx.Round = 1
 	sctx.RoundTrigger = db.RoundTriggerInitial
-	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`)
 
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	binDir := t.TempDir()
-	wrapper := filepath.Join(binDir, "git")
-	if err := os.WriteFile(wrapper, []byte(fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "update-ref" ]; then
-	echo "injected local update-ref failure" >&2
-	exit 1
-fi
-exec %q "$@"
-`, gitPath)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for index, value := range sctx.Env {
-		if strings.HasPrefix(value, "PATH=") {
-			sctx.Env[index] = "PATH=" + binDir + string(os.PathListSeparator) + strings.TrimPrefix(value, "PATH=")
-			break
-		}
-	}
+	sctx.Env = fakeCIGHWithGitUpdateRefError(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`, gitPath)
 
 	polls := 0
 	_, err = (&CIStep{

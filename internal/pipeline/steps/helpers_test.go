@@ -523,6 +523,23 @@ func fakeCIGH(t *testing.T, state, checksJSON string) []string {
 	})
 }
 
+// fakeCIGHWithGitUpdateRefError creates one cross-platform fake CLI directory
+// for CI provider calls and Git calls. The combined mode dispatches by the
+// linked executable name so the Git failure injection does not replace the
+// fake GitHub provider used by the same step.
+func fakeCIGHWithGitUpdateRefError(t *testing.T, state, checksJSON, realGit string) []string {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "gh")
+	linkTestBinary(t, binDir, "git")
+	return fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":     "ci-gh-git-update-ref-error",
+		"FAKE_CLI_STATE":    state,
+		"FAKE_CLI_CHECKS":   checksJSON,
+		"FAKE_CLI_REAL_GIT": realGit,
+	})
+}
+
 func fakeCIGHMergeable(t *testing.T, state, checksJSON, mergeable string) []string {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)
