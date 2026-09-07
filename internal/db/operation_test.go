@@ -21,7 +21,7 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindRefresh {
 		t.Fatalf("stored operation identity = %+v", stored)
 	}
-	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
+	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
 		t.Fatalf("stored receipt fields = %+v", stored)
 	}
 	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
@@ -165,6 +165,39 @@ func TestInsertRefreshOperationRequiresOperationDiagnosticArtifact(t *testing.T)
 	}
 	if _, err := d.InsertRefreshOperation(receipt); err == nil || !strings.Contains(err.Error(), "diagnostic artifact") {
 		t.Fatalf("insert error = %v, want diagnostic artifact rejection", err)
+	}
+}
+
+func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newRefreshOperationFixture(t, d)
+	receipt.AuthoritativeBaseSHA = nil
+
+	for _, decision := range []RefreshDecision{
+		RefreshDecisionSkipped,
+		RefreshDecisionFastForwarded,
+		RefreshDecisionRebased,
+		RefreshDecisionMerged,
+		RefreshDecisionConflicted,
+		RefreshDecisionRepaired,
+	} {
+		candidate := receipt
+		candidate.Decision = decision
+		if _, err := d.InsertRefreshOperation(candidate); err == nil || !strings.Contains(err.Error(), "authoritative base SHA") {
+			t.Fatalf("insert %s receipt without authoritative base SHA error = %v", decision, err)
+		}
+	}
+
+	for _, decision := range []RefreshDecision{RefreshDecisionRefused, RefreshDecisionError} {
+		candidate := receipt
+		candidate.Decision = decision
+		stored, err := d.InsertRefreshOperation(candidate)
+		if err != nil {
+			t.Fatalf("insert %s pre-resolution receipt: %v", decision, err)
+		}
+		if stored.AuthoritativeBaseSHA != nil {
+			t.Fatalf("stored %s pre-resolution receipt base SHA = %q, want unavailable", decision, *stored.AuthoritativeBaseSHA)
+		}
 	}
 }
 
@@ -319,7 +352,7 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		SourceRef:            "refs/heads/feature",
 		DestinationRef:       "refs/remotes/origin/main",
 		AuthoritativeBaseRef: "refs/remotes/origin/main",
-		AuthoritativeBaseSHA: "authoritative-base",
+		AuthoritativeBaseSHA: stringPointer("authoritative-base"),
 		StartingHeadSHA:      "starting-head",
 		Decision:             RefreshDecisionMerged,
 		ResultingHeadSHA:     "resulting-head",

@@ -58,7 +58,7 @@ type RefreshOperation struct {
 	SourceRef            string
 	DestinationRef       string
 	AuthoritativeBaseRef string
-	AuthoritativeBaseSHA string
+	AuthoritativeBaseSHA *string
 	StartingHeadSHA      string
 	Decision             RefreshDecision
 	ResultingHeadSHA     string
@@ -139,7 +139,7 @@ type operationQuerier interface {
 func validateRefreshOperation(q operationQuerier, operation RefreshOperation) error {
 	if strings.TrimSpace(operation.RunID) == "" || strings.TrimSpace(operation.StepID) == "" || strings.TrimSpace(operation.RoundID) == "" ||
 		strings.TrimSpace(operation.SourceRef) == "" || strings.TrimSpace(operation.DestinationRef) == "" ||
-		strings.TrimSpace(operation.AuthoritativeBaseRef) == "" || strings.TrimSpace(operation.AuthoritativeBaseSHA) == "" ||
+		strings.TrimSpace(operation.AuthoritativeBaseRef) == "" ||
 		strings.TrimSpace(operation.StartingHeadSHA) == "" || strings.TrimSpace(operation.ResultingHeadSHA) == "" {
 		return fmt.Errorf("insert refresh operation: required receipt identity is incomplete")
 	}
@@ -148,6 +148,13 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	}
 	if !validRefreshDecision(operation.Decision) {
 		return fmt.Errorf("insert refresh operation: unsupported decision %q", operation.Decision)
+	}
+	if operation.AuthoritativeBaseSHA == nil {
+		if operation.Decision != RefreshDecisionRefused && operation.Decision != RefreshDecisionError {
+			return fmt.Errorf("insert refresh operation: authoritative base SHA is required for decision %q", operation.Decision)
+		}
+	} else if strings.TrimSpace(*operation.AuthoritativeBaseSHA) == "" {
+		return fmt.Errorf("insert refresh operation: authoritative base SHA is empty")
 	}
 	if !validRefreshConflictState(operation.ConflictState) {
 		return fmt.Errorf("insert refresh operation: unsupported conflict state %q", operation.ConflictState)
@@ -292,9 +299,10 @@ func (d *DB) GetRefreshOperationsByRun(runID string) ([]*RefreshOperation, error
 func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperation, error) {
 	operation := &RefreshOperation{}
 	var kind, strategy, decision, conflictState, repairState string
+	var authoritativeBaseSHA sql.NullString
 	if err := row.Scan(
 		&operation.ID, &operation.RunID, &kind, &operation.StepID, &operation.RoundID,
-		&strategy, &operation.SourceRef, &operation.DestinationRef, &operation.AuthoritativeBaseRef, &operation.AuthoritativeBaseSHA,
+		&strategy, &operation.SourceRef, &operation.DestinationRef, &operation.AuthoritativeBaseRef, &authoritativeBaseSHA,
 		&operation.StartingHeadSHA, &decision, &operation.ResultingHeadSHA, &conflictState, &repairState,
 		&operation.StartedAt, &operation.CompletedAt, &operation.DurationMS, &operation.DiagnosticArtifactID,
 	); err != nil {
@@ -305,6 +313,9 @@ func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperatio
 	operation.Decision = RefreshDecision(decision)
 	operation.ConflictState = RefreshConflictState(conflictState)
 	operation.RepairState = RefreshRepairState(repairState)
+	if authoritativeBaseSHA.Valid {
+		operation.AuthoritativeBaseSHA = &authoritativeBaseSHA.String
+	}
 	return operation, nil
 }
 

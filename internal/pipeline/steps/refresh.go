@@ -55,7 +55,7 @@ type refreshReceiptRecorder struct {
 	strategy             types.RefreshStrategy
 	sourceRef            string
 	authoritativeBaseRef string
-	authoritativeBaseSHA string
+	authoritativeBaseSHA *string
 	enabled              bool
 }
 
@@ -68,13 +68,12 @@ type refreshOperationBuilder struct {
 	diagnosticArtifactID *string
 }
 
-func newRefreshReceiptRecorder(sctx *pipeline.StepContext, strategy types.RefreshStrategy, sourceRef, authoritativeBaseRef, authoritativeBaseSHA string) *refreshReceiptRecorder {
+func newRefreshReceiptRecorder(sctx *pipeline.StepContext, strategy types.RefreshStrategy, sourceRef, authoritativeBaseRef string) *refreshReceiptRecorder {
 	return &refreshReceiptRecorder{
 		sctx:                 sctx,
 		strategy:             strategy.OrDefault(),
 		sourceRef:            sourceRef,
 		authoritativeBaseRef: authoritativeBaseRef,
-		authoritativeBaseSHA: authoritativeBaseSHA,
 		enabled:              sctx != nil && sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" && sctx.Paths != nil,
 	}
 }
@@ -239,11 +238,7 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 		sourceRef = "HEAD"
 	}
 	authoritativeBaseRef := "origin/" + baseBranch
-	authoritativeBaseSHA := strings.TrimSpace(sctx.Run.BaseSHA)
-	if authoritativeBaseSHA == "" || git.IsZeroSHA(authoritativeBaseSHA) {
-		authoritativeBaseSHA = git.EmptyTreeSHA
-	}
-	receipts := newRefreshReceiptRecorder(sctx, strategy, sourceRef, authoritativeBaseRef, authoritativeBaseSHA)
+	receipts := newRefreshReceiptRecorder(sctx, strategy, sourceRef, authoritativeBaseRef)
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -269,7 +264,7 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 		return nil, wrappedErr
 	}
 	if baseSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", authoritativeBaseRef+"^{commit}"); err == nil && strings.TrimSpace(baseSHA) != "" {
-		receipts.authoritativeBaseSHA = strings.TrimSpace(baseSHA)
+		receipts.authoritativeBaseSHA = refreshStringPointer(strings.TrimSpace(baseSHA))
 	} else if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionError, fmt.Sprintf("resolve authoritative base %s: %v", authoritativeBaseRef, err)); receiptErr != nil {
 		return nil, errors.Join(fmt.Errorf("resolve authoritative base %s: %w", authoritativeBaseRef, err), receiptErr)
 	} else {
