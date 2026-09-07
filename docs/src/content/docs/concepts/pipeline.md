@@ -46,20 +46,35 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 ## Execution vocabulary
 
-- A **round** is one persisted execution pass of a step. It records the
-  evaluation produced by that pass, its starting, resulting, evaluated, and
-  trusted-config commit identities when available, and references to the
-  related agent invocations, command attempts, and owner-local artifacts.
+- A **round** is one persisted execution pass of a step. It starts `active`
+  and ends `completed` or `failed`; it links the related agent invocations,
+  command attempts, and owner-local artifacts. Structured rounds (every step
+  except Refresh and Push) also retain the subject's starting, resulting,
+  evaluated, and trusted-config commit identities when available.
+- An **evaluation** is the stable, explicitly typed result of a structured
+  round. Its kind is `initial_review`, `rereview`, `validation`,
+  `revalidation`, or `documentation`.
+- A **finding** belongs to exactly one evaluation. Findings retain stable,
+  run-unique record identities, an agent-facing ID unique within their
+  evaluation, and their original order. User-added findings become records in
+  the same evaluation rather than a copied fix payload.
+- A **decision** records a selection against an evaluation's finding
+  identities: selected findings keep selection order, while every other
+  finding remains deliberately unselected. It also retains per-finding user
+  edits and the decision source. A **waiver** is an explicit empty decision
+  that resolves a findings gate; a missing decision leaves it unresolved.
+  Skip and abort retain their terminal decision provenance but end the step or
+  run instead of resolving it.
+- A **repair** is the receipt for repair progress on its owning round. It
+  retains the fix summary, a content-free failure fingerprint, result
+  (`attempted`, `resolved`, `stopped_no_progress`,
+  `stopped_repeated_failure`, or `stopped_attempt_limit`), and resulting head
+  when available.
 - An **initial round** is a step's first pass. A **fix round** follows an
   automatic or user-selected repair. New rounds use `initial` or `auto_fix`;
   historical `user_fix` rows normalize to `auto_fix` on read while retaining
-  explicit legacy provenance.
-- Review rounds are **initial review** or **rereview**. Build, test, and lint
-  first passes are **validation** and their repair passes are
-  **revalidation**. The Document step records a **documentation** evaluation.
-- A **waiver** (an explicit decline in audit data) resolves a findings gate
-  with an empty fix selection. It differs from a missing decision, which
-  leaves the gate unresolved, and from skipping or aborting a step.
+  explicit legacy provenance. Migrations add records only and never infer
+  missing history.
 - An **attempt** is one actual controller-launched execution of a resolved pipeline command. Repeated executions remain separate attempts even when the script and runner are identical.
 - A **retry** is a later controller-observed attempt only when the immediately prior attempt is for the same command definition, step, purpose, command source, and runner provenance and ends in `fail`, `process_error`, `cancelled`, or `timeout`. It requires the same subject SHA and an unchanged clean input state (`input_state_id` equals the preceding attempt's `result_state_id`); otherwise it is a new attempt. A qualifying retry uses the durable reason `unchanged_after_repair`.
 
