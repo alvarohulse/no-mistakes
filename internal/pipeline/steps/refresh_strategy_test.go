@@ -18,6 +18,7 @@ import (
 
 func TestRefreshStep_RebasesOntoStackedBranch(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
@@ -41,6 +42,7 @@ func TestRefreshStep_RebasesOntoStackedBranch(t *testing.T) {
 
 func TestRefreshStepEvidenceKeepsPrimaryOperationAndOmitsFetchPlumbing(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
@@ -81,6 +83,7 @@ func TestRefreshStepEvidenceKeepsPrimaryOperationAndOmitsFetchPlumbing(t *testin
 
 func TestRefreshStep_MergesStackedBranch(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
@@ -105,6 +108,7 @@ func TestRefreshStep_MergesStackedBranch(t *testing.T) {
 
 func TestRefreshStep_FetchesLatestStackedBranchBeforeRefresh(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
 	other := t.TempDir()
 	gitCmd(t, other, "clone", upstream, ".")
@@ -131,6 +135,7 @@ func TestRefreshStep_FetchesLatestStackedBranchBeforeRefresh(t *testing.T) {
 
 func TestRefreshStep_MergeConflictRequiresApproval(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupConflictingStackedRefreshRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
 	sctx.Run.Branch = "refs/heads/feature"
@@ -162,6 +167,7 @@ func TestRefreshStep_MergeConflictRequiresApproval(t *testing.T) {
 
 func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	t.Parallel()
+	lockRefreshGitFixture(t)
 	dir, upstream, featureHead := setupConflictingStackedRefreshRepo(t)
 	ag := &mockAgent{
 		name: "test",
