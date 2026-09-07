@@ -275,7 +275,11 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 			return false, err
 		}
 		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-			return false, fmt.Errorf("update local branch ref: %w", err)
+			updateErr := fmt.Errorf("update local branch ref: %w", err)
+			if persistVerifiedPush != nil {
+				return false, pipeline.NewCIFixRepairDurabilityError(updateErr)
+			}
+			return false, updateErr
 		}
 		sctx.Run.HeadSHA = newHeadSHA
 		if persistVerifiedPush == nil {
@@ -293,7 +297,11 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	}
 
 	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
+		updateErr := fmt.Errorf("update local branch ref: %w", err)
+		if persistVerifiedPush != nil {
+			return false, pipeline.NewCIFixRepairDurabilityError(updateErr)
+		}
+		return false, updateErr
 	}
 	sctx.Run.HeadSHA = newHeadSHA
 	if persistVerifiedPush == nil {

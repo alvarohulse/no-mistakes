@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -355,6 +356,104 @@ func TestCIStep_StopsWhenPushedRepairHeadAndReceiptCannotPersist(t *testing.T) {
 	}
 	if len(rounds) != 2 || rounds[1].Status != db.RoundStatusActive || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary != nil || rounds[1].Repair.ResultingHeadSHA != nil {
 		t.Fatalf("CI repair rounds after receipt failure = %#v, want attempted repair without applied data", rounds)
+	}
+}
+
+func TestCIStep_QuarantinesWhenPersistedRepairCannotUpdateLocalRef(t *testing.T) {
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(opts.CWD, "local-ref-failure.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return ciRepairResult(), nil
+		},
+	}
+	sctx := newCIPersistedTestContext(t, ag, dir, upstream, baseSHA, headSHA)
+	sctx.Run.PRURL = &prURL
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = time.Minute
+	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.BeginStepRound(stepResult.ID, 1, db.RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.Round = 1
+	sctx.RoundTrigger = db.RoundTriggerInitial
+	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`)
+
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	if err := os.WriteFile(wrapper, []byte(fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "update-ref" ]; then
+	echo "injected local update-ref failure" >&2
+	exit 1
+fi
+exec %q "$@"
+`, gitPath)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for index, value := range sctx.Env {
+		if strings.HasPrefix(value, "PATH=") {
+			sctx.Env[index] = "PATH=" + binDir + string(os.PathListSeparator) + strings.TrimPrefix(value, "PATH=")
+			break
+		}
+	}
+
+	polls := 0
+	_, err = (&CIStep{
+		waitForNextPoll: func(context.Context, time.Duration) error {
+			polls++
+			return nil
+		},
+	}).Execute(sctx)
+	if !pipeline.IsCIFixRepairDurabilityError(err) {
+		t.Fatalf("CI repair result = %T %v, want durability uncertainty", err, err)
+	}
+	if !strings.Contains(err.Error(), "injected local update-ref failure") {
+		t.Fatalf("CI repair result = %v, want local update-ref failure", err)
+	}
+	if polls != 0 {
+		t.Fatalf("CI repair polls after local-ref failure = %d, want 0", polls)
+	}
+
+	pushedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	remoteFields := strings.Fields(gitCmd(t, dir, "ls-remote", upstream, "refs/heads/feature"))
+	if len(remoteFields) == 0 || remoteFields[0] != pushedHead || pushedHead == headSHA {
+		t.Fatalf("remote CI repair head = %q, want verified repair head %q", remoteFields, pushedHead)
+	}
+	persistedRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedRun.HeadSHA != pushedHead {
+		t.Fatalf("persisted run head = %q, want %q", persistedRun.HeadSHA, pushedHead)
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[1].Status != db.RoundStatusActive || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary == nil || *rounds[1].Repair.FixSummary != "repair failing checks" || rounds[1].Repair.ResultingHeadSHA == nil || *rounds[1].Repair.ResultingHeadSHA != pushedHead {
+		t.Fatalf("CI repair rounds after local-ref failure = %#v, want retained verified repair receipt", rounds)
 	}
 }
 
