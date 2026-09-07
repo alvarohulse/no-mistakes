@@ -80,26 +80,28 @@ func newRefreshReceiptRecorder(sctx *pipeline.StepContext, strategy types.Refres
 }
 
 func (r *refreshReceiptRecorder) begin(targetRef string) *refreshOperationBuilder {
-	startingHead := ""
+	return r.beginAt(targetRef, time.Now())
+}
+
+func (r *refreshReceiptRecorder) beginAt(targetRef string, startedAt time.Time) *refreshOperationBuilder {
+	startingHead := git.EmptyTreeSHA
 	if r != nil && r.sctx != nil {
-		startingHead = strings.TrimSpace(r.sctx.Run.HeadSHA)
-		if headSHA, err := git.HeadSHA(r.sctx.Ctx, r.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
+		headCtx, cancel := context.WithTimeout(context.Background(), refreshReceiptHeadResolveTimeout)
+		defer cancel()
+		if headSHA, err := git.HeadSHA(headCtx, r.sctx.WorkDir); err == nil && strings.TrimSpace(headSHA) != "" {
 			startingHead = strings.TrimSpace(headSHA)
 		}
-	}
-	if startingHead == "" {
-		startingHead = git.EmptyTreeSHA
 	}
 	return &refreshOperationBuilder{
 		recorder:        r,
 		targetRef:       targetRef,
 		startingHeadSHA: startingHead,
-		startedAt:       time.Now(),
+		startedAt:       startedAt,
 	}
 }
 
-func (r *refreshReceiptRecorder) recordRefusal(targetRef string, decision db.RefreshDecision, reason string) error {
-	operation := r.begin(targetRef)
+func (r *refreshReceiptRecorder) recordRefusal(startedAt time.Time, targetRef string, decision db.RefreshDecision, reason string) error {
+	operation := r.beginAt(targetRef, startedAt)
 	return operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, reason)
 }
 
@@ -294,17 +296,19 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	// state on the remote.
 	forcePush := isForcePushAgainstRemote(ctx, sctx.WorkDir, pushRemote, branch, branchTarget, sctx.Run.BaseSHA)
 
+	fetchStartedAt := time.Now()
 	sctx.Log("fetching latest upstream state...")
 	if err := fetchRunUpstreamBranch(ctx, sctx, baseBranch); err != nil {
 		wrappedErr := fmt.Errorf("fetch authoritative base origin/%s: %w", baseBranch, err)
-		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionError, wrappedErr.Error()); receiptErr != nil {
+		if receiptErr := receipts.recordRefusal(fetchStartedAt, authoritativeBaseRef, db.RefreshDecisionError, wrappedErr.Error()); receiptErr != nil {
 			wrappedErr = errors.Join(wrappedErr, receiptErr)
 		}
 		return nil, wrappedErr
 	}
+	baseResolveStartedAt := time.Now()
 	if baseSHA, err := git.ResolveRef(ctx, sctx.WorkDir, authoritativeBaseRef); err == nil && strings.TrimSpace(baseSHA) != "" {
 		receipts.authoritativeBaseSHA = refreshStringPointer(strings.TrimSpace(baseSHA))
-	} else if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionError, fmt.Sprintf("resolve authoritative base %s: %v", authoritativeBaseRef, err)); receiptErr != nil {
+	} else if receiptErr := receipts.recordRefusal(baseResolveStartedAt, authoritativeBaseRef, db.RefreshDecisionError, fmt.Sprintf("resolve authoritative base %s: %v", authoritativeBaseRef, err)); receiptErr != nil {
 		return nil, errors.Join(fmt.Errorf("resolve authoritative base %s: %w", authoritativeBaseRef, err), receiptErr)
 	} else {
 		return nil, fmt.Errorf("resolve authoritative base %s: %w", authoritativeBaseRef, err)
@@ -333,28 +337,32 @@ func (s *RefreshStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome
 	// the contributor's local default branch but were never pushed to
 	// origin/<default>. The check also applies to stacked branches unless their
 	// effective base already carries those commits.
+	bundledSafetyStartedAt := time.Now()
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, baseBranch); outcome != nil {
-		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionRefused, outcome.Findings); receiptErr != nil {
+		if receiptErr := receipts.recordRefusal(bundledSafetyStartedAt, authoritativeBaseRef, db.RefreshDecisionRefused, outcome.Findings); receiptErr != nil {
 			return nil, receiptErr
 		}
 		return outcome, nil
 	}
-	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
-		findingsJSON, _ := json.Marshal(Findings{
-			Items: []Finding{{
-				Severity:    "warning",
-				File:        filepath.Join("internal", "pipeline", "steps", "refresh.go"),
-				Description: fmt.Sprintf("origin/%s advanced after the force push; manual review required before updating the default branch", defaultBranch),
-			}},
-			Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
-		})
-		if receiptErr := receipts.recordRefusal(authoritativeBaseRef, db.RefreshDecisionRefused, string(findingsJSON)); receiptErr != nil {
-			return nil, receiptErr
+	if forcePush && branch == defaultBranch {
+		remoteAdvanceSafetyStartedAt := time.Now()
+		if remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
+			findingsJSON, _ := json.Marshal(Findings{
+				Items: []Finding{{
+					Severity:    "warning",
+					File:        filepath.Join("internal", "pipeline", "steps", "refresh.go"),
+					Description: fmt.Sprintf("origin/%s advanced after the force push; manual review required before updating the default branch", defaultBranch),
+				}},
+				Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
+			})
+			if receiptErr := receipts.recordRefusal(remoteAdvanceSafetyStartedAt, authoritativeBaseRef, db.RefreshDecisionRefused, string(findingsJSON)); receiptErr != nil {
+				return nil, receiptErr
+			}
+			return &pipeline.StepOutcome{
+				NeedsApproval: true,
+				Findings:      string(findingsJSON),
+			}, nil
 		}
-		return &pipeline.StepOutcome{
-			NeedsApproval: true,
-			Findings:      string(findingsJSON),
-		}, nil
 	}
 
 	targets := refreshTargetsForBranch(branch, baseBranch, branchTarget)
@@ -980,11 +988,27 @@ func refreshPOSIXQuote(value string) string {
 func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targetRef string, operation *refreshOperationBuilder) (db.RefreshDecision, string, error) {
 	targetSHA, err := resolveRefreshTargetRef(ctx, sctx.WorkDir, targetRef, operation)
 	if err != nil {
-		return db.RefreshDecisionSkipped, "", nil
+		missing, missingErr := refreshTargetIsMissing(ctx, sctx.WorkDir, targetRef)
+		if missingErr != nil {
+			return "", "", fmt.Errorf("resolve target head %s: %w", targetRef, errors.Join(err, missingErr))
+		}
+		if missing {
+			sctx.Log(fmt.Sprintf("target %s is unavailable; skipping refresh", targetRef))
+			return db.RefreshDecisionSkipped, "", nil
+		}
+		return "", "", fmt.Errorf("resolve target head %s: %w", targetRef, err)
 	}
 	targetSHA = strings.TrimSpace(targetSHA)
 	if targetSHA == "" {
 		return "", "", fmt.Errorf("resolve target head %s: empty SHA", targetRef)
+	}
+	verifiedTargetSHA, err := git.ResolveRef(ctx, sctx.WorkDir, targetSHA)
+	if err != nil {
+		return "", "", fmt.Errorf("validate target head %s: %w", targetRef, err)
+	}
+	targetSHA = strings.TrimSpace(verifiedTargetSHA)
+	if targetSHA == "" {
+		return "", "", fmt.Errorf("validate target head %s: empty SHA", targetRef)
 	}
 	localSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
@@ -1006,6 +1030,18 @@ func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targe
 		return db.RefreshDecisionFastForwarded, targetSHA, nil
 	}
 	return "", targetSHA, nil
+}
+
+func refreshTargetIsMissing(ctx context.Context, workDir, targetRef string) (bool, error) {
+	_, err := git.Run(ctx, workDir, "rev-parse", "--verify", "--quiet", targetRef+"^{commit}")
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("verify target exists: %w", err)
 }
 
 func resolveRefreshTargetRef(ctx context.Context, workDir, targetRef string, operation *refreshOperationBuilder) (string, error) {
