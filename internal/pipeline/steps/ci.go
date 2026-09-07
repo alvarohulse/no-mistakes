@@ -262,16 +262,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return
 		}
 		audit := s.repairProgress.Audit()
-		if audit.Result == pipeline.RepairResultAttempted && !outcome.NeedsApproval {
-			audit = s.repairProgress.Resolved()
-			if latestAppliedCIFixRepair != nil {
-				if dbErr := s.recordCIFixRepairOutcome(sctx, latestAppliedCIFixRepair, audit); dbErr != nil {
-					outcome = nil
-					err = fmt.Errorf("persist CI repair outcome: %w", dbErr)
-					return
-				}
-			}
-		}
 		if repairReceiptsPersisted {
 			outcome.RepairReceiptsPersisted = true
 			outcome.RoundCursor = roundCursor

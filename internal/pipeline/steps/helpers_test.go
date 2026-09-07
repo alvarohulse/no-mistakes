@@ -618,6 +618,37 @@ func fakeCIGHSequence(t *testing.T, state string, checks []string) []string {
 	})
 }
 
+func fakeCIGHStateSequence(t *testing.T, states, checks []string) []string {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "gh")
+
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "states.txt")
+	stateIndexPath := filepath.Join(tempDir, "states-index.txt")
+	checksPath := filepath.Join(tempDir, "checks.txt")
+	checksIndexPath := filepath.Join(tempDir, "checks-index.txt")
+	if err := os.WriteFile(statePath, []byte(strings.Join(states, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateIndexPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checksPath, []byte(strings.Join(checks, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checksIndexPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":              "ci-gh-seq",
+		"FAKE_CLI_STATE_PATH":        statePath,
+		"FAKE_CLI_STATE_INDEX_PATH":  stateIndexPath,
+		"FAKE_CLI_CHECKS_PATH":       checksPath,
+		"FAKE_CLI_CHECKS_INDEX_PATH": checksIndexPath,
+	})
+}
+
 // fakeCIGHLoggedSequence is fakeCIGHSequence with a recorded argv log, so tests
 // can assert which gh commands the CI monitor issued (for example whether it
 // asked for a check rerun). mergeable overrides the reported mergeable state

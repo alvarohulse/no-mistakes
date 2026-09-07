@@ -392,12 +392,18 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
-	completeRecoveredGate := func() error {
+	completeRecoveredGate := func(withWaiver bool) error {
 		if gate.step.Name() == types.StepReview {
 			if gate.reviewedHeadSHA == "" {
 				return fmt.Errorf("recovered review has no durable reviewed head candidate")
 			}
-			if err := e.db.CompleteReviewStep(gate.stepResult.ID, run.ID, gate.reviewedHeadSHA, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
+			var err error
+			if withWaiver {
+				err = e.db.CompleteApprovedStepWithWaiver(gate.lastRoundID, gate.stepResult.ID, run.ID, gate.reviewedHeadSHA, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult))
+			} else {
+				err = e.db.CompleteReviewStep(gate.stepResult.ID, run.ID, gate.reviewedHeadSHA, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult))
+			}
+			if err != nil {
 				return err
 			}
 			reviewedHead := gate.reviewedHeadSHA
@@ -405,10 +411,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			ClearUncertifiedPipelineRangeIfCertified(ctx, e.db, repo.ID, run.Branch, reviewedHead, workDir)
 			return nil
 		}
+		if withWaiver {
+			return e.db.CompleteApprovedStepWithWaiver(gate.lastRoundID, gate.stepResult.ID, run.ID, "", recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult))
+		}
 		return e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusCompleted, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult))
 	}
 	completeReconciledGate := func() error {
-		if err := completeRecoveredGate(); err != nil {
+		if err := completeRecoveredGate(false); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
@@ -504,11 +513,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
 	case types.ActionApprove:
-		if err := e.recordWaivedRound(gate.lastRoundID, gate.step.Name(), gate.round); err != nil {
-			return failRecoveredGatePersistence(err)
-		}
-		if err := completeRecoveredGate(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
+		if err := completeRecoveredGate(true); err != nil {
+			return failRecoveredGatePersistence(fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
@@ -990,6 +996,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	skipRemaining := false
 	stepSkipped := false
+	approvedByUser := false
 	var reviewApprovedHeadSHA string
 
 	// Execute with possible fix loop
@@ -1056,13 +1063,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		willStartAutoFix := nextRepairDecision != nil && nextRepairDecision.Attempt
 
-		if outcome.Findings != "" {
-			if dbErr := e.db.SetStepFindings(sr.ID, outcome.Findings); dbErr != nil {
-				slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
-			}
-		} else {
-			if dbErr := e.db.ClearStepFindings(sr.ID); dbErr != nil {
-				slog.Warn("failed to clear step findings in db", "step", stepName, "error", dbErr)
+		if !structuredRoundEligible(stepName) {
+			if outcome.Findings != "" {
+				if dbErr := e.db.SetStepFindings(sr.ID, outcome.Findings); dbErr != nil {
+					slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
+				}
+			} else {
+				if dbErr := e.db.ClearStepFindings(sr.ID); dbErr != nil {
+					slog.Warn("failed to clear step findings in db", "step", stepName, "error", dbErr)
+				}
 			}
 		}
 
@@ -1268,9 +1277,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		case types.ActionApprove:
 			// Approved - execution already frozen in executionMS, reset phaseStart
 			// so the done label computes no additional elapsed.
-			if err := e.recordWaivedRound(currentRoundID, stepName, roundNum); err != nil {
-				return failStepPersistence(err)
-			}
+			approvedByUser = true
 			phaseStart = time.Now()
 			goto done
 
@@ -1329,32 +1336,27 @@ done:
 	if stepSkipped {
 		status = types.StepStatusSkipped
 	}
-	// A review round's captured head becomes authority only when the review
-	// actually completes. Parked outcomes stay in the loop above, failures
-	// return earlier, and skipped reviews deliberately leave the binding empty.
-	// Completion and authority replacement are one DB transaction.
-	if stepName == types.StepReview && status == types.StepStatusCompleted && reviewApprovedHeadSHA != "" {
+	reviewCompletion := stepName == types.StepReview && status == types.StepStatusCompleted && reviewApprovedHeadSHA != ""
+	if approvedByUser {
+		if err := e.db.CompleteApprovedStepWithWaiver(currentRoundID, sr.ID, run.ID, reviewApprovedHeadSHA, finalExitCode, durationMS, logPath); err != nil {
+			return failStepPersistence(fmt.Errorf("complete approved step %s: %w", stepName, err))
+		}
+	} else if reviewCompletion {
 		if err := e.db.CompleteReviewStep(sr.ID, run.ID, reviewApprovedHeadSHA, finalExitCode, durationMS, logPath); err != nil {
 			return false, fmt.Errorf("complete step %s: %w", stepName, err)
 		}
+	}
+	if reviewCompletion {
 		reviewedHead := reviewApprovedHeadSHA
 		run.ReviewApprovedHeadSHA = &reviewedHead
 		ClearUncertifiedPipelineRangeIfCertified(ctx, e.db, repo.ID, run.Branch, reviewedHead, workDir)
-	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
-		return false, fmt.Errorf("complete step %s: %w", stepName, err)
+	} else if !approvedByUser {
+		if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
+			return false, fmt.Errorf("complete step %s: %w", stepName, err)
+		}
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, nil
-}
-
-func (e *Executor) recordWaivedRound(roundID string, stepName types.StepName, roundNum int) error {
-	if e == nil || e.db == nil || roundID == "" {
-		return nil
-	}
-	if err := e.db.SetStepRoundWaived(roundID); err != nil {
-		return fmt.Errorf("persist waived %s decision for round %d: %w", stepName, roundNum, err)
-	}
-	return nil
 }
 
 type gateStepBoundaryAgent struct {

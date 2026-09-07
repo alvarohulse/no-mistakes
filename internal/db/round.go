@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -351,13 +352,30 @@ func (d *DB) SetStepRoundDeclined(id string) error {
 }
 
 func (d *DB) SetStepRoundWaived(id string) error {
-	if normalized, err := d.roundHasEvaluation(id); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("set step round declined: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := setStepRoundWaivedTx(tx, id); err != nil {
 		return err
-	} else if normalized {
-		return d.setStructuredDecisionIfAbsentByExternalIDs(id, nil, RoundSelectionSourceUserWaived, nil, true)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set step round declined: commit: %w", err)
+	}
+	return nil
+}
+
+func setStepRoundWaivedTx(tx *sql.Tx, id string) error {
+	evaluation, err := getRoundEvaluation(tx, id)
+	if err != nil {
+		return err
+	}
+	if evaluation != nil {
+		return setStructuredDecisionByExternalIDsTx(tx, id, nil, RoundSelectionSourceUserWaived, nil, true, true)
 	}
 	declined := DeclinedSelectionJSON
-	if _, err := d.sql.Exec(
+	if _, err := tx.Exec(
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
 		  WHERE id = ? AND selection_source IS NULL`,
 		declined, RoundSelectionSourceUserWaived, id,

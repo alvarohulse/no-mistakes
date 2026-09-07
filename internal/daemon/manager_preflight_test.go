@@ -409,6 +409,52 @@ func TestStartRunAdmissionRejectsConcurrentClosure(t *testing.T) {
 	}
 }
 
+func TestShutdownCancelsTrackedAndReservedSetupBeforeWaitingForAdmission(t *testing.T) {
+	manager := NewRunManager(nil, nil, nil)
+	trackedCtx, cancelTracked := context.WithCancelCause(context.Background())
+	manager.mu.Lock()
+	manager.cancels["tracked"] = cancelTracked
+	manager.mu.Unlock()
+	setupCtx, releaseSetupContext := manager.shutdownAwareContext(context.Background())
+	defer releaseSetupContext()
+	releaseAdmission, err := manager.reserveRunAdmission()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseAdmissionOnce sync.Once
+	release := func() { releaseAdmissionOnce.Do(releaseAdmission) }
+	defer release()
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		manager.Shutdown()
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-trackedCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown waited for a reservation before cancelling a tracked run")
+	}
+	select {
+	case <-setupCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel reserved setup")
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown returned while an admission reservation remained active")
+	default:
+	}
+
+	release()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not complete after admission reservation released")
+	}
+}
+
 func writePreflightPolicyCommit(t *testing.T, repo *db.Repo, marker string, commands []string) string {
 	t.Helper()
 	var content strings.Builder

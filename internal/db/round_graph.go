@@ -222,9 +222,9 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 	}
 	defer tx.Rollback()
 
-	var runID, stepName, trigger, status string
-	if err := tx.QueryRow(`SELECT s.run_id, s.step_name, r.trigger_type, r.status
-		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ?`, roundID).Scan(&runID, &stepName, &trigger, &status); err != nil {
+	var runID, stepResultID, stepName, trigger, status string
+	if err := tx.QueryRow(`SELECT s.run_id, s.id, s.step_name, r.trigger_type, r.status
+		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ?`, roundID).Scan(&runID, &stepResultID, &stepName, &trigger, &status); err != nil {
 		return fmt.Errorf("complete structured step round: load round: %w", err)
 	}
 	if status != RoundStatusActive {
@@ -329,6 +329,18 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 			artifact.ID, runID, evaluation.ID, artifact.Ordinal, artifact.Kind, artifact.Label, artifact.Path, artifact.URL, artifact.Content); err != nil {
 			return fmt.Errorf("complete structured step round: insert artifact %q: %w", artifact.ID, err)
 		}
+	}
+
+	compatibilityFindings, err := CompatibilityFindingsJSON(&evaluation)
+	if err != nil {
+		return fmt.Errorf("complete structured step round: project compatibility findings: %w", err)
+	}
+	result, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, compatibilityFindings, stepResultID)
+	if err != nil {
+		return fmt.Errorf("complete structured step round: persist compatibility findings: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("complete structured step round: persist compatibility findings: step row not found")
 	}
 
 	var reviewedHead *string

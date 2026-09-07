@@ -85,6 +85,54 @@ func TestStructuredRoundPersistsOrderedEvaluationAndSubjectWithoutRoundJSON(t *t
 	}
 }
 
+func TestStructuredRoundCompletionRollsBackCompatibilityProjection(t *testing.T) {
+	database := openTestDB(t)
+	repo, err := database.InsertRepo("/tmp/structured-round-projection", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`CREATE TRIGGER reject_compatibility_projection
+		BEFORE UPDATE OF findings_json ON step_results
+		BEGIN
+			SELECT RAISE(FAIL, 'injected compatibility projection failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	err = database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind:     RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{{ExternalID: "review-1", Description: "needs review", Action: types.ActionAskUser}},
+	}, StructuredRoundSubject{}, nil, 1)
+	if err == nil {
+		t.Fatal("structured round completion succeeded after compatibility projection failure")
+	}
+	gotStep, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.FindingsJSON != nil {
+		t.Fatalf("step findings survived rolled-back completion: %q", *gotStep.FindingsJSON)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusActive || rounds[0].Evaluation != nil {
+		t.Fatalf("round after projection failure = %#v, want active without evaluation", rounds)
+	}
+}
+
 func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-decision", "https://example.com/repo.git", "main")

@@ -169,11 +169,25 @@ func TestExecutor_ApprovalPersistenceFailureDoesNotPublishOrWaitAtGate(t *testin
 	})
 
 	err = exec.Execute(context.Background(), run, repo, t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "persist review approval gate") {
-		t.Fatalf("Execute error = %v, want approval persistence failure", err)
+	if err == nil || !strings.Contains(err.Error(), "findings write failed") {
+		t.Fatalf("Execute error = %v, want compatibility projection failure", err)
 	}
 	if responseErr := exec.Respond(types.StepReview, types.ActionApprove, nil); responseErr == nil {
 		t.Fatal("executor remained parked after approval persistence failed")
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].FindingsJSON != nil {
+		t.Fatalf("step findings survived failed structured completion: %#v", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil {
+		t.Fatalf("round after failed compatibility projection = %#v", rounds)
 	}
 
 	eventsMu.Lock()

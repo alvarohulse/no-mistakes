@@ -622,8 +622,15 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbSteps[0].FindingsJSON != nil {
-		t.Fatalf("expected findings to be cleared, got %q", *dbSteps[0].FindingsJSON)
+	if dbSteps[0].FindingsJSON == nil {
+		t.Fatal("expected explicit empty findings projection")
+	}
+	findings, err := types.ParseFindingsJSON(*dbSteps[0].FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 0 {
+		t.Fatalf("final findings = %#v, want empty", findings.Items)
 	}
 }
 

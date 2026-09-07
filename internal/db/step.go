@@ -384,6 +384,55 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 	return nil
 }
 
+func (d *DB) CompleteApprovedStepWithWaiver(roundID, stepResultID, runID, approvedHeadSHA string, exitCode int, durationMS int64, logPath string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin complete approved step: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, recordedStepID, stepName string
+	if err := tx.QueryRow(`SELECT s.run_id, s.id, s.step_name
+		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = ?`, roundID).Scan(&recordedRunID, &recordedStepID, &stepName); err != nil {
+		return fmt.Errorf("complete approved step: load round: %w", err)
+	}
+	if recordedRunID != runID || recordedStepID != stepResultID {
+		return fmt.Errorf("complete approved step: round does not belong to step result")
+	}
+	if err := setStepRoundWaivedTx(tx, roundID); err != nil {
+		return fmt.Errorf("complete approved step: persist waiver: %w", err)
+	}
+
+	ts := now()
+	result, err := tx.Exec(
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		types.StepStatusCompleted, exitCode, durationMS, logPath, ts, ts, fmt.Sprintf("status: %s", types.StepStatusCompleted), stepResultID,
+	)
+	if err != nil {
+		return fmt.Errorf("complete approved step: complete step: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("complete approved step: step row not found")
+	}
+	if approvedHeadSHA != "" {
+		if stepName != string(types.StepReview) {
+			return fmt.Errorf("complete approved step: non-review step has an approved head")
+		}
+		result, err = tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, approvedHeadSHA, ts, runID)
+		if err != nil {
+			return fmt.Errorf("complete approved step: record review-approved head: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return fmt.Errorf("complete approved step: run row not found")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete approved step: %w", err)
+	}
+	return nil
+}
+
 // FailStep marks a step as failed with an error message and duration.
 func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 	_, err := d.sql.Exec(

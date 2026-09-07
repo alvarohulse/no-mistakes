@@ -47,6 +47,8 @@ type RunManager struct {
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
 	admissionMu  sync.Mutex                         // linearizes shutdown/quarantine with run insertion; never hold alongside mu
 	admissions   sync.WaitGroup
+	shutdownCtx  context.Context
+	shutdown     context.CancelCauseFunc
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
@@ -93,10 +95,13 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
+	shutdownCtx, shutdown := context.WithCancelCause(context.Background())
 	return &RunManager{
 		executors:                          make(map[string]*pipeline.Executor),
 		cancels:                            make(map[string]context.CancelCauseFunc),
 		dones:                              make(map[string]chan struct{}),
+		shutdownCtx:                        shutdownCtx,
+		shutdown:                           shutdown,
 		db:                                 database,
 		paths:                              p,
 		steps:                              stepFactory,
@@ -1325,10 +1330,21 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 
 	// Create the worktree only after the complete policy has resolved and been
 	// persisted. From this point, setup cleanup owns every pre-launch failure.
+	setupCtx, cancelSetup := m.shutdownAwareContext(ctx)
+	defer cancelSetup()
+	recordSetupFailure := func(message string) {
+		if shutdownCause := context.Cause(m.shutdownCtx); shutdownCause != nil {
+			if err := m.db.UpdateRunErrorStatus(run.ID, shutdownCause.Error(), types.RunCancelled); err != nil {
+				slog.Error("failed to record cancelled run setup", "run_id", run.ID, "error", err)
+			}
+			return
+		}
+		m.db.UpdateRunError(run.ID, message)
+	}
 	gateDir := m.paths.RepoDir(repo.ID)
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, resolved.HeadSHA); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
+	if err := git.WorktreeAdd(setupCtx, gateDir, wtDir, resolved.HeadSHA); err != nil {
+		recordSetupFailure(fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
@@ -1340,8 +1356,8 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 		}
 	}()
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
+	if err := git.CopyLocalUserIdentity(setupCtx, repo.WorkingPath, wtDir); err != nil {
+		recordSetupFailure(fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
@@ -1673,8 +1689,39 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
 	m.closeRunAdmission()
-	m.waitForRunAdmissions()
+	if m.shutdown != nil {
+		m.shutdown(fmt.Errorf("daemon shutting down"))
+	}
+	m.cancelTrackedRunsForShutdown()
 
+	admissionsDone := make(chan struct{})
+	go func() {
+		m.waitForRunAdmissions()
+		close(admissionsDone)
+	}()
+	drainTimer := time.NewTimer(30 * time.Second)
+	defer drainTimer.Stop()
+	select {
+	case <-admissionsDone:
+		m.cancelTrackedRunsForShutdown()
+	case <-drainTimer.C:
+		slog.Warn("timed out waiting for run setup during shutdown")
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-drainTimer.C:
+		slog.Warn("timed out waiting for runs to finish during shutdown")
+	}
+}
+
+func (m *RunManager) cancelTrackedRunsForShutdown() {
 	m.mu.Lock()
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
 	for id, cancel := range m.cancels {
@@ -1686,17 +1733,6 @@ func (m *RunManager) Shutdown() {
 		cancel(fmt.Errorf("daemon shutting down"))
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
-
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		slog.Warn("timed out waiting for runs to finish during shutdown")
-	}
 }
 
 func (m *RunManager) closeRunAdmission() {
@@ -1707,6 +1743,17 @@ func (m *RunManager) closeRunAdmission() {
 
 func (m *RunManager) waitForRunAdmissions() {
 	m.admissions.Wait()
+}
+
+func (m *RunManager) shutdownAwareContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	stop := context.AfterFunc(m.shutdownCtx, func() {
+		cancel(fmt.Errorf("daemon shutting down"))
+	})
+	return ctx, func() {
+		stop()
+		cancel(nil)
+	}
 }
 
 func (m *RunManager) reserveRunAdmission() (func(), error) {

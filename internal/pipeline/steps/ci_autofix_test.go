@@ -1428,6 +1428,57 @@ func TestCIStep_PersistsPushedRepairSummaries(t *testing.T) {
 	}
 }
 
+func TestCIStep_TerminalPRAfterPushedRepairLeavesReceiptAttempted(t *testing.T) {
+	for _, terminalState := range []string{"MERGED", "CLOSED"} {
+		t.Run(strings.ToLower(terminalState), func(t *testing.T) {
+			dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+			prURL := "https://github.com/test/repo/pull/42"
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "terminal-pr-repair.txt"), []byte("fixed"), 0o644); err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: json.RawMessage(`{"summary":"repair CI before terminal PR"}`)}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Run.PRURL = &prURL
+			sctx.Repo.UpstreamURL = upstream
+			sctx.Run.Branch = "refs/heads/feature"
+			sctx.Config.CITimeout = time.Minute
+			sctx.Config.AutoFix = config.AutoFix{CI: 1}
+
+			step := &recoveredCIEnvStep{
+				inner: &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }},
+				env: fakeCIGHStateSequence(t, []string{"OPEN", terminalState}, []string{
+					`[{"name":"test","state":"FAILURE","bucket":"fail"}]`,
+				}),
+			}
+			executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, sctx.Agent, []pipeline.Step{step}, nil)
+			if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil {
+				t.Fatal(err)
+			}
+
+			stepResults, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(stepResults[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 2 || rounds[0].Repair != nil {
+				t.Fatalf("CI rounds = %#v, want initial monitor and one repair receipt", rounds)
+			}
+			repair := rounds[1].Repair
+			if rounds[1].Trigger != db.RoundTriggerAutoFix || repair == nil || repair.Result == nil || *repair.Result != pipeline.RepairResultAttempted || repair.FixSummary == nil || *repair.FixSummary != "repair CI before terminal PR" || repair.ResultingHeadSHA == nil {
+				t.Fatalf("terminal PR repair receipt = %#v, want applied but unverified repair", repair)
+			}
+		})
+	}
+}
+
 func TestCIStep_ManualRepairResolvesOwningReceiptAfterChecksPass(t *testing.T) {
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
 	prURL := "https://github.com/test/repo/pull/42"
