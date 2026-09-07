@@ -475,11 +475,9 @@ func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error
 		if decision == nil {
 			return fmt.Errorf("set step round user findings: normalized round has no decision")
 		}
-		var selected []string
-		for _, finding := range decision.Findings {
-			if finding.State == RoundDecisionFindingSelected {
-				selected = append(selected, finding.FindingID)
-			}
+		selected := make([]string, 0, len(decision.Findings))
+		for _, finding := range orderedSelectedDecisionFindings(decision) {
+			selected = append(selected, finding.FindingID)
 		}
 		return d.setStructuredDecisionByExternalIDs(id, selected, decision.Source, userFindingsJSON, decision.ExplicitEmpty)
 	}

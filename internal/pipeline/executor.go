@@ -480,6 +480,16 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return completeReconciledGate()
 	}
 
+	failRecoveredGatePersistence := func(persistenceErr error) error {
+		redacted := safeurl.RedactText(persistenceErr.Error())
+		terminalErr := errors.New(redacted)
+		if dbErr := e.db.FailStep(gate.stepResult.ID, redacted, duration); dbErr != nil {
+			terminalErr = errors.Join(terminalErr, fmt.Errorf("mark recovered step %s failed after persistence error: %w", gate.step.Name(), dbErr))
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", redacted, &duration)
+		return e.failRun(run, repo, terminalErr, ctx)
+	}
+
 	approvalFields := telemetry.Fields{
 		"step":       string(gate.step.Name()),
 		"action":     string(response.action),
@@ -495,7 +505,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	switch response.action {
 	case types.ActionApprove:
 		if err := e.recordWaivedRound(gate.lastRoundID, gate.step.Name(), gate.round); err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGatePersistence(err)
 		}
 		if err := completeRecoveredGate(); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -528,7 +538,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			userFindingsJSON = &merged
 		}
 		if dbErr := e.db.PersistStepRoundFixDecisionAndMarkStepFixing(gate.stepResult.ID, gate.lastRoundID, selectedFindingIDs, db.RoundSelectionSourceUser, userFindingsJSON); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("persist recovered user-fix decision for step %s: %w", gate.step.Name(), dbErr), ctx)
+			return failRecoveredGatePersistence(fmt.Errorf("persist recovered user-fix decision for step %s: %w", gate.step.Name(), dbErr))
 		}
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
@@ -1014,7 +1024,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		if evaluationErr != nil {
 			dbErr = evaluationErr
 		} else {
-			resultingHead := run.HeadSHA
+			var resultingHead string
 			if observed, headErr := git.HeadSHA(ctx, workDir); headErr == nil && observed != "" {
 				resultingHead = observed
 			}

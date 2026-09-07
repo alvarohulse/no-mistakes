@@ -305,3 +305,95 @@ func TestStructuredRoundHydratesLinkedInvocationAttemptAndArtifactIDs(t *testing
 		t.Fatalf("round references = %#v", got)
 	}
 }
+
+func TestStructuredRoundRepairsOnlyAutoFixRounds(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/structured-repair", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepDocument)
+	summary := "document the change"
+
+	initial, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(initial.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationDocumentation,
+	}, StructuredRoundSubject{}, &summary, 1); err != nil {
+		t.Fatal(err)
+	}
+	if repair, err := database.GetRoundRepair(initial.ID); err != nil {
+		t.Fatal(err)
+	} else if repair != nil {
+		t.Fatalf("initial documentation round fabricated repair = %#v", repair)
+	}
+
+	fixRound, err := database.BeginStepRound(step.ID, 2, RoundTriggerAutoFix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(fixRound.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationDocumentation,
+	}, StructuredRoundSubject{}, &summary, 1); err != nil {
+		t.Fatal(err)
+	}
+	repair, err := database.GetRoundRepair(fixRound.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair == nil || repair.FixSummary == nil || *repair.FixSummary != summary {
+		t.Fatalf("fix round repair = %#v", repair)
+	}
+}
+
+func TestStructuredRoundDecisionPreservesSubmittedSelectionOrder(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/structured-selection-order", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepReview)
+	round, _ := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{
+			{ExternalID: "review-1", Description: "first", Action: types.ActionAutoFix},
+			{ExternalID: "review-2", Description: "second", Action: types.ActionAutoFix},
+			{ExternalID: "review-3", Description: "third", Action: types.ActionAskUser},
+		},
+	}, StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := `["review-2","review-1"]`
+	if err := database.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceUser); err != nil {
+		t.Fatal(err)
+	}
+
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Evaluation == nil || rounds[0].Decision == nil || rounds[0].SelectedFindingIDs == nil {
+		t.Fatalf("round projection = %#v", rounds)
+	}
+	var projected []string
+	if err := json.Unmarshal([]byte(*rounds[0].SelectedFindingIDs), &projected); err != nil {
+		t.Fatal(err)
+	}
+	if len(projected) != 2 || projected[0] != "review-2" || projected[1] != "review-1" {
+		t.Fatalf("selected finding order = %#v", projected)
+	}
+	if rounds[0].Evaluation.Findings[0].ExternalID != "review-1" || rounds[0].Evaluation.Findings[1].ExternalID != "review-2" || rounds[0].Evaluation.Findings[2].ExternalID != "review-3" {
+		t.Fatalf("evaluation order = %#v", rounds[0].Evaluation.Findings)
+	}
+	states := make(map[string]string, len(rounds[0].Decision.Findings))
+	for _, reference := range rounds[0].Decision.Findings {
+		for _, finding := range rounds[0].Evaluation.Findings {
+			if finding.ID == reference.FindingID {
+				states[finding.ExternalID] = reference.State
+			}
+		}
+	}
+	if states["review-1"] != RoundDecisionFindingSelected || states["review-2"] != RoundDecisionFindingSelected || states["review-3"] != RoundDecisionFindingUnselected {
+		t.Fatalf("decision states = %#v", states)
+	}
+}

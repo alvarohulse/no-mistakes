@@ -83,6 +83,7 @@ func normalizeFindingsJSON(raw string, prefix string) string {
 	// claim user provenance, so preserve that distinction before any finding
 	// is persisted, displayed, or selected for repair.
 	for i := range normalized.Items {
+		normalized.Items[i].Action = normalized.Items[i].ActionOrDefault()
 		normalized.Items[i].Source = types.FindingSourceAgent
 	}
 	normalizedRaw, err := types.MarshalFindingsJSON(normalized)

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -95,6 +96,7 @@ type StepRoundDecision struct {
 type StepRoundDecisionFinding struct {
 	FindingID        string
 	Ordinal          int
+	SelectionOrdinal *int
 	State            string
 	UserInstructions string
 	Edited           bool
@@ -288,7 +290,7 @@ func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEva
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
 	}
-	if fixSummary != nil || trigger == RoundTriggerAutoFix {
+	if trigger == RoundTriggerAutoFix {
 		if err := insertRoundRepair(tx, StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}); err != nil {
 			return fmt.Errorf("complete structured step round: insert repair: %w", err)
 		}
@@ -330,12 +332,32 @@ func (d *DB) SetStepRoundStructuredDecision(decision StepRoundDecision) error {
 		decision.CreatedAt = now()
 	}
 	references := make(map[string]StepRoundDecisionFinding, len(decision.Findings))
+	selectionOrdinals := make(map[int]string)
+	nextSelectionOrdinal := 0
 	for _, reference := range decision.Findings {
 		if reference.FindingID == "" || (reference.State != RoundDecisionFindingSelected && reference.State != RoundDecisionFindingUnselected) {
 			return fmt.Errorf("set structured round decision: invalid finding reference")
 		}
 		if _, exists := references[reference.FindingID]; exists {
 			return fmt.Errorf("set structured round decision: duplicate finding reference %q", reference.FindingID)
+		}
+		if reference.State == RoundDecisionFindingSelected {
+			if reference.SelectionOrdinal == nil {
+				ordinal := nextSelectionOrdinal
+				reference.SelectionOrdinal = &ordinal
+			}
+			if *reference.SelectionOrdinal < 0 {
+				return fmt.Errorf("set structured round decision: invalid selection ordinal %d", *reference.SelectionOrdinal)
+			}
+			if findingID, exists := selectionOrdinals[*reference.SelectionOrdinal]; exists {
+				return fmt.Errorf("set structured round decision: duplicate selection ordinal %d for findings %q and %q", *reference.SelectionOrdinal, findingID, reference.FindingID)
+			}
+			selectionOrdinals[*reference.SelectionOrdinal] = reference.FindingID
+			if *reference.SelectionOrdinal >= nextSelectionOrdinal {
+				nextSelectionOrdinal = *reference.SelectionOrdinal + 1
+			}
+		} else if reference.SelectionOrdinal != nil {
+			return fmt.Errorf("set structured round decision: unselected finding %q has a selection ordinal", reference.FindingID)
 		}
 		references[reference.FindingID] = reference
 	}
@@ -526,7 +548,7 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 			edited[finding.ID] = finding.UserInstructions != ""
 		}
 	}
-	selected := make(map[string]bool, len(selectedIDs))
+	selected := make(map[string]int, len(selectedIDs))
 	for _, id := range selectedIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -538,7 +560,11 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		if byExternal[id] == nil {
 			return fmt.Errorf("set structured round decision: selected finding %q does not belong to evaluation", id)
 		}
-		selected[byExternal[id].ID] = true
+		findingID := byExternal[id].ID
+		if _, exists := selected[findingID]; exists {
+			return fmt.Errorf("set structured round decision: duplicate selected finding %q", id)
+		}
+		selected[findingID] = len(selected)
 	}
 	if explicitEmpty || source == RoundSelectionSourceUserDeclined {
 		explicitEmpty = true
@@ -549,10 +575,12 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 	references := make(map[string]StepRoundDecisionFinding, len(evaluation.Findings))
 	for _, finding := range evaluation.Findings {
 		state := RoundDecisionFindingUnselected
-		if selected[finding.ID] {
+		var selectionOrdinal *int
+		if ordinal, found := selected[finding.ID]; found {
 			state = RoundDecisionFindingSelected
+			selectionOrdinal = &ordinal
 		}
-		references[finding.ID] = StepRoundDecisionFinding{FindingID: finding.ID, State: state, UserInstructions: finding.UserInstructions, Edited: edited[finding.ID]}
+		references[finding.ID] = StepRoundDecisionFinding{FindingID: finding.ID, SelectionOrdinal: selectionOrdinal, State: state, UserInstructions: finding.UserInstructions, Edited: edited[finding.ID]}
 	}
 	decision := StepRoundDecision{ID: newID(), RunID: evaluation.RunID, RoundID: roundID, Source: source, ExplicitEmpty: explicitEmpty, CreatedAt: now()}
 	if onlyIfAbsent {
@@ -580,8 +608,8 @@ func insertRoundDecisionIfAbsent(tx *sql.Tx, decision StepRoundDecision, finding
 	}
 	for ordinal, finding := range findings {
 		reference := references[finding.ID]
-		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?)`,
-			decision.ID, finding.ID, ordinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
+		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, selection_ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			decision.ID, finding.ID, ordinal, reference.SelectionOrdinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
 			return fmt.Errorf("set structured round decision: insert finding reference: %w", err)
 		}
 	}
@@ -598,8 +626,8 @@ func replaceRoundDecision(tx *sql.Tx, decision StepRoundDecision, findings []Ste
 	}
 	for ordinal, finding := range findings {
 		reference := references[finding.ID]
-		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?)`,
-			decision.ID, finding.ID, ordinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
+		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, selection_ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			decision.ID, finding.ID, ordinal, reference.SelectionOrdinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
 			return fmt.Errorf("set structured round decision: insert finding reference: %w", err)
 		}
 	}
@@ -684,16 +712,21 @@ func (d *DB) GetRoundDecision(roundID string) (*StepRoundDecision, error) {
 		return nil, fmt.Errorf("get round decision: %w", err)
 	}
 	decision.ExplicitEmpty = explicit != 0
-	rows, err := d.sql.Query(`SELECT finding_id, ordinal, state, user_instructions, edited FROM round_decision_findings WHERE decision_id = ? ORDER BY ordinal`, decision.ID)
+	rows, err := d.sql.Query(`SELECT finding_id, ordinal, selection_ordinal, state, user_instructions, edited FROM round_decision_findings WHERE decision_id = ? ORDER BY ordinal`, decision.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get round decision findings: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		finding := StepRoundDecisionFinding{}
+		var selectionOrdinal sql.NullInt64
 		var edited int
-		if err := rows.Scan(&finding.FindingID, &finding.Ordinal, &finding.State, &finding.UserInstructions, &edited); err != nil {
+		if err := rows.Scan(&finding.FindingID, &finding.Ordinal, &selectionOrdinal, &finding.State, &finding.UserInstructions, &edited); err != nil {
 			return nil, fmt.Errorf("scan round decision finding: %w", err)
+		}
+		if selectionOrdinal.Valid {
+			value := int(selectionOrdinal.Int64)
+			finding.SelectionOrdinal = &value
 		}
 		finding.Edited = edited != 0
 		decision.Findings = append(decision.Findings, finding)
@@ -702,6 +735,32 @@ func (d *DB) GetRoundDecision(roundID string) (*StepRoundDecision, error) {
 		return nil, fmt.Errorf("iterate round decision findings: %w", err)
 	}
 	return decision, nil
+}
+
+func orderedSelectedDecisionFindings(decision *StepRoundDecision) []StepRoundDecisionFinding {
+	if decision == nil {
+		return nil
+	}
+	selected := make([]StepRoundDecisionFinding, 0, len(decision.Findings))
+	for _, finding := range decision.Findings {
+		if finding.State == RoundDecisionFindingSelected {
+			selected = append(selected, finding)
+		}
+	}
+	sort.SliceStable(selected, func(i, j int) bool {
+		left, right := selected[i], selected[j]
+		switch {
+		case left.SelectionOrdinal != nil && right.SelectionOrdinal != nil:
+			return *left.SelectionOrdinal < *right.SelectionOrdinal
+		case left.SelectionOrdinal != nil:
+			return true
+		case right.SelectionOrdinal != nil:
+			return false
+		default:
+			return left.Ordinal < right.Ordinal
+		}
+	})
+	return selected
 }
 
 func (d *DB) GetRoundRepair(roundID string) (*StepRoundRepair, error) {
@@ -775,13 +834,10 @@ func (d *DB) hydrateRoundGraph(round *StepRound) error {
 			byID[finding.ID] = finding
 		}
 		userFindings := types.Findings{}
-		for _, reference := range decision.Findings {
+		for _, reference := range orderedSelectedDecisionFindings(decision) {
 			finding, found := byID[reference.FindingID]
 			if !found {
 				return fmt.Errorf("hydrate round decision: missing finding %q", reference.FindingID)
-			}
-			if reference.State != RoundDecisionFindingSelected {
-				continue
 			}
 			selected = append(selected, finding.ExternalID)
 			if finding.Source == types.FindingSourceUser || reference.UserInstructions != "" {
