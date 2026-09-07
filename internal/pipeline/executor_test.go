@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -142,6 +144,64 @@ func TestExecutorRefreshAndPushKeepRoundsOutOfStructuredGraph(t *testing.T) {
 		}
 		if rounds[0].Evaluation != nil || rounds[0].Decision != nil || rounds[0].Repair != nil {
 			t.Fatalf("%s persisted structured graph records: %#v", result.StepName, rounds[0])
+		}
+	}
+}
+
+func TestExecutorRefreshAutoFixKeepsRoundsOutOfStructuredGraph(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepRefresh,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			callCount++
+			if callCount == 1 {
+				return &StepOutcome{
+					AutoFixable: true,
+					Findings:    `{"findings":[{"id":"refresh-1","severity":"warning","description":"refresh conflict","action":"auto-fix"}]}`,
+				}, nil
+			}
+			return &StepOutcome{}, nil
+		},
+	}
+
+	executor := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Refresh: 1}}, nil, []Step{step}, nil)
+	if err := executor.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+	if callCount != 2 {
+		t.Fatalf("step executions = %d, want initial and one auto-fix execution", callCount)
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 {
+		t.Fatalf("steps = %#v", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 {
+		t.Fatalf("rounds = %#v", rounds)
+	}
+	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceAutoFix {
+		t.Fatalf("refresh auto-fix selection = %#v, want legacy auto-fix decision", rounds[0])
+	}
+	if rounds[0].RepairResult == nil || *rounds[0].RepairResult != RepairResultAttempted || rounds[0].RepairFailureFingerprint == nil {
+		t.Fatalf("refresh initial repair audit = %#v, want legacy attempted audit", rounds[0])
+	}
+	if rounds[1].RepairResult == nil || *rounds[1].RepairResult != RepairResultResolved {
+		t.Fatalf("refresh final repair audit = %#v, want legacy resolved audit", rounds[1])
+	}
+	for _, round := range rounds {
+		if round.Evaluation != nil || round.Decision != nil || round.Repair != nil {
+			t.Fatalf("refresh round persisted structured graph records: %#v", round)
 		}
 	}
 }

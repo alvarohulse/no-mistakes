@@ -1049,6 +1049,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		autoFixTransitionPersisted := false
 		if !structuredRoundEligible(stepName) {
 			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
+			if dbErr == nil && !willStartAutoFix && (finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "") {
+				dbErr = e.db.SetStepRoundRepairAudit(currentRoundID, finalRepairAudit.FailureFingerprint, finalRepairAudit.Result)
+			}
 		} else {
 			evaluation, evaluationErr := structuredRoundEvaluation(currentRoundID, run.ID, stepName, sctx.Fixing, outcome.Findings)
 			if evaluationErr != nil {
@@ -1116,7 +1119,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				if idsJSON == "" {
 					return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum))
 				}
-				if !sctx.Fixing && !autoFixTransitionPersisted {
+				if !structuredRoundEligible(stepName) || (!sctx.Fixing && !autoFixTransitionPersisted) {
 					attemptedRepair := db.StepRoundRepair{
 						FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
 						Result:             roundStringPointer(finalRepairAudit.Result),

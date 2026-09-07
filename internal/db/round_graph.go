@@ -887,7 +887,7 @@ func CompatibilityFindingsJSON(evaluation *StepRoundEvaluation) (*string, error)
 
 func findingsMetadataFromEvaluation(evaluation *StepRoundEvaluation) types.Findings {
 	findings := types.Findings{
-		Summary: evaluation.Summary, Tested: append([]string(nil), evaluation.Tested...), TestingSummary: evaluation.TestingSummary,
+		Items: []types.Finding{}, Summary: evaluation.Summary, Tested: append([]string(nil), evaluation.Tested...), TestingSummary: evaluation.TestingSummary,
 		RiskLevel: evaluation.RiskLevel, RiskRationale: evaluation.RiskRationale, RiskScope: evaluation.RiskScope,
 	}
 	for _, artifact := range evaluation.Artifacts {

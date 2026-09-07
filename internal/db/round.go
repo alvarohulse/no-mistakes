@@ -402,7 +402,8 @@ func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 
 // PersistStepRoundAutoFixDecisionAndMarkStepFixing atomically records the
 // automatic repair decision, its attempted audit receipt, and the fixing
-// transition that authorizes the next repair invocation.
+// transition that authorizes the next repair invocation. Normalized rounds
+// receive graph records; legacy rounds keep both values in step_rounds.
 func (d *DB) PersistStepRoundAutoFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, attemptedRepair StepRoundRepair) error {
 	if selectedFindingIDs == nil || strings.TrimSpace(*selectedFindingIDs) == "" || strings.TrimSpace(*selectedFindingIDs) == DeclinedSelectionJSON {
 		return fmt.Errorf("persist step round fix decision: automatic repair requires selected findings")
@@ -470,8 +471,20 @@ func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 		if attemptedRepair.CreatedAt == 0 {
 			attemptedRepair.CreatedAt = now()
 		}
-		if err := upsertRoundRepair(tx, *attemptedRepair); err != nil {
-			return fmt.Errorf("persist step round fix decision: insert automatic repair audit: %w", err)
+		if evaluation != nil {
+			if err := upsertRoundRepair(tx, *attemptedRepair); err != nil {
+				return fmt.Errorf("persist step round fix decision: insert automatic repair audit: %w", err)
+			}
+		} else {
+			// Refresh and Push rounds intentionally stay on the legacy receipt
+			// path. Keep their repair audit in step_rounds as well; inserting a
+			// normalized round_repairs row would create an orphan graph record.
+			if _, err := tx.Exec(
+				`UPDATE step_rounds SET repair_failure_fingerprint = ?, repair_result = ? WHERE id = ?`,
+				attemptedRepair.FailureFingerprint, attemptedRepair.Result, roundID,
+			); err != nil {
+				return fmt.Errorf("persist step round fix decision: update legacy repair audit: %w", err)
+			}
 		}
 	}
 	result, err := tx.Exec(

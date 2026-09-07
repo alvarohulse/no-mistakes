@@ -321,9 +321,6 @@ func isSelectedFindingsSummary(summary string) bool {
 
 // MarshalFindingsJSON encodes findings using the current wire shape.
 func MarshalFindingsJSON(findings Findings) (string, error) {
-	if findings.Items == nil {
-		findings.Items = []Finding{}
-	}
 	raw, err := json.Marshal(findings)
 	if err != nil {
 		return "", err
