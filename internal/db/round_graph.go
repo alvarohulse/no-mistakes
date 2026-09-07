@@ -177,17 +177,17 @@ func requireOneAffectedRow(result sql.Result, err error, operation string) error
 // evaluation, subject, and initial repair receipt. The compatibility JSON
 // columns remain empty; readers project them in memory for legacy consumers.
 func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64) error {
-	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, nil, nil, true)
+	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, nil, nil, true, true)
 }
 
 func (d *DB) CompleteStepRoundStructuredWithoutImplicitRepair(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, durationMS int64) error {
-	return d.completeStepRoundStructured(roundID, evaluation, subject, nil, durationMS, nil, nil, false)
+	return d.completeStepRoundStructured(roundID, evaluation, subject, nil, durationMS, nil, nil, false, true)
 }
 
 // CompleteStepRoundStructuredWithRepairAudit atomically completes a round with
 // its evaluation, subject, fix summary, and final repair audit.
 func (d *DB) CompleteStepRoundStructuredWithRepairAudit(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit StepRoundRepair) error {
-	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil, true)
+	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil, true, true)
 }
 
 // CompleteStepRoundStructuredAndStartAutoFix atomically completes a structured
@@ -228,10 +228,10 @@ func (d *DB) CompleteStepRoundStructuredAndStartAutoFix(stepResultID, roundID st
 			return fmt.Errorf("complete structured step round: expected one step result, updated %d", changed)
 		}
 		return nil
-	}, true)
+	}, true, true)
 }
 
-func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit *StepRoundRepair, afterComplete func(*sql.Tx) error, includeImplicitRepair bool) error {
+func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit *StepRoundRepair, afterComplete func(*sql.Tx) error, includeImplicitRepair bool, projectCompatibilityFindings bool) error {
 	if !validRoundEvaluationKind(evaluation.Kind) {
 		return fmt.Errorf("complete structured step round: invalid evaluation kind %q", evaluation.Kind)
 	}
@@ -353,16 +353,18 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		}
 	}
 
-	compatibilityFindings, err := CompatibilityFindingsJSON(&evaluation)
-	if err != nil {
-		return fmt.Errorf("complete structured step round: project compatibility findings: %w", err)
-	}
-	result, err = tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, compatibilityFindings, stepResultID)
-	if err != nil {
-		return fmt.Errorf("complete structured step round: persist compatibility findings: %w", err)
-	}
-	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-		return fmt.Errorf("complete structured step round: persist compatibility findings: step row not found")
+	if projectCompatibilityFindings {
+		compatibilityFindings, err := CompatibilityFindingsJSON(&evaluation)
+		if err != nil {
+			return fmt.Errorf("complete structured step round: project compatibility findings: %w", err)
+		}
+		result, err = tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, compatibilityFindings, stepResultID)
+		if err != nil {
+			return fmt.Errorf("complete structured step round: persist compatibility findings: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return fmt.Errorf("complete structured step round: persist compatibility findings: step row not found")
+		}
 	}
 
 	var reviewedHead *string
@@ -825,9 +827,9 @@ func (d *DB) CompleteCIFixRepairRound(roundID, startingHeadSHA string, durationM
 		return fmt.Errorf("complete CI repair round: repair result must remain attempted")
 	}
 	subject := StructuredRoundSubject{StartingHeadSHA: optionalString(startingHeadSHA), ResultingHeadSHA: repair.ResultingHeadSHA}
-	return d.CompleteStepRoundStructuredWithRepairAudit(roundID, StepRoundEvaluation{
+	return d.completeStepRoundStructured(roundID, StepRoundEvaluation{
 		Kind: RoundEvaluationRevalidation,
-	}, subject, repair.FixSummary, durationMS, repair)
+	}, subject, repair.FixSummary, durationMS, &repair, nil, true, false)
 }
 
 func (d *DB) roundHasEvaluation(roundID string) (bool, error) {

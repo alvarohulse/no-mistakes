@@ -905,6 +905,45 @@ func TestCompleteStructuredRoundUpdatesReservedCIFixRepair(t *testing.T) {
 	}
 }
 
+func TestCompleteCIFixRepairRoundDoesNotOverwriteActiveStepFindings(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-findings", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	existingFindings := `{"findings":[{"id":"ci-1","description":"still active"}]}`
+	if err := database.SetStepFindings(step.ID, existingFindings); err != nil {
+		t.Fatal(err)
+	}
+
+	attempted := RoundRepairAttempted
+	repairRound, err := database.BeginCIFixRepairRound(step.ID, run.ID, 0, StepRoundRepair{Result: &attempted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultingHead := "fixed-head"
+	if err := database.CompleteCIFixRepairRound(repairRound.ID, "starting-head", 1, StepRoundRepair{
+		Result:           &attempted,
+		ResultingHeadSHA: &resultingHead,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gotStep, err := database.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.FindingsJSON == nil || *gotStep.FindingsJSON != existingFindings {
+		t.Fatalf("step findings after CI repair completion = %#v, want %q", gotStep.FindingsJSON, existingFindings)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusCompleted || rounds[0].Evaluation == nil || rounds[0].Repair == nil {
+		t.Fatalf("completed CI repair round = %#v, want durable evaluation and repair", rounds)
+	}
+}
+
 func TestCompleteStructuredRoundRetainsReservedCIFixRepairOnFinalWriteFailure(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/ci-repair-completion-rollback", "https://example.com/repo.git", "main")
