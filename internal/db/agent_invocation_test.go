@@ -60,6 +60,33 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 }
 
+func TestInsertAgentInvocationRejectsIgnoredInsert(t *testing.T) {
+	d, _, run := openSessionTestDB(t)
+	if _, err := d.sql.Exec(`CREATE TRIGGER ignore_agent_invocation_insert
+		BEFORE INSERT ON agent_invocations
+		WHEN NEW.run_id = '` + run.ID + `'
+		BEGIN
+			SELECT RAISE(IGNORE);
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex",
+		SessionMode: InvocationModeCold, StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	})
+	if err == nil || !strings.Contains(err.Error(), "expected 1 row, inserted 0") {
+		t.Fatalf("InsertAgentInvocation() error = %v, want ignored insert refusal", err)
+	}
+	invocations, err := d.GetAgentInvocationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocations) != 0 {
+		t.Fatalf("ignored insert persisted invocations = %#v, want none", invocations)
+	}
+}
+
 func TestAgentInvocationRoundMustMatchInvocationSubject(t *testing.T) {
 	d, repo, run := openSessionTestDB(t)
 	review, err := d.InsertStepResult(run.ID, "review")

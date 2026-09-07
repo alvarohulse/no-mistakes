@@ -187,7 +187,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if inv.RoundID != "" {
 		roundID = inv.RoundID
 	}
-	_, err = d.sql.Exec(
+	result, err := d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
 		inv.ID, inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
@@ -202,6 +202,13 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert agent invocation: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("insert agent invocation rows affected: %w", err)
+	}
+	if inserted != 1 {
+		return nil, fmt.Errorf("insert agent invocation: expected 1 row, inserted %d", inserted)
 	}
 	return &inv, nil
 }
