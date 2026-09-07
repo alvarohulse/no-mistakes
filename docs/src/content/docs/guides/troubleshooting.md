@@ -163,7 +163,7 @@ Fatal step errors are appended to that log, so failures such as rejected pushes 
 
 ### Inspect command output and test evidence
 
-Each configured or planned command attempt keeps its complete immutable output at `<NM_HOME>/runs/<run-id>/command-output/<attempt-id>.log`; an empty file is valid when the command emitted no output. Artifact-registry paths are root-relative and every read verifies the recorded byte count and SHA-256 digest. Test evidence remains under its configured evidence root (by default `<NM_HOME>/evidence/<run-id>`), where it is indexed in place rather than copied into the run-artifact directory.
+Terminal configured and planned command attempts keep output at `<NM_HOME>/runs/<run-id>/command-output/<attempt-id>.log`; a zero-byte file is valid. [The Gate Model](/no-mistakes/concepts/gate-model/#database) owns the storage and integrity guarantees. Test evidence stays under its configured [`test.evidence` root](/no-mistakes/reference/global-config/#testevidence), where files are indexed in place rather than copied into the run-artifact directory.
 
 ### Recovery reports an invalid effective-config artifact
 

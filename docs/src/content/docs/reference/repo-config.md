@@ -385,7 +385,7 @@ preflight:
     windows: Get-Command git | Out-Null
 ```
 
-no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Because no run or step log exists yet, preflight exposes only a secret-redacted, control-sanitized, bounded failure diagnostic identifying the command index plus resolved command/runner source. This is distinct from the complete command output retained by an executed pipeline step's authoritative log.
+no-mistakes resolves and syntax-checks every entry with the effective runner, then executes the list from the registered source checkout after the complete policy is resolved but before it cancels an active run, inserts a run row, creates a worktree, runs hooks, or starts an agent. Commands run once in order with a fixed 30-second limit each. A non-zero exit, timeout, invalid runner, or launch error refuses the run; there is no retry, model repair, or fallback. Because no run or step log exists yet, preflight exposes only a secret-redacted, control-sanitized, bounded failure diagnostic identifying the command index plus resolved command/runner source. [Pipeline Steps](/no-mistakes/reference/pipeline-steps/) owns retention of output from executed pipeline commands.
 
 A top-level global `preflight` is rejected. Use a trusted default-branch repo config or a matching machine-owned `overrides.<owner>/<repo>.preflight` list. A machine override replaces the full committed list; an explicit empty list clears it.
 
@@ -403,7 +403,7 @@ Explicit build or compile command. Run through the resolved platform command and
 | Type | `string` or structured command |
 | Default | Empty (agent plans the appropriate build command) |
 
-When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding and kept in full in the Build step log.
+When set, the Build step runs this exact command visibly and checks its exit code. Non-zero output is bounded in the gate finding; [Pipeline Steps](/no-mistakes/reference/pipeline-steps/#build) owns complete-output retention.
 When empty, the routed Build agent selects one exact command in a read-only planning pass. The pipeline executes and records it. If it fails, a repair agent fixes the cause and the pipeline reruns the same plan; no usable plan parks instead of silently passing.
 Build is separate from Test: do not put test, lint, or documentation work in `commands.build` unless that work is inseparable from the repository's canonical build command.
 

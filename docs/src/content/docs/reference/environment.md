@@ -17,7 +17,7 @@ When set, everything else moves under this root:
 - Global config: `$NM_HOME/config.yaml`
 - Gate repos: `$NM_HOME/repos/<id>.git`
 - Worktrees: `$NM_HOME/worktrees/<repoID>/<runID>/`
-- Run launch artifacts: `$NM_HOME/runs/<runID>/`
+- Run artifacts (launch configuration and command output): `$NM_HOME/runs/<runID>/`
 - Logs: `$NM_HOME/logs/`
 - Database: `$NM_HOME/state.sqlite`
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
@@ -216,7 +216,7 @@ PR body contract v5 offers a configured formatter a wider subset: one row per to
 Detailed performance evidence stays on the machine in the local state database (`<NM_HOME>/state.sqlite`): one `agent_invocations` row per top-level harness invocation, plus each run's accumulated parked-at-gate time.
 Each row records run and step identity, purpose (such as review, review-fix, or lint-plan), the adapter-observed model and provider when available or the configured route identity otherwise, the cold/started/resumed/fallback session mode, a truncated session-identity hash, timestamps, duration, exit status, failure category, and `usage_coverage` alongside the session-fidelity metrics below. Coverage is `complete` only when the adapter's live stream proves its top-level totals account for all work; otherwise it is `unknown`. It is independent of nullable meter presence, and historical rows migrate to `unknown` without inference or backfill. A full Review row also stores the final content-free candidate pool (`agent`, model name/vendor, and optional flag) so the selected route remains auditable; fixer and non-Review rows leave that field null.
 It never stores prompts, model outputs, diffs, raw command arguments, secret values, or credentials - only bounded counts, low-cardinality categories, and durations.
-The same database keeps rich command definitions and controller-observed command attempts for active retained runs. Definitions contain the exact resolved script and portable runner identity; attempts include state, timing, outcome, exit or signal, and retry linkage. They are neither telemetry nor PR-body data, and stats projects only the content-free command receipts recorded in step evidence.
+The same database keeps rich command definitions, controller-observed command attempts, and the local artifact registry for active retained runs. Definitions contain the exact resolved script and portable runner identity; attempts include state, timing, outcome, exit or signal, retry linkage, and a terminal attempt's immutable output artifact. They are neither telemetry nor PR-body data, and stats projects only the content-free command receipts recorded in step evidence.
 
 Each started run also retains its full resolved configuration locally in
 `<NM_HOME>/runs/<runID>/effective-config.yaml`, including commands, hooks,
