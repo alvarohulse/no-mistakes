@@ -1087,10 +1087,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
 				}
 				repairProgressChecked = true
-				if err := persistRepairAudit(decision.Audit); err != nil {
-					return failStepPersistence(err)
-				}
 				if !decision.Attempt {
+					if err := persistRepairAudit(decision.Audit); err != nil {
+						return failStepPersistence(err)
+					}
 					writeLog(decision.Message)
 				} else {
 					idsJSON := findingIDsJSON(fixableFindings)
@@ -1099,6 +1099,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					}
 					if err := e.db.PersistStepRoundFixDecisionAndMarkStepFixing(sr.ID, currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix, nil); err != nil {
 						return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: %w", stepName, roundNum, err))
+					}
+					if err := persistRepairAudit(decision.Audit); err != nil {
+						return failStepPersistence(err)
 					}
 					autoFixAttempts = decision.AttemptNumber
 					telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))

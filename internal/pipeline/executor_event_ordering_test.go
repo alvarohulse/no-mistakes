@@ -245,8 +245,8 @@ func TestExecutor_AutoFixDecisionPersistenceFailureStopsBeforeRepair(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rounds) != 1 || rounds[0].Decision != nil || rounds[0].SelectionSource != nil {
-		t.Fatalf("round decision after failed write = %#v, want no durable decision", rounds)
+	if len(rounds) != 1 || rounds[0].Decision != nil || rounds[0].SelectionSource != nil || rounds[0].Repair != nil {
+		t.Fatalf("round receipts after failed decision write = %#v, want no durable decision or repair", rounds)
 	}
 }
 

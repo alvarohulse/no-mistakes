@@ -365,7 +365,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix","source":"user"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
@@ -474,7 +474,7 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix","source":"user"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
@@ -509,6 +509,16 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 	}
 	if items[0].ID != "review-2" || items[0].Description != "second" {
 		t.Fatalf("unexpected selected finding: %#v", items[0])
+	}
+	rounds, err := database.GetRoundsByStep(firstStepID(t, database, run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Evaluation == nil || len(rounds[0].Evaluation.Findings) != 2 {
+		t.Fatalf("rounds = %#v", rounds)
+	}
+	if rounds[0].Evaluation.Findings[0].Source != types.FindingSourceAgent {
+		t.Fatalf("step finding source = %q, want %q", rounds[0].Evaluation.Findings[0].Source, types.FindingSourceAgent)
 	}
 }
 

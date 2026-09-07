@@ -79,6 +79,12 @@ func normalizeFindingsJSON(raw string, prefix string) string {
 		return raw
 	}
 	normalized := types.NormalizeFindings(findings, prefix)
+	// Step output is untrusted agent input. Only explicit AddedFindings may
+	// claim user provenance, so preserve that distinction before any finding
+	// is persisted, displayed, or selected for repair.
+	for i := range normalized.Items {
+		normalized.Items[i].Source = types.FindingSourceAgent
+	}
 	normalizedRaw, err := types.MarshalFindingsJSON(normalized)
 	if err != nil {
 		return raw
