@@ -21,7 +21,7 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindRefresh {
 		t.Fatalf("stored operation identity = %+v", stored)
 	}
-	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
+	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA == nil || *stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
 		t.Fatalf("stored receipt fields = %+v", stored)
 	}
 	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
@@ -208,6 +208,27 @@ func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t
 	}
 }
 
+func TestRefreshOperationAllowsUnavailableResultingHead(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newRefreshOperationFixture(t, d)
+	receipt.ResultingHeadSHA = nil
+
+	stored, err := d.InsertRefreshOperation(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResultingHeadSHA != nil {
+		t.Fatalf("stored resulting head = %q, want unavailable", *stored.ResultingHeadSHA)
+	}
+	operations, err := d.GetRefreshOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].ResultingHeadSHA != nil {
+		t.Fatalf("round-tripped unavailable resulting head = %+v", operations)
+	}
+}
+
 func TestInsertRefreshOperationEnforcesDecisionConflictRepairTriples(t *testing.T) {
 	valid := []struct {
 		decision RefreshDecision
@@ -280,6 +301,66 @@ func TestOpenAddsOperationsWithoutFabricatingLegacyRefreshReceipts(t *testing.T)
 	}
 	if len(operations) != 0 {
 		t.Fatalf("legacy refresh operations = %+v, want none", operations)
+	}
+}
+
+func TestOpenMigratesRefreshResultingHeadToNullable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "refresh-resulting-head.sqlite")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE refresh_operations RENAME TO refresh_operations_legacy`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`CREATE TABLE refresh_operations (
+			operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+			strategy TEXT NOT NULL CHECK (strategy IN ('rebase', 'merge')),
+			source_ref TEXT NOT NULL,
+			destination_ref TEXT NOT NULL,
+			authoritative_base_ref TEXT NOT NULL,
+			authoritative_base_sha TEXT,
+			starting_head_sha TEXT NOT NULL,
+			decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
+			resulting_head_sha TEXT NOT NULL,
+			conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
+			repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
+		)`,
+	); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE refresh_operations_legacy`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { migrated.Close() })
+	var notNull int
+	if err := migrated.sql.QueryRow(
+		`SELECT "notnull" FROM pragma_table_info('refresh_operations') WHERE name = 'resulting_head_sha'`,
+	).Scan(&notNull); err != nil {
+		t.Fatal(err)
+	}
+	if notNull != 0 {
+		t.Fatalf("resulting_head_sha NOT NULL = %d, want nullable", notNull)
 	}
 }
 
@@ -417,7 +498,7 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		AuthoritativeBaseSHA: stringPointer("authoritative-base"),
 		StartingHeadSHA:      "starting-head",
 		Decision:             RefreshDecisionMerged,
-		ResultingHeadSHA:     "resulting-head",
+		ResultingHeadSHA:     stringPointer("resulting-head"),
 		ConflictState:        RefreshConflictStateNone,
 		RepairState:          RefreshRepairStateNotNeeded,
 		CommandAttemptIDs:    []string{secondAttempt.ID, firstAttempt.ID},
