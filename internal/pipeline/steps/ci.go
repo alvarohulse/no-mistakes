@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -614,8 +615,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if repairRound != nil {
 						restoreAgentRound = sctx.WithAgentRound(repairRound.id, repairRound.round)
 					}
-					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
+					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict, repairRound)
 					restoreAgentRound()
+					var persistenceErr *ciRepairPushPersistenceError
+					if errors.As(err, &persistenceErr) {
+						return nil, err
+					}
 					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
 						return nil, fmt.Errorf("persist CI manual repair receipt: %w", receiptErr)
 					}
@@ -668,8 +673,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if repairRound != nil {
 						restoreAgentRound = sctx.WithAgentRound(repairRound.id, repairRound.round)
 					}
-					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
+					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict, repairRound)
 					restoreAgentRound()
+					var persistenceErr *ciRepairPushPersistenceError
+					if errors.As(err, &persistenceErr) {
+						return nil, err
+					}
 					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
 						return nil, fmt.Errorf("persist CI repair receipt: %w", receiptErr)
 					}

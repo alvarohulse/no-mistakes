@@ -223,7 +223,7 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	}
 }
 
-func TestCIStep_StopsWhenAppliedRepairReceiptCannotPersist(t *testing.T) {
+func TestCIStep_StopsWhenPushedRepairHeadAndReceiptCannotPersist(t *testing.T) {
 	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
 	prURL := "https://github.com/test/repo/pull/42"
 	agentCalls := 0
@@ -283,11 +283,11 @@ func TestCIStep_StopsWhenAppliedRepairReceiptCannotPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`CREATE TRIGGER reject_applied_ci_repair_receipt
-		BEFORE UPDATE OF fix_summary, resulting_head_sha ON round_repairs
-		WHEN NEW.fix_summary IS NOT NULL
+	if _, err := raw.Exec(`CREATE TRIGGER reject_pushed_ci_repair_head
+		BEFORE UPDATE OF head_sha ON runs
+		WHEN NEW.head_sha != OLD.head_sha
 		BEGIN
-			SELECT RAISE(FAIL, 'injected applied CI repair receipt failure');
+			SELECT RAISE(FAIL, 'injected pushed CI repair transaction failure');
 		END`); err != nil {
 		raw.Close()
 		t.Fatal(err)
@@ -296,12 +296,32 @@ func TestCIStep_StopsWhenAppliedRepairReceiptCannotPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = (&CIStep{}).Execute(sctx)
-	if err == nil || !strings.Contains(err.Error(), "injected applied CI repair receipt failure") {
-		t.Fatalf("CI repair result = %v, want receipt persistence failure", err)
+	polls := 0
+	_, err = (&CIStep{
+		waitForNextPoll: func(context.Context, time.Duration) error {
+			polls++
+			return nil
+		},
+	}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "injected pushed CI repair transaction failure") {
+		t.Fatalf("CI repair result = %v, want pushed repair persistence failure", err)
 	}
 	if agentCalls != 1 {
 		t.Fatalf("CI repair agent calls = %d, want one", agentCalls)
+	}
+	if polls != 0 {
+		t.Fatalf("CI repair polls after persistence failure = %d, want 0", polls)
+	}
+	remoteFields := strings.Fields(gitCmd(t, dir, "ls-remote", upstream, "refs/heads/feature"))
+	if len(remoteFields) == 0 || remoteFields[0] != gitCmd(t, dir, "rev-parse", "HEAD") {
+		t.Fatalf("CI repair push was not verified before persistence failure: %q", remoteFields)
+	}
+	persistedRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedRun.HeadSHA != headSHA {
+		t.Fatalf("run head after failed pushed-repair transaction = %q, want %q", persistedRun.HeadSHA, headSHA)
 	}
 	rounds, err := sctx.DB.GetRoundsByStep(stepResult.ID)
 	if err != nil {
