@@ -428,7 +428,7 @@ func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []st
 		return fmt.Errorf("set structured round decision: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty); err != nil {
+	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty, false); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -437,7 +437,22 @@ func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []st
 	return nil
 }
 
-func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
+func (d *DB) setStructuredDecisionIfAbsentByExternalIDs(roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("set structured round decision: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty, true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set structured round decision: commit: %w", err)
+	}
+	return nil
+}
+
+func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty, onlyIfAbsent bool) error {
 	if !validRoundDecisionSource(source) {
 		return fmt.Errorf("set structured round decision: invalid source %q", source)
 	}
@@ -454,6 +469,7 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		byExternal[evaluation.Findings[i].ID] = &evaluation.Findings[i]
 	}
 	edited := make(map[string]bool)
+	selectedAliases := make(map[string]string)
 	if userFindingsJSON != nil && strings.TrimSpace(*userFindingsJSON) != "" {
 		merged, parseErr := types.ParseFindingsJSON(*userFindingsJSON)
 		if parseErr != nil {
@@ -467,12 +483,23 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 			}
 			seen[item.ID] = true
 			if existing := byExternal[item.ID]; existing != nil {
-				existing.UserInstructions = item.UserInstructions
-				if _, err := tx.Exec(`UPDATE round_findings SET user_instructions = ? WHERE id = ?`, existing.UserInstructions, existing.ID); err != nil {
-					return fmt.Errorf("set structured round decision: update finding edit: %w", err)
+				if item.Source == types.FindingSourceUser && existing.Source != types.FindingSourceUser {
+					externalID := item.ID
+					for suffix := 1; ; suffix++ {
+						item.ID = fmt.Sprintf("user-%d", suffix)
+						if byExternal[item.ID] == nil {
+							break
+						}
+					}
+					selectedAliases[externalID] = item.ID
+				} else {
+					existing.UserInstructions = item.UserInstructions
+					if _, err := tx.Exec(`UPDATE round_findings SET user_instructions = ? WHERE id = ?`, existing.UserInstructions, existing.ID); err != nil {
+						return fmt.Errorf("set structured round decision: update finding edit: %w", err)
+					}
+					edited[existing.ID] = item.UserInstructions != ""
+					continue
 				}
-				edited[existing.ID] = item.UserInstructions != ""
-				continue
 			}
 			if item.Source == "" {
 				item.Source = types.FindingSourceUser
@@ -505,6 +532,9 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		if id == "" {
 			continue
 		}
+		if alias := selectedAliases[id]; alias != "" {
+			id = alias
+		}
 		if byExternal[id] == nil {
 			return fmt.Errorf("set structured round decision: selected finding %q does not belong to evaluation", id)
 		}
@@ -525,8 +555,35 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		references[finding.ID] = StepRoundDecisionFinding{FindingID: finding.ID, State: state, UserInstructions: finding.UserInstructions, Edited: edited[finding.ID]}
 	}
 	decision := StepRoundDecision{ID: newID(), RunID: evaluation.RunID, RoundID: roundID, Source: source, ExplicitEmpty: explicitEmpty, CreatedAt: now()}
+	if onlyIfAbsent {
+		return insertRoundDecisionIfAbsent(tx, decision, evaluation.Findings, references)
+	}
 	if err := replaceRoundDecision(tx, decision, evaluation.Findings, references); err != nil {
 		return err
+	}
+	return nil
+}
+
+func insertRoundDecisionIfAbsent(tx *sql.Tx, decision StepRoundDecision, findings []StepRoundFinding, references map[string]StepRoundDecisionFinding) error {
+	result, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, explicit_empty, created_at)
+		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO NOTHING`,
+		decision.ID, decision.RunID, decision.RoundID, decision.Source, decision.ExplicitEmpty, decision.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("set structured round decision: insert decision: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set structured round decision: insert decision rows affected: %w", err)
+	}
+	if inserted == 0 {
+		return nil
+	}
+	for ordinal, finding := range findings {
+		reference := references[finding.ID]
+		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?)`,
+			decision.ID, finding.ID, ordinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
+			return fmt.Errorf("set structured round decision: insert finding reference: %w", err)
+		}
 	}
 	return nil
 }

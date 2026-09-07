@@ -150,6 +150,84 @@ func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t 
 	}
 }
 
+func TestStructuredRoundRekeysCollidingUserFinding(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/structured-decision-collision", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepReview)
+	round, _ := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind: RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{
+			{ExternalID: "review-1", Description: "selected agent finding", Action: types.ActionAutoFix},
+			{ExternalID: "review-2", Description: "unselected agent finding", Action: types.ActionAskUser},
+		},
+	}, StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := `{"findings":[{"id":"review-1","description":"selected agent finding","action":"auto-fix"},{"id":"review-2","source":"user","description":"user-authored finding","action":"auto-fix"}]}`
+	selected := `["review-1","review-2"]`
+	if err := database.SetStepRoundUserDecision(round.ID, &selected, RoundSelectionSourceUser, &merged); err != nil {
+		t.Fatal(err)
+	}
+
+	evaluation, err := database.GetRoundEvaluation(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := database.GetRoundDecision(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evaluation == nil || decision == nil || len(evaluation.Findings) != 3 {
+		t.Fatalf("evaluation/decision = %#v / %#v", evaluation, decision)
+	}
+	states := make(map[string]string, len(decision.Findings))
+	for _, reference := range decision.Findings {
+		for _, finding := range evaluation.Findings {
+			if finding.ID == reference.FindingID {
+				states[finding.ExternalID] = reference.State
+			}
+		}
+	}
+	if evaluation.Findings[1].Description != "unselected agent finding" || states["review-2"] != RoundDecisionFindingUnselected {
+		t.Fatalf("unselected agent finding = %#v, states = %#v", evaluation.Findings[1], states)
+	}
+	if evaluation.Findings[2].ExternalID != "user-1" || evaluation.Findings[2].Description != "user-authored finding" || states["user-1"] != RoundDecisionFindingSelected {
+		t.Fatalf("rekeyed user finding = %#v, states = %#v", evaluation.Findings[2], states)
+	}
+}
+
+func TestStructuredRoundDeclinedDoesNotOverwriteRecordedSelection(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/structured-decision-decline", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepReview)
+	round, _ := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+	if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind:     RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{{ExternalID: "review-1", Description: "selected finding", Action: types.ActionAutoFix}},
+	}, StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	selected := `["review-1"]`
+	if err := database.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceAutoFix); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepRoundDeclined(round.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	decision, err := database.GetRoundDecision(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision == nil || decision.Source != RoundSelectionSourceAutoFix || decision.ExplicitEmpty || len(decision.Findings) != 1 || decision.Findings[0].State != RoundDecisionFindingSelected {
+		t.Fatalf("recorded selection was overwritten: %#v", decision)
+	}
+}
+
 func TestStructuredRoundRejectsDuplicateFindingIdentities(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/duplicate-finding", "https://example.com/repo.git", "main")

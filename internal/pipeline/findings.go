@@ -274,10 +274,8 @@ func hasAskUserFindingsJSON(raw string) bool {
 	return types.HasAskUserFindings(findings)
 }
 
-// combineSelectedFindingIDs returns the ordered list of finding IDs that
-// were dispatched to the fix agent: the user's selected agent-produced
-// IDs plus any user-authored finding IDs (which only appear in the merged
-// list).
+// combineSelectedFindingIDs returns the ordered list of selected agent
+// findings plus user-authored findings.
 func combineSelectedFindingIDs(selected []string, mergedFindings string) []string {
 	if mergedFindings == "" {
 		return selected
@@ -294,7 +292,7 @@ func combineSelectedFindingIDs(selected []string, mergedFindings string) []strin
 	}
 	result := append([]string(nil), selected...)
 	for _, item := range merged.Items {
-		if item.ID == "" || seen[item.ID] {
+		if item.ID == "" || item.Source != types.FindingSourceUser || seen[item.ID] {
 			continue
 		}
 		result = append(result, item.ID)
@@ -320,6 +318,12 @@ func mergeUserOverridesJSON(raw string, instructions map[string]string, added []
 		return raw
 	}
 	return encoded
+}
+
+func mergeSelectedUserOverridesJSON(raw string, selectedIDs []string, instructions map[string]string, added []types.Finding) (string, []string) {
+	merged := mergeUserOverridesJSON(raw, instructions, added)
+	allSelectedIDs := combineSelectedFindingIDs(selectedIDs, merged)
+	return filterFindingsJSON(merged, allSelectedIDs), allSelectedIDs
 }
 
 func filterFindingsJSON(raw string, ids []string) string {

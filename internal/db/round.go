@@ -354,7 +354,7 @@ func (d *DB) SetStepRoundWaived(id string) error {
 	if normalized, err := d.roundHasEvaluation(id); err != nil {
 		return err
 	} else if normalized {
-		return d.setStructuredDecisionByExternalIDs(id, nil, RoundSelectionSourceUserWaived, nil, true)
+		return d.setStructuredDecisionIfAbsentByExternalIDs(id, nil, RoundSelectionSourceUserWaived, nil, true)
 	}
 	declined := DeclinedSelectionJSON
 	if _, err := d.sql.Exec(
@@ -420,7 +420,7 @@ func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 		return err
 	}
 	if evaluation != nil {
-		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false); err != nil {
+		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false, false); err != nil {
 			return err
 		}
 	} else {

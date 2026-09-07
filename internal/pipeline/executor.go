@@ -517,8 +517,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
 		selected := filterFindingsJSON(gate.findings, response.findingIDs)
-		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
-		allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
+		merged, allSelectedIDs := mergeSelectedUserOverridesJSON(gate.findings, response.findingIDs, response.instructions, response.addedFindings)
 		idsJSON := marshalFindingIDs(allSelectedIDs)
 		var selectedFindingIDs *string
 		if idsJSON != "" {
@@ -1245,8 +1244,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		case types.ActionFix:
 			selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs)
 			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
-			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
-			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, mergedFindings)
+			mergedFindings, allSelectedIDs := mergeSelectedUserOverridesJSON(outcome.Findings, response.findingIDs, response.instructions, response.addedFindings)
 			idsJSON := marshalFindingIDs(allSelectedIDs)
 			var selectedFindingIDs *string
 			if idsJSON != "" {

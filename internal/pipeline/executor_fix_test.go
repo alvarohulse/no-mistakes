@@ -382,7 +382,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	instructions := map[string]string{"review-1": "only touch parser.go, skip helpers"}
-	added := []types.Finding{{Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
+	added := []types.Finding{{ID: "review-2", Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
 	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added); err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +432,20 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 	}
 	if !strings.Contains(*round.SelectedFindingIDs, "user-1") {
 		t.Errorf("expected user-added finding id in selected list, got %s", *round.SelectedFindingIDs)
+	}
+	if round.Evaluation == nil || round.Decision == nil || len(round.Evaluation.Findings) != 3 {
+		t.Fatalf("structured round = %#v", round)
+	}
+	states := make(map[string]string, len(round.Decision.Findings))
+	for _, reference := range round.Decision.Findings {
+		for _, finding := range round.Evaluation.Findings {
+			if finding.ID == reference.FindingID {
+				states[finding.ExternalID] = reference.State
+			}
+		}
+	}
+	if states["review-2"] != db.RoundDecisionFindingUnselected || states["user-1"] != db.RoundDecisionFindingSelected {
+		t.Fatalf("decision states = %#v", states)
 	}
 }
 
