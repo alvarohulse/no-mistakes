@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -148,6 +150,68 @@ func TestPreflightFailureDoesNotSupersedeActiveRun(t *testing.T) {
 	}
 	if active == nil || active.Status != types.RunRunning {
 		t.Fatalf("active run status = %v, want running", active)
+	}
+}
+
+func TestStartRunAdmissionRejectsConcurrentClosure(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		close func(*RunManager)
+	}{
+		{
+			name: "post-worktree quarantine",
+			close: func(manager *RunManager) {
+				_ = manager.unresolvedPostWorktreeRun(errors.New("unresolved post-worktree terminalization"))
+			},
+		},
+		{
+			name: "shutdown",
+			close: func(manager *RunManager) {
+				manager.Shutdown()
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("NM_DEMO", "1")
+			p, database, repo, marker := newPolicyResolutionFixture(t, "admission-"+strings.ReplaceAll(tt.name, " ", "-"))
+			head := writePreflightPolicyCommit(t, repo, marker, []string{"echo ready"})
+			step := &mockPassStep{name: types.StepReview}
+			manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+			t.Cleanup(manager.Shutdown)
+			setSafeBareRepositoryExplicitForDaemonTest(t)
+
+			preflightStarted := make(chan struct{})
+			releasePreflight := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releasePreflight) }) }
+			t.Cleanup(release)
+			manager.executePreflight = func(context.Context, runner.Prepared, runner.ExecuteOptions) (runner.Result, error) {
+				close(preflightStarted)
+				<-releasePreflight
+				return runner.Result{}, nil
+			}
+
+			result := make(chan error, 1)
+			go func() {
+				_, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "concurrent admission", "", "", "")
+				result <- err
+			}()
+			select {
+			case <-preflightStarted:
+			case <-time.After(time.Second):
+				t.Fatal("run did not reach the paused preflight seam")
+			}
+			tt.close(manager)
+			release()
+
+			select {
+			case err := <-result:
+				assertPolicyResolutionFailureHasNoSideEffects(t, p, database, repo, marker, step, err, "daemon is shutting down")
+				assertNoEffectiveConfigArtifacts(t, p)
+			case <-time.After(time.Second):
+				t.Fatal("run admission did not return after closure")
+			}
+		})
 	}
 }
 

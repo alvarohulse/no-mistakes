@@ -45,6 +45,7 @@ type RunManager struct {
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
+	admissionMu  sync.Mutex                         // linearizes shutdown/quarantine with run insertion; never hold alongside mu
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
@@ -1271,7 +1272,14 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// fallback, so writing it in the same insert avoids ever creating a run that
 	// is missing its guaranteed PR-note content.
 	runOptions.RefreshStrategy = resolved.RefreshStrategy
+	m.admissionMu.Lock()
+	if m.shuttingDown.Load() {
+		m.admissionMu.Unlock()
+		trackStartFailure("daemon_shutdown")
+		return "", fmt.Errorf("daemon is shutting down")
+	}
 	run, err := m.db.InsertRunWithIDAndOptions(runID, repo.ID, branch, resolved.HeadSHA, baseSHA, runOptions)
+	m.admissionMu.Unlock()
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1654,7 +1662,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
-	m.shuttingDown.Store(true)
+	m.closeRunAdmission()
 
 	m.mu.Lock()
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
@@ -1678,6 +1686,12 @@ func (m *RunManager) Shutdown() {
 	case <-time.After(30 * time.Second):
 		slog.Warn("timed out waiting for runs to finish during shutdown")
 	}
+}
+
+func (m *RunManager) closeRunAdmission() {
+	m.admissionMu.Lock()
+	m.shuttingDown.Store(true)
+	m.admissionMu.Unlock()
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.

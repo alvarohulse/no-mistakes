@@ -38,7 +38,7 @@ func (e *unresolvedPostWorktreeRunError) Unwrap() error { return e.cause }
 func (m *RunManager) unresolvedPostWorktreeRun(cause error) error {
 	// Set the admission guard before returning to lifecycle cleanup so no new
 	// run can be admitted after this run loses its durable terminal state.
-	m.shuttingDown.Store(true)
+	m.closeRunAdmission()
 	return &unresolvedPostWorktreeRunError{cause: cause}
 }
 
