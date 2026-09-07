@@ -159,11 +159,11 @@ review:
 }
 
 // TestRepoConfigPromptsFromDefaultBranch proves configured prompt additions
-// actually reach the step agents of a real gated run, and that they follow the
-// same trusted default-branch boundary as commands and agent routes: the
-// trusted copy's prompts.shared reaches every model prompt, each step key
-// reaches its own step, and a hostile pushed-branch prompts value never reaches
-// an agent.
+// actually reach the intended step agents of a real gated run, and that they
+// follow the same trusted default-branch boundary as commands and agent routes.
+// The reviewer deliberately uses the exact upstream built-in prompt, while
+// other model prompts still receive trusted shared and step-specific additions;
+// a hostile pushed-branch prompts value never reaches any agent.
 func TestRepoConfigPromptsFromDefaultBranch(t *testing.T) {
 	optOut := false
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t), AllowRepoCommands: &optOut})
@@ -218,14 +218,20 @@ prompts:
 				t.Fatalf("SECURITY REGRESSION: invocation %d (%s) carried pushed-branch prompt config %q; prompts must be read from the trusted default branch:\n%s", i, inv.Agent, hostile, inv.Prompt)
 			}
 		}
+		if strings.Contains(inv.Prompt, "Review the code changes and return structured findings") {
+			if strings.Contains(inv.Prompt, "NM_E2E_TRUSTED_SHARED") || strings.Contains(inv.Prompt, "NM_E2E_TRUSTED_REVIEW") || strings.Contains(inv.Prompt, "Additional prompt config:") {
+				t.Errorf("reviewer invocation must remain identical to upstream built-in guidance:\n%s", inv.Prompt)
+			}
+			continue
+		}
 		if !strings.Contains(inv.Prompt, "NM_E2E_TRUSTED_SHARED") {
-			t.Errorf("invocation %d (%s) missing trusted prompts.shared; shared guidance must reach every pipeline model prompt:\n%s", i, inv.Agent, inv.Prompt)
+			t.Errorf("invocation %d (%s) missing trusted prompts.shared; shared guidance must reach every non-reviewer pipeline model prompt:\n%s", i, inv.Agent, inv.Prompt)
 		}
 		if !strings.Contains(inv.Prompt, "Additional prompt config:") {
 			t.Errorf("invocation %d (%s) missing the append-only prompt config wrapper:\n%s", i, inv.Agent, inv.Prompt)
 		}
 	}
-	t.Logf("%d agent invocations: all carried the trusted prompts.shared guidance, none carried the pushed branch's prompts", len(invocations))
+	t.Logf("%d agent invocations: non-reviewers carried trusted prompts.shared guidance, none carried the pushed branch's prompts", len(invocations))
 
 	// Each step key reaches its own step's prompt, after the shared guidance.
 	for _, want := range []struct {
@@ -233,7 +239,6 @@ prompts:
 		find    string
 		markers []string
 	}{
-		{name: "review", find: "Review the code changes and return structured findings", markers: []string{"NM_E2E_TRUSTED_REVIEW"}},
 		{name: "test", find: "You are validating a code change by testing it", markers: []string{"NM_E2E_TRUSTED_TEST"}},
 		{name: "document", find: "Keep the project documentation accurate for this change", markers: []string{"NM_E2E_TRUSTED_DOCUMENT"}},
 		{name: "lint", find: "Select the exact shell command the Lint pipeline step should execute", markers: []string{"NM_E2E_TRUSTED_LINT"}},

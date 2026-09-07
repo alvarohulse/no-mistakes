@@ -165,7 +165,7 @@ Previous review findings to address:
 	// net-deleted-author-lines git-diff backstop for the removal-of-required
 	// class - a fixer round that net-deletes author-added lines parks
 	// regardless of intent source. Held pending a scope decision.
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction + configuredPromptSection(sctx, s.Name())
+	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	// Path-scoped repository review guidance, taken from the trusted
 	// default-branch config copy (regardless of allow_repo_commands) so a pushed
@@ -191,18 +191,21 @@ Context:
 - ignore patterns: %s
 
 Task:
-- Apply the installed /review-changes contract, including its normal delegated review fan-out, while returning this step's required structured schema.
 - Read the relevant history and diff yourself.
 - Focus findings on risks introduced by changed code, but inspect surrounding code, call sites, shared helpers, tests, and invariants when needed to understand root cause.
 - Determine from the stated intent and relevant evidence whether a bug-fix change claims a durable fix or explicitly authorized short-term containment.
 - For a claimed durable fix, reconstruct the concrete failing sequence and required invariant, inspect relevant sibling paths and shared state transitions, and ask whether the same authorized failure remains reachable.
 - For any new or changed logic, construct at least one concrete input or state and trace it through the code, looking for a case that produces a wrong result without erroring.
+- When changed behavior reads, writes, returns, indexes, caches, logs, or otherwise processes potentially protected resources or user data, trace a concrete operation or disclosure across the relevant boundaries. Check where identity is established and whether unauthenticated execution remains reachable; whether authorization is enforced at the earliest shared boundary used by every caller; ownership, role, tenant, organization, and administrative scope including alternate call paths; public responses and serialization of private fields, PII, drafts, internal metadata, or reviewer/admin-only data; secondary disclosure through search projections, caches, logs, telemetry, error details, exports, and generated artifacts; and fail-open defaults, missing-context behavior, preview or bypass paths, and stale authorization assumptions.
+- Report an authorization or privacy finding only with source-backed evidence of a concrete reachable operation or disclosure path. Identify the protected resource or field, the bypass or missing control, and the resulting unauthorized action or exposure. Do not infer a finding merely because middleware, an authorization call, or an auth-related test is absent by name; accept equivalent controls and intentionally public data when the source proves them.
+- Repository instructions own access policy. If changed behavior introduces a concrete material operation or disclosure involving potentially protected resources or user data, and the instructions and source do not establish whether it is allowed, you MUST emit an "ask-user" finding that names the missing policy decision. Do not report immaterial or pre-existing ambiguity, and do not invent access policy. A source-proven routine defect retains the existing "auto-fix" semantics.
 - When source evidence proves the failure remains reachable, report the concrete path and recommend the earliest supported shared boundary that would make the invariant hold, rather than duplicating another symptom patch.
 - Do not infer a systemic flaw from code shape, duplication, or architectural preference alone. Do not demand a shared abstraction or broad redesign without a concrete reachable path, violated invariant, or immediately competing semantic owner.
+- Report a finding only when you can construct a concrete sequence that occurs during the change's intended usage, including rare but real sequences those callers actually perform. Do not report a finding whose only supporting path is a hypothetical unused execution that intended callers, the public API, or documented usage never take.
 - Do not block explicitly authorized honest containment merely because a later durable fix is possible. Do not expand user scope or turn optional broader improvements into blockers.
 - Do NOT run tests during review. The pipeline has a dedicated test step after review.
 - Analyze for bugs, risks, and code simplification opportunities.
-- "Simplification" means reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). It does NOT mean removing features, changing product behavior, or stripping intentional user-facing output.
+- "Simplification" opportunities in this pass mean reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). They do NOT mean removing features, changing product behavior, or stripping intentional user-facing output; a component the intent does not require is reported through the dedicated Simplification section below, never as an "auto-fix" refactor.
 - Treat security issues, performance regressions, breaking changes, insufficient error handling, and a computation that returns a wrong value, label, or set without failing as risks.
 - Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate.
 
@@ -217,17 +220,24 @@ Rules:
   - "ask-user": the finding is about functional requirements or product behavior, or otherwise challenges the author's deliberate intent. Even if it seems obviously wrong, we should ask the user for review. Examples: "this feature seems unnecessary", "this hardcoded value should be configurable", "this deletion looks wrong". When in doubt, default to "ask-user".
   - "auto-fix": the finding is a non-functional, non user-visible issue (correctness, error handling, security, performance, mechanical code quality) that can be safely fixed without any discussion about the author's intent.
   - "no-op": the finding is informational and does not require any action (e.g. noting a pattern, acknowledging a tradeoff).
+- Classify by the remedy, not only by the topic. If the smallest honest remedy for a finding would add new durable state, a schema change, new background, retry, or persistence machinery, a new subsystem, or otherwise EXTEND the change beyond its stated intent rather than CORRECT what it already does, the action must be "ask-user" even when the defect itself looks mechanical. Say in the description that the remedy, not the defect, is what needs authorization.
 - For each finding, set review_scope to exactly one of:
   - "source": every source-verifiable finding, including any finding that mixes a source defect with a delivery claim.
   - "pipeline-owned-delivery": only a finding whose sole claim is that this run's remote branch, push, PR, or CI output is not present yet.
   - "external-delivery": a pre-existing or external PR, third-party artifact, or other lifecycle requirement not owned by this run.
+
+Simplification (a dedicated pass over what the change introduced, in addition to the findings above):
+- Enumerate every component the change introduced: a new branch, acceptance or matching path, fallback, alias, mode, flag, option, a second definition of a concept the code already defines once, or a parallel copy of a rule. Judge each one against the User intent when one is stated, otherwise against the change's own stated purpose. The stated purpose sets the required scope, not the implementation.
+- For each component that is not strictly required to satisfy that intent, report a finding with severity "warning" and action "ask-user". Name the component, state that no intent requirement needs it or which requirement it exceeds, and recommend removing it as the remedy. Do not recommend hardening, validating, or documenting a component the intent does not require.
+- When a defect you reported above lives inside such a component, say so in that finding and name removal of the component as the smallest honest remedy, instead of prescribing a repair that keeps the component and hardens it.
+- Report each unrequired component once. When a component is required but a strictly narrower form satisfies the intent (for example an exact match where the change accepts several spellings), name the narrower form.
 
 Risk assessment (after listing all findings):
 - Assess source code, source-verifiable criteria, and enforceable external lifecycle requirements normally, while excluding findings scoped "pipeline-owned-delivery" from risk.
 - Set risk_level to "low" if the change is well-bounded, mostly cosmetic, or straightforward with little ambiguity.
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
-- Provide a one-sentence risk_rationale in self-contained GitHub-flavored Markdown explaining why you chose that risk level. It is published on its own, so state the reason in full and never refer to the findings above, this review, or anything else the reader cannot see. Wrap code identifiers, symbols, files, commands, and configuration keys in backticks, for example %s.
+- Provide a one-sentence risk_rationale explaining why you chose that risk level.
 - Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s`,
 		branch,
 		baseSHA,
@@ -235,7 +245,6 @@ Risk assessment (after listing all findings):
 		reviewScope,
 		sctx.Repo.DefaultBranch,
 		ignorePatterns,
-		"`AlertMessage.close`",
 		historySection,
 		pathInstructions,
 	)
