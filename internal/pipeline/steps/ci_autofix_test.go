@@ -1195,6 +1195,118 @@ func TestCIStep_FixMode_ManualInterventionRunsCIFix(t *testing.T) {
 	}
 }
 
+func TestCIStep_PersistsPushedRepairSummaries(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		autoFixLimit  int
+		checks        []string
+		expectedFixes int
+		expected      string
+		userFix       bool
+	}{
+		{
+			name:          "automatic repairs retain the final summary",
+			autoFixLimit:  2,
+			checks:        []string{`[{"name":"test","state":"FAILURE","bucket":"fail"}]`, `[{"name":"lint","state":"FAILURE","bucket":"fail"}]`},
+			expectedFixes: 2,
+			expected:      "repair lint",
+		},
+		{
+			name:          "user requested repair retains its summary",
+			autoFixLimit:  0,
+			checks:        []string{`[{"name":"test","state":"FAILURE","bucket":"fail"}]`, `[{"name":"test","state":"FAILURE","bucket":"fail"}]`},
+			expectedFixes: 1,
+			expected:      "repair test",
+			userFix:       true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+			prURL := "https://github.com/test/repo/pull/42"
+			fixCount := 0
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					fixCount++
+					if err := os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("summary-repair-%d.txt", fixCount)), []byte("fixed"), 0o644); err != nil {
+						return nil, err
+					}
+					summary := "repair test"
+					if fixCount == 2 {
+						summary = "repair lint"
+					}
+					return &agent.Result{Output: json.RawMessage(fmt.Sprintf(`{"summary":%q}`, summary))}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Run.PRURL = &prURL
+			sctx.Repo.UpstreamURL = upstream
+			sctx.Run.Branch = "refs/heads/feature"
+			sctx.Config.CITimeout = time.Second
+			sctx.Config.AutoFix = config.AutoFix{CI: tt.autoFixLimit}
+
+			clock := time.Now()
+			inner := &CIStep{
+				now: func() time.Time { return clock },
+				waitForNextPoll: func(context.Context, time.Duration) error {
+					if fixCount == tt.expectedFixes {
+						clock = clock.Add(2 * time.Second)
+					}
+					return nil
+				},
+			}
+			step := &recoveredCIEnvStep{inner: inner, env: fakeCIGHSequence(t, "OPEN", tt.checks)}
+			executor := pipeline.NewExecutor(sctx.DB, sctx.Paths, sctx.Config, sctx.Agent, []pipeline.Step{step}, nil)
+			done := make(chan error, 1)
+			go func() { done <- executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir) }()
+
+			if tt.userFix {
+				respondToCIApproval(t, executor, types.ActionFix, []string{"ci-1"})
+			}
+			respondToCIApproval(t, executor, types.ActionAbort, nil)
+			if err := <-done; err == nil || !strings.Contains(err.Error(), "aborted by user") {
+				t.Fatalf("executor result = %v, want user abort", err)
+			}
+			if fixCount != tt.expectedFixes {
+				t.Fatalf("CI repair count = %d, want %d", fixCount, tt.expectedFixes)
+			}
+
+			stepResults, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stepResults) != 1 {
+				t.Fatalf("step results = %d, want 1", len(stepResults))
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(stepResults[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repair, err := sctx.DB.GetRoundRepair(rounds[len(rounds)-1].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repair == nil || repair.FixSummary == nil || *repair.FixSummary != tt.expected {
+				t.Fatalf("repair receipt = %#v, want fix summary %q", repair, tt.expected)
+			}
+		})
+	}
+}
+
+func respondToCIApproval(t *testing.T, executor *pipeline.Executor, action types.ApprovalAction, findingIDs []string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepCI, action, findingIDs); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("CI approval %q was not accepted", action)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestCIStep_AutoFixNoChangesStopsImmediately verifies that an unchanged Git
 // content state consumes one attempt and then stops instead of retrying.
 func TestCIStep_AutoFixNoChangesStopsImmediately(t *testing.T) {
@@ -1262,6 +1374,9 @@ func TestCIStep_AutoFixNoChangesStopsImmediately(t *testing.T) {
 	}
 	if outcome.RepairAudit.Result != pipeline.RepairResultNoProgress || outcome.RepairAudit.FailureFingerprint == "" {
 		t.Fatalf("repair audit = %+v, want content-free no-progress receipt", outcome.RepairAudit)
+	}
+	if outcome.FixSummary != "" {
+		t.Fatalf("no-progress CI outcome retained fix summary %q", outcome.FixSummary)
 	}
 
 	if fixCount != 1 {
@@ -1368,6 +1483,9 @@ func TestCIStep_FixMode_NoChanges_CountsAsAttempt(t *testing.T) {
 	}
 	if !outcome.NeedsApproval {
 		t.Fatal("expected approval needed after fix mode with no changes")
+	}
+	if outcome.FixSummary != "" {
+		t.Fatalf("no-progress manual CI outcome retained fix summary %q", outcome.FixSummary)
 	}
 
 	if fixCount != 1 {

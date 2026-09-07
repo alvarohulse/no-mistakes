@@ -16,12 +16,13 @@ import (
 
 // autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
 // commits and pushes to the configured push remote.
-// Returns (true, nil) when changes were committed and pushed, (false, nil)
-// when the agent produced no changes, or (false, err) on failure.
-func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool) (bool, error) {
+// Returns (true, summary, nil) when changes were committed and pushed,
+// (false, "", nil) when the agent produced no changes, or (false, "", err)
+// on failure.
+func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, failingNames []string, mergeConflict bool) (bool, string, error) {
 	ctx := sctx.Ctx
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	baseBranch := effectiveBaseBranch(sctx)
@@ -118,7 +119,7 @@ CI logs:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
-		return false, fmt.Errorf("agent CI fix: %w", err)
+		return false, "", fmt.Errorf("agent CI fix: %w", err)
 	}
 
 	return s.commitAndPushAttributed(sctx, result)
@@ -132,52 +133,59 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext, summary string) (bool
 	if strings.TrimSpace(summary) == "" {
 		return false, fmt.Errorf("read CI repair commit summary: summary is empty")
 	}
-	return s.commitAndPushResolved(sctx, nil, summary)
+	pushed, _, err := s.commitAndPushResolved(sctx, nil, summary)
+	return pushed, err
 }
 
-func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result) (bool, error) {
-	return s.commitAndPushResolved(sctx, result, "")
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result) (bool, string, error) {
+	pushed, summary, err := s.commitAndPushResolved(sctx, result, "")
+	if err != nil || !pushed {
+		return pushed, "", err
+	}
+	return pushed, summary, nil
 }
 
-func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary string) (bool, error) {
+func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary string) (bool, string, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("check CI changes: %w", err)
+		return false, "", fmt.Errorf("check CI changes: %w", err)
 	}
 	if strings.TrimSpace(status) == "" {
 		sctx.Log("no changes to commit")
 		headSHA, err := stepGitHeadSHA(sctx)
 		if err == nil && headSHA != sctx.Run.HeadSHA {
-			return s.pushUpdatedHeadSHA(sctx, headSHA)
+			pushed, err := s.pushUpdatedHeadSHA(sctx, headSHA)
+			return pushed, "", err
 		}
-		return false, nil
+		return false, "", nil
 	}
 	if summary == "" {
 		summary, err = extractCommitSummary(result)
 		if err != nil {
-			return false, fmt.Errorf("read CI repair commit summary: %w", err)
+			return false, "", fmt.Errorf("read CI repair commit summary: %w", err)
 		}
 		if summary == "" {
-			return false, fmt.Errorf("read CI repair commit summary: summary is empty")
+			return false, "", fmt.Errorf("read CI repair commit summary: summary is empty")
 		}
 	}
 
 	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
-		return false, fmt.Errorf("stage CI changes: %w", err)
+		return false, "", fmt.Errorf("stage CI changes: %w", err)
 	}
 	message, err := attributedAgentFixCommitMessage(sctx, types.StepCI, summary, result)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	if _, err := stepGitRun(sctx, "commit", "-m", message); err != nil {
-		return false, fmt.Errorf("commit: %w", err)
+		return false, "", fmt.Errorf("commit: %w", err)
 	}
 	headSHA, err := stepGitHeadSHA(sctx)
 	if err != nil {
-		return false, fmt.Errorf("resolve head after commit: %w", err)
+		return false, "", fmt.Errorf("resolve head after commit: %w", err)
 	}
 
-	return s.pushUpdatedHeadSHA(sctx, headSHA)
+	pushed, err := s.pushUpdatedHeadSHA(sctx, headSHA)
+	return pushed, summary, err
 }
 
 func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string) (bool, error) {
