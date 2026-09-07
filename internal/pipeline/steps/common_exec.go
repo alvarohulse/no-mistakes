@@ -261,11 +261,19 @@ func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, pu
 	return runStepCommand(sctx, command, purpose, "")
 }
 
+func runStepRunnerCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, purpose string, env []string) (string, int, error) {
+	return runStepCommandWithEnv(sctx, command, purpose, "", env)
+}
+
 func runStepPlannedCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
 	return runStepCommand(sctx, command, purpose, db.CommandDefinitionSourcePlanned)
 }
 
 func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose, definitionSource string) (string, int, error) {
+	return runStepCommandWithEnv(sctx, command, purpose, definitionSource, sctx.Env)
+}
+
+func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, purpose, definitionSource string, env []string) (string, int, error) {
 	sequence := sctx.NextCommandSequence()
 	processTerminationGrace := shellenv.DefaultProcessTerminationGrace
 	defaultRunner := runner.Spec{}
@@ -277,7 +285,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 	}
 	options := runner.ExecuteOptions{
 		Dir:                     sctx.WorkDir,
-		ExtraEnv:                sctx.Env,
+		ExtraEnv:                env,
 		ProcessTerminationGrace: processTerminationGrace,
 		CaptureFullOutput:       true,
 	}
@@ -445,6 +453,10 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 }
 
 func cleanCommandStateID(ctx context.Context, dir, sha string) (*string, error) {
+	state := "git:" + sha
+	if git.LooksLikeBareRepository(dir) {
+		return &state, nil
+	}
 	dirty, err := git.HasUncommittedChanges(ctx, dir)
 	if err != nil {
 		return nil, err
@@ -452,7 +464,6 @@ func cleanCommandStateID(ctx context.Context, dir, sha string) (*string, error) 
 	if dirty {
 		return nil, nil
 	}
-	state := "git:" + sha
 	return &state, nil
 }
 
