@@ -50,9 +50,10 @@ func (e *refreshCommandExitError) Error() string {
 func (e *refreshCommandExitError) ExitCode() int { return e.code }
 
 type refreshPrimaryResult struct {
-	output    string
-	succeeded bool
-	err       error
+	output         string
+	succeeded      bool
+	err            error
+	persistenceErr error
 }
 
 type refreshTargetPreparation struct {
@@ -704,10 +705,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 			}
 			return nil, fmt.Errorf("rebase onto %s: %w", targetRef, err)
 		}
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""); receiptErr != nil {
-			return nil, receiptErr
-		}
-		return conflictFiles, nil
+		return conflictFiles, errors.Join(result.persistenceErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""))
 	}
 	return nil, errors.Join(result.err, operation.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 }
@@ -732,6 +730,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 		return errors.Join(result.err, operation.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 	}
 	err = result.err
+	primaryPersistenceErr := result.persistenceErr
 
 	if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
@@ -778,24 +777,18 @@ Instructions:
 	if err != nil {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 		repairErr := fmt.Errorf("agent resolve conflicts: %w", err)
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
-			repairErr = errors.Join(repairErr, receiptErr)
-		}
-		return repairErr
+		return errors.Join(primaryPersistenceErr, repairErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()))
 	}
 
 	// Verify rebase completed (no rebase still in progress)
 	if rebaseInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 		repairErr := fmt.Errorf("agent did not complete the rebase")
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
-			repairErr = errors.Join(repairErr, receiptErr)
-		}
-		return repairErr
+		return errors.Join(primaryPersistenceErr, repairErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()))
 	}
 
 	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the rebase conflicts onto %s; no rebase remained in progress.", targetRef))
-	return operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, "")
+	return errors.Join(primaryPersistenceErr, operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, ""))
 }
 
 func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string, receipts *refreshReceiptRecorder) ([]string, error) {
@@ -823,10 +816,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string,
 			}
 			return nil, fmt.Errorf("merge %s: %w", targetRef, err)
 		}
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""); receiptErr != nil {
-			return nil, receiptErr
-		}
-		return conflictFiles, nil
+		return conflictFiles, errors.Join(result.persistenceErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateNotAttempted, ""))
 	}
 	return nil, errors.Join(result.err, operation.finish(db.RefreshDecisionMerged, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 }
@@ -850,6 +840,7 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 		return errors.Join(result.err, operation.finish(db.RefreshDecisionMerged, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 	}
 	err = result.err
+	primaryPersistenceErr := result.persistenceErr
 
 	conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
 	if len(conflictFiles) == 0 {
@@ -894,21 +885,15 @@ Instructions:
 	if err != nil {
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		repairErr := fmt.Errorf("agent resolve conflicts: %w", err)
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
-			repairErr = errors.Join(repairErr, receiptErr)
-		}
-		return repairErr
+		return errors.Join(primaryPersistenceErr, repairErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()))
 	}
 	if mergeInProgress(ctx, sctx.WorkDir) {
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		repairErr := fmt.Errorf("agent did not complete the merge")
-		if receiptErr := operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()); receiptErr != nil {
-			repairErr = errors.Join(repairErr, receiptErr)
-		}
-		return repairErr
+		return errors.Join(primaryPersistenceErr, repairErr, operation.finish(db.RefreshDecisionConflicted, db.RefreshConflictStateDetected, db.RefreshRepairStateFailed, repairErr.Error()))
 	}
 	sctx.RecordEvidence(fmt.Sprintf("Agent resolved the merge conflicts from %s; no merge remained in progress.", targetRef))
-	return operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, "")
+	return errors.Join(primaryPersistenceErr, operation.finish(db.RefreshDecisionRepaired, db.RefreshConflictStateResolved, db.RefreshRepairStateSucceeded, ""))
 }
 
 func recordRefreshCommand(sctx *pipeline.StepContext, command string, runErr error) {
@@ -941,23 +926,23 @@ func runRefreshPrimaryResult(ctx context.Context, sctx *pipeline.StepContext, op
 
 	before, err := operation.refreshScopeAttemptIDs()
 	if err != nil {
-		return refreshPrimaryResult{err: err}
+		return refreshPrimaryResult{err: err, persistenceErr: err}
 	}
 	commandResult := runStepGitCommandResult(sctx, command, string(types.StepRefresh), args...)
 	if captureErr := operation.captureAttemptsStartedAfter(before); captureErr != nil {
 		commandResult.persistenceErr = errors.Join(commandResult.persistenceErr, captureErr)
 	}
 	if !commandResult.executed {
-		return refreshPrimaryResult{output: commandResult.output, err: commandResult.err()}
+		return refreshPrimaryResult{output: commandResult.output, err: commandResult.err(), persistenceErr: commandResult.persistenceErr}
 	}
 	if commandResult.executionErr != nil {
-		return refreshPrimaryResult{output: commandResult.output, err: commandResult.err()}
+		return refreshPrimaryResult{output: commandResult.output, err: commandResult.err(), persistenceErr: commandResult.persistenceErr}
 	}
 	if commandResult.exitCode != 0 {
 		exitErr := &refreshCommandExitError{command: strings.TrimPrefix(command, "git "), code: commandResult.exitCode, output: commandResult.output}
-		return refreshPrimaryResult{output: commandResult.output, err: errors.Join(exitErr, commandResult.persistenceErr)}
+		return refreshPrimaryResult{output: commandResult.output, err: errors.Join(exitErr, commandResult.persistenceErr), persistenceErr: commandResult.persistenceErr}
 	}
-	return refreshPrimaryResult{output: commandResult.output, succeeded: true, err: commandResult.persistenceErr}
+	return refreshPrimaryResult{output: commandResult.output, succeeded: true, err: commandResult.persistenceErr, persistenceErr: commandResult.persistenceErr}
 }
 
 func refreshGitCommand(sctx *pipeline.StepContext, args ...string) string {

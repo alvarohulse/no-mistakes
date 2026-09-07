@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -382,6 +383,135 @@ func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *
 	}
 	if operations[0].Decision == db.RefreshDecisionError {
 		t.Fatalf("refresh operation misclassified receipt persistence failure: %+v", operations[0])
+	}
+}
+
+func TestRefreshConflictPreservesReceiptFailures(t *testing.T) {
+	tests := []struct {
+		name               string
+		strategy           types.RefreshStrategy
+		repair             bool
+		breakReceipt       func(t *testing.T, sctx *pipeline.StepContext)
+		wantErrorSubstring string
+	}{
+		{
+			name:     "approval returns output artifact failure",
+			strategy: types.RefreshStrategyRebase,
+			breakReceipt: func(t *testing.T, sctx *pipeline.StepContext) {
+				t.Helper()
+				sctx.Paths = nil
+			},
+		},
+		{
+			name:     "repair returns output artifact failure",
+			strategy: types.RefreshStrategyRebase,
+			repair:   true,
+			breakReceipt: func(t *testing.T, sctx *pipeline.StepContext) {
+				t.Helper()
+				sctx.Paths = nil
+			},
+		},
+		{
+			name:     "approval returns attempt completion failure",
+			strategy: types.RefreshStrategyMerge,
+			breakReceipt: func(t *testing.T, _ *pipeline.StepContext) {
+				t.Helper()
+				originalComplete := completeControllerCommandAttemptWithOutputArtifact
+				completeControllerCommandAttemptWithOutputArtifact = func(*db.DB, string, string, *int, *string, *string, *string, db.Artifact) (*db.Artifact, error) {
+					return nil, errors.New("injected attempt completion failure")
+				}
+				t.Cleanup(func() {
+					completeControllerCommandAttemptWithOutputArtifact = originalComplete
+				})
+			},
+			wantErrorSubstring: "injected attempt completion failure",
+		},
+		{
+			name:     "repair returns attempt completion failure",
+			strategy: types.RefreshStrategyMerge,
+			repair:   true,
+			breakReceipt: func(t *testing.T, _ *pipeline.StepContext) {
+				t.Helper()
+				originalComplete := completeControllerCommandAttemptWithOutputArtifact
+				completeControllerCommandAttemptWithOutputArtifact = func(*db.DB, string, string, *int, *string, *string, *string, db.Artifact) (*db.Artifact, error) {
+					return nil, errors.New("injected attempt completion failure")
+				}
+				t.Cleanup(func() {
+					completeControllerCommandAttemptWithOutputArtifact = originalComplete
+				})
+			},
+			wantErrorSubstring: "injected attempt completion failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, _, featureHead := setupConflictingStackedRefreshRepo(t)
+			ag := &mockAgent{name: "test"}
+			if tt.repair {
+				ag = resolvingRefreshConflictAgent(t, dir, tt.strategy)
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, featureHead, featureHead, config.Commands{})
+			beginRefreshReceiptRound(t, sctx)
+			tt.breakReceipt(t, sctx)
+			receipts := newRefreshReceiptRecorder(sctx, tt.strategy, "refs/heads/feature", "origin/main")
+			receipts.authoritativeBaseSHA = refreshStringPointer(featureHead)
+
+			var err error
+			if tt.repair {
+				err = refreshWithAgent(context.Background(), sctx, tt.strategy, "origin/dependency", receipts)
+			} else {
+				conflictFiles, refreshErr := tryRefresh(context.Background(), sctx, tt.strategy, "origin/dependency", receipts)
+				if len(conflictFiles) == 0 {
+					t.Fatal("refresh did not report the detected conflict")
+				}
+				err = refreshErr
+			}
+			if !errors.Is(err, errCommandPersistence) {
+				t.Fatalf("refresh error = %v, want command persistence failure", err)
+			}
+			if tt.wantErrorSubstring != "" && !strings.Contains(err.Error(), tt.wantErrorSubstring) {
+				t.Fatalf("refresh error = %v, want %q", err, tt.wantErrorSubstring)
+			}
+
+			operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(operations) != 1 {
+				t.Fatalf("refresh operations = %+v, want one", operations)
+			}
+			operation := operations[0]
+			if len(operation.CommandAttemptIDs) != 1 || operation.ResultingHeadSHA == nil {
+				t.Fatalf("refresh operation = %+v", operation)
+			}
+			if tt.repair {
+				if operation.Decision != db.RefreshDecisionRepaired || operation.ConflictState != db.RefreshConflictStateResolved || operation.RepairState != db.RefreshRepairStateSucceeded || *operation.ResultingHeadSHA == featureHead {
+					t.Fatalf("repaired refresh operation = %+v, want a changed terminal head", operation)
+				}
+			} else if operation.Decision != db.RefreshDecisionConflicted || operation.ConflictState != db.RefreshConflictStateDetected || operation.RepairState != db.RefreshRepairStateNotAttempted || *operation.ResultingHeadSHA != featureHead {
+				t.Fatalf("conflicted refresh operation = %+v, want restored head %s", operation, featureHead)
+			}
+		})
+	}
+}
+
+func resolvingRefreshConflictAgent(t *testing.T, dir string, strategy types.RefreshStrategy) *mockAgent {
+	t.Helper()
+	return &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("resolved\n"), 0o644); err != nil {
+				return nil, err
+			}
+			gitCmd(t, dir, "add", "shared.txt")
+			if strategy.OrDefault() == types.RefreshStrategyRebase {
+				gitCmd(t, dir, "-c", "core.editor=true", "rebase", "--continue")
+			} else {
+				gitCmd(t, dir, "-c", "core.editor=true", "merge", "--continue")
+			}
+			return &agent.Result{}, nil
+		},
 	}
 }
 
