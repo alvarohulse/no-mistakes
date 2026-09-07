@@ -1273,6 +1273,15 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
+	activeRun, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		trackStartFailure("verify_supersession")
+		return "", fmt.Errorf("verify superseded run: %w", err)
+	}
+	if activeRun != nil {
+		trackStartFailure("supersession_incomplete")
+		return "", fmt.Errorf("active run %s for branch %q remained unresolved after supersession", activeRun.ID, branch)
+	}
 
 	// Create run record.
 	// Persist the operator PR note atomically with the run. Unlike inferred
@@ -1664,6 +1673,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
 	m.closeRunAdmission()
+	m.waitForRunAdmissions()
 
 	m.mu.Lock()
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
@@ -1693,6 +1703,9 @@ func (m *RunManager) closeRunAdmission() {
 	m.admissionMu.Lock()
 	m.shuttingDown.Store(true)
 	m.admissionMu.Unlock()
+}
+
+func (m *RunManager) waitForRunAdmissions() {
 	m.admissions.Wait()
 }
 

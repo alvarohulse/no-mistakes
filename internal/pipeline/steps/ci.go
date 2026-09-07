@@ -275,10 +275,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if repairReceiptsPersisted {
 			outcome.RepairReceiptsPersisted = true
 			outcome.RoundCursor = roundCursor
-			if audit.Result == pipeline.RepairResultAttempted || audit.Result == pipeline.RepairResultResolved {
-				audit = pipeline.RepairAudit{}
-			}
-			outcome.RepairAudit = audit
+			outcome.RepairAudit = pipeline.RepairAudit{}
 		} else {
 			outcome.RepairAudit = audit
 		}
@@ -738,6 +735,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						sctx.Log("no CI checks reported yet, waiting for checks to register...")
 					}
 				case allChecksPassed(checks):
+					if latestAppliedCIFixRepair != nil {
+						if receiptErr := s.recordCIFixRepairOutcome(sctx, latestAppliedCIFixRepair, pipeline.RepairAudit{
+							FailureFingerprint: latestAppliedCIFixRepair.failureFingerprint,
+							Result:             pipeline.RepairResultResolved,
+						}); receiptErr != nil {
+							return nil, fmt.Errorf("persist CI repair outcome: %w", receiptErr)
+						}
+						latestAppliedCIFixRepair = nil
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)

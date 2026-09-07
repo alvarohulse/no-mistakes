@@ -266,6 +266,87 @@ func TestStartRunQuarantineAfterAdmissionKeepsReplacement(t *testing.T) {
 	}
 }
 
+func TestStartRunQuarantineFromIncumbentRejectsUnresolvedReplacement(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, _ := setupTestGitRepo(t, p, database, "admission-incumbent-quarantine")
+	head := commitPostWorktreeHook(t, repo, postWorktreeFailingHook())
+	installRunUpdateTrigger(t, p.DB(), `
+		CREATE TRIGGER reject_post_worktree_terminalization
+		BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled'
+		BEGIN SELECT RAISE(FAIL, 'injected terminal write failure'); END;
+	`)
+
+	manager := NewRunManager(database, p, nil)
+	manager.postWorktreeTerminalizationTimeout = 150 * time.Millisecond
+	completed := false
+	t.Cleanup(func() {
+		if completed {
+			manager.Shutdown()
+		}
+	})
+
+	incumbentID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "active run", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForPostWorktreePark(t, database, incumbentID)
+	manager.mu.Lock()
+	incumbentDone := manager.dones[incumbentID]
+	manager.mu.Unlock()
+	if incumbentDone == nil {
+		t.Fatal("incumbent run lost its completion handle")
+	}
+
+	replacement := make(chan struct {
+		runID string
+		err   error
+	}, 1)
+	go func() {
+		runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "replacement", "", "", "")
+		replacement <- struct {
+			runID string
+			err   error
+		}{runID, err}
+	}()
+
+	quarantineDeadline := time.Now().Add(2 * time.Second)
+	for !manager.shuttingDown.Load() {
+		if time.Now().After(quarantineDeadline) {
+			t.Fatal("incumbent did not quarantine the daemon during supersession")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-incumbentDone:
+	case <-time.After(time.Second):
+		t.Fatal("unresolved incumbent did not complete supersession")
+	}
+	select {
+	case result := <-replacement:
+		if result.runID != "" || result.err == nil || !strings.Contains(result.err.Error(), "remained unresolved after supersession") {
+			t.Fatalf("replacement result = (%q, %v), want unresolved-incumbent refusal", result.runID, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not return after unresolved incumbent quarantined")
+	}
+	active, err := database.GetActiveRun(repo.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active == nil || active.ID != incumbentID {
+		t.Fatalf("active run = %#v, want retained unresolved incumbent %q", active, incumbentID)
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs after rejected replacement = %#v, want only incumbent", runs)
+	}
+	completed = true
+}
+
 func TestStartRunAdmissionRejectsConcurrentClosure(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
