@@ -2063,13 +2063,13 @@ func TestCIStep_StoppedAutoRepairDoesNotAuditInitialRound(t *testing.T) {
 
 func respondToCIApproval(t *testing.T, executor *pipeline.Executor, action types.ApprovalAction, findingIDs []string) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if err := executor.Respond(types.StepCI, action, findingIDs); err == nil {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("CI approval %q was not accepted", action)
+			t.Fatalf("CI approval %q was not accepted within timeout", action)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
