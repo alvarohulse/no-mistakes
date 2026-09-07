@@ -381,7 +381,15 @@ func setStepRoundExplicitEmptyDecisionTx(tx *sql.Tx, id, source string) error {
 		return err
 	}
 	if evaluation != nil {
-		return setStructuredDecisionByExternalIDsTx(tx, id, nil, source, nil, true, true)
+		var existingDecisionID string
+		err := tx.QueryRow(`SELECT id FROM round_decisions WHERE round_id = ?`, id).Scan(&existingDecisionID)
+		if err == nil {
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return fmt.Errorf("set step round decision: load existing decision: %w", err)
+		}
+		return setStructuredDecisionByExternalIDsTx(tx, id, nil, source, nil, true)
 	}
 	declined := DeclinedSelectionJSON
 	if _, err := tx.Exec(
@@ -464,7 +472,7 @@ func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 		return err
 	}
 	if evaluation != nil {
-		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false, false); err != nil {
+		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false); err != nil {
 			return err
 		}
 	} else {

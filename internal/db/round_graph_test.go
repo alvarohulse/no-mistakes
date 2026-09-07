@@ -184,6 +184,191 @@ func TestStructuredRoundCompletionRollsBackOnIgnoredRoundUpdate(t *testing.T) {
 	}
 }
 
+func TestStructuredRoundRequiredInsertsRollBackWhenIgnored(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*DB, *StepRound) error
+		trigger string
+		execute func(*DB, *StepRound) error
+		assert  func(*testing.T, *DB, *StepRound, string)
+	}{
+		{
+			name: "evaluation",
+			trigger: `CREATE TRIGGER ignore_round_evaluation
+				BEFORE INSERT ON round_evaluations
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				return database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{Kind: RoundEvaluationInitialReview}, StructuredRoundSubject{}, nil, 1)
+			},
+			assert: assertStructuredRoundCompletionRolledBack,
+		},
+		{
+			name: "finding",
+			trigger: `CREATE TRIGGER ignore_round_finding
+				BEFORE INSERT ON round_findings
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				return database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+					Kind:     RoundEvaluationInitialReview,
+					Findings: []StepRoundFinding{{ExternalID: "review-1", Description: "needs review"}},
+				}, StructuredRoundSubject{}, nil, 1)
+			},
+			assert: assertStructuredRoundCompletionRolledBack,
+		},
+		{
+			name: "artifact",
+			trigger: `CREATE TRIGGER ignore_round_artifact
+				BEFORE INSERT ON round_evaluation_artifacts
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				return database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+					Kind:      RoundEvaluationInitialReview,
+					Artifacts: []StepRoundEvaluationArtifact{{Kind: "log", Label: "evidence", Content: "output"}},
+				}, StructuredRoundSubject{}, nil, 1)
+			},
+			assert: assertStructuredRoundCompletionRolledBack,
+		},
+		{
+			name:    "user-added finding",
+			prepare: completeRoundForDecision,
+			trigger: `CREATE TRIGGER ignore_user_added_finding
+				BEFORE INSERT ON round_findings
+				WHEN NEW.source = 'user'
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				selected := `["review-1","user-1"]`
+				merged := `{"findings":[{"id":"review-1","description":"existing"},{"id":"user-1","description":"added","action":"auto-fix","source":"user"}]}`
+				return database.SetStepRoundUserDecision(round.ID, &selected, RoundSelectionSourceUser, &merged)
+			},
+			assert: func(t *testing.T, database *DB, round *StepRound, _ string) {
+				t.Helper()
+				evaluation, err := database.GetRoundEvaluation(round.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if evaluation == nil || len(evaluation.Findings) != 1 {
+					t.Fatalf("evaluation after ignored user finding = %#v", evaluation)
+				}
+				decision, err := database.GetRoundDecision(round.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if decision != nil {
+					t.Fatalf("decision after ignored user finding = %#v", decision)
+				}
+			},
+		},
+		{
+			name:    "decision reference",
+			prepare: completeRoundForDecision,
+			trigger: `CREATE TRIGGER ignore_decision_reference
+				BEFORE INSERT ON round_decision_findings
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				selected := `["review-1"]`
+				return database.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceUser)
+			},
+			assert: assertNoStructuredRoundDecision,
+		},
+		{
+			name:    "explicit-empty decision parent",
+			prepare: completeRoundForDecision,
+			trigger: `CREATE TRIGGER ignore_explicit_empty_decision
+				BEFORE INSERT ON round_decisions
+				WHEN NEW.explicit_empty = 1
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`,
+			execute: func(database *DB, round *StepRound) error {
+				return database.SetStepRoundWaived(round.ID)
+			},
+			assert: assertNoStructuredRoundDecision,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, err := database.InsertRepo("/tmp/structured-round-ignored-"+strings.ReplaceAll(test.name, " ", "-"), "https://example.com/repo.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := database.BeginStepRound(step.ID, 1, RoundTriggerInitial)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.prepare != nil {
+				if err := test.prepare(database, round); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.sql.Exec(test.trigger); err != nil {
+				t.Fatal(err)
+			}
+
+			err = test.execute(database, round)
+			if err == nil || !strings.Contains(err.Error(), "expected one row, affected 0") {
+				t.Fatalf("ignored required insert error = %v", err)
+			}
+			test.assert(t, database, round, step.ID)
+		})
+	}
+}
+
+func completeRoundForDecision(database *DB, round *StepRound) error {
+	return database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{
+		Kind:     RoundEvaluationInitialReview,
+		Findings: []StepRoundFinding{{ExternalID: "review-1", Description: "existing"}},
+	}, StructuredRoundSubject{}, nil, 1)
+}
+
+func assertStructuredRoundCompletionRolledBack(t *testing.T, database *DB, round *StepRound, stepID string) {
+	t.Helper()
+	step, err := database.GetStepResult(stepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if step.FindingsJSON != nil {
+		t.Fatalf("step findings survived ignored insert: %q", *step.FindingsJSON)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != RoundStatusActive || rounds[0].Evaluation != nil {
+		t.Fatalf("round after ignored insert = %#v, want active without evaluation", rounds)
+	}
+}
+
+func assertNoStructuredRoundDecision(t *testing.T, database *DB, round *StepRound, _ string) {
+	t.Helper()
+	decision, err := database.GetRoundDecision(round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision != nil {
+		t.Fatalf("decision after ignored insert = %#v", decision)
+	}
+}
+
 func TestStructuredRoundDecisionPreservesSelectionNonSelectionAndUserAddition(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/structured-decision", "https://example.com/repo.git", "main")

@@ -159,6 +159,20 @@ func optionalString(value string) *string {
 	return &value
 }
 
+func requireOneAffectedRow(result sql.Result, err error, operation string) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s rows affected: %w", operation, err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("%s: expected one row, affected %d", operation, affected)
+	}
+	return nil
+}
+
 // CompleteStepRoundStructured atomically completes an active round with its
 // evaluation, subject, and initial repair receipt. The compatibility JSON
 // columns remain empty; readers project them in memory for legacy consumers.
@@ -197,7 +211,7 @@ func (d *DB) CompleteStepRoundStructuredAndStartAutoFix(stepResultID, roundID st
 		if err := tx.QueryRow(`SELECT 1 FROM step_rounds WHERE id = ? AND step_result_id = ?`, roundID, stepResultID).Scan(new(int)); err != nil {
 			return fmt.Errorf("complete structured step round: load step result: %w", err)
 		}
-		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, RoundSelectionSourceAutoFix, nil, false, false); err != nil {
+		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, RoundSelectionSourceAutoFix, nil, false); err != nil {
 			return err
 		}
 		result, err := tx.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
@@ -258,12 +272,13 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 	if err != nil {
 		return fmt.Errorf("complete structured step round: encode tested claims: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO round_evaluations
+	result, err := tx.Exec(`INSERT INTO round_evaluations
 		(id, run_id, round_id, kind, summary, tested_json, testing_summary, risk_level, risk_rationale, risk_scope, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evaluation.ID, evaluation.RunID, evaluation.RoundID, evaluation.Kind, evaluation.Summary, string(testedJSON), evaluation.TestingSummary,
-		evaluation.RiskLevel, evaluation.RiskRationale, evaluation.RiskScope, evaluation.CreatedAt); err != nil {
-		return fmt.Errorf("complete structured step round: insert evaluation: %w", err)
+		evaluation.RiskLevel, evaluation.RiskRationale, evaluation.RiskScope, evaluation.CreatedAt)
+	if err := requireOneAffectedRow(result, err, "complete structured step round: insert evaluation"); err != nil {
+		return err
 	}
 
 	seenIDs := make(map[string]struct{}, len(evaluation.Findings))
@@ -302,12 +317,13 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		finding.RequiresHumanReview = finding.RequiresHumanReview || finding.Action == types.ActionAskUser
 		seenIDs[finding.ID] = struct{}{}
 		seenExternalIDs[finding.ExternalID] = struct{}{}
-		if _, err := tx.Exec(`INSERT INTO round_findings
+		result, err := tx.Exec(`INSERT INTO round_findings
 			(id, run_id, evaluation_id, ordinal, external_id, severity, file, line, description, action, source, user_instructions, review_scope, requires_human_review)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			finding.ID, runID, evaluation.ID, finding.Ordinal, finding.ExternalID, finding.Severity, finding.File, finding.Line,
-			finding.Description, finding.Action, finding.Source, finding.UserInstructions, finding.ReviewScope, finding.RequiresHumanReview); err != nil {
-			return fmt.Errorf("complete structured step round: insert finding %q: %w", finding.ID, err)
+			finding.Description, finding.Action, finding.Source, finding.UserInstructions, finding.ReviewScope, finding.RequiresHumanReview)
+		if err := requireOneAffectedRow(result, err, fmt.Sprintf("complete structured step round: insert finding %q", finding.ID)); err != nil {
+			return err
 		}
 	}
 
@@ -328,11 +344,12 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		}
 		artifact.Ordinal = ordinal
 		seenArtifactIDs[artifact.ID] = struct{}{}
-		if _, err := tx.Exec(`INSERT INTO round_evaluation_artifacts
+		result, err := tx.Exec(`INSERT INTO round_evaluation_artifacts
 			(id, run_id, evaluation_id, ordinal, kind, label, path, url, content)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			artifact.ID, runID, evaluation.ID, artifact.Ordinal, artifact.Kind, artifact.Label, artifact.Path, artifact.URL, artifact.Content); err != nil {
-			return fmt.Errorf("complete structured step round: insert artifact %q: %w", artifact.ID, err)
+			artifact.ID, runID, evaluation.ID, artifact.Ordinal, artifact.Kind, artifact.Label, artifact.Path, artifact.URL, artifact.Content)
+		if err := requireOneAffectedRow(result, err, fmt.Sprintf("complete structured step round: insert artifact %q", artifact.ID)); err != nil {
+			return err
 		}
 	}
 
@@ -340,7 +357,7 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 	if err != nil {
 		return fmt.Errorf("complete structured step round: project compatibility findings: %w", err)
 	}
-	result, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, compatibilityFindings, stepResultID)
+	result, err = tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, compatibilityFindings, stepResultID)
 	if err != nil {
 		return fmt.Errorf("complete structured step round: persist compatibility findings: %w", err)
 	}
@@ -834,7 +851,7 @@ func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []st
 		return fmt.Errorf("set structured round decision: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty, false); err != nil {
+	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -843,22 +860,7 @@ func (d *DB) setStructuredDecisionByExternalIDs(roundID string, selectedIDs []st
 	return nil
 }
 
-func (d *DB) setStructuredDecisionIfAbsentByExternalIDs(roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return fmt.Errorf("set structured round decision: begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-	if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selectedIDs, source, userFindingsJSON, explicitEmpty, true); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("set structured round decision: commit: %w", err)
-	}
-	return nil
-}
-
-func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty, onlyIfAbsent bool) error {
+func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedIDs []string, source string, userFindingsJSON *string, explicitEmpty bool) error {
 	if !validRoundDecisionSource(source) {
 		return fmt.Errorf("set structured round decision: invalid source %q", source)
 	}
@@ -919,12 +921,13 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 				Source: item.Source, UserInstructions: item.UserInstructions, ReviewScope: item.ReviewScope,
 				RequiresHumanReview: item.ActionOrDefault() == types.ActionAskUser,
 			}
-			if _, err := tx.Exec(`INSERT INTO round_findings
+			result, err := tx.Exec(`INSERT INTO round_findings
 				(id, run_id, evaluation_id, ordinal, external_id, severity, file, line, description, action, source, user_instructions, review_scope, requires_human_review)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				finding.ID, evaluation.RunID, evaluation.ID, finding.Ordinal, finding.ExternalID, finding.Severity, finding.File,
-				finding.Line, finding.Description, finding.Action, finding.Source, finding.UserInstructions, finding.ReviewScope, finding.RequiresHumanReview); err != nil {
-				return fmt.Errorf("set structured round decision: insert user finding: %w", err)
+				finding.Line, finding.Description, finding.Action, finding.Source, finding.UserInstructions, finding.ReviewScope, finding.RequiresHumanReview)
+			if err := requireOneAffectedRow(result, err, "set structured round decision: insert user finding"); err != nil {
+				return err
 			}
 			evaluation.Findings = append(evaluation.Findings, finding)
 			byExternal[finding.ExternalID] = &evaluation.Findings[len(evaluation.Findings)-1]
@@ -967,35 +970,8 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		references[finding.ID] = StepRoundDecisionFinding{FindingID: finding.ID, SelectionOrdinal: selectionOrdinal, State: state, UserInstructions: finding.UserInstructions, Edited: edited[finding.ID]}
 	}
 	decision := StepRoundDecision{ID: newID(), RunID: evaluation.RunID, RoundID: roundID, Source: source, ExplicitEmpty: explicitEmpty, CreatedAt: now()}
-	if onlyIfAbsent {
-		return insertRoundDecisionIfAbsent(tx, decision, evaluation.Findings, references)
-	}
 	if err := replaceRoundDecision(tx, decision, evaluation.Findings, references); err != nil {
 		return err
-	}
-	return nil
-}
-
-func insertRoundDecisionIfAbsent(tx *sql.Tx, decision StepRoundDecision, findings []StepRoundFinding, references map[string]StepRoundDecisionFinding) error {
-	result, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, explicit_empty, created_at)
-		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO NOTHING`,
-		decision.ID, decision.RunID, decision.RoundID, decision.Source, decision.ExplicitEmpty, decision.CreatedAt)
-	if err != nil {
-		return fmt.Errorf("set structured round decision: insert decision: %w", err)
-	}
-	inserted, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set structured round decision: insert decision rows affected: %w", err)
-	}
-	if inserted == 0 {
-		return nil
-	}
-	for ordinal, finding := range findings {
-		reference := references[finding.ID]
-		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, selection_ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			decision.ID, finding.ID, ordinal, reference.SelectionOrdinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
-			return fmt.Errorf("set structured round decision: insert finding reference: %w", err)
-		}
 	}
 	return nil
 }
@@ -1004,15 +980,17 @@ func replaceRoundDecision(tx *sql.Tx, decision StepRoundDecision, findings []Ste
 	if _, err := tx.Exec(`DELETE FROM round_decisions WHERE round_id = ?`, decision.RoundID); err != nil {
 		return fmt.Errorf("set structured round decision: clear prior decision: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, explicit_empty, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		decision.ID, decision.RunID, decision.RoundID, decision.Source, decision.ExplicitEmpty, decision.CreatedAt); err != nil {
-		return fmt.Errorf("set structured round decision: insert decision: %w", err)
+	result, err := tx.Exec(`INSERT INTO round_decisions (id, run_id, round_id, source, explicit_empty, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		decision.ID, decision.RunID, decision.RoundID, decision.Source, decision.ExplicitEmpty, decision.CreatedAt)
+	if err := requireOneAffectedRow(result, err, "set structured round decision: insert decision"); err != nil {
+		return err
 	}
 	for ordinal, finding := range findings {
 		reference := references[finding.ID]
-		if _, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, selection_ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			decision.ID, finding.ID, ordinal, reference.SelectionOrdinal, reference.State, reference.UserInstructions, reference.Edited); err != nil {
-			return fmt.Errorf("set structured round decision: insert finding reference: %w", err)
+		result, err := tx.Exec(`INSERT INTO round_decision_findings (decision_id, finding_id, ordinal, selection_ordinal, state, user_instructions, edited) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			decision.ID, finding.ID, ordinal, reference.SelectionOrdinal, reference.State, reference.UserInstructions, reference.Edited)
+		if err := requireOneAffectedRow(result, err, "set structured round decision: insert finding reference"); err != nil {
+			return err
 		}
 	}
 	return nil
