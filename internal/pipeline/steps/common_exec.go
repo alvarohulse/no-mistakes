@@ -500,15 +500,18 @@ func executeStepGitCommand(sctx *pipeline.StepContext, args []string) (runner.Re
 	if err == nil {
 		return result, nil
 	}
+	if ctxErr := sctx.Ctx.Err(); ctxErr != nil {
+		result.ExitCode = -1
+		result.Signal = runner.ProcessSignal(cmd.ProcessState)
+		return result, ctxErr
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		result.ExitCode = exitErr.ExitCode()
+		result.Signal = runner.ProcessSignal(exitErr.ProcessState)
 		return result, nil
 	}
 	result.ExitCode = -1
-	if ctxErr := sctx.Ctx.Err(); ctxErr != nil {
-		return result, ctxErr
-	}
 	return result, err
 }
 

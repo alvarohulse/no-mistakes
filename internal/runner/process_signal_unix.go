@@ -18,3 +18,10 @@ func processSignal(state *os.ProcessState) *string {
 	signal := status.Signal().String()
 	return &signal
 }
+
+// ProcessSignal reports the terminating signal represented by a process
+// state. It is shared by runner-owned and controller-owned direct commands so
+// both execution paths persist the same signal identity.
+func ProcessSignal(state *os.ProcessState) *string {
+	return processSignal(state)
+}
