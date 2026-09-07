@@ -306,6 +306,9 @@ func TestCIStep_StopsWhenPushedRepairHeadAndReceiptCannotPersist(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected pushed CI repair transaction failure") {
 		t.Fatalf("CI repair result = %v, want pushed repair persistence failure", err)
 	}
+	if !pipeline.IsCIFixRepairDurabilityError(err) {
+		t.Fatalf("CI repair result = %T %v, want durability uncertainty", err, err)
+	}
 	if agentCalls != 1 {
 		t.Fatalf("CI repair agent calls = %d, want one", agentCalls)
 	}

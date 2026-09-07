@@ -632,6 +632,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.dones[plan.run.ID] = done
 	m.mu.Unlock()
 
+	retainRunOwnership := false
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
@@ -648,6 +649,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			cancel(nil)
 			_ = agents.Close()
+			if retainRunOwnership {
+				slog.Error("retaining run ownership after CI repair durability uncertainty and quarantining daemon", "run_id", plan.run.ID)
+				return
+			}
 			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.closeSubscribers(plan.run.ID)
 			m.sweepRunWorktreeProcesses(plan.workDir)
@@ -667,7 +672,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
-			if plan.run.Status == types.RunRunning {
+			if pipeline.IsCIFixRepairDurabilityError(err) {
+				m.closeRunAdmission()
+				retainRunOwnership = true
+			} else if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
@@ -694,7 +702,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		telemetry.Track("run", fields)
 		// Recovery is the second run-completion path. It must feed the same
 		// self-populating eval corpus as a run that never lost its daemon.
-		m.autoCaptureEvalCase(runCtx, plan.cfg, plan.run.ID)
+		if !retainRunOwnership {
+			m.autoCaptureEvalCase(runCtx, plan.cfg, plan.run.ID)
+		}
 	}()
 }
 
@@ -1444,7 +1454,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				// together. Startup recovery will fail this run closed after the
 				// daemon is restarted; deleting any part here would make that
 				// recovery unsafe.
-				slog.Error("retaining unresolved post-worktree run and quarantining daemon", "run_id", run.ID)
+				slog.Error("retaining unresolved run and quarantining daemon", "run_id", run.ID)
 				return
 			}
 			resolved.releaseTrustedRef(context.Background())
@@ -1472,6 +1482,10 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		if executeErr != nil {
 			var unresolvedErr *unresolvedPostWorktreeRunError
 			if errors.As(executeErr, &unresolvedErr) {
+				retainRunOwnership = true
+			}
+			if pipeline.IsCIFixRepairDurabilityError(executeErr) {
+				m.closeRunAdmission()
 				retainRunOwnership = true
 			}
 			fields := telemetry.Fields{

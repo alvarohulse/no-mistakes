@@ -1022,6 +1022,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
+			if IsCIFixRepairDurabilityError(err) {
+				return false, fmt.Errorf("step %s failed: %w", stepName, err)
+			}
 			return failActiveStepRound(fmt.Errorf("step %s failed: %s", stepName, safeurl.RedactText(err.Error())))
 		}
 
@@ -1622,6 +1625,9 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if IsCIFixRepairDurabilityError(err) {
+		return err
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {

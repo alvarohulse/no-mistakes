@@ -23,6 +23,33 @@ const commandEvidenceTruncationMarker = "… [command truncated]"
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
+type CIFixRepairDurabilityError struct {
+	cause error
+}
+
+func NewCIFixRepairDurabilityError(cause error) error {
+	return &CIFixRepairDurabilityError{cause: cause}
+}
+
+func (e *CIFixRepairDurabilityError) Error() string {
+	if e == nil || e.cause == nil {
+		return "CI repair durability uncertain"
+	}
+	return "CI repair durability uncertain: " + e.cause.Error()
+}
+
+func (e *CIFixRepairDurabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func IsCIFixRepairDurabilityError(err error) bool {
+	var target *CIFixRepairDurabilityError
+	return errors.As(err, &target)
+}
+
 // AgentRoutes is an immutable run-scoped routing table. Steps with no explicit
 // entry use Default, preserving the run-wide agent behavior.
 type AgentRoutes struct {

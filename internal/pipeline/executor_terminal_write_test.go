@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -149,6 +150,51 @@ func TestExecutor_TerminalizesStepAndRoundWhenRepairProgressFails(t *testing.T) 
 	}
 	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed {
 		t.Fatalf("rounds = %#v, want failed active round", rounds)
+	}
+}
+
+func TestExecutor_RetainsCIFixRepairDurabilityUncertainty(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cause := errors.New("CI repair push receipt transaction failed")
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return nil, NewCIFixRepairDurabilityError(cause)
+		},
+	}
+	events := &eventCollector{}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, events.handler)
+
+	err := exec.Execute(context.Background(), run, repo, t.TempDir())
+	if !IsCIFixRepairDurabilityError(err) {
+		t.Fatalf("Execute() error = %T %v, want CI repair durability uncertainty", err, err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("Execute() error = %v, want original persistence failure", err)
+	}
+	gotRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRun.Status != types.RunRunning {
+		t.Fatalf("run status = %s, want running", gotRun.Status)
+	}
+	stepResults, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stepResults) != 1 || stepResults[0].Status != types.StepStatusRunning {
+		t.Fatalf("step results = %#v, want active CI step", stepResults)
+	}
+	rounds, err := database.GetRoundsByStep(stepResults[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusActive {
+		t.Fatalf("rounds = %#v, want active CI round", rounds)
+	}
+	if terminal := events.findRunEvent(ipc.EventRunCompleted); terminal != nil {
+		t.Fatalf("durability uncertainty emitted terminal run event: %#v", terminal)
 	}
 }
 

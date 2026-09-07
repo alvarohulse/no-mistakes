@@ -130,24 +130,12 @@ CI logs:
 	if repairRound != nil {
 		persistRepairPush = func(headSHA, summary string, binding db.PushBinding) error {
 			if err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding); err != nil {
-				return &ciRepairPushPersistenceError{err: err}
+				return pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
 			}
 			return nil
 		}
 	}
 	return s.commitAndPushAttributed(sctx, result, agentStartingHeadSHA, persistRepairPush)
-}
-
-type ciRepairPushPersistenceError struct {
-	err error
-}
-
-func (e *ciRepairPushPersistenceError) Error() string {
-	return fmt.Sprintf("persist pushed CI repair: %v", e.err)
-}
-
-func (e *ciRepairPushPersistenceError) Unwrap() error {
-	return e.err
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the

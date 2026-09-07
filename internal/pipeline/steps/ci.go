@@ -2,7 +2,6 @@ package steps
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -617,8 +616,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict, repairRound)
 					restoreAgentRound()
-					var persistenceErr *ciRepairPushPersistenceError
-					if errors.As(err, &persistenceErr) {
+					if pipeline.IsCIFixRepairDurabilityError(err) {
 						return nil, err
 					}
 					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
@@ -675,8 +673,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict, repairRound)
 					restoreAgentRound()
-					var persistenceErr *ciRepairPushPersistenceError
-					if errors.As(err, &persistenceErr) {
+					if pipeline.IsCIFixRepairDurabilityError(err) {
 						return nil, err
 					}
 					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
