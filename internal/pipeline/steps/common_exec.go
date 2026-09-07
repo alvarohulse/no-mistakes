@@ -415,7 +415,7 @@ func runStepCommand(sctx *pipeline.StepContext, command runner.Command, purpose,
 			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(result.Output))
 			if artifactErr != nil {
 				completionErr = fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr)
-			} else if _, persistErr := sctx.DB.CompleteCommandAttemptWithOutputArtifact(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
+			} else if _, persistErr := sctx.DB.CompleteControllerCommandAttemptWithOutputArtifact(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
 				completionErr = fmt.Errorf("%w: persist command attempt completion with output artifact: %w", errCommandPersistence, persistErr)
 			}
 		}

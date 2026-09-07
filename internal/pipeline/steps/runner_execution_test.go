@@ -228,6 +228,7 @@ func TestRunStepRunnerCommandPersistsImmutableOutputArtifacts(t *testing.T) {
 		wantExitCode  int
 		wantOutcome   string
 		wantTestedSHA bool
+		wantProof     bool
 	}{
 		{
 			name:          "non-empty success",
@@ -236,6 +237,7 @@ func TestRunStepRunnerCommandPersistsImmutableOutputArtifacts(t *testing.T) {
 			wantExitCode:  0,
 			wantOutcome:   db.CommandOutcomePass,
 			wantTestedSHA: true,
+			wantProof:     true,
 		},
 		{
 			name:          "empty success",
@@ -244,6 +246,7 @@ func TestRunStepRunnerCommandPersistsImmutableOutputArtifacts(t *testing.T) {
 			wantExitCode:  0,
 			wantOutcome:   db.CommandOutcomePass,
 			wantTestedSHA: true,
+			wantProof:     true,
 		},
 		{
 			name:         "non-zero failure",
@@ -289,6 +292,12 @@ func TestRunStepRunnerCommandPersistsImmutableOutputArtifacts(t *testing.T) {
 			}
 			if (attempt.TestedSHA != nil) != tt.wantTestedSHA {
 				t.Fatalf("tested SHA = %v, want present=%t", attempt.TestedSHA, tt.wantTestedSHA)
+			}
+			if attempt.AcceptedAsProof != tt.wantProof {
+				t.Fatalf("accepted as proof = %t, want %t", attempt.AcceptedAsProof, tt.wantProof)
+			}
+			if (tt.wantProof && (attempt.ProofReason == nil || *attempt.ProofReason != db.CommandProofReasonObservedPass)) || (!tt.wantProof && attempt.ProofReason != nil) {
+				t.Fatalf("proof reason = %v, want proof=%t", attempt.ProofReason, tt.wantProof)
 			}
 
 			stored, err := sctx.DB.GetArtifact(*attempt.OutputArtifactID)

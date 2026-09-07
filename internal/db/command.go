@@ -11,11 +11,14 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/runner"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
 	CommandObserverController      = "controller"
+	CommandObserverProvider        = "provider"
 	CommandDefinitionSourcePlanned = "planned"
+	CommandProofReasonObservedPass = "observed_passing_attempt"
 
 	CommandOutcomePass         = "pass"
 	CommandOutcomeFail         = "fail"
@@ -68,6 +71,8 @@ type CommandAttempt struct {
 	RetryOfAttemptID    *string
 	RetryReason         *string
 	OutputArtifactID    *string
+	AcceptedAsProof     bool
+	ProofReason         *string
 }
 
 type commandIdentity struct {
@@ -306,9 +311,21 @@ func OptionalStringsEqual(left, right *string) bool {
 }
 
 // CompleteCommandAttemptWithOutputArtifact atomically persists a terminal
-// controller observation and the attempt's only output artifact. An attempt
-// cannot gain an output artifact after it is terminal.
+// attempt and its only output artifact as execution history. Generic completion
+// never accepts an attempt as proof.
 func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string, artifact Artifact) (*Artifact, error) {
+	return d.completeCommandAttemptWithOutputArtifact(id, outcome, exitCode, signal, resultStateID, testedSHA, artifact, false)
+}
+
+// CompleteControllerCommandAttemptWithOutputArtifact atomically records the
+// controller's observed completion and accepts it as proof only when it meets
+// the validation-proof contract. Provider observations can be accepted through
+// this seam when the controller has persisted their exact observed result.
+func (d *DB) CompleteControllerCommandAttemptWithOutputArtifact(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string, artifact Artifact) (*Artifact, error) {
+	return d.completeCommandAttemptWithOutputArtifact(id, outcome, exitCode, signal, resultStateID, testedSHA, artifact, true)
+}
+
+func (d *DB) completeCommandAttemptWithOutputArtifact(id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string, artifact Artifact, acceptAsProof bool) (*Artifact, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("complete command attempt with output artifact: begin transaction: %w", err)
@@ -321,6 +338,13 @@ func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 	}
 	if err := validateCommandAttemptCompletion(attempt, outcome, exitCode, signal, resultStateID, testedSHA); err != nil {
 		return nil, err
+	}
+	acceptedAsProof := false
+	if acceptAsProof {
+		acceptedAsProof, err = commandAttemptCanEstablishProof(tx, attempt, outcome, exitCode, signal, resultStateID, testedSHA)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if attempt.CompletedAt != nil || attempt.OutputArtifactID != nil {
 		return nil, fmt.Errorf("complete command attempt with output artifact: attempt is already complete")
@@ -358,11 +382,16 @@ func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 	}
 
 	completedAt := time.Now().UnixMilli()
+	var proofReason *string
+	if acceptedAsProof {
+		reason := CommandProofReasonObservedPass
+		proofReason = &reason
+	}
 	result, err := tx.Exec(
 		`UPDATE command_attempts
-		 SET completed_at = ?, duration_ms = MAX(0, ? - started_at), outcome = ?, exit_code = ?, signal = ?, result_state_id = ?, tested_sha = ?, output_artifact_id = ?
+		 SET completed_at = ?, duration_ms = MAX(0, ? - started_at), outcome = ?, exit_code = ?, signal = ?, result_state_id = ?, tested_sha = ?, output_artifact_id = ?, accepted_as_proof = ?, proof_reason = ?
 		 WHERE id = ? AND completed_at IS NULL AND output_artifact_id IS NULL`,
-		completedAt, completedAt, outcome, exitCode, signal, resultStateID, testedSHA, artifact.ID, id,
+		completedAt, completedAt, outcome, exitCode, signal, resultStateID, testedSHA, artifact.ID, acceptedAsProof, proofReason, id,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("complete command attempt with output artifact: update attempt: %w", err)
@@ -378,6 +407,39 @@ func (d *DB) CompleteCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 		return nil, fmt.Errorf("complete command attempt with output artifact: commit: %w", err)
 	}
 	return &artifact, nil
+}
+
+func commandAttemptCanEstablishProof(q commandAttemptQuerier, attempt *CommandAttempt, outcome string, exitCode *int, signal, resultStateID, testedSHA *string) (bool, error) {
+	if attempt == nil || attempt.Observer != CommandObserverController && attempt.Observer != CommandObserverProvider {
+		return false, nil
+	}
+	if outcome != CommandOutcomePass || exitCode == nil || *exitCode != 0 || signal != nil {
+		return false, nil
+	}
+	if testedSHA == nil || *testedSHA != attempt.BeforeSHA {
+		return false, nil
+	}
+	cleanState := "git:" + attempt.BeforeSHA
+	if attempt.InputStateID == nil || resultStateID == nil || *attempt.InputStateID != cleanState || *resultStateID != cleanState {
+		return false, nil
+	}
+	var stepName types.StepName
+	if err := q.QueryRow(`SELECT step_name FROM step_results WHERE id = ? AND run_id = ?`, attempt.StepID, attempt.RunID).Scan(&stepName); err != nil {
+		return false, fmt.Errorf("accept command attempt as proof: load owning step: %w", err)
+	}
+	if !isValidationProofStep(stepName) || attempt.Purpose != string(stepName) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func isValidationProofStep(stepName types.StepName) bool {
+	switch stepName {
+	case types.StepBuild, types.StepTest, types.StepLint:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateCommandOutputArtifact(attempt *CommandAttempt, artifact Artifact) error {
@@ -443,7 +505,8 @@ func getCommandAttempt(q commandAttemptQuerier, id string) (*CommandAttempt, err
 	if err := scanCommandAttempt(q.QueryRow(
 		`SELECT id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
 		        command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
-		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason, output_artifact_id
+		        started_at, completed_at, duration_ms, outcome, exit_code, signal, retry_of_attempt_id, retry_reason, output_artifact_id,
+		        accepted_as_proof, proof_reason
 		 FROM command_attempts WHERE id = ?`, id,
 	), attempt); err != nil {
 		return nil, fmt.Errorf("get command attempt: %w", err)
@@ -457,7 +520,8 @@ func (d *DB) GetCommandAttemptsByRun(runID string) ([]*CommandAttempt, error) {
 	rows, err := d.sql.Query(
 		`SELECT ca.id, ca.run_id, ca.command_id, ca.step_id, ca.round_id, ca.sequence, ca.purpose, ca.observer, ca.trigger_type, ca.before_sha, ca.tested_sha,
 		        ca.command_source, ca.runner_schema_version, ca.runner_source, ca.runner_version, ca.input_state_id, ca.result_state_id,
-		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason, ca.output_artifact_id
+		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason, ca.output_artifact_id,
+		        ca.accepted_as_proof, ca.proof_reason
 		 FROM command_attempts ca
 		 JOIN step_results sr ON sr.id = ca.step_id
 		 JOIN step_rounds r ON r.id = ca.round_id
@@ -478,6 +542,48 @@ func (d *DB) GetCommandAttemptsByRun(runID string) ([]*CommandAttempt, error) {
 	return attempts, rows.Err()
 }
 
+// GetAcceptedCommandAttemptsByTestedSHA returns proof accepted for exactly one
+// tested commit. It deliberately does not follow ancestry or substitute the
+// run's current head: a successful check proves only the SHA it observed.
+func (d *DB) GetAcceptedCommandAttemptsByTestedSHA(runID, testedSHA string) ([]*CommandAttempt, error) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(testedSHA) == "" {
+		return nil, fmt.Errorf("get accepted command attempts by tested SHA: run ID and tested SHA are required")
+	}
+	rows, err := d.sql.Query(
+		`SELECT ca.id, ca.run_id, ca.command_id, ca.step_id, ca.round_id, ca.sequence, ca.purpose, ca.observer, ca.trigger_type, ca.before_sha, ca.tested_sha,
+		        ca.command_source, ca.runner_schema_version, ca.runner_source, ca.runner_version, ca.input_state_id, ca.result_state_id,
+		        ca.started_at, ca.completed_at, ca.duration_ms, ca.outcome, ca.exit_code, ca.signal, ca.retry_of_attempt_id, ca.retry_reason, ca.output_artifact_id,
+		        ca.accepted_as_proof, ca.proof_reason
+		 FROM command_attempts ca
+		 JOIN runs run ON run.id = ca.run_id
+		 JOIN step_results sr ON sr.id = ca.step_id
+		 JOIN step_rounds r ON r.id = ca.round_id
+		 WHERE ca.run_id = ? AND ca.tested_sha = ? AND ca.accepted_as_proof = 1
+		   AND sr.status = ? AND r.status = ?
+		   AND sr.step_name IN (?, ?, ?) AND ca.purpose = sr.step_name
+		   AND run.status NOT IN (?, ?)
+		 ORDER BY sr.step_order, r.round, ca.sequence`,
+		runID, testedSHA, types.StepStatusCompleted, RoundStatusCompleted,
+		types.StepBuild, types.StepTest, types.StepLint, types.RunFailed, types.RunCancelled,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get accepted command attempts by tested SHA: %w", err)
+	}
+	defer rows.Close()
+	var attempts []*CommandAttempt
+	for rows.Next() {
+		attempt := &CommandAttempt{}
+		if err := scanCommandAttempt(rows, attempt); err != nil {
+			return nil, fmt.Errorf("scan accepted command attempt by tested SHA: %w", err)
+		}
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate accepted command attempts by tested SHA: %w", err)
+	}
+	return attempts, nil
+}
+
 func scanCommandAttempt(row interface{ Scan(...any) error }, attempt *CommandAttempt) error {
 	return row.Scan(
 		&attempt.ID, &attempt.RunID, &attempt.CommandID, &attempt.StepID,
@@ -487,6 +593,6 @@ func scanCommandAttempt(row interface{ Scan(...any) error }, attempt *CommandAtt
 		&attempt.InputStateID, &attempt.ResultStateID, &attempt.StartedAt,
 		&attempt.CompletedAt, &attempt.DurationMS, &attempt.Outcome, &attempt.ExitCode,
 		&attempt.Signal, &attempt.RetryOfAttemptID, &attempt.RetryReason,
-		&attempt.OutputArtifactID,
+		&attempt.OutputArtifactID, &attempt.AcceptedAsProof, &attempt.ProofReason,
 	)
 }

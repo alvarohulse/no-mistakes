@@ -100,6 +100,114 @@ func TestCompleteCommandAttemptWithOutputArtifactAtomicallyLinksExactlyOneArtifa
 	}
 }
 
+func TestCompleteCommandAttemptWithOutputArtifactKeepsObservedPassAsHistory(t *testing.T) {
+	for _, observer := range []string{CommandObserverController, CommandObserverProvider} {
+		t.Run(observer, func(t *testing.T) {
+			d := openTestDB(t)
+			attempt, _, _, _ := newCommandArtifactAttemptFixture(t, d)
+			if _, err := d.sql.Exec(`UPDATE command_attempts SET observer = ? WHERE id = ?`, observer, attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+			exit := 0
+			if _, err := d.CompleteCommandAttemptWithOutputArtifact(
+				attempt.ID,
+				CommandOutcomePass,
+				&exit,
+				nil,
+				stringPointer("git:head"),
+				stringPointer("head"),
+				commandOutputArtifact(filepath.ToSlash(filepath.Join(attempt.RunID, "command-output", attempt.ID+".log")), "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9", 11),
+			); err != nil {
+				t.Fatalf("complete command attempt history: %v", err)
+			}
+			stored, err := d.getCommandAttempt(attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.AcceptedAsProof || stored.ProofReason != nil {
+				t.Fatalf("generic completion accepted proof = %+v", stored)
+			}
+		})
+	}
+}
+
+func TestCompleteControllerCommandAttemptWithOutputArtifactRejectsNonValidationProofPurpose(t *testing.T) {
+	tests := []struct {
+		name    string
+		step    types.StepName
+		purpose string
+	}{
+		{name: "review", step: types.StepReview, purpose: "review"},
+		{name: "CI", step: types.StepCI, purpose: "ci"},
+		{name: "other purpose", step: types.StepTest, purpose: "other"},
+		{name: "mismatched validation purpose", step: types.StepBuild, purpose: "test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, err := d.InsertRepo("/home/user/non-validation-proof", "git@github.com:user/non-validation-proof.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := d.InsertStepResult(run.ID, tt.step)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, err := d.EnsureCommandDefinition(run.ID, runner.Resolved{
+				Script:        "echo validation",
+				CommandSource: runner.SourceBase,
+				Provenance:    runner.Provenance{SchemaVersion: runner.SchemaVersion, Platform: "linux", Source: runner.SourceDefault, Executable: "sh", Args: []string{"-c"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt, err := d.StartCommandAttempt(CommandAttempt{
+				RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+				Sequence: 1, Purpose: tt.purpose, Observer: CommandObserverController, Trigger: "initial", BeforeSHA: "head",
+				InputStateID: stringPointer("git:head"), CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit := 0
+			if _, err := d.CompleteControllerCommandAttemptWithOutputArtifact(attempt.ID, CommandOutcomePass, &exit, nil, stringPointer("git:head"), stringPointer("head"), commandOutputArtifactForAttempt(attempt)); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.getCommandAttempt(attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.AcceptedAsProof || stored.ProofReason != nil {
+				t.Fatalf("non-validation proof acceptance = %+v", stored)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateStepStatus(step.ID, types.StepStatusCompleted); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(`UPDATE command_attempts SET accepted_as_proof = 1, proof_reason = ? WHERE id = ?`, CommandProofReasonObservedPass, attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+			proofs, err := d.GetAcceptedCommandAttemptsByTestedSHA(run.ID, "head")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(proofs) != 0 {
+				t.Fatalf("non-validation proof lookup = %+v", proofs)
+			}
+		})
+	}
+}
+
 func TestCompleteCommandAttemptWithOutputArtifactRejectsNonNormalizedPathWithoutTerminalizing(t *testing.T) {
 	d := openTestDB(t)
 	attempt, _, _, _ := newCommandArtifactAttemptFixture(t, d)
