@@ -25,6 +25,10 @@ func roundEvaluationKind(stepName types.StepName, fixing bool) string {
 	}
 }
 
+func structuredRoundEligible(stepName types.StepName) bool {
+	return stepName != types.StepRefresh && stepName != types.StepPush
+}
+
 func structuredRoundEvaluation(roundID, runID string, stepName types.StepName, fixing bool, raw string) (db.StepRoundEvaluation, error) {
 	evaluation := db.StepRoundEvaluation{RunID: runID, RoundID: roundID, Kind: roundEvaluationKind(stepName, fixing)}
 	if strings.TrimSpace(raw) == "" {

@@ -1019,35 +1019,39 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			s := outcome.FixSummary
 			fixSummaryPtr = &s
 		}
-		evaluation, evaluationErr := structuredRoundEvaluation(currentRoundID, run.ID, stepName, sctx.Fixing, outcome.Findings)
 		var dbErr error
-		if evaluationErr != nil {
-			dbErr = evaluationErr
+		if !structuredRoundEligible(stepName) {
+			dbErr = e.db.CompleteStepRound(currentRoundID, findingsPtr, fixSummaryPtr, roundDuration)
 		} else {
-			var resultingHead string
-			if observed, headErr := git.HeadSHA(ctx, workDir); headErr == nil && observed != "" {
-				resultingHead = observed
-			}
-			evaluatedHead := resultingHead
-			if stepName == types.StepReview {
-				// Only the Review outcome provides a candidate that may later be
-				// promoted by the existing completion/approval transaction.
-				evaluatedHead = reviewApprovedHeadSHA
-			}
-			subject := db.StructuredRoundSubject{
-				StartingHeadSHA:  roundStringPointer(reviewStartingHeadSHA),
-				ResultingHeadSHA: roundStringPointer(resultingHead),
-				EvaluatedHeadSHA: roundStringPointer(evaluatedHead),
-			}
-			if e.config != nil {
-				if e.config.TrustedConfigSHA != "" {
-					subject.TrustedConfigSHA = roundStringPointer(e.config.TrustedConfigSHA)
+			evaluation, evaluationErr := structuredRoundEvaluation(currentRoundID, run.ID, stepName, sctx.Fixing, outcome.Findings)
+			if evaluationErr != nil {
+				dbErr = evaluationErr
+			} else {
+				var resultingHead string
+				if observed, headErr := git.HeadSHA(ctx, workDir); headErr == nil && observed != "" {
+					resultingHead = observed
 				}
-				if stepName == types.StepReview && e.config.CaptureEvalProvenance {
-					subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
+				evaluatedHead := resultingHead
+				if stepName == types.StepReview {
+					// Only the Review outcome provides a candidate that may later be
+					// promoted by the existing completion/approval transaction.
+					evaluatedHead = reviewApprovedHeadSHA
 				}
+				subject := db.StructuredRoundSubject{
+					StartingHeadSHA:  roundStringPointer(reviewStartingHeadSHA),
+					ResultingHeadSHA: roundStringPointer(resultingHead),
+					EvaluatedHeadSHA: roundStringPointer(evaluatedHead),
+				}
+				if e.config != nil {
+					if e.config.TrustedConfigSHA != "" {
+						subject.TrustedConfigSHA = roundStringPointer(e.config.TrustedConfigSHA)
+					}
+					if stepName == types.StepReview && e.config.CaptureEvalProvenance {
+						subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
+					}
+				}
+				dbErr = e.db.CompleteStepRoundStructured(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration)
 			}
-			dbErr = e.db.CompleteStepRoundStructured(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration)
 		}
 		if dbErr != nil {
 			roundErr := fmt.Errorf("complete %s round %d: %w", stepName, roundNum, dbErr)

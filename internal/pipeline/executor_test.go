@@ -110,6 +110,42 @@ func TestExecutor_PropagatesPRNoteToStepContext(t *testing.T) {
 	}
 }
 
+func TestExecutorRefreshAndPushKeepRoundsOutOfStructuredGraph(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	findings := `{"findings":[]}`
+	executor := NewExecutor(database, p, nil, nil, []Step{
+		&adaptiveCallStep{name: types.StepRefresh, fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{Findings: findings}, nil
+		}},
+		&adaptiveCallStep{name: types.StepPush, fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{Findings: findings}, nil
+		}},
+	}, nil)
+
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		rounds, err := database.GetRoundsByStep(result.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rounds) != 1 {
+			t.Fatalf("%s rounds = %#v", result.StepName, rounds)
+		}
+		if rounds[0].FindingsJSON == nil {
+			t.Fatalf("%s round did not retain compatibility findings", result.StepName)
+		}
+		if rounds[0].Evaluation != nil || rounds[0].Decision != nil || rounds[0].Repair != nil {
+			t.Fatalf("%s persisted structured graph records: %#v", result.StepName, rounds[0])
+		}
+	}
+}
+
 func TestExecutorPersistsFutureConfiguredSkipBeforeEarlierStepRuns(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	pr := &adaptiveCallStep{name: types.StepPR, fn: func(*StepContext) (*StepOutcome, error) {
