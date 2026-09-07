@@ -228,6 +228,13 @@ func TestStartRunQuarantineAfterAdmissionKeepsReplacement(t *testing.T) {
 	go func() {
 		quarantined <- manager.unresolvedPostWorktreeRun(errors.New("unresolved post-worktree terminalization"))
 	}()
+	quarantineDeadline := time.Now().Add(time.Second)
+	for !manager.shuttingDown.Load() {
+		if time.Now().After(quarantineDeadline) {
+			t.Fatal("quarantine did not close admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	releaseOnce.Do(func() { close(release) })
 
 	var result struct {

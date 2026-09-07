@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -65,12 +67,12 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 
 	agentCalled := false
 	var repairContext *pipeline.StepContext
-	var ciRoundID string
+	var ciStepResultID string
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			agentCalled = true
-			if repairContext == nil || ciRoundID == "" {
+			if repairContext == nil || ciStepResultID == "" {
 				t.Fatal("CI repair agent started without a persisted round context")
 			}
 			persistedRun, err := repairContext.DB.GetRun(repairContext.Run.ID)
@@ -80,7 +82,14 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 			if persistedRun.CIFixAttempts == nil || *persistedRun.CIFixAttempts != 1 {
 				t.Fatalf("CI repair started with attempts = %#v, want durable reservation of one", persistedRun.CIFixAttempts)
 			}
-			repair, err := repairContext.DB.GetRoundRepair(ciRoundID)
+			rounds, err := repairContext.DB.GetRoundsByStep(ciStepResultID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 2 || rounds[1].Trigger != db.RoundTriggerAutoFix {
+				t.Fatalf("CI repair rounds = %#v, want initial and active auto-fix repair", rounds)
+			}
+			repair, err := repairContext.DB.GetRoundRepair(rounds[1].ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -139,7 +148,7 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	sctx.Round = 1
 	sctx.RoundTrigger = "initial"
 	repairContext = sctx
-	ciRoundID = round.ID
+	ciStepResultID = stepResult.ID
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -173,12 +182,19 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	if persistedRun.CIFixAttempts == nil || *persistedRun.CIFixAttempts != 1 {
 		t.Fatalf("cancelled CI repair attempts = %#v, want one spent attempt", persistedRun.CIFixAttempts)
 	}
-	repair, err := sctx.DB.GetRoundRepair(round.ID)
+	rounds, err := sctx.DB.GetRoundsByStep(stepResult.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repair == nil || repair.Result == nil || *repair.Result != pipeline.RepairResultAttempted || repair.FailureFingerprint == nil {
-		t.Fatalf("cancelled CI repair receipt = %#v, want durable attempted receipt", repair)
+	if len(rounds) != 2 || rounds[0].ID != round.ID || rounds[1].Status != db.RoundStatusCompleted || rounds[1].Trigger != db.RoundTriggerAutoFix {
+		t.Fatalf("cancelled CI repair rounds = %#v, want initial plus completed auto-fix repair", rounds)
+	}
+	repair, err := sctx.DB.GetRoundRepair(rounds[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair == nil || repair.Result == nil || *repair.Result != pipeline.RepairResultAttempted || repair.FailureFingerprint == nil || repair.FixSummary == nil || *repair.FixSummary != "fix Windows path handling" || repair.ResultingHeadSHA == nil || *repair.ResultingHeadSHA != persistedRun.HeadSHA {
+		t.Fatalf("cancelled CI repair receipt = %#v, want persisted applied repair", repair)
 	}
 
 	if len(ag.calls) == 0 {
@@ -204,6 +220,95 @@ func TestCIStep_CIFailureAutoFix(t *testing.T) {
 	}
 	if !strings.Contains(body, "No-Mistakes-Model: gpt-5.6-terra-medium") {
 		t.Fatalf("CI fix commit lacks model attribution:\n%s", body)
+	}
+}
+
+func TestCIStep_StopsWhenAppliedRepairReceiptCannotPersist(t *testing.T) {
+	dir, upstream, baseSHA, headSHA := setupCIRerunRepo(t)
+	prURL := "https://github.com/test/repo/pull/42"
+	agentCalls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			agentCalls++
+			if err := os.WriteFile(filepath.Join(opts.CWD, "receipt-failure.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return ciRepairResult(), nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	database, err := db.Open(sctx.Paths.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	sctx.DB = database
+	repo, err := sctx.DB.InsertRepo(dir, upstream, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := sctx.DB.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = run
+	sctx.Repo = repo
+	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail"}]`)
+	sctx.Run.PRURL = &prURL
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.CITimeout = time.Minute
+	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.BeginStepRound(stepResult.ID, 1, db.RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.Round = 1
+	sctx.RoundTrigger = db.RoundTriggerInitial
+
+	raw, err := sql.Open("sqlite", sctx.Paths.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TRIGGER reject_applied_ci_repair_receipt
+		BEFORE UPDATE OF fix_summary, resulting_head_sha ON round_repairs
+		WHEN NEW.fix_summary IS NOT NULL
+		BEGIN
+			SELECT RAISE(FAIL, 'injected applied CI repair receipt failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (&CIStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "injected applied CI repair receipt failure") {
+		t.Fatalf("CI repair result = %v, want receipt persistence failure", err)
+	}
+	if agentCalls != 1 {
+		t.Fatalf("CI repair agent calls = %d, want one", agentCalls)
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[1].Status != db.RoundStatusActive || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || *rounds[1].Repair.Result != pipeline.RepairResultAttempted || rounds[1].Repair.FixSummary != nil || rounds[1].Repair.ResultingHeadSHA != nil {
+		t.Fatalf("CI repair rounds after receipt failure = %#v, want attempted repair without applied data", rounds)
 	}
 }
 
@@ -429,12 +534,12 @@ func TestCIStep_RestartDoesNotResetAutoFixBudget(t *testing.T) {
 	if !firstOutcome.NeedsApproval || fixCount != 1 {
 		t.Fatalf("initial CI outcome = %+v, fixes = %d; want parked after one automatic fix", firstOutcome, fixCount)
 	}
-	reservedRepair, err := sctx.DB.GetRoundRepair(round.ID)
+	rounds, err := sctx.DB.GetRoundsByStep(stepResult.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reservedRepair == nil || reservedRepair.Result == nil || *reservedRepair.Result != pipeline.RepairResultAttempted || reservedRepair.FailureFingerprint == nil {
-		t.Fatalf("parked CI repair receipt = %#v, want durable attempted receipt", reservedRepair)
+	if len(rounds) != 2 || rounds[1].Trigger != db.RoundTriggerAutoFix || rounds[1].Repair == nil || rounds[1].Repair.Result == nil || rounds[1].Repair.FailureFingerprint == nil {
+		t.Fatalf("parked CI repair rounds = %#v, want durable repair receipt", rounds)
 	}
 
 	recoveredRun, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -1201,23 +1306,32 @@ func TestCIStep_PersistsPushedRepairSummaries(t *testing.T) {
 		autoFixLimit  int
 		checks        []string
 		expectedFixes int
-		expected      string
+		expected      []string
 		userFix       bool
+		precommitted  bool
 	}{
 		{
 			name:          "automatic repairs retain the final summary",
 			autoFixLimit:  2,
 			checks:        []string{`[{"name":"test","state":"FAILURE","bucket":"fail"}]`, `[{"name":"lint","state":"FAILURE","bucket":"fail"}]`},
 			expectedFixes: 2,
-			expected:      "repair lint",
+			expected:      []string{"repair test", "repair lint"},
 		},
 		{
 			name:          "user requested repair retains its summary",
 			autoFixLimit:  0,
 			checks:        []string{`[{"name":"test","state":"FAILURE","bucket":"fail"}]`, `[{"name":"test","state":"FAILURE","bucket":"fail"}]`},
 			expectedFixes: 1,
-			expected:      "repair test",
+			expected:      []string{"repair test"},
 			userFix:       true,
+		},
+		{
+			name:          "agent precommitted repair retains its summary",
+			autoFixLimit:  1,
+			checks:        []string{`[{"name":"test","state":"FAILURE","bucket":"fail"}]`},
+			expectedFixes: 1,
+			expected:      []string{"repair test"},
+			precommitted:  true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1234,6 +1348,10 @@ func TestCIStep_PersistsPushedRepairSummaries(t *testing.T) {
 					summary := "repair test"
 					if fixCount == 2 {
 						summary = "repair lint"
+					}
+					if tt.precommitted {
+						gitCmd(t, opts.CWD, "add", "-A")
+						gitCmd(t, opts.CWD, "commit", "-m", summary)
 					}
 					return &agent.Result{Output: json.RawMessage(fmt.Sprintf(`{"summary":%q}`, summary))}, nil
 				},
@@ -1282,12 +1400,29 @@ func TestCIStep_PersistsPushedRepairSummaries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			repair, err := sctx.DB.GetRoundRepair(rounds[len(rounds)-1].ID)
-			if err != nil {
-				t.Fatal(err)
+			var repairs []*db.StepRound
+			for _, round := range rounds {
+				if round.Repair != nil && round.Repair.FixSummary != nil {
+					repairs = append(repairs, round)
+				}
 			}
-			if repair == nil || repair.FixSummary == nil || *repair.FixSummary != tt.expected {
-				t.Fatalf("repair receipt = %#v, want fix summary %q", repair, tt.expected)
+			if len(repairs) != len(tt.expected) {
+				t.Fatalf("repair rounds = %#v, want %d applied receipts", rounds, len(tt.expected))
+			}
+			for index, round := range repairs {
+				if round.Round != index+2 || round.Trigger != db.RoundTriggerAutoFix || round.Repair.Result == nil || *round.Repair.Result != pipeline.RepairResultAttempted || *round.Repair.FixSummary != tt.expected[index] || round.Repair.ResultingHeadSHA == nil {
+					t.Fatalf("repair round %d = %#v, want applied receipt for %q", index, round, tt.expected[index])
+				}
+				invocations, err := sctx.DB.GetAgentInvocationsByRound(round.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(invocations) != 1 || invocations[0].Round != round.Round {
+					t.Fatalf("repair round %d invocations = %#v, want one agent repair invocation", index, invocations)
+				}
+			}
+			if *repairs[len(repairs)-1].Repair.ResultingHeadSHA != sctx.Run.HeadSHA {
+				t.Fatalf("final repair head = %q, want %q", *repairs[len(repairs)-1].Repair.ResultingHeadSHA, sctx.Run.HeadSHA)
 			}
 		})
 	}

@@ -158,13 +158,17 @@ func optionalString(value string) *string {
 // evaluation, subject, and initial repair receipt. The compatibility JSON
 // columns remain empty; readers project them in memory for legacy consumers.
 func (d *DB) CompleteStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64) error {
-	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, nil, nil)
+	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, nil, nil, true)
+}
+
+func (d *DB) CompleteStepRoundStructuredWithoutImplicitRepair(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, durationMS int64) error {
+	return d.completeStepRoundStructured(roundID, evaluation, subject, nil, durationMS, nil, nil, false)
 }
 
 // CompleteStepRoundStructuredWithRepairAudit atomically completes a round with
 // its evaluation, subject, fix summary, and final repair audit.
 func (d *DB) CompleteStepRoundStructuredWithRepairAudit(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit StepRoundRepair) error {
-	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil)
+	return d.completeStepRoundStructured(roundID, evaluation, subject, fixSummary, durationMS, &repairAudit, nil, true)
 }
 
 // CompleteStepRoundStructuredAndStartAutoFix atomically completes a structured
@@ -205,10 +209,10 @@ func (d *DB) CompleteStepRoundStructuredAndStartAutoFix(stepResultID, roundID st
 			return fmt.Errorf("complete structured step round: expected one step result, updated %d", changed)
 		}
 		return nil
-	})
+	}, true)
 }
 
-func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit *StepRoundRepair, afterComplete func(*sql.Tx) error) error {
+func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEvaluation, subject StructuredRoundSubject, fixSummary *string, durationMS int64, repairAudit *StepRoundRepair, afterComplete func(*sql.Tx) error, includeImplicitRepair bool) error {
 	if !validRoundEvaluationKind(evaluation.Kind) {
 		return fmt.Errorf("complete structured step round: invalid evaluation kind %q", evaluation.Kind)
 	}
@@ -341,7 +345,7 @@ func (d *DB) completeStepRoundStructured(roundID string, evaluation StepRoundEva
 		subject.ResultingHeadSHA, subject.EvaluatedHeadSHA, durationMS, RoundStatusCompleted, roundID, RoundStatusActive); err != nil {
 		return fmt.Errorf("complete structured step round: update round: %w", err)
 	}
-	if trigger == RoundTriggerAutoFix || repairAudit != nil {
+	if (includeImplicitRepair && trigger == RoundTriggerAutoFix) || repairAudit != nil {
 		repair := StepRoundRepair{ID: newID(), RunID: runID, RoundID: roundID, FixSummary: fixSummary, ResultingHeadSHA: subject.ResultingHeadSHA, CreatedAt: now()}
 		if repairAudit != nil {
 			repair = *repairAudit
@@ -572,6 +576,127 @@ func (d *DB) ReserveCIFixAttemptAndRecordRoundRepair(runID, roundID string, atte
 		return fmt.Errorf("reserve CI repair attempt: commit: %w", err)
 	}
 	return nil
+}
+
+func (d *DB) BeginCIFixRepairRound(stepResultID, runID string, attempts int, repair StepRoundRepair) (*StepRound, error) {
+	if attempts < 0 {
+		return nil, fmt.Errorf("begin CI repair round: attempts must not be negative")
+	}
+	if repair.Result == nil || *repair.Result != RoundRepairAttempted {
+		return nil, fmt.Errorf("begin CI repair round: repair audit must record an attempted result")
+	}
+	if attempts > 0 && repair.FailureFingerprint == nil {
+		return nil, fmt.Errorf("begin CI repair round: automatic repair requires a failure fingerprint")
+	}
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin CI repair round: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, stepName string
+	if err := tx.QueryRow(`SELECT run_id, step_name FROM step_results WHERE id = ?`, stepResultID).Scan(&recordedRunID, &stepName); err != nil {
+		return nil, fmt.Errorf("begin CI repair round: load step result: %w", err)
+	}
+	if recordedRunID != runID || stepName != string(types.StepCI) {
+		return nil, fmt.Errorf("begin CI repair round: step is not a CI step for run")
+	}
+	if attempts > 0 {
+		var persisted sql.NullInt64
+		if err := tx.QueryRow(`SELECT ci_fix_attempts FROM runs WHERE id = ?`, runID).Scan(&persisted); err != nil {
+			return nil, fmt.Errorf("begin CI repair round: load run budget: %w", err)
+		}
+		if !persisted.Valid {
+			return nil, fmt.Errorf("begin CI repair round: run has unknown CI repair budget")
+		}
+		if persisted.Int64 >= int64(attempts) {
+			return nil, fmt.Errorf("begin CI repair round: attempt %d does not advance persisted budget %d", attempts, persisted.Int64)
+		}
+		if _, err := tx.Exec(`UPDATE runs SET ci_fix_attempts = ?, updated_at = ? WHERE id = ?`, attempts, now(), runID); err != nil {
+			return nil, fmt.Errorf("begin CI repair round: update run budget: %w", err)
+		}
+	}
+
+	var roundNumber int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(round), 0) + 1 FROM step_rounds WHERE step_result_id = ?`, stepResultID).Scan(&roundNumber); err != nil {
+		return nil, fmt.Errorf("begin CI repair round: allocate round number: %w", err)
+	}
+	round := &StepRound{
+		ID:           newID(),
+		StepResultID: stepResultID,
+		Round:        roundNumber,
+		Trigger:      RoundTriggerAutoFix,
+		Status:       RoundStatusActive,
+		DurationMS:   0,
+		CreatedAt:    now(),
+	}
+	if _, err := tx.Exec(`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, status, duration_ms, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		round.ID, round.StepResultID, round.Round, round.Trigger, round.Status, round.DurationMS, round.CreatedAt,
+	); err != nil {
+		return nil, fmt.Errorf("begin CI repair round: insert round: %w", err)
+	}
+	if repair.ID == "" {
+		repair.ID = newID()
+	}
+	repair.RunID = runID
+	repair.RoundID = round.ID
+	if repair.CreatedAt == 0 {
+		repair.CreatedAt = now()
+	}
+	if err := upsertRoundRepair(tx, repair); err != nil {
+		return nil, fmt.Errorf("begin CI repair round: persist attempted receipt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("begin CI repair round: commit: %w", err)
+	}
+	return round, nil
+}
+
+func (d *DB) RecordCIFixRepairAttempt(roundID, runID string, repair StepRoundRepair) error {
+	if repair.Result == nil || *repair.Result != RoundRepairAttempted {
+		return fmt.Errorf("record CI repair attempt: repair audit must record an attempted result")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("record CI repair attempt: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, stepName, trigger, status string
+	if err := tx.QueryRow(`SELECT s.run_id, s.step_name, r.trigger_type, r.status
+		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ?`, roundID).Scan(&recordedRunID, &stepName, &trigger, &status); err != nil {
+		return fmt.Errorf("record CI repair attempt: load round: %w", err)
+	}
+	if recordedRunID != runID || stepName != string(types.StepCI) || trigger != RoundTriggerAutoFix || status != RoundStatusActive {
+		return fmt.Errorf("record CI repair attempt: round is not an active CI auto-fix round for run")
+	}
+	if repair.ID == "" {
+		repair.ID = newID()
+	}
+	repair.RunID = runID
+	repair.RoundID = roundID
+	if repair.CreatedAt == 0 {
+		repair.CreatedAt = now()
+	}
+	if err := upsertRoundRepair(tx, repair); err != nil {
+		return fmt.Errorf("record CI repair attempt: persist attempted receipt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("record CI repair attempt: commit: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) CompleteCIFixRepairRound(roundID, startingHeadSHA string, durationMS int64, repair StepRoundRepair) error {
+	if repair.Result == nil || *repair.Result != RoundRepairAttempted {
+		return fmt.Errorf("complete CI repair round: repair result must remain attempted")
+	}
+	subject := StructuredRoundSubject{StartingHeadSHA: optionalString(startingHeadSHA), ResultingHeadSHA: repair.ResultingHeadSHA}
+	return d.CompleteStepRoundStructuredWithRepairAudit(roundID, StepRoundEvaluation{
+		Kind: RoundEvaluationRevalidation,
+	}, subject, repair.FixSummary, durationMS, repair)
 }
 
 func (d *DB) roundHasEvaluation(roundID string) (bool, error) {

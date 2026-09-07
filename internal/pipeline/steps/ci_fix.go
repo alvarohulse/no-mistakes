@@ -111,6 +111,10 @@ CI logs:
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.`
 
+	agentStartingHeadSHA, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve head before CI repair: %w", err)
+	}
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.Agent.Run(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -122,7 +126,7 @@ CI logs:
 		return false, "", fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	return s.commitAndPushAttributed(sctx, result)
+	return s.commitAndPushAttributed(sctx, result, agentStartingHeadSHA)
 }
 
 // commitAndPush commits any uncommitted changes and force-pushes to the
@@ -133,19 +137,23 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext, summary string) (bool
 	if strings.TrimSpace(summary) == "" {
 		return false, fmt.Errorf("read CI repair commit summary: summary is empty")
 	}
-	pushed, _, err := s.commitAndPushResolved(sctx, nil, summary)
+	pushed, _, err := s.commitAndPushResolved(sctx, nil, summary, "")
 	return pushed, err
 }
 
-func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result) (bool, string, error) {
-	pushed, summary, err := s.commitAndPushResolved(sctx, result, "")
-	if err != nil || !pushed {
-		return pushed, "", err
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result, agentStartingHeadSHA string) (bool, string, error) {
+	recordedHeadSHA := sctx.Run.HeadSHA
+	_, summary, err := s.commitAndPushResolved(sctx, result, "", agentStartingHeadSHA)
+	if err != nil {
+		return false, "", err
 	}
-	return pushed, summary, nil
+	if sctx.Run.HeadSHA == recordedHeadSHA || summary == "" {
+		return false, "", nil
+	}
+	return true, summary, nil
 }
 
-func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary string) (bool, string, error) {
+func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary, agentStartingHeadSHA string) (bool, string, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, "", fmt.Errorf("check CI changes: %w", err)
@@ -154,8 +162,20 @@ func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent
 		sctx.Log("no changes to commit")
 		headSHA, err := stepGitHeadSHA(sctx)
 		if err == nil && headSHA != sctx.Run.HeadSHA {
+			if summary == "" && result != nil && headSHA != agentStartingHeadSHA {
+				summary, err = extractCommitSummary(result)
+				if err != nil {
+					return false, "", fmt.Errorf("read CI repair commit summary: %w", err)
+				}
+				if summary == "" {
+					return false, "", fmt.Errorf("read CI repair commit summary: summary is empty")
+				}
+			}
 			pushed, err := s.pushUpdatedHeadSHA(sctx, headSHA)
-			return pushed, "", err
+			if err != nil || summary == "" {
+				return pushed, "", err
+			}
+			return pushed, summary, nil
 		}
 		return false, "", nil
 	}

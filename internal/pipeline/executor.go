@@ -589,8 +589,17 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			if err != nil || len(rounds) == 0 {
 				return nil, fmt.Errorf("recovered approval gate has no complete round")
 			}
-			latest := rounds[len(rounds)-1]
-			if latest.FindingsJSON == nil || *latest.FindingsJSON != *result.FindingsJSON {
+			var latest *db.StepRound
+			maxRound := 0
+			for _, round := range rounds {
+				if round.Round > maxRound {
+					maxRound = round.Round
+				}
+				if round.Status == db.RoundStatusCompleted && round.FindingsJSON != nil && *round.FindingsJSON == *result.FindingsJSON {
+					latest = round
+				}
+			}
+			if latest == nil {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
 			autoFixes := 0
@@ -604,7 +613,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				step:        e.steps[index],
 				stepResult:  result,
 				findings:    *result.FindingsJSON,
-				round:       latest.Round,
+				round:       maxRound,
 				autoFixes:   autoFixes,
 				lastRoundID: latest.ID,
 			}
@@ -857,6 +866,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	repairProgress := NewRepairProgress(autoFixAttempts)
 	roundNum := state.roundNum
 	currentRoundID := state.currentRoundID
+	agentRoundID := ""
+	agentRoundNumber := 0
 
 	instrumentAgent := func(inner agent.Agent, reviewCandidatePool []db.ReviewCandidateReceipt) agent.Agent {
 		if inner == nil {
@@ -866,12 +877,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		inner = &gateStepBoundaryAgent{inner: inner, phase: stepName}
 		inner = &lifecycleAgent{inner: inner, onLifecycle: onAgentLifecycle}
 		return &perfRecordingAgent{
-			inner:               inner,
-			db:                  e.db,
-			runID:               run.ID,
-			stepName:            stepName,
-			round:               func() int { return roundNum + 1 },
-			roundID:             func() string { return currentRoundID },
+			inner:    inner,
+			db:       e.db,
+			runID:    run.ID,
+			stepName: stepName,
+			round: func() int {
+				if agentRoundNumber > 0 {
+					return agentRoundNumber
+				}
+				return roundNum + 1
+			},
+			roundID: func() string {
+				if agentRoundID != "" {
+					return agentRoundID
+				}
+				return currentRoundID
+			},
 			reviewCandidatePool: append([]db.ReviewCandidateReceipt(nil), reviewCandidatePool...),
 		}
 	}
@@ -931,6 +952,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		OnPRMerged:         e.onPRMerged,
 	}
+	sctx.agentRoundOverride = func(roundID string, round int) func() {
+		previousID, previousRound := agentRoundID, agentRoundNumber
+		agentRoundID, agentRoundNumber = roundID, round
+		return func() {
+			agentRoundID, agentRoundNumber = previousID, previousRound
+		}
+	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
 	}
@@ -982,6 +1010,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := step.Execute(sctx)
 		roundNum++
+		if outcome != nil && outcome.RoundCursor > roundNum {
+			roundNum = outcome.RoundCursor
+		}
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
 			return failActiveStepRound(fmt.Errorf("step %s failed: %s", stepName, safeurl.RedactText(err.Error())))
@@ -1080,7 +1111,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 						subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
 					}
 				}
-				if willStartAutoFix {
+				if outcome.RepairReceiptsPersisted {
+					if finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "" {
+						dbErr = e.db.CompleteStepRoundStructuredWithRepairAudit(currentRoundID, evaluation, subject, nil, roundDuration, db.StepRoundRepair{
+							FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
+							Result:             roundStringPointer(finalRepairAudit.Result),
+						})
+					} else {
+						dbErr = e.db.CompleteStepRoundStructuredWithoutImplicitRepair(currentRoundID, evaluation, subject, roundDuration)
+					}
+				} else if willStartAutoFix {
 					idsJSON := findingIDsJSON(fixableFindings)
 					if idsJSON == "" {
 						dbErr = fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum)

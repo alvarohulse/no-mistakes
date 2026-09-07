@@ -107,22 +107,69 @@ func (s *CIStep) loadCIFixAttempts(sctx *pipeline.StepContext) error {
 	return nil
 }
 
-func (s *CIStep) reserveCIFixAttempt(sctx *pipeline.StepContext, attempts int, audit pipeline.RepairAudit) error {
+type ciFixRepairRound struct {
+	id                 string
+	round              int
+	failureFingerprint string
+	completeAtReceipt  bool
+}
+
+func (s *CIStep) beginCIFixRepairRound(sctx *pipeline.StepContext, attempts int, audit pipeline.RepairAudit) (*ciFixRepairRound, error) {
 	if sctx.DB == nil || sctx.Run == nil || sctx.StepResultID == "" {
-		return nil
+		return nil, nil
 	}
-	if sctx.RoundID == "" {
-		return fmt.Errorf("current CI round identity is missing")
+	if attempts == 0 && sctx.RoundID != "" && sctx.RoundTrigger == db.RoundTriggerAutoFix {
+		if err := sctx.DB.RecordCIFixRepairAttempt(sctx.RoundID, sctx.Run.ID, db.StepRoundRepair{
+			FailureFingerprint: optionalCIFixAuditValue(audit.FailureFingerprint),
+			Result:             optionalCIFixAuditValue(audit.Result),
+		}); err != nil {
+			return nil, err
+		}
+		return &ciFixRepairRound{id: sctx.RoundID, round: sctx.Round, failureFingerprint: audit.FailureFingerprint}, nil
 	}
-	if err := sctx.DB.ReserveCIFixAttemptAndRecordRoundRepair(sctx.Run.ID, sctx.RoundID, attempts, db.StepRoundRepair{
+	round, err := sctx.DB.BeginCIFixRepairRound(sctx.StepResultID, sctx.Run.ID, attempts, db.StepRoundRepair{
 		FailureFingerprint: optionalCIFixAuditValue(audit.FailureFingerprint),
 		Result:             optionalCIFixAuditValue(audit.Result),
-	}); err != nil {
-		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	persisted := attempts
-	sctx.Run.CIFixAttempts = &persisted
-	return nil
+	if attempts > 0 {
+		persisted := attempts
+		sctx.Run.CIFixAttempts = &persisted
+	}
+	return &ciFixRepairRound{id: round.ID, round: round.Round, failureFingerprint: audit.FailureFingerprint, completeAtReceipt: true}, nil
+}
+
+func (s *CIStep) completeCIFixRepairRound(sctx *pipeline.StepContext, repairRound *ciFixRepairRound, startingHeadSHA string, durationMS int64, applied bool, summary string) error {
+	if repairRound == nil {
+		return nil
+	}
+	result := pipeline.RepairResultAttempted
+	repair := db.StepRoundRepair{
+		RoundID:            repairRound.id,
+		FailureFingerprint: optionalCIFixAuditValue(repairRound.failureFingerprint),
+		Result:             &result,
+	}
+	if applied {
+		repair.FixSummary = optionalCIFixAuditValue(summary)
+		repair.ResultingHeadSHA = optionalCIFixAuditValue(sctx.Run.HeadSHA)
+	}
+	if !repairRound.completeAtReceipt {
+		return sctx.DB.SetStepRoundStructuredRepair(repair)
+	}
+	return sctx.DB.CompleteCIFixRepairRound(repairRound.id, startingHeadSHA, durationMS, repair)
+}
+
+func (s *CIStep) recordCIFixRepairOutcome(sctx *pipeline.StepContext, repairRound *ciFixRepairRound, audit pipeline.RepairAudit) error {
+	if repairRound == nil {
+		return nil
+	}
+	return sctx.DB.SetStepRoundStructuredRepair(db.StepRoundRepair{
+		RoundID:            repairRound.id,
+		FailureFingerprint: optionalCIFixAuditValue(audit.FailureFingerprint),
+		Result:             optionalCIFixAuditValue(audit.Result),
+	})
 }
 
 func optionalCIFixAuditValue(value string) *string {
@@ -207,6 +254,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		s.repairProgress = pipeline.NewRepairProgress(s.ciFixAttempts)
 	}
 	successfulFixSummary := ""
+	repairReceiptsPersisted := false
+	roundCursor := sctx.Round
+	var latestCIFixRepair, latestAppliedCIFixRepair *ciFixRepairRound
 	defer func() {
 		if outcome == nil {
 			return
@@ -214,8 +264,24 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		audit := s.repairProgress.Audit()
 		if audit.Result == pipeline.RepairResultAttempted && !outcome.NeedsApproval {
 			audit = s.repairProgress.Resolved()
+			if latestAppliedCIFixRepair != nil {
+				if dbErr := s.recordCIFixRepairOutcome(sctx, latestAppliedCIFixRepair, audit); dbErr != nil {
+					outcome = nil
+					err = fmt.Errorf("persist CI repair outcome: %w", dbErr)
+					return
+				}
+			}
 		}
-		outcome.RepairAudit = audit
+		if repairReceiptsPersisted {
+			outcome.RepairReceiptsPersisted = true
+			outcome.RoundCursor = roundCursor
+			if audit.Result == pipeline.RepairResultAttempted || audit.Result == pipeline.RepairResultResolved {
+				audit = pipeline.RepairAudit{}
+			}
+			outcome.RepairAudit = audit
+		} else {
+			outcome.RepairAudit = audit
+		}
 		if successfulFixSummary != "" {
 			outcome.FixSummary = successfulFixSummary
 		}
@@ -548,12 +614,31 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					manualFixAttempted = true
 					sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
 					previousHeadSHA := sctx.Run.HeadSHA
+					repairRound, receiptErr := s.beginCIFixRepairRound(sctx, 0, pipeline.RepairAudit{Result: pipeline.RepairResultAttempted})
+					if receiptErr != nil {
+						return nil, fmt.Errorf("begin CI manual repair receipt: %w", receiptErr)
+					}
+					repairReceiptsPersisted = repairReceiptsPersisted || repairRound != nil
+					if repairRound != nil && repairRound.round > roundCursor {
+						roundCursor = repairRound.round
+					}
+					repairStartedAt := time.Now()
+					restoreAgentRound := func() {}
+					if repairRound != nil {
+						restoreAgentRound = sctx.WithAgentRound(repairRound.id, repairRound.round)
+					}
 					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
+					restoreAgentRound()
+					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
+						return nil, fmt.Errorf("persist CI manual repair receipt: %w", receiptErr)
+					}
+					latestCIFixRepair = repairRound
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						if pushed {
 							successfulFixSummary = fixSummary
+							latestAppliedCIFixRepair = repairRound
 						}
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
@@ -574,21 +659,40 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						return nil, fmt.Errorf("evaluate CI repair progress: %w", progressErr)
 					}
 					if !decision.Attempt {
+						if receiptErr := s.recordCIFixRepairOutcome(sctx, latestCIFixRepair, decision.Audit); receiptErr != nil {
+							return nil, fmt.Errorf("persist CI repair outcome: %w", receiptErr)
+						}
 						sctx.Log(fmt.Sprintf("issues detected: %s - %s, waiting for manual intervention...", issueDesc, decision.Message))
 						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
 					}
-					if err := s.reserveCIFixAttempt(sctx, decision.AttemptNumber, decision.Audit); err != nil {
-						return nil, fmt.Errorf("reserve CI repair attempt: %w", err)
+					repairRound, receiptErr := s.beginCIFixRepairRound(sctx, decision.AttemptNumber, decision.Audit)
+					if receiptErr != nil {
+						return nil, fmt.Errorf("begin CI repair receipt: %w", receiptErr)
+					}
+					repairReceiptsPersisted = repairReceiptsPersisted || repairRound != nil
+					if repairRound != nil && repairRound.round > roundCursor {
+						roundCursor = repairRound.round
 					}
 					s.ciFixAttempts = decision.AttemptNumber
 					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
 					previousHeadSHA := sctx.Run.HeadSHA
+					repairStartedAt := time.Now()
+					restoreAgentRound := func() {}
+					if repairRound != nil {
+						restoreAgentRound = sctx.WithAgentRound(repairRound.id, repairRound.round)
+					}
 					pushed, fixSummary, err := s.autoFixCI(sctx, host, pr, fixTargets, mergeConflict)
+					restoreAgentRound()
+					if receiptErr := s.completeCIFixRepairRound(sctx, repairRound, previousHeadSHA, time.Since(repairStartedAt).Milliseconds(), pushed, fixSummary); receiptErr != nil {
+						return nil, fmt.Errorf("persist CI repair receipt: %w", receiptErr)
+					}
+					latestCIFixRepair = repairRound
 					if err != nil {
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						if pushed {
 							successfulFixSummary = fixSummary
+							latestAppliedCIFixRepair = repairRound
 						}
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
@@ -596,6 +700,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						decision, progressErr := s.repairProgress.Next(ctx, sctx.WorkDir, fixKey, ciFixLimit)
 						if progressErr != nil {
 							return nil, fmt.Errorf("evaluate CI repair progress after unchanged fix: %w", progressErr)
+						}
+						if receiptErr := s.recordCIFixRepairOutcome(sctx, repairRound, decision.Audit); receiptErr != nil {
+							return nil, fmt.Errorf("persist CI repair outcome: %w", receiptErr)
 						}
 						sctx.Log(fmt.Sprintf("CI fix produced no changes - %s", decision.Message))
 						return ciFailureOutcome(reportedIssues, mergeConflict, decision.Message), nil
