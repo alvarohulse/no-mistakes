@@ -23,6 +23,7 @@ import (
 )
 
 const commandOutputDirectory = "command-output"
+const diagnosticDirectory = "diagnostics"
 
 // Store resolves artifact registry roots to owner-local filesystem roots.
 // Evidence may use a configured external root, while command output always
@@ -154,6 +155,58 @@ func (s *Store) CreateCommandOutput(runID, attemptID string, output []byte) (art
 		Purpose:      db.ArtifactPurposeCommandOutput,
 		Label:        "Command output",
 		Kind:         db.ArtifactKindCommandOutput,
+		MediaType:    mediaType,
+		Encoding:     encoding,
+		SHA256:       hex.EncodeToString(digest[:]),
+		SourceBytes:  int64(len(output)),
+		State:        db.ArtifactStateAvailable,
+	}, nil
+}
+
+// CreateOperationDiagnostic writes a bounded operation diagnostic as an
+// immutable run artifact. The caller supplies the producer links before
+// registering the returned metadata with the database.
+func (s *Store) CreateOperationDiagnostic(runID, name string, output []byte) (artifact db.Artifact, err error) {
+	if err := validatePathComponent("run ID", runID); err != nil {
+		return db.Artifact{}, err
+	}
+	if err := validatePathComponent("diagnostic name", name); err != nil {
+		return db.Artifact{}, err
+	}
+	relativePath := path.Join(runID, diagnosticDirectory, name+".log")
+	outputFile, err := createArtifactFile(s.runRoot, runID, diagnosticDirectory, name+".log", nil)
+	if err != nil {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: create immutable file: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = outputFile.discard()
+		}
+	}()
+	if err := outputFile.protect(); err != nil {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: protect file: %w", err)
+	}
+	if written, err := outputFile.file.Write(output); err != nil {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: write file: %w", err)
+	} else if written != len(output) {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: write file: %w", io.ErrShortWrite)
+	}
+	if err := outputFile.file.Sync(); err != nil {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: sync file: %w", err)
+	}
+	if err := outputFile.closeAndSync(); err != nil {
+		return db.Artifact{}, fmt.Errorf("create operation diagnostic: close output file: %w", err)
+	}
+	published = true
+	digest := sha256.Sum256(output)
+	mediaType, encoding := commandOutputFormat(output)
+	return db.Artifact{
+		StorageRoot:  db.ArtifactStorageRootRun,
+		RelativePath: relativePath,
+		Purpose:      db.ArtifactPurposeOperationDiagnostic,
+		Label:        "Operation diagnostic",
+		Kind:         db.ArtifactKindOperationDiagnostic,
 		MediaType:    mediaType,
 		Encoding:     encoding,
 		SHA256:       hex.EncodeToString(digest[:]),

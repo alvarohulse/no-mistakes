@@ -21,6 +21,10 @@ type commandOutputFile struct {
 }
 
 func createCommandOutputFile(root, runID, name string, afterCommandDirectoryOpen func()) (*commandOutputFile, error) {
+	return createArtifactFile(root, runID, commandOutputDirectory, name, afterCommandDirectoryOpen)
+}
+
+func createArtifactFile(root, runID, directoryName, name string, afterDirectoryOpen func()) (*commandOutputFile, error) {
 	rootDirectory, err := openOrCreateNoFollowArtifactRoot(root)
 	if err != nil {
 		return nil, err
@@ -33,12 +37,12 @@ func createCommandOutputFile(root, runID, name string, afterCommandDirectoryOpen
 	}
 	defer windows.CloseHandle(runDirectory)
 
-	commandDirectory, err := openOrCreatePrivateArtifactDirectory(runDirectory, commandOutputDirectory)
+	commandDirectory, err := openOrCreatePrivateArtifactDirectory(runDirectory, directoryName)
 	if err != nil {
-		return nil, fmt.Errorf("open command output directory: %w", err)
+		return nil, fmt.Errorf("open artifact directory: %w", err)
 	}
-	if afterCommandDirectoryOpen != nil {
-		afterCommandDirectoryOpen()
+	if afterDirectoryOpen != nil {
+		afterDirectoryOpen()
 	}
 	handle, err := createNoFollowArtifactFile(commandDirectory, name)
 	if err != nil {

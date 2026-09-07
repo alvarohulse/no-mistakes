@@ -204,8 +204,10 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	var artifactOwnerCount int
 	if err := q.QueryRow(
 		`SELECT count(*) FROM artifacts
-		 WHERE id = ? AND run_id = ? AND step_id = ? AND round_id = ?`,
+		 WHERE id = ? AND run_id = ? AND step_id = ? AND round_id = ?
+		   AND purpose = ? AND kind = ? AND storage_root = ? AND command_attempt_id IS NULL`,
 		*operation.DiagnosticArtifactID, operation.RunID, operation.StepID, operation.RoundID,
+		ArtifactPurposeOperationDiagnostic, ArtifactKindOperationDiagnostic, ArtifactStorageRootRun,
 	).Scan(&artifactOwnerCount); err != nil {
 		return fmt.Errorf("insert refresh operation: validate diagnostic artifact: %w", err)
 	}
