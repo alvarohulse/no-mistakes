@@ -393,9 +393,24 @@ func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, sou
 }
 
 // PersistStepRoundFixDecisionAndMarkStepFixing records the decision that
-// authorizes a repair and exposes the step as fixing in one transaction. A
-// repair must never begin from a decision that is absent or only partly stored.
+// authorizes a user-requested repair and exposes the step as fixing in one
+// transaction. A repair must never begin from a decision that is absent or
+// only partly stored.
 func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, source string, userFindingsJSON *string) error {
+	return d.persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID, selectedFindingIDs, source, userFindingsJSON, nil)
+}
+
+// PersistStepRoundAutoFixDecisionAndMarkStepFixing atomically records the
+// automatic repair decision, its attempted audit receipt, and the fixing
+// transition that authorizes the next repair invocation.
+func (d *DB) PersistStepRoundAutoFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, attemptedRepair StepRoundRepair) error {
+	if selectedFindingIDs == nil || strings.TrimSpace(*selectedFindingIDs) == "" || strings.TrimSpace(*selectedFindingIDs) == DeclinedSelectionJSON {
+		return fmt.Errorf("persist step round fix decision: automatic repair requires selected findings")
+	}
+	return d.persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID, selectedFindingIDs, RoundSelectionSourceAutoFix, nil, &attemptedRepair)
+}
+
+func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, source string, userFindingsJSON *string, attemptedRepair *StepRoundRepair) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("persist step round fix decision: begin transaction: %w", err)
@@ -405,7 +420,8 @@ func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 	if !validRoundDecisionSource(source) {
 		return fmt.Errorf("persist step round fix decision: invalid source %q", source)
 	}
-	if err := tx.QueryRow(`SELECT 1 FROM step_rounds WHERE id = ? AND step_result_id = ?`, roundID, stepResultID).Scan(new(int)); err != nil {
+	var runID string
+	if err := tx.QueryRow(`SELECT s.run_id FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ? AND r.step_result_id = ?`, roundID, stepResultID).Scan(&runID); err != nil {
 		return fmt.Errorf("persist step round fix decision: load round: %w", err)
 	}
 
@@ -433,6 +449,29 @@ func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID 
 			selectedFindingIDs, selectionSource, userFindingsJSON, roundID,
 		); err != nil {
 			return fmt.Errorf("persist step round fix decision: update legacy decision: %w", err)
+		}
+	}
+	if attemptedRepair != nil {
+		if source != RoundSelectionSourceAutoFix || attemptedRepair.FailureFingerprint == nil || attemptedRepair.Result == nil || *attemptedRepair.Result != RoundRepairAttempted {
+			return fmt.Errorf("persist step round fix decision: automatic repair audit must record an attempted fingerprint")
+		}
+		if attemptedRepair.RoundID == "" {
+			attemptedRepair.RoundID = roundID
+		}
+		if attemptedRepair.RunID == "" {
+			attemptedRepair.RunID = runID
+		}
+		if attemptedRepair.RoundID != roundID || attemptedRepair.RunID != runID {
+			return fmt.Errorf("persist step round fix decision: automatic repair audit does not belong to round")
+		}
+		if attemptedRepair.ID == "" {
+			attemptedRepair.ID = newID()
+		}
+		if attemptedRepair.CreatedAt == 0 {
+			attemptedRepair.CreatedAt = now()
+		}
+		if err := upsertRoundRepair(tx, *attemptedRepair); err != nil {
+			return fmt.Errorf("persist step round fix decision: insert automatic repair audit: %w", err)
 		}
 	}
 	result, err := tx.Exec(

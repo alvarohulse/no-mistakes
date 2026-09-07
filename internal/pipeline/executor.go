@@ -999,6 +999,37 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		finalExitCode = outcome.ExitCode
 		durationOverrideMS += outcome.DurationOverrideMS
 
+		repairFailureFindings := repairFailureFindingsJSON(outcome.Findings)
+		fixableFindings := autoFixableFindingsJSON(outcome.Findings)
+		finalRepairAudit := outcome.RepairAudit
+		var nextRepairDecision *RepairDecision
+		repairProgressChecked := false
+		if outcome.AutoFixable && autoFixLimit > 0 && fixableFindings != "" {
+			decision, progressErr := repairProgress.Next(ctx, workDir, repairFailureFindings, autoFixLimit)
+			if progressErr != nil {
+				return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
+			}
+			repairProgressChecked = true
+			nextRepairDecision = &decision
+			if decision.Audit.Result != "" {
+				finalRepairAudit = decision.Audit
+			}
+		}
+		if autoFixAttempts > 0 && finalRepairAudit.Result == "" {
+			if repairFailureFindings == "" {
+				finalRepairAudit = repairProgress.Resolved()
+			} else if !repairProgressChecked {
+				decision, progressErr := repairProgress.Observe(ctx, workDir, repairFailureFindings)
+				if progressErr != nil {
+					return false, fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr)
+				}
+				if decision.Audit.Result != "" {
+					finalRepairAudit = decision.Audit
+				}
+			}
+		}
+		willStartAutoFix := nextRepairDecision != nil && nextRepairDecision.Attempt
+
 		if outcome.Findings != "" {
 			if dbErr := e.db.SetStepFindings(sr.ID, outcome.Findings); dbErr != nil {
 				slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
@@ -1050,7 +1081,24 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 						subject.ReplayConfigJSON = append([]byte(nil), e.config.ReplayConfigJSON...)
 					}
 				}
-				dbErr = e.db.CompleteStepRoundStructured(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration)
+				if sctx.Fixing && willStartAutoFix {
+					idsJSON := findingIDsJSON(fixableFindings)
+					if idsJSON == "" {
+						dbErr = fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum)
+					} else {
+						dbErr = e.db.CompleteStepRoundStructuredAndStartAutoFix(sr.ID, currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration, &idsJSON, db.StepRoundRepair{
+							FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
+							Result:             roundStringPointer(finalRepairAudit.Result),
+						})
+					}
+				} else if sctx.Fixing && (finalRepairAudit.FailureFingerprint != "" || finalRepairAudit.Result != "") {
+					dbErr = e.db.CompleteStepRoundStructuredWithRepairAudit(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration, db.StepRoundRepair{
+						FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
+						Result:             roundStringPointer(finalRepairAudit.Result),
+					})
+				} else {
+					dbErr = e.db.CompleteStepRoundStructured(currentRoundID, evaluation, subject, fixSummaryPtr, roundDuration)
+				}
 			}
 		}
 		if dbErr != nil {
@@ -1077,8 +1125,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 			return nil
 		}
-		if err := persistRepairAudit(outcome.RepairAudit); err != nil {
-			return failStepPersistence(err)
+		if !sctx.Fixing && !willStartAutoFix {
+			if err := persistRepairAudit(finalRepairAudit); err != nil {
+				return failStepPersistence(err)
+			}
 		}
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.
@@ -1087,67 +1137,35 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 		}
 
-		// Check if auto-fix should be attempted.
-		// Only auto-fix findings whose action is "auto-fix".
-		// This runs before the NeedsApproval check so that all severity
-		// levels (including "info") get a chance at automatic fixing.
-		repairFailureFindings := repairFailureFindingsJSON(outcome.Findings)
-		fixableFindings := autoFixableFindingsJSON(outcome.Findings)
-		repairProgressChecked := false
-		if outcome.AutoFixable && autoFixLimit > 0 {
-			if fixableFindings != "" {
-				decision, progressErr := repairProgress.Next(ctx, workDir, repairFailureFindings, autoFixLimit)
-				if progressErr != nil {
-					return false, fmt.Errorf("evaluate %s repair progress: %w", stepName, progressErr)
+		if nextRepairDecision != nil {
+			if !nextRepairDecision.Attempt {
+				writeLog(nextRepairDecision.Message)
+			} else {
+				idsJSON := findingIDsJSON(fixableFindings)
+				if idsJSON == "" {
+					return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum))
 				}
-				repairProgressChecked = true
-				if !decision.Attempt {
-					if err := persistRepairAudit(decision.Audit); err != nil {
-						return failStepPersistence(err)
+				if !sctx.Fixing {
+					attemptedRepair := db.StepRoundRepair{
+						FailureFingerprint: roundStringPointer(finalRepairAudit.FailureFingerprint),
+						Result:             roundStringPointer(finalRepairAudit.Result),
 					}
-					writeLog(decision.Message)
-				} else {
-					idsJSON := findingIDsJSON(fixableFindings)
-					if idsJSON == "" {
-						return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: no selected findings", stepName, roundNum))
-					}
-					if err := e.db.PersistStepRoundFixDecisionAndMarkStepFixing(sr.ID, currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix, nil); err != nil {
+					if err := e.db.PersistStepRoundAutoFixDecisionAndMarkStepFixing(sr.ID, currentRoundID, &idsJSON, attemptedRepair); err != nil {
 						return failStepPersistence(fmt.Errorf("persist auto-fix decision for %s round %d: %w", stepName, roundNum, err))
 					}
-					if err := persistRepairAudit(decision.Audit); err != nil {
-						return failStepPersistence(err)
-					}
-					autoFixAttempts = decision.AttemptNumber
-					telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
-					slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
-					executionMS += time.Since(phaseStart).Milliseconds()
-					fixCount := findingsCount(fixableFindings)
-					writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
-					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
-					phaseStart = time.Now()
-					sctx.Fixing = true
-					sctx.PreviousFindings = fixableFindings
-					nextTrigger = "auto_fix"
-					continue
 				}
-			}
-		}
-		if autoFixAttempts > 0 && outcome.RepairAudit.Result == "" {
-			if repairFailureFindings == "" {
-				if err := persistRepairAudit(repairProgress.Resolved()); err != nil {
-					return failStepPersistence(err)
-				}
-			} else if !repairProgressChecked {
-				decision, progressErr := repairProgress.Observe(ctx, workDir, repairFailureFindings)
-				if progressErr != nil {
-					return false, fmt.Errorf("observe %s surviving repair failure: %w", stepName, progressErr)
-				}
-				if decision.Audit.Result != "" {
-					if err := persistRepairAudit(decision.Audit); err != nil {
-						return failStepPersistence(err)
-					}
-					writeLog(decision.Message)
-				}
+				autoFixAttempts = nextRepairDecision.AttemptNumber
+				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
+				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
+				executionMS += time.Since(phaseStart).Milliseconds()
+				fixCount := findingsCount(fixableFindings)
+				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
+				phaseStart = time.Now()
+				sctx.Fixing = true
+				sctx.PreviousFindings = fixableFindings
+				nextTrigger = "auto_fix"
+				continue
 			}
 		}
 
