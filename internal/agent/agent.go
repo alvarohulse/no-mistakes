@@ -34,12 +34,26 @@ type ModelIdentityReporter interface {
 	ConfiguredModel() ModelIdentity
 }
 
+// EffortReporter exposes a routed agent's controller-declared reasoning effort.
+// Wrappers must forward this capability so route inspection remains intact.
+type EffortReporter interface {
+	ConfiguredEffort() Effort
+}
+
 // ConfiguredModel returns a routed model identity when one was configured.
 func ConfiguredModel(a Agent) ModelIdentity {
 	if reporter, ok := a.(ModelIdentityReporter); ok {
 		return reporter.ConfiguredModel()
 	}
 	return ModelIdentity{}
+}
+
+// ConfiguredEffort returns a routed reasoning effort when one was configured.
+func ConfiguredEffort(a Agent) Effort {
+	if reporter, ok := a.(EffortReporter); ok {
+		return reporter.ConfiguredEffort()
+	}
+	return ""
 }
 
 // RunOpts configures a single agent invocation.
@@ -927,19 +941,20 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 			return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 		}
 	}
-	if opts.Model == "" {
+	if opts.Model == "" && opts.Effort == "" {
 		return created, nil
 	}
-	if opts.Vendor == "" {
+	if opts.Model != "" && opts.Vendor == "" {
 		_ = created.Close()
 		return nil, fmt.Errorf("model vendor is required for routed model %q", opts.Model)
 	}
-	return &modelIdentityAgent{inner: created, identity: ModelIdentity{Name: opts.Model, Vendor: opts.Vendor}}, nil
+	return &modelIdentityAgent{inner: created, identity: ModelIdentity{Name: opts.Model, Vendor: opts.Vendor}, effort: opts.Effort}, nil
 }
 
 type modelIdentityAgent struct {
 	inner    Agent
 	identity ModelIdentity
+	effort   Effort
 }
 
 func (a *modelIdentityAgent) Name() string { return a.inner.Name() }
@@ -972,6 +987,8 @@ func (a *modelIdentityAgent) apply(result *Result) {
 func (a *modelIdentityAgent) Close() error { return a.inner.Close() }
 
 func (a *modelIdentityAgent) ConfiguredModel() ModelIdentity { return a.identity }
+
+func (a *modelIdentityAgent) ConfiguredEffort() Effort { return a.effort }
 
 func (a *modelIdentityAgent) SupportsSessionResume() bool {
 	return SupportsSessionResume(a.inner)

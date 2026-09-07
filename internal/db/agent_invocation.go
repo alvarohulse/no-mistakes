@@ -9,12 +9,14 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
 	maxReviewCandidateAgentBytes  = 128
 	maxReviewCandidateModelBytes  = 256
 	maxReviewCandidateVendorBytes = 128
+	maxReviewCandidateEffortBytes = 16
 )
 
 // ReviewCandidateReceipt is the content-free route identity persisted with a
@@ -23,6 +25,7 @@ type ReviewCandidateReceipt struct {
 	Agent    string `json:"agent"`
 	Model    string `json:"model"`
 	Vendor   string `json:"vendor"`
+	Effort   string `json:"effort,omitempty"`
 	Optional bool   `json:"optional,omitempty"`
 }
 
@@ -454,7 +457,15 @@ func validateReviewCandidatePool(pool []ReviewCandidateReceipt) error {
 		if err := validateReviewCandidateIdentity("vendor", candidate.Vendor, maxReviewCandidateVendorBytes); err != nil {
 			return fmt.Errorf("review candidate %d: %w", i+1, err)
 		}
-		key := candidate.Agent + "\x00" + candidate.Model + "\x00" + candidate.Vendor
+		if candidate.Effort != "" {
+			if err := validateReviewCandidateIdentity("effort", candidate.Effort, maxReviewCandidateEffortBytes); err != nil {
+				return fmt.Errorf("review candidate %d: %w", i+1, err)
+			}
+		}
+		if err := types.ValidateAgentRoute(types.AgentName(candidate.Agent), candidate.Model, candidate.Vendor, candidate.Effort); err != nil {
+			return fmt.Errorf("review candidate %d route: %w", i+1, err)
+		}
+		key := candidate.Agent + "\x00" + candidate.Model + "\x00" + candidate.Vendor + "\x00" + candidate.Effort
 		if seen[key] {
 			return fmt.Errorf("review candidate %d duplicates %s/%s", i+1, candidate.Agent, candidate.Model)
 		}

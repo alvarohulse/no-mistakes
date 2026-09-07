@@ -146,8 +146,8 @@ func TestAgentInvocationRoundMustMatchInvocationSubject(t *testing.T) {
 func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	pool := []ReviewCandidateReceipt{
-		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
-		{Agent: "cursor", Model: "grok-4.6", Vendor: "xai", Optional: true},
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic", Effort: "high"},
+		{Agent: "cursor", Model: "grok-4.6", Vendor: "xai", Effort: "medium", Optional: true},
 	}
 	inv := AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "claude",
@@ -169,7 +169,7 @@ func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	if err := d.sql.QueryRow(`SELECT review_candidate_pool_json FROM agent_invocations WHERE run_id = ?`, run.ID).Scan(&encoded); err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `[{"agent":"claude","model":"claude-opus-5","vendor":"anthropic"},{"agent":"cursor","model":"grok-4.6","vendor":"xai","optional":true}]`
+	wantJSON := `[{"agent":"claude","model":"claude-opus-5","vendor":"anthropic","effort":"high"},{"agent":"cursor","model":"grok-4.6","vendor":"xai","effort":"medium","optional":true}]`
 	if encoded == nil || *encoded != wantJSON {
 		t.Fatalf("candidate pool JSON = %v, want %s", encoded, wantJSON)
 	}

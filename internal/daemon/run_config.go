@@ -409,6 +409,7 @@ func pushedConfigUsesDifferentTrustedControls(pushed, effective *config.RepoConf
 		!agentListsEqual(pushed.Agents, effective.Agents) ||
 		!stepAgentRoutesEqual(pushed.ConfiguredStepAgents(), effective.ConfiguredStepAgents()) ||
 		!stepModelRoutesEqual(pushed.ConfiguredStepModels(), effective.ConfiguredStepModels()) ||
+		!stepEffortRoutesEqual(pushed.ConfiguredStepEfforts(), effective.ConfiguredStepEfforts()) ||
 		!reviewCandidateRoutesEqual(pushed.Review, effective.Review)
 }
 

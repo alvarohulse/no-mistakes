@@ -499,13 +499,14 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 		return nil, fmt.Errorf("resolved pipeline default agent does not match route order")
 	}
 	routes := &pipelineAgents{routes: pipeline.AgentRoutes{ByStep: make(map[types.StepName]agent.Agent)}}
-	build := func(names []types.AgentName, model config.ModelRoute) (agent.Agent, error) {
+	build := func(names []types.AgentName, model config.ModelRoute, effort string) (agent.Agent, error) {
 		created := make([]agent.Agent, 0, len(names))
 		for _, name := range names {
 			next, err := agent.NewWithOptions(name, cfg.AgentPathFor(name), cfg.AgentArgsFor(name), agent.Options{
 				ACPRegistryOverrides:    cfg.ACPRegistryOverrides,
 				Model:                   model.Name,
 				Vendor:                  model.Vendor,
+				Effort:                  agent.Effort(effort),
 				DisableProjectSettings:  cfg.DisableProjectSettings,
 				ProcessTerminationGrace: cfg.ProcessTerminationGrace,
 			})
@@ -528,7 +529,7 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 		return routed, nil
 	}
 
-	defaultAgent, err := build(cfg.Agents, config.ModelRoute{})
+	defaultAgent, err := build(cfg.Agents, config.ModelRoute{}, "")
 	if err != nil {
 		return nil, err
 	}
@@ -546,13 +547,14 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 	} {
 		names := cfg.StepAgents[step]
 		model := cfg.ConfiguredModelForStep(step)
-		if len(names) == 0 && model.Name == "" {
+		effort := cfg.ConfiguredEffortForStep(step)
+		if len(names) == 0 && model.Name == "" && effort == "" {
 			continue
 		}
 		if len(names) == 0 {
 			names = cfg.Agents
 		}
-		routed, routeErr := build(names, model)
+		routed, routeErr := build(names, model, effort)
 		if routeErr != nil {
 			_ = routes.Close()
 			return nil, fmt.Errorf("create %s agent route: %w", step, routeErr)
@@ -560,7 +562,7 @@ func newResolvedPipelineAgentsWithEvidenceRoot(cfg *config.Config, evidenceRoot 
 		routes.routes.ByStep[step] = routed
 	}
 	for i, candidate := range cfg.ReviewCandidates {
-		routed, routeErr := build([]types.AgentName{candidate.Agent}, candidate.Model)
+		routed, routeErr := build([]types.AgentName{candidate.Agent}, candidate.Model, candidate.Effort)
 		if routeErr != nil {
 			_ = routes.Close()
 			return nil, fmt.Errorf("create review candidate %d route: %w", i+1, routeErr)
@@ -735,6 +737,18 @@ func stepModelRoutesEqual(a, b map[types.StepName]config.ModelRoute) bool {
 	}
 	for step, model := range a {
 		if b[step] != model {
+			return false
+		}
+	}
+	return true
+}
+
+func stepEffortRoutesEqual(a, b map[types.StepName]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for step, effort := range a {
+		if b[step] != effort {
 			return false
 		}
 	}

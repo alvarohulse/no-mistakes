@@ -103,11 +103,13 @@ type effectiveAgentDocument struct {
 type effectiveAgentRoute struct {
 	Agents []types.AgentName `yaml:"agents"`
 	Model  config.ModelRoute `yaml:"model"`
+	Effort string            `yaml:"effort,omitempty"`
 }
 
 type effectiveReviewCandidate struct {
 	Agent    types.AgentName   `yaml:"agent"`
 	Model    config.ModelRoute `yaml:"model"`
+	Effort   string            `yaml:"effort,omitempty"`
 	Optional bool              `yaml:"optional"`
 }
 
@@ -266,12 +268,13 @@ func effectiveConfigDocumentFromResolution(stackedOn string, resolved *runPolicy
 		stepRoutes[step] = effectiveAgentRoute{
 			Agents: append([]types.AgentName(nil), route.Agents...),
 			Model:  config.ModelRoute{Name: route.Model.Name, Vendor: route.Model.Vendor},
+			Effort: route.Effort,
 		}
 	}
 	candidates := make([]effectiveReviewCandidate, 0, len(routing.ReviewCandidates))
 	for _, candidate := range routing.ReviewCandidates {
 		candidates = append(candidates, effectiveReviewCandidate{
-			Agent: candidate.Agent, Model: config.ModelRoute{Name: candidate.Model.Name, Vendor: candidate.Model.Vendor}, Optional: candidate.Optional,
+			Agent: candidate.Agent, Model: config.ModelRoute{Name: candidate.Model.Name, Vendor: candidate.Model.Vendor}, Effort: candidate.Effort, Optional: candidate.Optional,
 		})
 	}
 	steps := make([]effectivePolicyStep, 0, len(resolved.Policy.Steps))
@@ -497,6 +500,7 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 			}
 			set(prefix+".model.name", resolvedPrefix+".model.name")
 			set(prefix+".model.vendor", resolvedPrefix+".model.vendor")
+			set(prefix+".effort", resolvedPrefix+".effort")
 		}
 		for i := range document.Agent.ReviewCandidates {
 			prefix := fmt.Sprintf("agent.review_candidates[%d]", i)
@@ -504,6 +508,7 @@ func effectiveConfigAnnotations(resolved *runPolicyResolution, document effectiv
 			set(prefix+".agent", resolvedPrefix+".agent")
 			set(prefix+".model.name", resolvedPrefix+".model.name")
 			set(prefix+".model.vendor", resolvedPrefix+".model.vendor")
+			set(prefix+".effort", resolvedPrefix+".effort")
 			set(prefix+".optional", resolvedPrefix+".optional")
 		}
 	}

@@ -23,8 +23,13 @@ func TestNewPipelineAgents_CarriesFixerAndReviewCandidateModelIdentity(t *testin
 			types.StepBuild:  {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 		},
+		StepEfforts: map[types.StepName]string{
+			types.StepBuild:  "xhigh",
+			types.StepReview: "xhigh",
+			types.StepTest:   "low",
+		},
 		ReviewCandidates: []config.ReviewCandidate{
-			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
+			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}, Effort: "high"},
 		},
 	}
 	routes, err := newPipelineAgents(context.Background(), cfg, fakeLookPath)
@@ -36,14 +41,23 @@ func TestNewPipelineAgents_CarriesFixerAndReviewCandidateModelIdentity(t *testin
 	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepBuild)); got != (agent.ModelIdentity{Name: "gpt-5.6-sol", Vendor: "openai"}) {
 		t.Fatalf("build model = %#v", got)
 	}
+	if got := agent.ConfiguredEffort(routes.AgentForStep(types.StepBuild)); got != agent.EffortXHigh {
+		t.Fatalf("build effort = %q, want %q", got, agent.EffortXHigh)
+	}
 	if len(routes.routes.ReviewCandidates) != 1 {
 		t.Fatalf("review candidate routes = %d, want 1", len(routes.routes.ReviewCandidates))
 	}
 	if got := agent.ConfiguredModel(routes.routes.ReviewCandidates[0]); got != (agent.ModelIdentity{Name: "claude-opus-5", Vendor: "anthropic"}) {
 		t.Fatalf("review candidate model = %#v", got)
 	}
+	if got := agent.ConfiguredEffort(routes.routes.ReviewCandidates[0]); got != agent.EffortHigh {
+		t.Fatalf("review candidate effort = %q, want %q", got, agent.EffortHigh)
+	}
 	if got := agent.ConfiguredModel(routes.AgentForStep(types.StepTest)); got != (agent.ModelIdentity{}) {
-		t.Fatalf("unconfigured test model = %#v, want empty", got)
+		t.Fatalf("effort-only test model = %#v, want empty", got)
+	}
+	if got := agent.ConfiguredEffort(routes.AgentForStep(types.StepTest)); got != agent.EffortLow {
+		t.Fatalf("effort-only test effort = %q, want %q", got, agent.EffortLow)
 	}
 }
 

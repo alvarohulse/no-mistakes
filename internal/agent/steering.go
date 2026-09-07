@@ -48,6 +48,8 @@ func (s steeredAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 
 func (s steeredAgent) ConfiguredModel() ModelIdentity { return ConfiguredModel(s.Agent) }
 
+func (s steeredAgent) ConfiguredEffort() Effort { return ConfiguredEffort(s.Agent) }
+
 func (s steeredAgent) SupportsSessionResume() bool {
 	return SupportsSessionResume(s.Agent)
 }

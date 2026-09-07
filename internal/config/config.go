@@ -354,22 +354,26 @@ type StepAgentRaw struct {
 	Agent  types.AgentName   `yaml:"-"`
 	Agents []types.AgentName `yaml:"-"`
 	Model  ModelRoute        `yaml:"model"`
+	Effort string            `yaml:"effort"`
 }
 
 func (c StepAgentRaw) MarshalYAML() (any, error) {
 	return struct {
-		Agent agentList  `yaml:"agent,omitempty"`
-		Model ModelRoute `yaml:"model,omitempty"`
+		Agent  agentList  `yaml:"agent,omitempty"`
+		Model  ModelRoute `yaml:"model,omitempty"`
+		Effort string     `yaml:"effort,omitempty"`
 	}{
-		Agent: agentList(stepAgentNames(c.Agent, c.Agents)),
-		Model: c.Model,
+		Agent:  agentList(stepAgentNames(c.Agent, c.Agents)),
+		Model:  c.Model,
+		Effort: c.Effort,
 	}, nil
 }
 
 func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
-		Agent agentList  `yaml:"agent"`
-		Model ModelRoute `yaml:"model"`
+		Agent  agentList  `yaml:"agent"`
+		Model  ModelRoute `yaml:"model"`
+		Effort string     `yaml:"effort"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
@@ -377,7 +381,8 @@ func (c *StepAgentRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
-	return nil
+	c.Effort = raw.Effort
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 // ModelRoute is a controller-known model identity for one pipeline route.
@@ -425,6 +430,7 @@ func (m ModelRoute) Validate() error {
 type ReviewCandidate struct {
 	Agent    types.AgentName `yaml:"agent" json:"agent"`
 	Model    ModelRoute      `yaml:"model" json:"model"`
+	Effort   string          `yaml:"effort,omitempty" json:"effort,omitempty"`
 	Optional bool            `yaml:"optional,omitempty" json:"optional,omitempty"`
 }
 
@@ -432,13 +438,14 @@ func (c *ReviewCandidate) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent    string     `yaml:"agent"`
 		Model    ModelRoute `yaml:"model"`
+		Effort   string     `yaml:"effort"`
 		Optional bool       `yaml:"optional"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
 		return err
 	}
 	raw.Agent = strings.TrimSpace(raw.Agent)
-	candidate := ReviewCandidate{Agent: types.AgentName(raw.Agent), Model: raw.Model, Optional: raw.Optional}
+	candidate := ReviewCandidate{Agent: types.AgentName(raw.Agent), Model: raw.Model, Effort: raw.Effort, Optional: raw.Optional}
 	if err := candidate.Validate(); err != nil {
 		return err
 	}
@@ -461,6 +468,9 @@ func (c ReviewCandidate) Validate() error {
 	if err := c.Model.Validate(); err != nil {
 		return fmt.Errorf("review candidate model: %w", err)
 	}
+	if err := types.ValidateAgentRoute(c.Agent, c.Model.Name, c.Model.Vendor, c.Effort); err != nil {
+		return fmt.Errorf("review candidate route: %w", err)
+	}
 	return nil
 }
 
@@ -476,11 +486,13 @@ func (c ReviewRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent            agentList         `yaml:"agent,omitempty"`
 		Model            ModelRoute        `yaml:"model,omitempty"`
+		Effort           string            `yaml:"effort,omitempty"`
 		Candidates       []ReviewCandidate `yaml:"candidates,omitempty"`
 		PathInstructions []PathInstruction `yaml:"path_instructions,omitempty"`
 	}{
 		Agent:            agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:            c.Model,
+		Effort:           c.Effort,
 		Candidates:       append([]ReviewCandidate(nil), c.Candidates...),
 		PathInstructions: c.PathInstructions,
 	}, nil
@@ -490,6 +502,7 @@ func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent                agentList         `yaml:"agent"`
 		Model                ModelRoute        `yaml:"model"`
+		Effort               string            `yaml:"effort"`
 		Candidates           []ReviewCandidate `yaml:"candidates"`
 		LegacyAdversaryAgent any               `yaml:"adversary_agent"`
 		LegacyAdversaryModel any               `yaml:"adversary_model"`
@@ -504,9 +517,10 @@ func (c *ReviewRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.Candidates = append([]ReviewCandidate(nil), raw.Candidates...)
 	c.PathInstructions = raw.PathInstructions
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 func resolveLegacyStepConfig(refresh, legacyRebase *StepAgentRaw) (StepAgentRaw, error) {
@@ -529,6 +543,7 @@ type RefreshRaw struct {
 	Agent    types.AgentName
 	Agents   []types.AgentName
 	Model    ModelRoute
+	Effort   string
 	Strategy types.RefreshStrategy
 }
 
@@ -536,10 +551,12 @@ func (c RefreshRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent    agentList             `yaml:"agent,omitempty"`
 		Model    ModelRoute            `yaml:"model,omitempty"`
+		Effort   string                `yaml:"effort,omitempty"`
 		Strategy types.RefreshStrategy `yaml:"strategy,omitempty"`
 	}{
 		Agent:    agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:    c.Model,
+		Effort:   c.Effort,
 		Strategy: c.Strategy,
 	}, nil
 }
@@ -548,6 +565,7 @@ func (c *RefreshRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent    agentList  `yaml:"agent"`
 		Model    ModelRoute `yaml:"model"`
+		Effort   string     `yaml:"effort"`
 		Strategy string     `yaml:"strategy"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
@@ -560,8 +578,9 @@ func (c *RefreshRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.Strategy = strategy
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 func resolveLegacyRepoRefreshConfig(refresh *RefreshRaw, legacyRebase *StepAgentRaw) (RefreshRaw, error) {
@@ -572,7 +591,7 @@ func resolveLegacyRepoRefreshConfig(refresh *RefreshRaw, legacyRebase *StepAgent
 		return *refresh, nil
 	}
 	if legacyRebase != nil {
-		return RefreshRaw{Agent: legacyRebase.Agent, Agents: copyAgents(legacyRebase.Agents), Model: legacyRebase.Model}, nil
+		return RefreshRaw{Agent: legacyRebase.Agent, Agents: copyAgents(legacyRebase.Agents), Model: legacyRebase.Model, Effort: legacyRebase.Effort}, nil
 	}
 	return RefreshRaw{}, nil
 }
@@ -582,6 +601,7 @@ type DocumentRaw struct {
 	Agent  types.AgentName   `yaml:"-"`
 	Agents []types.AgentName `yaml:"-"`
 	Model  ModelRoute        `yaml:"model"`
+	Effort string            `yaml:"effort"`
 	// Instructions augment (never replace) the built-in documentation
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
@@ -592,10 +612,12 @@ func (c DocumentRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent        agentList  `yaml:"agent,omitempty"`
 		Model        ModelRoute `yaml:"model,omitempty"`
+		Effort       string     `yaml:"effort,omitempty"`
 		Instructions string     `yaml:"instructions,omitempty"`
 	}{
 		Agent:        agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:        c.Model,
+		Effort:       c.Effort,
 		Instructions: c.Instructions,
 	}, nil
 }
@@ -604,6 +626,7 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent        agentList  `yaml:"agent"`
 		Model        ModelRoute `yaml:"model"`
+		Effort       string     `yaml:"effort"`
 		Instructions string     `yaml:"instructions"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
@@ -612,8 +635,9 @@ func (c *DocumentRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.Instructions = raw.Instructions
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 // PathInstruction is one glob-scoped block of review guidance. Path follows the
@@ -873,6 +897,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("intent.model") {
 		out.Intent.Model = override.Intent.Model
 	}
+	if override.has("intent.effort") {
+		out.Intent.Effort = override.Intent.Effort
+	}
 	if override.has("intent.enabled") {
 		out.Intent.Enabled = override.Intent.Enabled
 	}
@@ -892,6 +919,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("refresh.model", "rebase.model") {
 		out.Refresh.Model = override.Refresh.Model
 	}
+	if override.has("refresh.effort", "rebase.effort") {
+		out.Refresh.Effort = override.Refresh.Effort
+	}
 	if override.has("refresh.strategy") {
 		out.Refresh.Strategy = override.Refresh.Strategy
 	}
@@ -901,6 +931,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	}
 	if override.has("review.model") {
 		out.Review.Model = override.Review.Model
+	}
+	if override.has("review.effort") {
+		out.Review.Effort = override.Review.Effort
 	}
 	if override.has("review.candidates") {
 		out.Review.Candidates = copyReviewCandidates(override.Review.Candidates)
@@ -915,6 +948,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("build.model") {
 		out.Build.Model = override.Build.Model
 	}
+	if override.has("build.effort") {
+		out.Build.Effort = override.Build.Effort
+	}
 	if override.has("test.agent") {
 		out.Test.Agent = override.Test.Agent
 		out.Test.Agents = copyAgents(override.Test.Agents)
@@ -922,12 +958,18 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("test.model") {
 		out.Test.Model = override.Test.Model
 	}
+	if override.has("test.effort") {
+		out.Test.Effort = override.Test.Effort
+	}
 	if override.has("document.agent") {
 		out.Document.Agent = override.Document.Agent
 		out.Document.Agents = copyAgents(override.Document.Agents)
 	}
 	if override.has("document.model") {
 		out.Document.Model = override.Document.Model
+	}
+	if override.has("document.effort") {
+		out.Document.Effort = override.Document.Effort
 	}
 	if override.has("document.instructions") {
 		out.Document.Instructions = override.Document.Instructions
@@ -939,6 +981,9 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("lint.model") {
 		out.Lint.Model = override.Lint.Model
 	}
+	if override.has("lint.effort") {
+		out.Lint.Effort = override.Lint.Effort
+	}
 	if override.has("pr.agent") {
 		out.PR.Agent = override.PR.Agent
 		out.PR.Agents = copyAgents(override.PR.Agents)
@@ -946,12 +991,18 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("pr.model") {
 		out.PR.Model = override.PR.Model
 	}
+	if override.has("pr.effort") {
+		out.PR.Effort = override.PR.Effort
+	}
 	if override.has("ci.agent") {
 		out.CI.Agent = override.CI.Agent
 		out.CI.Agents = copyAgents(override.CI.Agents)
 	}
 	if override.has("ci.model") {
 		out.CI.Model = override.CI.Model
+	}
+	if override.has("ci.effort") {
+		out.CI.Effort = override.CI.Effort
 	}
 	if override.has("ci.rerun_transient") {
 		out.CI.RerunTransient = override.CI.RerunTransient
@@ -1457,10 +1508,12 @@ func (c CIRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent          agentList  `yaml:"agent,omitempty"`
 		Model          ModelRoute `yaml:"model,omitempty"`
+		Effort         string     `yaml:"effort,omitempty"`
 		RerunTransient *int       `yaml:"rerun_transient,omitempty"`
 	}{
 		Agent:          agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:          c.Model,
+		Effort:         c.Effort,
 		RerunTransient: c.RerunTransient,
 	}, nil
 }
@@ -1469,6 +1522,7 @@ func (c *CIRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent          agentList  `yaml:"agent"`
 		Model          ModelRoute `yaml:"model"`
+		Effort         string     `yaml:"effort"`
 		RerunTransient *int       `yaml:"rerun_transient"`
 	}
 	if err := decodeKnownFields(value, &raw); err != nil {
@@ -1477,8 +1531,9 @@ func (c *CIRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.RerunTransient = raw.RerunTransient
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 // CI holds the resolved CI-step settings.
@@ -1530,6 +1585,7 @@ type Config struct {
 	Agents                  []types.AgentName
 	StepAgents              map[types.StepName][]types.AgentName
 	StepModels              map[types.StepName]ModelRoute
+	StepEfforts             map[types.StepName]string
 	ReviewCandidates        []ReviewCandidate
 	Runner                  runner.Spec
 	ResolvedRunner          *runner.Provenance
@@ -1695,6 +1751,7 @@ type TestRaw struct {
 	Agent    types.AgentName   `yaml:"-"`
 	Agents   []types.AgentName `yaml:"-"`
 	Model    ModelRoute        `yaml:"model"`
+	Effort   string            `yaml:"effort"`
 	Evidence EvidenceRaw       `yaml:"evidence"`
 }
 
@@ -1702,10 +1759,12 @@ func (c TestRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent    agentList   `yaml:"agent,omitempty"`
 		Model    ModelRoute  `yaml:"model,omitempty"`
+		Effort   string      `yaml:"effort,omitempty"`
 		Evidence EvidenceRaw `yaml:"evidence,omitempty"`
 	}{
 		Agent:    agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:    c.Model,
+		Effort:   c.Effort,
 		Evidence: c.Evidence,
 	}, nil
 }
@@ -1714,6 +1773,7 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent    agentList   `yaml:"agent"`
 		Model    ModelRoute  `yaml:"model"`
+		Effort   string      `yaml:"effort"`
 		Evidence EvidenceRaw `yaml:"evidence"`
 	}
 	if err := decodeKnownFieldsShallow(value, &raw); err != nil {
@@ -1722,8 +1782,9 @@ func (c *TestRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.Evidence = raw.Evidence
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 // EvidenceRaw is the YAML representation of owner-local test-evidence
@@ -1851,6 +1912,7 @@ type IntentRaw struct {
 	Agent           types.AgentName   `yaml:"-"`
 	Agents          []types.AgentName `yaml:"-"`
 	Model           ModelRoute        `yaml:"model"`
+	Effort          string            `yaml:"effort"`
 	Enabled         *bool             `yaml:"enabled"`
 	Threshold       *float64          `yaml:"threshold"`
 	SlackDays       *int              `yaml:"slack_days"`
@@ -1861,6 +1923,7 @@ func (c IntentRaw) MarshalYAML() (any, error) {
 	return struct {
 		Agent           agentList  `yaml:"agent,omitempty"`
 		Model           ModelRoute `yaml:"model,omitempty"`
+		Effort          string     `yaml:"effort,omitempty"`
 		Enabled         *bool      `yaml:"enabled,omitempty"`
 		Threshold       *float64   `yaml:"threshold,omitempty"`
 		SlackDays       *int       `yaml:"slack_days,omitempty"`
@@ -1868,6 +1931,7 @@ func (c IntentRaw) MarshalYAML() (any, error) {
 	}{
 		Agent:           agentList(stepAgentNames(c.Agent, c.Agents)),
 		Model:           c.Model,
+		Effort:          c.Effort,
 		Enabled:         c.Enabled,
 		Threshold:       c.Threshold,
 		SlackDays:       c.SlackDays,
@@ -1879,6 +1943,7 @@ func (c *IntentRaw) UnmarshalYAML(value *yaml.Node) error {
 	var raw struct {
 		Agent           agentList  `yaml:"agent"`
 		Model           ModelRoute `yaml:"model"`
+		Effort          string     `yaml:"effort"`
 		Enabled         *bool      `yaml:"enabled"`
 		Threshold       *float64   `yaml:"threshold"`
 		SlackDays       *int       `yaml:"slack_days"`
@@ -1890,11 +1955,12 @@ func (c *IntentRaw) UnmarshalYAML(value *yaml.Node) error {
 	c.Agent = firstAgent(raw.Agent)
 	c.Agents = copyAgents(raw.Agent)
 	c.Model = raw.Model
+	c.Effort = raw.Effort
 	c.Enabled = raw.Enabled
 	c.Threshold = raw.Threshold
 	c.SlackDays = raw.SlackDays
 	c.DisabledReaders = raw.DisabledReaders
-	return nil
+	return validateRawStepRoute(c.Agent, c.Agents, c.Model, c.Effort)
 }
 
 // Intent is the resolved user-intent extraction config.
@@ -2094,6 +2160,21 @@ func firstAgent(names []types.AgentName) types.AgentName {
 	return names[0]
 }
 
+func validateRawStepRoute(agentName types.AgentName, agents []types.AgentName, model ModelRoute, effort string) error {
+	if err := types.ValidateAgentEffort(effort); err != nil {
+		return err
+	}
+	names := stepAgentNames(agentName, agents)
+	// Ordered fallback lists may intentionally contain backends that cannot
+	// express a cross-vendor model or effort; ResolveAgent filters those at
+	// launch while retaining the usable entries. A single concrete route is
+	// unambiguous and can be rejected during config parsing.
+	if len(names) == 1 && names[0] != types.AgentAuto {
+		return types.ValidateAgentRoute(names[0], model.Name, model.Vendor, effort)
+	}
+	return nil
+}
+
 func copyAgents(names []types.AgentName) []types.AgentName {
 	if len(names) == 0 {
 		return nil
@@ -2122,6 +2203,12 @@ func addStepAgentRoute(routes map[types.StepName][]types.AgentName, step types.S
 func addStepModelRoute(routes map[types.StepName]ModelRoute, step types.StepName, model ModelRoute) {
 	if model.Name != "" {
 		routes[step] = model
+	}
+}
+
+func addStepEffortRoute(routes map[types.StepName]string, step types.StepName, effort string) {
+	if effort != "" {
+		routes[step] = effort
 	}
 }
 
@@ -2158,6 +2245,23 @@ func (c *RepoConfig) ConfiguredStepModels() map[types.StepName]ModelRoute {
 	return routes
 }
 
+// ConfiguredStepEfforts returns the repo's explicitly configured per-step
+// reasoning efforts. Unconfigured steps are omitted and use their harness
+// default effort.
+func (c *RepoConfig) ConfiguredStepEfforts() map[types.StepName]string {
+	routes := make(map[types.StepName]string)
+	addStepEffortRoute(routes, types.StepIntent, c.Intent.Effort)
+	addStepEffortRoute(routes, types.StepRefresh, c.Refresh.Effort)
+	addStepEffortRoute(routes, types.StepReview, c.Review.Effort)
+	addStepEffortRoute(routes, types.StepBuild, c.Build.Effort)
+	addStepEffortRoute(routes, types.StepTest, c.Test.Effort)
+	addStepEffortRoute(routes, types.StepDocument, c.Document.Effort)
+	addStepEffortRoute(routes, types.StepLint, c.Lint.Effort)
+	addStepEffortRoute(routes, types.StepPR, c.PR.Effort)
+	addStepEffortRoute(routes, types.StepCI, c.CI.Effort)
+	return routes
+}
+
 func (c *GlobalConfig) configuredStepAgents() map[types.StepName][]types.AgentName {
 	routes := make(map[types.StepName][]types.AgentName)
 	addStepAgentRoute(routes, types.StepIntent, c.Intent.Agent, c.Intent.Agents)
@@ -2186,10 +2290,30 @@ func (c *GlobalConfig) configuredStepModels() map[types.StepName]ModelRoute {
 	return routes
 }
 
+func (c *GlobalConfig) configuredStepEfforts() map[types.StepName]string {
+	routes := make(map[types.StepName]string)
+	addStepEffortRoute(routes, types.StepIntent, c.Intent.Effort)
+	addStepEffortRoute(routes, types.StepRefresh, c.Refresh.Effort)
+	addStepEffortRoute(routes, types.StepReview, c.Review.Effort)
+	addStepEffortRoute(routes, types.StepBuild, c.Build.Effort)
+	addStepEffortRoute(routes, types.StepTest, c.Test.Effort)
+	addStepEffortRoute(routes, types.StepDocument, c.Document.Effort)
+	addStepEffortRoute(routes, types.StepLint, c.Lint.Effort)
+	addStepEffortRoute(routes, types.StepPR, c.PR.Effort)
+	addStepEffortRoute(routes, types.StepCI, c.CI.Effort)
+	return routes
+}
+
 // ConfiguredModelForStep returns a step's explicit model identity. The empty
 // route means the selected backend should use its own default model.
 func (c *Config) ConfiguredModelForStep(step types.StepName) ModelRoute {
 	return c.StepModels[step]
+}
+
+// ConfiguredEffortForStep returns a step's explicit reasoning effort. The
+// empty value means the selected backend should use its own default effort.
+func (c *Config) ConfiguredEffortForStep(step types.StepName) string {
+	return c.StepEfforts[step]
 }
 
 // ConfiguredAgentsForStep returns a step's explicit route or the run-wide
@@ -2534,12 +2658,15 @@ func (c *Config) resolveAgentWithOrigins(ctx context.Context, lookPath func(stri
 	if c.StepModels == nil {
 		c.StepModels = make(map[types.StepName]ModelRoute)
 	}
+	if c.StepEfforts == nil {
+		c.StepEfforts = make(map[types.StepName]string)
+	}
 	if err := c.validateManagedRoutes(); err != nil {
 		return nil, err
 	}
 	origins := &agentResolutionOrigins{Steps: make(map[types.StepName][]bool)}
 	defaultCandidates := c.configuredAgents()
-	resolved, runtimeOrigins, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgents(ctx, defaultCandidates, ModelRoute{}, "", lookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -2559,13 +2686,14 @@ func (c *Config) resolveAgentWithOrigins(ctx context.Context, lookPath func(stri
 	} {
 		candidates := c.StepAgents[step]
 		model := c.StepModels[step]
-		if len(candidates) == 0 && model.Name == "" {
+		effort := c.StepEfforts[step]
+		if len(candidates) == 0 && model.Name == "" && effort == "" {
 			continue
 		}
 		if len(candidates) == 0 {
 			candidates = defaultCandidates
 		}
-		resolved, runtimeOrigins, err := c.resolveAgents(ctx, candidates, model, lookPath)
+		resolved, runtimeOrigins, err := c.resolveAgents(ctx, candidates, model, effort, lookPath)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s agent route: %w", step, err)
 		}
@@ -2645,7 +2773,7 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 		if err := candidate.Validate(); err != nil {
 			return fmt.Errorf("resolve review candidate %d: %w", i+1, err)
 		}
-		if err := validateAgentModelCompatibility(candidate.Agent, candidate.Model); err != nil {
+		if err := validateAgentRouteCompatibility(candidate.Agent, candidate.Model, candidate.Effort); err != nil {
 			return fmt.Errorf("resolve review candidate %d: %w", i+1, err)
 		}
 		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate.Agent, lookPath)
@@ -2678,7 +2806,7 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 			return fmt.Errorf("required review candidate %s/%s is unavailable: model is not present in the harness catalog", candidate.Agent, candidate.Model.Name)
 		}
 		candidate.Agent = resolved
-		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor
+		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor + "\x00" + candidate.Effort
 		if seen[key] {
 			return fmt.Errorf("resolved review candidate %d duplicates the %s/%s route", i+1, candidate.Agent, candidate.Model.Name)
 		}
@@ -2692,18 +2820,18 @@ func (c *Config) resolveReviewCandidates(ctx context.Context, lookPath func(stri
 	return nil
 }
 
-func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
+func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName, model ModelRoute, effort string, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	if len(candidates) <= 1 {
 		name := firstAgent(candidates)
 		configured := name
 		if name == types.AgentAuto {
-			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
+			name, err := c.resolveAutoAgentForRoute(ctx, model, effort, lookPath)
 			if err != nil {
 				return nil, nil, err
 			}
 			return []types.AgentName{name}, []bool{true}, nil
 		}
-		if err := validateAgentModelCompatibility(name, model); err != nil {
+		if err := validateAgentRouteCompatibility(name, model, effort); err != nil {
 			return nil, nil, err
 		}
 		resolved, ok, probe, err := c.resolveConfiguredAgent(ctx, name, lookPath)
@@ -2716,7 +2844,7 @@ func (c *Config) resolveAgents(ctx context.Context, candidates []types.AgentName
 		return []types.AgentName{resolved}, []bool{resolved != configured}, nil
 	}
 
-	resolved, runtimeOrigins, err := c.resolveAgentList(ctx, candidates, model, lookPath)
+	resolved, runtimeOrigins, err := c.resolveAgentList(ctx, candidates, model, effort, lookPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2734,13 +2862,13 @@ func (c *Config) configuredAgents() []types.AgentName {
 }
 
 func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (string, error)) (types.AgentName, error) {
-	return c.resolveAutoAgentForModel(ctx, ModelRoute{}, lookPath)
+	return c.resolveAutoAgentForRoute(ctx, ModelRoute{}, "", lookPath)
 }
 
-func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute, lookPath func(string) (string, error)) (types.AgentName, error) {
+func (c *Config) resolveAutoAgentForRoute(ctx context.Context, model ModelRoute, effort string, lookPath func(string) (string, error)) (types.AgentName, error) {
 	probed := make([]string, 0, len(nativeAgentProbeOrder)+len(types.RegisteredACPTargets())+1)
 	for _, name := range nativeAgentProbeOrder {
-		if !agentCanServeModel(name, model) {
+		if !agentCanServeRoute(name, model, effort) {
 			continue
 		}
 		bin := string(name)
@@ -2779,7 +2907,7 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 		if err != nil {
 			return "", err
 		}
-		if available {
+		if available && agentCanServeRoute(name, model, effort) {
 			return name, nil
 		}
 	}
@@ -2789,7 +2917,7 @@ func (c *Config) resolveAutoAgentForModel(ctx context.Context, model ModelRoute,
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
 
-func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
+func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, model ModelRoute, effort string, lookPath func(string) (string, error)) ([]types.AgentName, []bool, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
 	runtimeOrigins := make([]bool, 0, len(candidates))
 	seen := map[string]bool{}
@@ -2798,7 +2926,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		configured := candidate
 		fromAuto := candidate == types.AgentAuto
 		if candidate == types.AgentAuto {
-			name, err := c.resolveAutoAgentForModel(ctx, model, lookPath)
+			name, err := c.resolveAutoAgentForRoute(ctx, model, effort, lookPath)
 			if err != nil && strings.HasPrefix(err.Error(), "no runnable agent found") {
 				probed = append(probed, "auto")
 				continue
@@ -2808,7 +2936,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 			}
 			candidate = name
 		}
-		if err := validateAgentModelCompatibility(candidate, model); err != nil {
+		if err := validateAgentRouteCompatibility(candidate, model, effort); err != nil {
 			if isACPAgent(candidate) {
 				return nil, nil, err
 			}
@@ -2839,18 +2967,12 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 	return resolved, runtimeOrigins, nil
 }
 
-func validateAgentModelCompatibility(name types.AgentName, model ModelRoute) error {
-	if model.Name == "" {
-		return nil
-	}
-	return types.ValidateAgentRoute(name, model.Name, model.Vendor, "")
+func validateAgentRouteCompatibility(name types.AgentName, model ModelRoute, effort string) error {
+	return types.ValidateAgentRoute(name, model.Name, model.Vendor, effort)
 }
 
-func agentCanServeModel(name types.AgentName, model ModelRoute) bool {
-	if model.Name == "" {
-		return true
-	}
-	return types.ValidateAgentRoute(name, model.Name, model.Vendor, "") == nil
+func agentCanServeRoute(name types.AgentName, model ModelRoute, effort string) bool {
+	return types.ValidateAgentRoute(name, model.Name, model.Vendor, effort) == nil
 }
 
 func resolvedAgentIdentity(name types.AgentName) string {
@@ -3489,7 +3611,7 @@ func validateReviewRaw(review ReviewRaw) error {
 		if err := candidate.Validate(); err != nil {
 			return fmt.Errorf("review.candidates[%d]: %w", i, err)
 		}
-		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor
+		key := string(candidate.Agent) + "\x00" + candidate.Model.Name + "\x00" + candidate.Model.Vendor + "\x00" + candidate.Effort
 		if seenCandidates[key] {
 			return fmt.Errorf("review.candidates[%d] duplicates the %s/%s route", i, candidate.Agent, candidate.Model.Name)
 		}
@@ -3618,9 +3740,9 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 		return effective, provenance
 	}
 	routed := []string{
-		"agent", "commands", "preflight", "hooks", "prompts", "intent.agent", "intent.model", "refresh.agent", "refresh.model",
-		"review.agent", "review.model", "review.candidates", "build.agent", "build.model", "test.agent", "test.model",
-		"document.agent", "document.model", "lint.agent", "lint.model", "pr.agent", "pr.model", "ci.agent", "ci.model",
+		"agent", "commands", "preflight", "hooks", "prompts", "intent.agent", "intent.model", "intent.effort", "refresh.agent", "refresh.model", "refresh.effort",
+		"review.agent", "review.model", "review.effort", "review.candidates", "build.agent", "build.model", "build.effort", "test.agent", "test.model", "test.effort",
+		"document.agent", "document.model", "document.effort", "lint.agent", "lint.model", "lint.effort", "pr.agent", "pr.model", "pr.effort", "ci.agent", "ci.model", "ci.effort",
 	}
 	provenance.replaceRepoLayer(trusted, EffectiveConfigSourceTrusted, routed...)
 	if trusted != nil {
@@ -3632,17 +3754,21 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 		effective.Intent.Agent = trusted.Intent.Agent
 		effective.Intent.Agents = copyAgents(trusted.Intent.Agents)
 		effective.Intent.Model = trusted.Intent.Model
+		effective.Intent.Effort = trusted.Intent.Effort
 		effective.Refresh.Agent = trusted.Refresh.Agent
 		effective.Refresh.Agents = copyAgents(trusted.Refresh.Agents)
 		effective.Refresh.Model = trusted.Refresh.Model
+		effective.Refresh.Effort = trusted.Refresh.Effort
 		effective.Review = copyReviewRaw(trusted.Review)
 		effective.Build = copyStepAgentRaw(trusted.Build)
 		effective.Test.Agent = trusted.Test.Agent
 		effective.Test.Agents = copyAgents(trusted.Test.Agents)
 		effective.Test.Model = trusted.Test.Model
+		effective.Test.Effort = trusted.Test.Effort
 		effective.Document.Agent = trusted.Document.Agent
 		effective.Document.Agents = copyAgents(trusted.Document.Agents)
 		effective.Document.Model = trusted.Document.Model
+		effective.Document.Effort = trusted.Document.Effort
 		effective.Lint = copyStepAgentRaw(trusted.Lint)
 		effective.PR = copyStepAgentRaw(trusted.PR)
 		effective.CI.StepAgentRaw = copyStepAgentRaw(trusted.CI.StepAgentRaw)
@@ -3656,15 +3782,18 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 		effective.Intent.Agent = ""
 		effective.Intent.Agents = nil
 		effective.Intent.Model = ModelRoute{}
+		effective.Intent.Effort = ""
 		effective.Refresh = RefreshRaw{}
 		effective.Review = ReviewRaw{}
 		effective.Build = StepAgentRaw{}
 		effective.Test.Agent = ""
 		effective.Test.Agents = nil
 		effective.Test.Model = ModelRoute{}
+		effective.Test.Effort = ""
 		effective.Document.Agent = ""
 		effective.Document.Agents = nil
 		effective.Document.Model = ModelRoute{}
+		effective.Document.Effort = ""
 		effective.Lint = StepAgentRaw{}
 		effective.PR = StepAgentRaw{}
 		effective.CI.StepAgentRaw = StepAgentRaw{}
@@ -3674,7 +3803,7 @@ func effectiveRepoConfigWithProvenance(pushed, trusted *RepoConfig, allowRepoCom
 }
 
 func copyStepAgentRaw(src StepAgentRaw) StepAgentRaw {
-	return StepAgentRaw{Agent: src.Agent, Agents: copyAgents(src.Agents), Model: src.Model}
+	return StepAgentRaw{Agent: src.Agent, Agents: copyAgents(src.Agents), Model: src.Model, Effort: src.Effort}
 }
 
 func copyReviewRaw(src ReviewRaw) ReviewRaw {
@@ -3998,6 +4127,7 @@ func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMe
 		Agents:                  copyAgents(global.Agents),
 		StepAgents:              global.configuredStepAgents(),
 		StepModels:              global.configuredStepModels(),
+		StepEfforts:             global.configuredStepEfforts(),
 		ReviewCandidates:        copyReviewCandidates(global.Review.Candidates),
 		Runner:                  global.Runner.Clone(),
 		ACPXPath:                global.ACPXPath,
@@ -4052,6 +4182,10 @@ func mergeConfig(global *GlobalConfig, repo *RepoConfig, provenance *effectiveMe
 		cfg.StepModels[step] = model
 		provenance.apply(string(step) + ".model.name")
 		provenance.apply(string(step) + ".model.vendor")
+	}
+	for step, effort := range repo.ConfiguredStepEfforts() {
+		cfg.StepEfforts[step] = effort
+		provenance.apply(string(step) + ".effort")
 	}
 	if repo.Review.Candidates != nil {
 		cfg.ReviewCandidates = copyReviewCandidates(repo.Review.Candidates)

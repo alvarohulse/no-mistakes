@@ -320,9 +320,13 @@ func resolvedRoutingTestConfig() *config.Config {
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepTest:   {Name: "google/gemini-3.5-pro", Vendor: "google"},
 		},
+		StepEfforts: map[types.StepName]string{
+			types.StepReview: "xhigh",
+			types.StepTest:   "high",
+		},
 		ReviewCandidates: []config.ReviewCandidate{
-			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
-			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}, Effort: "high"},
+			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}, Effort: "medium"},
 		},
 	}
 }

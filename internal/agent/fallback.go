@@ -46,6 +46,19 @@ func (a *fallbackAgent) ConfiguredModel() ModelIdentity {
 	return identity
 }
 
+func (a *fallbackAgent) ConfiguredEffort() Effort {
+	if len(a.agents) == 0 {
+		return ""
+	}
+	effort := ConfiguredEffort(a.agents[0])
+	for _, current := range a.agents[1:] {
+		if ConfiguredEffort(current) != effort {
+			return ""
+		}
+	}
+	return effort
+}
+
 func (a *fallbackAgent) SupportsSessionResume() bool {
 	for _, current := range a.agents {
 		if SupportsSessionResume(current) {
