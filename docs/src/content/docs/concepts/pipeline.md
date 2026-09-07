@@ -46,6 +46,20 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 ## Execution vocabulary
 
+- A **round** is one persisted execution pass of a step. It records the
+  evaluation produced by that pass, its starting, resulting, evaluated, and
+  trusted-config commit identities when available, and references to the
+  related agent invocations, command attempts, and owner-local artifacts.
+- An **initial round** is a step's first pass. A **fix round** follows an
+  automatic or user-selected repair. New rounds use `initial` or `auto_fix`;
+  historical `user_fix` rows normalize to `auto_fix` on read while retaining
+  explicit legacy provenance.
+- Review rounds are **initial review** or **rereview**. Build, test, and lint
+  first passes are **validation** and their repair passes are
+  **revalidation**. The Document step records a **documentation** evaluation.
+- A **waiver** (an explicit decline in audit data) resolves a findings gate
+  with an empty fix selection. It differs from a missing decision, which
+  leaves the gate unresolved, and from skipping or aborting a step.
 - An **attempt** is one actual controller-launched execution of a resolved pipeline command. Repeated executions remain separate attempts even when the script and runner are identical.
 - A **retry** is a later controller-observed attempt only when the immediately prior attempt is for the same command definition, step, purpose, command source, and runner provenance and ends in `fail`, `process_error`, `cancelled`, or `timeout`. It requires the same subject SHA and an unchanged clean input state (`input_state_id` equals the preceding attempt's `result_state_id`); otherwise it is a new attempt. A qualifying retry uses the durable reason `unchanged_after_repair`.
 
