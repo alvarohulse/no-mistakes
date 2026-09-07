@@ -32,33 +32,26 @@ type StepRound struct {
 	Trigger           string // "initial" or "auto_fix" in the normalized view
 	TriggerProvenance *string
 	Status            string
-	FindingsJSON      *string // nullable - findings produced by this round
+	// FindingsJSON is the compatibility projection of Evaluation. Structured
+	// rounds do not persist this embedded JSON; legacy rows retain it.
+	FindingsJSON      *string
 	ReviewedHeadSHA   *string // non-authoritative commit candidate captured by a review round
 	StartingHeadSHA   *string
 	TrustedConfigSHA  *string
 	ReplayConfigJSON  []byte
 	GlobalConfigYAML  []byte
 	RepoConfigYAML    []byte
-	// UserFindingsJSON, when non-nil, is the merged finding list that was
-	// dispatched to the fix agent after the user edited per-finding
-	// instructions or added their own findings. It includes both the
-	// selected agent-produced findings (with any attached user
-	// instructions) and the user-authored findings.
+	// UserFindingsJSON is a compatibility projection. Structured rounds keep
+	// user additions and per-finding edits in Evaluation and Decision.
 	UserFindingsJSON *string
-	// SelectedFindingIDs, when non-nil, is a JSON array of finding IDs that
-	// were chosen (by the user or auto-fix filter) to be fixed AFTER this
-	// round. It is populated on the round whose findings triggered the next
-	// round, so that later rounds' prompts can tell which findings were
-	// deliberately left unselected.
+	// SelectedFindingIDs and SelectionSource are compatibility projections of
+	// Decision. Structured decisions use stable references for selected and
+	// deliberately unselected findings.
 	SelectedFindingIDs *string
 	SelectionSource    *string
-	// FixSummary, when non-nil, is the agent's one-line commit summary for
-	// the fix attempt performed during this round. It is only set when the
-	// round itself was a fix round (trigger=="auto_fix").
+	// FixSummary, RepairFailureFingerprint, and RepairResult are compatibility
+	// projections of Repair.
 	FixSummary *string
-	// RepairFailureFingerprint and RepairResult are content-free audit facts
-	// for bounded automatic repair. The fingerprint is a one-way hash of the
-	// normalized failure identity; no finding or output content is duplicated.
 	RepairFailureFingerprint *string
 	RepairResult             *string
 	ResultingHeadSHA         *string
