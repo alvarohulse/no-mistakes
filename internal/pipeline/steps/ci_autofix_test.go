@@ -35,12 +35,6 @@ func ciRepairResult() *agent.Result {
 func newCIPersistedTestContext(t *testing.T, ag agent.Agent, workDir, upstream, baseSHA, headSHA string) *pipeline.StepContext {
 	t.Helper()
 	sctx := newTestContext(t, ag, workDir, baseSHA, headSHA, config.Commands{})
-	database, err := db.Open(sctx.Paths.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	sctx.DB = database
 	repo, err := sctx.DB.InsertRepo(workDir, upstream, "main")
 	if err != nil {
 		t.Fatal(err)

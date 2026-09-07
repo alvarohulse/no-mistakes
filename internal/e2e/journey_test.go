@@ -1375,8 +1375,15 @@ func assertIgnoredOnlyRun(t *testing.T, h *Harness) {
 	if !ok {
 		t.Fatal("expected document step in ignored-only run")
 	}
-	if documentStep.FindingsJSON != nil {
-		t.Fatalf("expected no document findings JSON for ignored-only diff, got %s", *documentStep.FindingsJSON)
+	if documentStep.FindingsJSON == nil {
+		t.Fatal("expected ignored-only document step to record its empty findings projection")
+	}
+	documentFindings, err := types.ParseFindingsJSON(*documentStep.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse ignored-only document findings: %v", err)
+	}
+	if len(documentFindings.Items) != 0 {
+		t.Fatalf("expected no document findings for ignored-only diff, got %+v", documentFindings.Items)
 	}
 	invs := h.AgentInvocations()
 	if sawPromptContainingAll(invs, "Review the code changes", "branch: ignored-only") {

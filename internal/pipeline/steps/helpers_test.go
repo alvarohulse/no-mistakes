@@ -176,8 +176,8 @@ func setupGitRepo(t *testing.T) (string, string, string) {
 func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.Open(dbPath)
+	p := paths.WithRoot(t.TempDir())
+	database, err := db.Open(p.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,6 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 	run := &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "refs/heads/feature", HeadSHA: headSHA, BaseSHA: baseSHA}
 	repo := &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"}
 	cfg := &config.Config{Agent: types.AgentClaude, Commands: cmds}
-	p := paths.WithRoot(t.TempDir())
 	commandPlanning := pipeline.NewCommandPlanningWorkspace(p, cfg, run, repo, workDir)
 	t.Cleanup(func() {
 		if err := commandPlanning.Close(context.Background()); err != nil {
