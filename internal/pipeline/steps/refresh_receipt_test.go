@@ -93,7 +93,7 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	if rebased == nil || rebased.Decision != db.RefreshDecisionRebased || rebased.ConflictState != db.RefreshConflictStateNone || len(rebased.CommandAttemptIDs) != 1 {
 		t.Fatalf("base refresh receipt = %+v", rebased)
 	}
-	if rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
+	if rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == nil || *rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
 		t.Fatalf("base refresh identities = %+v", rebased)
 	}
 
@@ -156,6 +156,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Config.Runner = runner.Spec{Executable: "bash", Args: []string{"-lc"}}
+	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
 	sctx.Env = fakeCLIEnv(binDir, map[string]string{
 		"FAKE_CLI_MODE":     "git-require-noninteractive-env",
 		"FAKE_CLI_REAL_GIT": realGit,
@@ -170,7 +171,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "rebase origin/dependency") {
+	if !strings.Contains(string(log), "rebase "+dependencySHA) {
 		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
 	}
 }
@@ -244,6 +245,96 @@ func TestRefreshPrimaryPersistsContextTermination(t *testing.T) {
 				t.Fatalf("git fixture did not start: %v", err)
 			}
 		})
+	}
+}
+
+func TestRefreshReceiptCapturesResultingHeadAfterRunContextCancellation(t *testing.T) {
+	dir, baseSHA, startingHeadSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, startingHeadSHA, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	receipts.authoritativeBaseSHA = refreshStringPointer(baseSHA)
+	operation := receipts.begin("origin/main")
+
+	if err := os.WriteFile(filepath.Join(dir, "after.txt"), []byte("after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "after.txt")
+	gitCmd(t, dir, "commit", "-m", "advance head")
+	resultingHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sctx.Ctx = ctx
+	cancel()
+	if err := operation.finish(db.RefreshDecisionFastForwarded, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].ResultingHeadSHA == nil || *operations[0].ResultingHeadSHA != resultingHeadSHA {
+		t.Fatalf("resulting head after cancellation = %+v, want %s", operations, resultingHeadSHA)
+	}
+}
+
+func TestRefreshReceiptMarksUnreadableResultingHeadUnavailable(t *testing.T) {
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, t.TempDir(), "base", "head", config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	operation := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main").begin("origin/main")
+
+	if err := operation.finish(db.RefreshDecisionError, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, "unable to read HEAD"); err != nil {
+		t.Fatal(err)
+	}
+
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].ResultingHeadSHA != nil {
+		t.Fatalf("unreadable resulting head = %+v, want unavailable", operations)
+	}
+}
+
+func TestTryRebasePinsResolvedTargetCommit(t *testing.T) {
+	dir, baseSHA, startingHeadSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "target-first.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "target-first.txt")
+	gitCmd(t, dir, "commit", "-m", "target first")
+	firstTargetSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "target-second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "target-second.txt")
+	gitCmd(t, dir, "commit", "-m", "target second")
+	movedTargetSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "update-ref", "refs/remotes/origin/target", firstTargetSHA)
+	gitCmd(t, dir, "checkout", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, startingHeadSHA, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	receipts.authoritativeBaseSHA = refreshStringPointer(baseSHA)
+	resolutions := 0
+	receipts.resolveTargetRef = func(context.Context, string, string) (string, error) {
+		resolutions++
+		gitCmd(t, dir, "update-ref", "refs/remotes/origin/target", movedTargetSHA)
+		return firstTargetSHA, nil
+	}
+
+	conflictFiles, err := tryRebase(context.Background(), sctx, "origin/target", receipts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflictFiles) != 0 || resolutions != 1 {
+		t.Fatalf("refresh result = conflicts %v, resolutions %d", conflictFiles, resolutions)
+	}
+	if !isAncestor(context.Background(), dir, firstTargetSHA, "HEAD") || isAncestor(context.Background(), dir, movedTargetSHA, "HEAD") {
+		t.Fatalf("rebase did not preserve resolved target %s after ref moved to %s", firstTargetSHA, movedTargetSHA)
 	}
 }
 
@@ -545,7 +636,7 @@ func TestRefreshPrimaryRunsBareRepositoryCommandAndRecordsReceipt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionSkipped || len(operations[0].CommandAttemptIDs) != 1 {
+	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionSkipped || operations[0].ResultingHeadSHA == nil || len(operations[0].CommandAttemptIDs) != 1 {
 		t.Fatalf("bare refresh receipt = %+v", operations)
 	}
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)

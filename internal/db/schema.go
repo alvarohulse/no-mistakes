@@ -316,7 +316,7 @@ CREATE TABLE IF NOT EXISTS refresh_operations (
     authoritative_base_sha  TEXT,
     starting_head_sha       TEXT NOT NULL,
     decision                TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
-    resulting_head_sha      TEXT NOT NULL,
+    resulting_head_sha      TEXT,
     conflict_state          TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
     repair_state            TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
 );
@@ -688,7 +688,7 @@ var migrationStatements = []string{
 		authoritative_base_sha TEXT,
 		starting_head_sha TEXT NOT NULL,
 		decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
-		resulting_head_sha TEXT NOT NULL,
+		resulting_head_sha TEXT,
 		conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
 		repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
 	)`,

@@ -61,7 +61,7 @@ type RefreshOperation struct {
 	AuthoritativeBaseSHA *string
 	StartingHeadSHA      string
 	Decision             RefreshDecision
-	ResultingHeadSHA     string
+	ResultingHeadSHA     *string
 	ConflictState        RefreshConflictState
 	RepairState          RefreshRepairState
 	CommandAttemptIDs    []string
@@ -140,7 +140,7 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	if strings.TrimSpace(operation.RunID) == "" || strings.TrimSpace(operation.StepID) == "" || strings.TrimSpace(operation.RoundID) == "" ||
 		strings.TrimSpace(operation.SourceRef) == "" || strings.TrimSpace(operation.DestinationRef) == "" ||
 		strings.TrimSpace(operation.AuthoritativeBaseRef) == "" ||
-		strings.TrimSpace(operation.StartingHeadSHA) == "" || strings.TrimSpace(operation.ResultingHeadSHA) == "" {
+		strings.TrimSpace(operation.StartingHeadSHA) == "" {
 		return fmt.Errorf("insert refresh operation: required receipt identity is incomplete")
 	}
 	if operation.Strategy != types.RefreshStrategyRebase && operation.Strategy != types.RefreshStrategyMerge {
@@ -319,11 +319,11 @@ func (d *DB) GetRefreshOperationsByRun(runID string) ([]*RefreshOperation, error
 func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperation, error) {
 	operation := &RefreshOperation{}
 	var kind, strategy, decision, conflictState, repairState string
-	var authoritativeBaseSHA sql.NullString
+	var authoritativeBaseSHA, resultingHeadSHA sql.NullString
 	if err := row.Scan(
 		&operation.ID, &operation.RunID, &kind, &operation.StepID, &operation.RoundID,
 		&strategy, &operation.SourceRef, &operation.DestinationRef, &operation.AuthoritativeBaseRef, &authoritativeBaseSHA,
-		&operation.StartingHeadSHA, &decision, &operation.ResultingHeadSHA, &conflictState, &repairState,
+		&operation.StartingHeadSHA, &decision, &resultingHeadSHA, &conflictState, &repairState,
 		&operation.StartedAt, &operation.CompletedAt, &operation.DurationMS, &operation.DiagnosticArtifactID,
 	); err != nil {
 		return nil, err
@@ -335,6 +335,9 @@ func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperatio
 	operation.RepairState = RefreshRepairState(repairState)
 	if authoritativeBaseSHA.Valid {
 		operation.AuthoritativeBaseSHA = &authoritativeBaseSHA.String
+	}
+	if resultingHeadSHA.Valid {
+		operation.ResultingHeadSHA = &resultingHeadSHA.String
 	}
 	return operation, nil
 }
@@ -357,6 +360,61 @@ func (d *DB) populateOperationCommandAttemptIDs(operation *RefreshOperation) err
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate operation command attempts: %w", err)
+	}
+	return nil
+}
+
+func migrateRefreshOperationResultingHeadAvailability(sqlDB *sql.DB) error {
+	var notNull int
+	if err := sqlDB.QueryRow(
+		`SELECT "notnull" FROM pragma_table_info('refresh_operations') WHERE name = 'resulting_head_sha'`,
+	).Scan(&notNull); err != nil {
+		return fmt.Errorf("inspect refresh receipt resulting head column: %w", err)
+	}
+	if notNull == 0 {
+		return nil
+	}
+
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin refresh receipt resulting head migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`CREATE TABLE refresh_operations_rebuilt (
+			operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+			strategy TEXT NOT NULL CHECK (strategy IN ('rebase', 'merge')),
+			source_ref TEXT NOT NULL,
+			destination_ref TEXT NOT NULL,
+			authoritative_base_ref TEXT NOT NULL,
+			authoritative_base_sha TEXT,
+			starting_head_sha TEXT NOT NULL,
+			decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
+			resulting_head_sha TEXT,
+			conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
+			repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
+		)`,
+	); err != nil {
+		return fmt.Errorf("create refresh receipt resulting head migration table: %w", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO refresh_operations_rebuilt
+		 (operation_id, strategy, source_ref, destination_ref, authoritative_base_ref, authoritative_base_sha,
+		  starting_head_sha, decision, resulting_head_sha, conflict_state, repair_state)
+		 SELECT operation_id, strategy, source_ref, destination_ref, authoritative_base_ref, authoritative_base_sha,
+		        starting_head_sha, decision, resulting_head_sha, conflict_state, repair_state
+		 FROM refresh_operations`,
+	); err != nil {
+		return fmt.Errorf("copy refresh receipt resulting head migration rows: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE refresh_operations`); err != nil {
+		return fmt.Errorf("drop refresh receipt resulting head migration table: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE refresh_operations_rebuilt RENAME TO refresh_operations`); err != nil {
+		return fmt.Errorf("rename refresh receipt resulting head migration table: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit refresh receipt resulting head migration: %w", err)
 	}
 	return nil
 }
