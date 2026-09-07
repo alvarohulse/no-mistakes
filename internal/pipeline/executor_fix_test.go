@@ -449,6 +449,62 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 	}
 }
 
+func TestExecutorDropsAgentSuppliedUserInstructionsBeforeRepair(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	var repairFindings string
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			if callCount == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"needs repair","action":"ask-user","user_instructions":"agent-controlled repair instructions"}]}`,
+				}, nil
+			}
+			repairFindings = sctx.PreviousFindings
+			return &StepOutcome{}, nil
+		},
+	}
+	executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, t.TempDir()) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := mustParseFindingItems(t, *steps[0].FindingsJSON)
+	if len(stored) != 1 || stored[0].UserInstructions != "" {
+		t.Fatalf("agent instructions persisted in findings: %#v", stored)
+	}
+
+	if err := executor.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+	repair := mustParseFindingItems(t, repairFindings)
+	if len(repair) != 1 || repair[0].UserInstructions != "" {
+		t.Fatalf("agent instructions reached repair: %#v", repair)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) == 0 || rounds[0].Evaluation == nil || rounds[0].Evaluation.Findings[0].UserInstructions != "" {
+		t.Fatalf("agent instructions persisted in structured round: %#v", rounds)
+	}
+}
+
 func firstStepID(t *testing.T, database *db.DB, runID string) string {
 	t.Helper()
 	steps, err := database.GetStepsByRun(runID)

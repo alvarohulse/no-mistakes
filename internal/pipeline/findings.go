@@ -85,6 +85,7 @@ func normalizeFindingsJSON(raw string, prefix string) string {
 	for i := range normalized.Items {
 		normalized.Items[i].Action = normalized.Items[i].ActionOrDefault()
 		normalized.Items[i].Source = types.FindingSourceAgent
+		normalized.Items[i].UserInstructions = ""
 	}
 	normalizedRaw, err := types.MarshalFindingsJSON(normalized)
 	if err != nil {
