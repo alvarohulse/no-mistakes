@@ -60,6 +60,62 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 }
 
+func TestAgentInvocationRoundMustMatchInvocationSubject(t *testing.T) {
+	d, repo, run := openSessionTestDB(t)
+	review, err := d.InsertStepResult(run.ID, "review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewRound1, err := d.BeginStepRound(review.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewRound2, err := d.BeginStepRound(review.ID, 2, RoundTriggerAutoFix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testStep, err := d.InsertStepResult(run.ID, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testRound, err := d.BeginStepRound(testStep.ID, 1, RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRun, err := d.InsertRun(repo.ID, "feature/y", "other-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base := AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, RoundID: reviewRound1.ID,
+		Purpose: "review", Agent: "codex", SessionMode: InvocationModeCold,
+		StartedAt: 1, CompletedAt: 2, DurationMS: 1, ExitStatus: "ok",
+	}
+	if _, err := d.InsertAgentInvocation(AgentInvocation{
+		RunID: otherRun.ID, StepName: base.StepName, Round: base.Round, RoundID: base.RoundID,
+		Purpose: base.Purpose, Agent: base.Agent, SessionMode: base.SessionMode,
+		StartedAt: base.StartedAt, CompletedAt: base.CompletedAt, DurationMS: base.DurationMS, ExitStatus: base.ExitStatus,
+	}); err == nil || !strings.Contains(err.Error(), "round subject") {
+		t.Fatalf("cross-run InsertAgentInvocation() error = %v, want round subject refusal", err)
+	}
+
+	persisted, err := d.InsertAgentInvocation(base)
+	if err != nil {
+		t.Fatalf("insert matching invocation: %v", err)
+	}
+
+	persisted.RoundID = testRound.ID
+	if _, err := d.UpdateAgentInvocation(*persisted); err == nil || !strings.Contains(err.Error(), "round subject") {
+		t.Fatalf("cross-step UpdateAgentInvocation() error = %v, want round subject refusal", err)
+	}
+
+	persisted.RoundID = reviewRound2.ID
+	if _, err := d.UpdateAgentInvocation(*persisted); err == nil || !strings.Contains(err.Error(), "round subject") {
+		t.Fatalf("cross-round UpdateAgentInvocation() error = %v, want round subject refusal", err)
+	}
+}
+
 func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	pool := []ReviewCandidateReceipt{

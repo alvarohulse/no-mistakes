@@ -175,6 +175,9 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
+	if err := d.validateAgentInvocationRound(inv); err != nil {
+		return nil, err
+	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
 	if err != nil {
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
@@ -210,6 +213,9 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		return nil, fmt.Errorf("update agent invocation: id is required")
 	}
 	if err := normalizeUsageCoverage(&inv); err != nil {
+		return nil, err
+	}
+	if err := d.validateAgentInvocationRound(inv); err != nil {
 		return nil, err
 	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
@@ -253,6 +259,30 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		return nil, fmt.Errorf("update agent invocation: expected 1 row, updated %d", updated)
 	}
 	return &inv, nil
+}
+
+// validateAgentInvocationRound prevents a receipt from linking a round from a
+// different execution subject. The foreign key alone proves that a round exists;
+// this check preserves the run, step, and numeric-round identity of the
+// invocation that claims it.
+func (d *DB) validateAgentInvocationRound(inv AgentInvocation) error {
+	if inv.RoundID == "" {
+		return nil
+	}
+	var found int
+	err := d.sql.QueryRow(`SELECT 1
+		FROM step_rounds r
+		JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = ? AND s.run_id = ? AND s.step_name = ? AND r.round = ?`,
+		inv.RoundID, inv.RunID, inv.StepName, inv.Round,
+	).Scan(&found)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("agent invocation round subject does not match run %q step %q round %d", inv.RunID, inv.StepName, inv.Round)
+	}
+	if err != nil {
+		return fmt.Errorf("validate agent invocation round subject: %w", err)
+	}
+	return nil
 }
 
 // GetAgentInvocationsByRun returns a run's invocations in execution order.
