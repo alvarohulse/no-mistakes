@@ -279,6 +279,112 @@ func TestRefreshReceiptCapturesResultingHeadAfterRunContextCancellation(t *testi
 	}
 }
 
+func TestRefreshReceiptPreservesSuccessfulDecisionWhenOutputArtifactPersistenceFails(t *testing.T) {
+	tests := []struct {
+		name     string
+		decision db.RefreshDecision
+		run      func(t *testing.T, sctx *pipeline.StepContext, receipts *refreshReceiptRecorder) error
+	}{
+		{
+			name:     "rebase",
+			decision: db.RefreshDecisionRebased,
+			run: func(t *testing.T, sctx *pipeline.StepContext, receipts *refreshReceiptRecorder) error {
+				_, err := tryRebase(context.Background(), sctx, "origin/dependency", receipts)
+				return err
+			},
+		},
+		{
+			name:     "merge",
+			decision: db.RefreshDecisionMerged,
+			run: func(t *testing.T, sctx *pipeline.StepContext, receipts *refreshReceiptRecorder) error {
+				_, err := tryMerge(context.Background(), sctx, "origin/dependency", receipts)
+				return err
+			},
+		},
+		{
+			name:     "fast forward",
+			decision: db.RefreshDecisionFastForwarded,
+			run: func(t *testing.T, sctx *pipeline.StepContext, receipts *refreshReceiptRecorder) error {
+				_, err := tryRebase(context.Background(), sctx, "origin/target", receipts)
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var dir, featureHead string
+			if tt.decision == db.RefreshDecisionFastForwarded {
+				dir, _, featureHead = setupGitRepo(t)
+				gitCmd(t, dir, "checkout", "-b", "target")
+				if err := os.WriteFile(filepath.Join(dir, "target.txt"), []byte("target\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", "target.txt")
+				gitCmd(t, dir, "commit", "-m", "target")
+				targetSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+				gitCmd(t, dir, "update-ref", "refs/remotes/origin/target", targetSHA)
+				gitCmd(t, dir, "checkout", "feature")
+			} else {
+				dir, _, featureHead = setupStackedRefreshRepo(t)
+			}
+
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+			beginRefreshReceiptRound(t, sctx)
+			sctx.Paths = nil // Simulate command-output artifact-store creation failure.
+			receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+			receipts.authoritativeBaseSHA = refreshStringPointer(featureHead)
+
+			err := tt.run(t, sctx, receipts)
+			if !errors.Is(err, errCommandPersistence) {
+				t.Fatalf("refresh error = %v, want command persistence failure", err)
+			}
+
+			operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resultingHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			if len(operations) != 1 || operations[0].Decision != tt.decision || operations[0].ResultingHeadSHA == nil || *operations[0].ResultingHeadSHA != resultingHeadSHA || resultingHeadSHA == featureHead {
+				t.Fatalf("refresh operation = %+v, want successful %s at %s", operations, tt.decision, resultingHeadSHA)
+			}
+		})
+	}
+}
+
+func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *testing.T) {
+	dir, _, featureHead := setupStackedRefreshRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, featureHead, featureHead, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	receipts := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	receipts.authoritativeBaseSHA = refreshStringPointer(featureHead)
+
+	originalComplete := completeControllerCommandAttemptWithOutputArtifact
+	completeControllerCommandAttemptWithOutputArtifact = func(*db.DB, string, string, *int, *string, *string, *string, db.Artifact) (*db.Artifact, error) {
+		return nil, errors.New("injected attempt completion failure")
+	}
+	t.Cleanup(func() {
+		completeControllerCommandAttemptWithOutputArtifact = originalComplete
+	})
+
+	_, err := tryRebase(context.Background(), sctx, "origin/dependency", receipts)
+	if !errors.Is(err, errCommandPersistence) || !strings.Contains(err.Error(), "injected attempt completion failure") {
+		t.Fatalf("refresh error = %v, want attempt completion persistence failure", err)
+	}
+
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultingHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionRebased || operations[0].ResultingHeadSHA == nil || *operations[0].ResultingHeadSHA != resultingHeadSHA || resultingHeadSHA == featureHead {
+		t.Fatalf("refresh operation = %+v, want successful rebase at %s", operations, resultingHeadSHA)
+	}
+	if operations[0].Decision == db.RefreshDecisionError {
+		t.Fatalf("refresh operation misclassified receipt persistence failure: %+v", operations[0])
+	}
+}
+
 func TestRefreshReceiptUsesLiveStartingHeadForNextTargetAfterCancellation(t *testing.T) {
 	dir, baseSHA, startingHeadSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, startingHeadSHA, config.Commands{})

@@ -27,7 +27,27 @@ var (
 	errCommandPreparation = errors.New("command preparation failed")
 	errCommandPersistence = errors.New("command provenance persistence failed")
 	errCommandExecution   = errors.New("command execution failed")
+
+	completeControllerCommandAttemptWithOutputArtifact = func(database *db.DB, id, outcome string, exitCode *int, signal, resultStateID, testedSHA *string, outputArtifact db.Artifact) (*db.Artifact, error) {
+		return database.CompleteControllerCommandAttemptWithOutputArtifact(id, outcome, exitCode, signal, resultStateID, testedSHA, outputArtifact)
+	}
 )
+
+// persistedStepCommandResult preserves the direct-process result separately
+// from failures recording its execution receipt. Controller-owned callers that
+// change repository state need that distinction to record the observed state
+// even if provenance persistence later fails.
+type persistedStepCommandResult struct {
+	output         string
+	exitCode       int
+	executed       bool
+	executionErr   error
+	persistenceErr error
+}
+
+func (r persistedStepCommandResult) err() error {
+	return errors.Join(r.executionErr, r.persistenceErr)
+}
 
 func envValue(env []string, key string) (string, bool) {
 	return envValueForOS(env, key, runtime.GOOS)
@@ -320,6 +340,11 @@ func runStepCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, p
 // shell commands and controller-owned direct commands use this path so an
 // execution receipt never needs to pretend that a different process ran it.
 func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, execute func() (runner.Result, error)) (string, int, error) {
+	result := runPersistedStepCommandResult(sctx, resolved, purpose, definitionSource, sequence, execute)
+	return result.output, result.exitCode, result.err()
+}
+
+func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, execute func() (runner.Result, error)) persistedStepCommandResult {
 	var attempt *db.CommandAttempt
 	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
 		definitionResolution := resolved
@@ -328,21 +353,21 @@ func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolve
 		}
 		definition, persistErr := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, definitionResolution)
 		if persistErr != nil {
-			return "", -1, fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr)
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: persist command definition: %w", errCommandPersistence, persistErr)}
 		}
 		beforeSHA, headErr := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 		if headErr != nil {
-			return "", -1, fmt.Errorf("%w: resolve command subject: %w", errCommandPersistence, headErr)
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: resolve command subject: %w", errCommandPersistence, headErr)}
 		}
 		inputStateID, stateErr := cleanCommandStateID(sctx.Ctx, sctx.WorkDir, beforeSHA)
 		if stateErr != nil {
-			return "", -1, fmt.Errorf("%w: resolve command input state: %w", errCommandPersistence, stateErr)
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: resolve command input state: %w", errCommandPersistence, stateErr)}
 		}
 		var retryOf *string
 		var retryReason *string
 		priorAttempts, lookupErr := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
 		if lookupErr != nil {
-			return "", -1, fmt.Errorf("%w: resolve command retry: %w", errCommandPersistence, lookupErr)
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: resolve command retry: %w", errCommandPersistence, lookupErr)}
 		}
 		for i := len(priorAttempts) - 1; i >= 0; i-- {
 			candidate := priorAttempts[i]
@@ -382,26 +407,26 @@ func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolve
 			RetryReason:         retryReason,
 		})
 		if persistErr != nil {
-			return "", -1, fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)}
 		}
 	}
 
-	result, err := execute()
-	if err != nil {
-		err = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, err)
+	runnerResult, executionErr := execute()
+	if executionErr != nil {
+		executionErr = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, executionErr)
 	}
 	var recordedExitCode *int
-	if err == nil {
-		recordedExitCode = &result.ExitCode
+	if executionErr == nil {
+		recordedExitCode = &runnerResult.ExitCode
 	}
 	var observedExitCode *int
-	if result.ExitCode >= 0 {
-		observedExitCode = &result.ExitCode
+	if runnerResult.ExitCode >= 0 {
+		observedExitCode = &runnerResult.ExitCode
 	}
-	var completionErr error
+	var persistenceErr error
 	var attemptOutcome string
 	if attempt != nil {
-		attemptOutcome = commandAttemptOutcome(sctx.Ctx, result.ExitCode, err)
+		attemptOutcome = commandAttemptOutcome(sctx.Ctx, runnerResult.ExitCode, executionErr)
 		var resultStateID *string
 		var resultStateErr error
 		if sctx.Ctx.Err() == nil {
@@ -422,43 +447,50 @@ func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolve
 			testedSHA = &tested
 		}
 		attemptExitCode := observedExitCode
-		if result.Signal != nil {
+		if runnerResult.Signal != nil {
 			attemptExitCode = nil
 		}
 		store, storeErr := artifact.NewStore(sctx.Paths, "")
 		if storeErr != nil {
-			completionErr = fmt.Errorf("%w: create command output store: %w", errCommandPersistence, storeErr)
+			persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output store: %w", errCommandPersistence, storeErr))
 		} else {
-			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(result.Output))
+			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(runnerResult.Output))
 			if artifactErr != nil {
-				completionErr = fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr)
-			} else if _, persistErr := sctx.DB.CompleteControllerCommandAttemptWithOutputArtifact(attempt.ID, attemptOutcome, attemptExitCode, result.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
-				completionErr = fmt.Errorf("%w: persist command attempt completion with output artifact: %w", errCommandPersistence, persistErr)
+				persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr))
+			} else if _, persistErr := completeControllerCommandAttemptWithOutputArtifact(sctx.DB, attempt.ID, attemptOutcome, attemptExitCode, runnerResult.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
+				persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: persist command attempt completion with output artifact: %w", errCommandPersistence, persistErr))
 			}
 		}
 		if resultStateErr != nil {
-			err = errors.Join(err, resultStateErr)
+			persistenceErr = errors.Join(persistenceErr, resultStateErr)
 		}
 	}
+	commandErr := errors.Join(executionErr, persistenceErr)
 	if resolved.Script != "" {
 		recordedResolution := resolved
 		if definitionSource != "" {
 			recordedResolution.CommandSource = definitionSource
 		}
-		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, err)
+		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, commandErr)
 	} else {
-		sctx.RecordCommandAtSequence(resolved.Script, sequence, recordedExitCode, err)
+		sctx.RecordCommandAtSequence(resolved.Script, sequence, recordedExitCode, commandErr)
 	}
 	if attempt != nil {
-		if completionErr != nil {
-			outcomeErr := fmt.Errorf("command completed with outcome %s (exit code %d)", attemptOutcome, result.ExitCode)
-			if result.Signal != nil {
-				outcomeErr = fmt.Errorf("command completed with outcome %s (signal %s)", attemptOutcome, *result.Signal)
+		if persistenceErr != nil {
+			outcomeErr := fmt.Errorf("command completed with outcome %s (exit code %d)", attemptOutcome, runnerResult.ExitCode)
+			if runnerResult.Signal != nil {
+				outcomeErr = fmt.Errorf("command completed with outcome %s (signal %s)", attemptOutcome, *runnerResult.Signal)
 			}
-			err = errors.Join(err, outcomeErr, completionErr)
+			persistenceErr = errors.Join(outcomeErr, persistenceErr)
 		}
 	}
-	return result.Output, result.ExitCode, err
+	return persistedStepCommandResult{
+		output:         runnerResult.Output,
+		exitCode:       runnerResult.ExitCode,
+		executed:       true,
+		executionErr:   executionErr,
+		persistenceErr: persistenceErr,
+	}
 }
 
 // runStepGitCommand executes a controller-owned Git command without routing
@@ -466,6 +498,11 @@ func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolve
 // output-artifact contract as configured commands while preventing login
 // profiles from weakening the required non-interactive Git environment.
 func runStepGitCommand(sctx *pipeline.StepContext, command, purpose string, args ...string) (string, int, error) {
+	result := runStepGitCommandResult(sctx, command, purpose, args...)
+	return result.output, result.exitCode, result.err()
+}
+
+func runStepGitCommandResult(sctx *pipeline.StepContext, command, purpose string, args ...string) persistedStepCommandResult {
 	sequence := sctx.NextCommandSequence()
 	gitArgs := append([]string(nil), args...)
 	if git.LooksLikeBareRepository(sctx.WorkDir) {
@@ -482,7 +519,7 @@ func runStepGitCommand(sctx *pipeline.StepContext, command, purpose string, args
 			Executable:    "git",
 		},
 	}
-	return runPersistedStepCommand(sctx, resolved, purpose, "", sequence, func() (runner.Result, error) {
+	return runPersistedStepCommandResult(sctx, resolved, purpose, "", sequence, func() (runner.Result, error) {
 		return executeStepGitCommand(sctx, gitArgs)
 	})
 }
