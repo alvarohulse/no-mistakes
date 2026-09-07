@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -162,7 +163,14 @@ func (s *CIStep) completeCIFixRepairRound(sctx *pipeline.StepContext, repairRoun
 	} else {
 		err = sctx.DB.CompleteCIFixRepairRound(repairRound.id, startingHeadSHA, durationMS, repair)
 	}
-	return wrapCIFixRepairFinalizationError(repairRound, "complete CI repair receipt", err)
+	err = wrapCIFixRepairFinalizationError(repairRound, "complete CI repair receipt", err)
+	if err == nil || !repairRound.completeAtReceipt || repairRound.verifiedPush || pipeline.IsCIFixRepairDurabilityError(err) {
+		return err
+	}
+	if cleanupErr := sctx.DB.FailStepRound(repairRound.id, durationMS); cleanupErr != nil {
+		return pipeline.NewCIFixRepairDurabilityError(errors.Join(err, fmt.Errorf("fail incomplete CI repair round: %w", cleanupErr)))
+	}
+	return err
 }
 
 func (s *CIStep) recordCIFixRepairOutcome(sctx *pipeline.StepContext, repairRound *ciFixRepairRound, audit pipeline.RepairAudit) error {
