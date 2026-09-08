@@ -258,6 +258,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     round_id               TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
     invocation_id          TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
     command_attempt_id     TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+    operation_id           TEXT REFERENCES operations(id) ON DELETE CASCADE,
     purpose                TEXT NOT NULL,
     label                  TEXT NOT NULL,
     description            TEXT,
@@ -279,6 +280,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
     ON artifacts (run_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_operation_id
+    ON artifacts (operation_id) WHERE operation_id IS NOT NULL;
 
 -- Operations are a run-scoped indexed collection. Variant tables carry their
 -- typed facts so Push can join this collection later without duplicating the
@@ -369,6 +373,32 @@ WHEN NEW.diagnostic_artifact_id IS NOT NULL AND NOT EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_insert
+BEFORE INSERT ON artifacts
+WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+      AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+      AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_update
+BEFORE UPDATE OF run_id, step_id, round_id, operation_id ON artifacts
+WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+      AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+      AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
 END;
 
 CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_insert
@@ -598,6 +628,7 @@ var migrationStatements = []string{
 		round_id TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
 		invocation_id TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
 		command_attempt_id TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+		operation_id TEXT REFERENCES operations(id) ON DELETE CASCADE,
 		purpose TEXT NOT NULL,
 		label TEXT NOT NULL,
 		description TEXT,
@@ -632,6 +663,8 @@ var migrationStatements = []string{
 		UNIQUE (run_id, id),
 		FOREIGN KEY (run_id, diagnostic_artifact_id) REFERENCES artifacts(run_id, id)
 	)`,
+	`ALTER TABLE artifacts ADD COLUMN operation_id TEXT REFERENCES operations(id) ON DELETE CASCADE`,
+	`CREATE INDEX IF NOT EXISTS idx_artifacts_operation_id ON artifacts (operation_id) WHERE operation_id IS NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_operations_run_started_id ON operations (run_id, started_at, id)`,
 	`CREATE TABLE IF NOT EXISTS refresh_operations (
 		operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
@@ -697,6 +730,30 @@ var migrationStatements = []string{
 	)
 	BEGIN
 		SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_insert
+	BEFORE INSERT ON artifacts
+	WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+		  AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+		  AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_update
+	BEFORE UPDATE OF run_id, step_id, round_id, operation_id ON artifacts
+	WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+		  AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+		  AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
 	END`,
 	`CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_insert
 	BEFORE INSERT ON operation_command_attempts
