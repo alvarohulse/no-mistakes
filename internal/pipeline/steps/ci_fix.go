@@ -181,6 +181,9 @@ func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent
 					return false, "", fmt.Errorf("read CI repair commit summary: summary is empty")
 				}
 			}
+			if persistRepairPush != nil && strings.TrimSpace(summary) == "" {
+				return false, "", fmt.Errorf("read CI repair commit summary: summary is empty")
+			}
 			pushed, err := s.pushCIFixHeadSHA(sctx, headSHA, summary, persistRepairPush)
 			if err != nil || summary == "" {
 				return pushed, summary, err

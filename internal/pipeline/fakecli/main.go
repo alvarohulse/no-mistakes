@@ -67,6 +67,15 @@ func handleFakeCLI(mode string) {
 		fakeCIGlabSequenceHandler(args)
 	case "ci-gh-reconcile":
 		fakeCIGHReconcileHandler(args)
+	case "ci-gh-git-update-ref-error":
+		switch filepath.Base(os.Args[0]) {
+		case "gh":
+			fakeCIGHHandler(args)
+		case "git":
+			fakeGitUpdateRefErrorHandler(args)
+		default:
+			os.Exit(1)
+		}
 	default:
 		os.Exit(1)
 	}
@@ -250,6 +259,14 @@ func fakeGitRemoteErrorHandler(args []string) {
 		os.Exit(1)
 	}
 	fakeGitForward(args, realGit)
+}
+
+func fakeGitUpdateRefErrorHandler(args []string) {
+	if len(args) > 0 && args[0] == "update-ref" {
+		fmt.Fprintln(os.Stderr, "injected local update-ref failure")
+		os.Exit(1)
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
 }
 
 func fakeGitForward(args []string, realGit string) {

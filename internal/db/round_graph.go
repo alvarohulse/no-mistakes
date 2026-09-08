@@ -873,10 +873,10 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 	if evaluation == nil {
 		return fmt.Errorf("set structured round decision: round %q has no evaluation", roundID)
 	}
-	byExternal := make(map[string]*StepRoundFinding, len(evaluation.Findings))
+	byExternal := make(map[string]int, len(evaluation.Findings))
 	for i := range evaluation.Findings {
-		byExternal[evaluation.Findings[i].ExternalID] = &evaluation.Findings[i]
-		byExternal[evaluation.Findings[i].ID] = &evaluation.Findings[i]
+		byExternal[evaluation.Findings[i].ExternalID] = i
+		byExternal[evaluation.Findings[i].ID] = i
 	}
 	edited := make(map[string]bool)
 	selectedAliases := make(map[string]string)
@@ -892,12 +892,13 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 				return fmt.Errorf("set structured round decision: user finding identity is missing or duplicated")
 			}
 			seen[item.ID] = true
-			if existing := byExternal[item.ID]; existing != nil {
+			if existingIndex, exists := byExternal[item.ID]; exists {
+				existing := &evaluation.Findings[existingIndex]
 				if item.Source == types.FindingSourceUser && existing.Source != types.FindingSourceUser {
 					externalID := item.ID
 					for suffix := 1; ; suffix++ {
 						item.ID = fmt.Sprintf("user-%d", suffix)
-						if byExternal[item.ID] == nil {
+						if _, exists := byExternal[item.ID]; !exists {
 							break
 						}
 					}
@@ -932,8 +933,9 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 				return err
 			}
 			evaluation.Findings = append(evaluation.Findings, finding)
-			byExternal[finding.ExternalID] = &evaluation.Findings[len(evaluation.Findings)-1]
-			byExternal[finding.ID] = &evaluation.Findings[len(evaluation.Findings)-1]
+			findingIndex := len(evaluation.Findings) - 1
+			byExternal[finding.ExternalID] = findingIndex
+			byExternal[finding.ID] = findingIndex
 			edited[finding.ID] = finding.UserInstructions != ""
 		}
 	}
@@ -946,10 +948,11 @@ func setStructuredDecisionByExternalIDsTx(tx *sql.Tx, roundID string, selectedID
 		if alias := selectedAliases[id]; alias != "" {
 			id = alias
 		}
-		if byExternal[id] == nil {
+		findingIndex, exists := byExternal[id]
+		if !exists {
 			return fmt.Errorf("set structured round decision: selected finding %q does not belong to evaluation", id)
 		}
-		findingID := byExternal[id].ID
+		findingID := evaluation.Findings[findingIndex].ID
 		if _, exists := selected[findingID]; exists {
 			return fmt.Errorf("set structured round decision: duplicate selected finding %q", id)
 		}
@@ -1217,6 +1220,9 @@ func (d *DB) hydrateRoundGraph(round *StepRound) error {
 		return fmt.Errorf("hydrate round decision: %w", err)
 	}
 	if decision != nil {
+		if evaluation == nil {
+			return fmt.Errorf("hydrate round decision: round %q has decision without evaluation", round.ID)
+		}
 		round.Decision = decision
 		source := decision.Source
 		round.SelectionSource = &source
