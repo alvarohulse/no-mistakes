@@ -87,6 +87,7 @@ commands:
 	resolvedReferences := make(map[string]int)
 	foundEmptyOutput := false
 	foundPushAttempt := false
+	foundPushTargetResolution := false
 	for _, attempt := range attempts {
 		if attempt.OutputArtifactID == nil {
 			t.Fatalf("attempt %s (%s) has no output artifact reference", attempt.ID, attempt.Purpose)
@@ -125,6 +126,8 @@ commands:
 			if string(contents) != want {
 				t.Fatalf("output artifact %s contents = %q, want %q", registered.ID, contents, want)
 			}
+		case step == types.StepName("resolve push target"):
+			foundPushTargetResolution = true
 		case step == types.StepPush:
 			foundPushAttempt = true
 		default:
@@ -136,6 +139,9 @@ commands:
 	}
 	if !foundPushAttempt {
 		t.Fatal("whole pipeline recorded no Push command attempts")
+	}
+	if !foundPushTargetResolution {
+		t.Fatal("whole pipeline recorded no resolve-push-target command attempt")
 	}
 	if !foundEmptyOutput {
 		t.Fatal("whole pipeline did not retain a zero-byte command output artifact")
