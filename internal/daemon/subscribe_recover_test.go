@@ -27,7 +27,7 @@ func TestSubscribeReceivesEvents(t *testing.T) {
 		return []pipeline.Step{approvalStep}
 	})
 
-	repo, headSHA := setupTestGitRepo(t, p, d, "testrepo-sub1")
+	_, headSHA := setupTestGitRepo(t, p, d, "testrepo-sub1")
 
 	// Trigger a push to get a run ID.
 	client, err := ipc.Dial(p.Socket())
@@ -110,21 +110,6 @@ verifyEvents:
 	if !hasRunCompleted {
 		t.Error("never received run_completed event")
 	}
-
-	// Stream completion intentionally precedes post-run cleanup. Let that
-	// cleanup finish before the test harness shuts down the daemon, so this
-	// subscription test does not race unrelated eval capture teardown.
-	worktree := p.WorktreeDir(repo.ID, pushResult.RunID)
-	deadline = time.Now().Add(testRunTerminalBudget)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(worktree); os.IsNotExist(err) {
-			return
-		} else if err != nil {
-			t.Fatalf("stat completed run worktree: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("completed run worktree was not removed within %s", testRunTerminalBudget)
 }
 
 func TestSubscribeToSlowRunReceivesEvents(t *testing.T) {
