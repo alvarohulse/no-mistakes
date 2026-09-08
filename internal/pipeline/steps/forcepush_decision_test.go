@@ -146,7 +146,7 @@ func TestResolveForcePushDecision_AllowsWhenRemoteContentIncorporated(t *testing
 	if err != nil {
 		t.Fatalf("expected push allowed when remote content is incorporated, got %v", err)
 	}
-	if d.newBranch || d.upToDate || d.remoteSHA != remoteTip {
+	if d.newBranch || d.upToDate || !d.incorporated || d.remoteSHA != remoteTip {
 		t.Fatalf("expected guarded force-push anchored to %s, got %#v", remoteTip, d)
 	}
 }

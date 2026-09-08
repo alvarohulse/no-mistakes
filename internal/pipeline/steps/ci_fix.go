@@ -259,7 +259,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	if err != nil {
 		var refusal *forcePushWouldDiscardError
 		if errors.As(err, &refusal) {
-			receipt.markRefused(err.Error())
+			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
 		}
 		return false, err
 	}
@@ -269,6 +269,8 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
 	case decision.upToDate:
 		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	case decision.incorporated:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote movement passed incorporation safety checks", decision.remoteSHA)
 	default:
 		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
@@ -281,15 +283,9 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err != nil {
 			return fmt.Errorf("verify successful push: %w", err)
 		}
-		fields := strings.Fields(remoteOut)
-		if len(fields) == 0 || fields[0] != newHeadSHA {
-			observed := "missing"
-			if len(fields) > 0 {
-				observed = fields[0]
-			}
-			return fmt.Errorf("verify successful push: remote head %s does not equal pushed head %s", observed, newHeadSHA)
+		if err := recordVerifiedPushRemoteSHA(receipt, remoteOut, newHeadSHA); err != nil {
+			return fmt.Errorf("verify successful push: %w", err)
 		}
-		receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
 		binding := db.PushBinding{
 			HeadSHA:           newHeadSHA,
 			TargetKind:        targetKind,

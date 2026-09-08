@@ -16,9 +16,10 @@ type gitRunner func(args ...string) (string, error)
 // Exactly one of newBranch / upToDate is true, or neither (a guarded
 // force-push anchored to remoteSHA is required).
 type forcePushDecision struct {
-	remoteSHA string // current remote head; the lease anchor for a force-push
-	newBranch bool   // the branch does not exist on the remote -> plain push
-	upToDate  bool   // the remote already points at the head -> no push needed
+	remoteSHA    string // current remote head; the lease anchor for a force-push
+	newBranch    bool   // the branch does not exist on the remote -> plain push
+	upToDate     bool   // the remote already points at the head -> no push needed
+	incorporated bool   // remote moved, but patch-ID analysis proved its changes are included
 }
 
 // forcePushWouldDiscardError reports that a force-push would discard commits
@@ -88,7 +89,7 @@ func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSe
 		return forcePushDecision{}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
 	}
 	if len(dropped) == 0 {
-		return forcePushDecision{remoteSHA: current}, nil
+		return forcePushDecision{remoteSHA: current, incorporated: true}, nil
 	}
 	return forcePushDecision{}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
 }

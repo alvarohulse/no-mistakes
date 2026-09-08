@@ -150,7 +150,7 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), "")
 		var refusal *forcePushWouldDiscardError
 		if errors.As(err, &refusal) {
-			receipt.markRefused(err.Error())
+			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
 		}
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
@@ -160,6 +160,8 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
 	case decision.upToDate:
 		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	case decision.incorporated:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote movement passed incorporation safety checks", decision.remoteSHA)
 	default:
 		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
@@ -195,16 +197,10 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	if err != nil {
 		return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 	}
-	fields := strings.Fields(verifiedRemote)
-	if len(fields) == 0 || fields[0] != headBeingPushed {
-		observed := "missing"
-		if len(fields) > 0 {
-			observed = fields[0]
-		}
-		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, observed, headBeingPushed)
+	if err := recordVerifiedPushRemoteSHA(receipt, verifiedRemote, headBeingPushed); err != nil {
+		return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 	}
-	verifiedRemote = fields[0]
-	receipt.remoteAfterSHA = pushReceiptStringPointer(verifiedRemote)
+	verifiedRemote = *receipt.remoteAfterSHA
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
 		HeadSHA:           headBeingPushed,
 		TargetKind:        pushTarget,
@@ -240,6 +236,22 @@ func pushReceiptStringPointer(value string) *string {
 		return nil
 	}
 	return &value
+}
+
+func recordVerifiedPushRemoteSHA(receipt *pushReceiptRecorder, output, expected string) error {
+	fields := strings.Fields(output)
+	if len(fields) == 0 || fields[0] != expected {
+		if len(fields) > 0 {
+			receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
+		}
+		observed := "missing"
+		if len(fields) > 0 {
+			observed = fields[0]
+		}
+		return fmt.Errorf("remote head %s does not equal pushed head %s", observed, expected)
+	}
+	receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
+	return nil
 }
 
 func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {

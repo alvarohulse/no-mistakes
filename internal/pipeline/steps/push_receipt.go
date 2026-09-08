@@ -38,6 +38,7 @@ type pushReceiptRecorder struct {
 	transportStarted  bool
 	refused           bool
 	attemptIDs        []string
+	attemptSnapshot   func() ([]string, error)
 }
 
 func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef string) *pushReceiptRecorder {
@@ -108,6 +109,12 @@ func (r *pushReceiptRecorder) markRefused(reason string) {
 	r.setDecision(db.PushLeaseOrForceDecisionRefused, reason, "")
 }
 
+func (r *pushReceiptRecorder) markRefusedAtRemote(reason, remoteSHA string) {
+	r.refused = true
+	r.setDecision(db.PushLeaseOrForceDecisionRefused, reason, remoteSHA)
+	r.remoteAfterSHA = pushReceiptStringPointer(remoteSHA)
+}
+
 func (r *pushReceiptRecorder) recordAttempt(id string) {
 	if id == "" {
 		return
@@ -124,17 +131,22 @@ func (r *pushReceiptRecorder) recordAttempt(id string) {
 // durable command-attempt/artifact seam and records only attempts created by
 // this operation.
 func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...string) (string, error) {
-	before, err := commandAttemptIDsForScope(r.sctx)
+	before, err := r.snapshotAttempts()
 	if err != nil {
 		return "", err
 	}
 	output, exitCode, runErr := runStepGitCommand(r.sctx, command, purpose, args...)
-	after, afterErr := commandAttemptIDsForScope(r.sctx)
-	if afterErr == nil {
-		for id := range after {
-			if _, existed := before[id]; !existed {
-				r.recordAttempt(id)
-			}
+	after, afterErr := r.snapshotAttempts()
+	if afterErr != nil {
+		return output, errors.Join(runErr, fmt.Errorf("record push command attempts: %w", afterErr))
+	}
+	seen := make(map[string]struct{}, len(before))
+	for _, id := range before {
+		seen[id] = struct{}{}
+	}
+	for _, id := range after {
+		if _, existed := seen[id]; !existed {
+			r.recordAttempt(id)
 		}
 	}
 	if runErr != nil {
@@ -144,6 +156,13 @@ func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...str
 		return output, &pushCommandExitError{command: command, code: exitCode, output: output}
 	}
 	return output, nil
+}
+
+func (r *pushReceiptRecorder) snapshotAttempts() ([]string, error) {
+	if r.attemptSnapshot != nil {
+		return r.attemptSnapshot()
+	}
+	return commandAttemptIDsForScope(r.sctx)
 }
 
 type pushCommandExitError struct {
@@ -159,15 +178,15 @@ func (e *pushCommandExitError) Error() string {
 	return fmt.Sprintf("git %s exited with code %d: %s", e.command, e.code, safeurl.RedactText(strings.TrimSpace(e.output)))
 }
 
-func commandAttemptIDsForScope(sctx *pipeline.StepContext) (map[string]struct{}, error) {
+func commandAttemptIDsForScope(sctx *pipeline.StepContext) ([]string, error) {
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
 	if err != nil {
 		return nil, err
 	}
-	ids := make(map[string]struct{})
+	ids := make([]string, 0, len(attempts))
 	for _, attempt := range attempts {
 		if attempt.StepID == sctx.StepResultID && attempt.RoundID == sctx.RoundID {
-			ids[attempt.ID] = struct{}{}
+			ids = append(ids, attempt.ID)
 		}
 	}
 	return ids, nil
@@ -188,6 +207,11 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 		case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded), errors.Is(runErr, errCommandExecution):
 			outcome = db.PushOperationOutcomeProcessError
 		default:
+			var commandExit *pushCommandExitError
+			if errors.As(runErr, &commandExit) && commandExit.code < 0 {
+				outcome = db.PushOperationOutcomeProcessError
+				break
+			}
 			var refusal *forcePushWouldDiscardError
 			if errors.As(runErr, &refusal) {
 				outcome = db.PushOperationOutcomeRefused

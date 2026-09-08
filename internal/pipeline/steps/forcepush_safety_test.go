@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // fileAtRef reports whether path exists in the tree at ref in the given repo.
@@ -73,6 +75,17 @@ func TestCIStep_CommitAndPush_RefusesToClobberUnseenUpstreamCommit(t *testing.T)
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Run.HeadSHA = headSHA // gate's last-recorded head == H1
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "repair", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "repair"
 
 	step := &CIStep{}
 	pushed, err := step.commitAndPush(sctx, "preserve reviewed remote changes")
@@ -92,6 +105,17 @@ func TestCIStep_CommitAndPush_RefusesToClobberUnseenUpstreamCommit(t *testing.T)
 	}
 	if !fileAtRef(t, upstream, "refs/heads/feature", "approved.txt") {
 		t.Fatalf("approved.txt was discarded from origin - data loss")
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("CI push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResult.ID || receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != approvedSHA || receipt.RemoteAfterSHA == nil || *receipt.RemoteAfterSHA != approvedSHA {
+		t.Fatalf("CI refusal receipt remote state = %+v, want %s", receipt, approvedSHA)
 	}
 }
 
@@ -146,9 +170,20 @@ func TestPushStep_RefusesToClobberAdvancedUpstreamBranch(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Run.HeadSHA = h3
 	recordReviewApproval(t, sctx, h3)
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	step := &PushStep{}
-	_, err := step.Execute(sctx)
+	_, err = step.Execute(sctx)
 	if err == nil {
 		t.Fatalf("expected push to refuse clobbering advanced upstream branch")
 	}
@@ -159,6 +194,17 @@ func TestPushStep_RefusesToClobberAdvancedUpstreamBranch(t *testing.T) {
 	}
 	if !fileAtRef(t, upstream, "refs/heads/feature", "upstream.txt") {
 		t.Fatalf("upstream.txt was discarded from origin - data loss")
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != advancedSHA || receipt.RemoteAfterSHA == nil || *receipt.RemoteAfterSHA != advancedSHA {
+		t.Fatalf("refusal receipt remote state = %+v, want %s", receipt, advancedSHA)
 	}
 }
 
