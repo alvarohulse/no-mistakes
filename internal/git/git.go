@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -756,16 +757,40 @@ func isWorktreeConfigWriteUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
+var worktreeOperationLocks sync.Map // normalized repository path → *sync.Mutex
+
+// withWorktreeOperationLock serializes Git worktree metadata operations for a
+// repository. Git creates a linked-worktree metadata directory before it has
+// finished writing that directory's commondir file, so another concurrent
+// worktree add can observe the partial entry and fail with "failed to read
+// .../commondir". Remove must use the same lock because it mutates the same
+// metadata directory while a new run may be starting.
+func withWorktreeOperationLock(repoDir string, operation func() error) error {
+	key := filepath.Clean(repoDir)
+	if absolute, err := filepath.Abs(key); err == nil {
+		key = absolute
+	}
+	lockValue, _ := worktreeOperationLocks.LoadOrStore(key, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+	return operation()
+}
+
 // WorktreeAdd creates a detached worktree at wtPath checked out to the given SHA.
 func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
-	_, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
-	return err
+	return withWorktreeOperationLock(repoDir, func() error {
+		_, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
+		return err
+	})
 }
 
 // WorktreeRemove removes a worktree at the given path.
 func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
-	_, err := Run(ctx, repoDir, "worktree", "remove", "--force", wtPath)
-	return err
+	return withWorktreeOperationLock(repoDir, func() error {
+		_, err := Run(ctx, repoDir, "worktree", "remove", "--force", wtPath)
+		return err
+	})
 }
 
 // ResolveRef returns the commit SHA that ref resolves to via

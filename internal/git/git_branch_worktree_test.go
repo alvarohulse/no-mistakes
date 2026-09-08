@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,50 @@ func TestWorktreeAddAndRemove(t *testing.T) {
 	// verify worktree directory is gone
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
 		t.Fatal("worktree directory should not exist after removal")
+	}
+}
+
+// TestWorktreeAddConcurrentSameRepo exercises Git's linked-worktree metadata
+// race. A concurrent worktree add can observe the sibling metadata directory
+// before Git has written its commondir file, which fails with "failed to read
+// .../commondir" on Windows and occasionally on other platforms.
+func TestWorktreeAddConcurrentSameRepo(t *testing.T) {
+	ctx := context.Background()
+	const (
+		attempts = 16
+		workers  = 4
+	)
+	for attempt := 0; attempt < attempts; attempt++ {
+		src := initTestRepo(t)
+		bare := filepath.Join(t.TempDir(), "bare")
+		if err := InitBare(ctx, bare); err != nil {
+			t.Fatal(err)
+		}
+		run(t, src, "git", "remote", "add", "bare", bare)
+		run(t, src, "git", "push", "bare", "HEAD:refs/heads/main")
+		sha := run(t, src, "git", "rev-parse", "HEAD")
+
+		start := make(chan struct{})
+		errs := make(chan error, workers)
+		for worker := 0; worker < workers; worker++ {
+			wtDir := filepath.Join(t.TempDir(), fmt.Sprintf("worktree-%d", worker))
+			go func() {
+				<-start
+				errs <- WorktreeAdd(ctx, bare, wtDir, sha)
+			}()
+		}
+		close(start)
+		var firstErr error
+		for worker := 0; worker < workers; worker++ {
+			if err := <-errs; err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+		}
+		if firstErr != nil {
+			t.Fatalf("attempt %d: concurrent WorktreeAdd failed: %v", attempt, firstErr)
+		}
 	}
 }
 
