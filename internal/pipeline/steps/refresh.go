@@ -118,8 +118,8 @@ func (r *refreshReceiptRecorder) recordRefusal(startedAt time.Time, targetRef st
 	return operation.finish(decision, db.RefreshConflictStateNone, db.RefreshRepairStateNotAttempted, reason)
 }
 
-func (o *refreshOperationBuilder) refreshScopeAttemptIDs() (map[string]struct{}, error) {
-	ids := make(map[string]struct{})
+func (o *refreshOperationBuilder) refreshScopeAttemptIDs() ([]string, error) {
+	var ids []string
 	if o == nil || o.recorder == nil || !o.recorder.enabled {
 		return ids, nil
 	}
@@ -131,12 +131,12 @@ func (o *refreshOperationBuilder) refreshScopeAttemptIDs() (map[string]struct{},
 		if attempt.StepID != o.recorder.sctx.StepResultID || attempt.RoundID != o.recorder.sctx.RoundID {
 			continue
 		}
-		ids[attempt.ID] = struct{}{}
+		ids = append(ids, attempt.ID)
 	}
 	return ids, nil
 }
 
-func (o *refreshOperationBuilder) captureAttemptsStartedAfter(before map[string]struct{}) error {
+func (o *refreshOperationBuilder) captureAttemptsStartedAfter(before []string) error {
 	if o == nil || o.recorder == nil || !o.recorder.enabled {
 		return nil
 	}
@@ -144,8 +144,12 @@ func (o *refreshOperationBuilder) captureAttemptsStartedAfter(before map[string]
 	if err != nil {
 		return err
 	}
-	for attemptID := range after {
-		if _, alreadyPresent := before[attemptID]; alreadyPresent {
+	beforeSet := make(map[string]struct{}, len(before))
+	for _, attemptID := range before {
+		beforeSet[attemptID] = struct{}{}
+	}
+	for _, attemptID := range after {
+		if _, alreadyPresent := beforeSet[attemptID]; alreadyPresent {
 			continue
 		}
 		alreadyLinked := false
@@ -188,6 +192,7 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 		diagnosticRequired = true
 	}
 	var diagnosticErr error
+	var diagnosticArtifact *db.Artifact
 	if o.diagnosticArtifactID == nil && diagnosticRequired && o.recorder.sctx.Paths != nil {
 		store, err := artifact.NewStore(o.recorder.sctx.Paths, "")
 		if err != nil {
@@ -202,12 +207,7 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 				metadata.RunID = o.recorder.sctx.Run.ID
 				metadata.StepID = refreshStringPointer(o.recorder.sctx.StepResultID)
 				metadata.RoundID = refreshStringPointer(o.recorder.sctx.RoundID)
-				registered, err := o.recorder.sctx.DB.RegisterArtifact(metadata)
-				if err != nil {
-					diagnosticErr = fmt.Errorf("register refresh diagnostic: %w", err)
-				} else {
-					o.diagnosticArtifactID = &registered.ID
-				}
+				diagnosticArtifact = &metadata
 			}
 		}
 	}
@@ -232,8 +232,18 @@ func (o *refreshOperationBuilder) finish(decision db.RefreshDecision, conflictSt
 		DurationMS:           maxInt64(0, completedAt.Sub(o.startedAt).Milliseconds()),
 		DiagnosticArtifactID: o.diagnosticArtifactID,
 	}
-	if _, err := o.recorder.sctx.DB.InsertRefreshOperation(operation); err != nil {
-		return errors.Join(diagnosticErr, fmt.Errorf("insert refresh receipt: %w", err))
+	var insertErr error
+	if diagnosticArtifact != nil {
+		var stored *db.RefreshOperation
+		stored, insertErr = o.recorder.sctx.DB.InsertRefreshOperationWithDiagnostic(operation, *diagnosticArtifact)
+		if stored != nil {
+			o.diagnosticArtifactID = stored.DiagnosticArtifactID
+		}
+	} else {
+		_, insertErr = o.recorder.sctx.DB.InsertRefreshOperation(operation)
+	}
+	if insertErr != nil {
+		return errors.Join(diagnosticErr, fmt.Errorf("insert refresh receipt: %w", insertErr))
 	}
 	return diagnosticErr
 }
