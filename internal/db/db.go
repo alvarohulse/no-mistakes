@@ -113,6 +113,10 @@ func open(path string, beforeFreshSchemaInstall func() error) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 	}
+	if err := migrateRefreshOperationSchema(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
+	}
 	if err := migrateRoundDecisionSources(sqlDB); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)

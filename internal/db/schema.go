@@ -315,7 +315,8 @@ CREATE TABLE IF NOT EXISTS refresh_operations (
     authoritative_base_ref  TEXT NOT NULL,
     authoritative_base_sha  TEXT,
     starting_head_sha       TEXT,
-    decision                TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
+    resolved_target_head_sha TEXT,
+    decision                TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error', 'cancelled')),
     resulting_head_sha      TEXT,
     conflict_state          TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
     repair_state            TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
@@ -577,6 +578,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_output_artifact
 CREATE INDEX IF NOT EXISTS idx_command_attempts_proof_by_tested_sha
     ON command_attempts (run_id, tested_sha) WHERE accepted_as_proof = 1;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_run_id
+    ON command_attempts (run_id, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_run_id
+    ON artifacts (run_id, id);
+
 CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_insert
 BEFORE INSERT ON command_attempts
 WHEN NEW.accepted_as_proof NOT IN (0, 1)
@@ -716,7 +723,8 @@ var migrationStatements = []string{
 		authoritative_base_ref TEXT NOT NULL,
 		authoritative_base_sha TEXT,
 		starting_head_sha TEXT,
-		decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error')),
+		resolved_target_head_sha TEXT,
+		decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error', 'cancelled')),
 		resulting_head_sha TEXT,
 		conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
 		repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))

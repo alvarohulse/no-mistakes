@@ -145,6 +145,9 @@ func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	if rebased.StartingHeadSHA == nil || *rebased.StartingHeadSHA != featureHead || rebased.ResultingHeadSHA == nil || *rebased.ResultingHeadSHA == featureHead || rebased.AuthoritativeBaseSHA == nil || *rebased.AuthoritativeBaseSHA == "" {
 		t.Fatalf("base refresh identities = %+v", rebased)
 	}
+	if rebased.ResolvedTargetHeadSHA == nil || *rebased.ResolvedTargetHeadSHA != *rebased.AuthoritativeBaseSHA {
+		t.Fatalf("base refresh resolved target = %+v", rebased)
+	}
 
 	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
 	if err != nil {
@@ -708,6 +711,13 @@ func TestTryRebasePinsResolvedTargetCommit(t *testing.T) {
 	if !isAncestor(context.Background(), dir, firstTargetSHA, "HEAD") || isAncestor(context.Background(), dir, movedTargetSHA, "HEAD") {
 		t.Fatalf("rebase did not preserve resolved target %s after ref moved to %s", firstTargetSHA, movedTargetSHA)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].ResolvedTargetHeadSHA == nil || *operations[0].ResolvedTargetHeadSHA != firstTargetSHA {
+		t.Fatalf("resolved target receipt = %+v, want %s", operations, firstTargetSHA)
+	}
 }
 
 func TestTryRebaseClassifiesOnlyVerifiedMissingTargetAsSkipped(t *testing.T) {
@@ -731,7 +741,7 @@ func TestTryRebaseClassifiesOnlyVerifiedMissingTargetAsSkipped(t *testing.T) {
 				return "", context.Canceled
 			},
 			wantErr:      context.Canceled,
-			wantDecision: db.RefreshDecisionError,
+			wantDecision: db.RefreshDecisionCancelled,
 		},
 		{
 			name:      "malformed resolved commit",

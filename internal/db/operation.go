@@ -26,6 +26,7 @@ const (
 	RefreshDecisionRepaired      RefreshDecision = "repaired"
 	RefreshDecisionRefused       RefreshDecision = "refused"
 	RefreshDecisionError         RefreshDecision = "error"
+	RefreshDecisionCancelled     RefreshDecision = "cancelled"
 )
 
 type RefreshConflictState string
@@ -49,26 +50,27 @@ const (
 // that produced it. The generic operations collection owns identity, timing,
 // and shared references; this type owns only the Refresh-specific facts.
 type RefreshOperation struct {
-	ID                   string
-	RunID                string
-	Kind                 OperationKind
-	StepID               string
-	RoundID              string
-	Strategy             types.RefreshStrategy
-	SourceRef            string
-	DestinationRef       string
-	AuthoritativeBaseRef string
-	AuthoritativeBaseSHA *string
-	StartingHeadSHA      *string
-	Decision             RefreshDecision
-	ResultingHeadSHA     *string
-	ConflictState        RefreshConflictState
-	RepairState          RefreshRepairState
-	CommandAttemptIDs    []string
-	StartedAt            int64
-	CompletedAt          int64
-	DurationMS           int64
-	DiagnosticArtifactID *string
+	ID                    string
+	RunID                 string
+	Kind                  OperationKind
+	StepID                string
+	RoundID               string
+	Strategy              types.RefreshStrategy
+	SourceRef             string
+	DestinationRef        string
+	AuthoritativeBaseRef  string
+	AuthoritativeBaseSHA  *string
+	StartingHeadSHA       *string
+	ResolvedTargetHeadSHA *string
+	Decision              RefreshDecision
+	ResultingHeadSHA      *string
+	ConflictState         RefreshConflictState
+	RepairState           RefreshRepairState
+	CommandAttemptIDs     []string
+	StartedAt             int64
+	CompletedAt           int64
+	DurationMS            int64
+	DiagnosticArtifactID  *string
 }
 
 // InsertRefreshOperation atomically records a completed Refresh receipt and
@@ -163,26 +165,27 @@ func (d *DB) InsertRefreshOperationWithDiagnostic(operation RefreshOperation, di
 	diagnostic.CreatedAt = time.Now().UnixMilli()
 	operation.DiagnosticArtifactID = &diagnostic.ID
 	if err := insertRefreshOperationRows(tx, RefreshOperation{
-		ID:                   operation.ID,
-		RunID:                operation.RunID,
-		Kind:                 operation.Kind,
-		StepID:               operation.StepID,
-		RoundID:              operation.RoundID,
-		Strategy:             operation.Strategy,
-		SourceRef:            operation.SourceRef,
-		DestinationRef:       operation.DestinationRef,
-		AuthoritativeBaseRef: operation.AuthoritativeBaseRef,
-		AuthoritativeBaseSHA: operation.AuthoritativeBaseSHA,
-		StartingHeadSHA:      operation.StartingHeadSHA,
-		Decision:             operation.Decision,
-		ResultingHeadSHA:     operation.ResultingHeadSHA,
-		ConflictState:        operation.ConflictState,
-		RepairState:          operation.RepairState,
-		CommandAttemptIDs:    operation.CommandAttemptIDs,
-		StartedAt:            operation.StartedAt,
-		CompletedAt:          operation.CompletedAt,
-		DurationMS:           operation.DurationMS,
-		DiagnosticArtifactID: nil,
+		ID:                    operation.ID,
+		RunID:                 operation.RunID,
+		Kind:                  operation.Kind,
+		StepID:                operation.StepID,
+		RoundID:               operation.RoundID,
+		Strategy:              operation.Strategy,
+		SourceRef:             operation.SourceRef,
+		DestinationRef:        operation.DestinationRef,
+		AuthoritativeBaseRef:  operation.AuthoritativeBaseRef,
+		AuthoritativeBaseSHA:  operation.AuthoritativeBaseSHA,
+		StartingHeadSHA:       operation.StartingHeadSHA,
+		ResolvedTargetHeadSHA: operation.ResolvedTargetHeadSHA,
+		Decision:              operation.Decision,
+		ResultingHeadSHA:      operation.ResultingHeadSHA,
+		ConflictState:         operation.ConflictState,
+		RepairState:           operation.RepairState,
+		CommandAttemptIDs:     operation.CommandAttemptIDs,
+		StartedAt:             operation.StartedAt,
+		CompletedAt:           operation.CompletedAt,
+		DurationMS:            operation.DurationMS,
+		DiagnosticArtifactID:  nil,
 	}); err != nil {
 		return nil, err
 	}
@@ -228,11 +231,12 @@ func insertRefreshOperationRows(tx *sql.Tx, operation RefreshOperation) error {
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO refresh_operations
-		 (operation_id, strategy, source_ref, destination_ref, authoritative_base_ref, authoritative_base_sha,
-		  starting_head_sha, decision, resulting_head_sha, conflict_state, repair_state)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (operation_id, strategy, source_ref, destination_ref, authoritative_base_ref, authoritative_base_sha,
+			  starting_head_sha, resolved_target_head_sha, decision, resulting_head_sha, conflict_state, repair_state)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		operation.ID, operation.Strategy, operation.SourceRef, operation.DestinationRef,
 		operation.AuthoritativeBaseRef, operation.AuthoritativeBaseSHA, operation.StartingHeadSHA,
+		operation.ResolvedTargetHeadSHA,
 		operation.Decision, operation.ResultingHeadSHA, operation.ConflictState, operation.RepairState,
 	); err != nil {
 		return fmt.Errorf("insert refresh operation: insert refresh receipt: %w", err)
@@ -261,6 +265,9 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	if operation.StartingHeadSHA != nil && strings.TrimSpace(*operation.StartingHeadSHA) == "" {
 		return fmt.Errorf("insert refresh operation: starting head SHA is empty")
 	}
+	if operation.ResolvedTargetHeadSHA != nil && strings.TrimSpace(*operation.ResolvedTargetHeadSHA) == "" {
+		return fmt.Errorf("insert refresh operation: resolved target head SHA is empty")
+	}
 	if operation.Strategy != types.RefreshStrategyRebase && operation.Strategy != types.RefreshStrategyMerge {
 		return fmt.Errorf("insert refresh operation: unsupported strategy %q", operation.Strategy)
 	}
@@ -268,7 +275,7 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 		return fmt.Errorf("insert refresh operation: unsupported decision %q", operation.Decision)
 	}
 	if operation.AuthoritativeBaseSHA == nil {
-		if operation.Decision != RefreshDecisionRefused && operation.Decision != RefreshDecisionError {
+		if operation.Decision != RefreshDecisionRefused && operation.Decision != RefreshDecisionError && operation.Decision != RefreshDecisionCancelled {
 			return fmt.Errorf("insert refresh operation: authoritative base SHA is required for decision %q", operation.Decision)
 		}
 	} else if strings.TrimSpace(*operation.AuthoritativeBaseSHA) == "" {
@@ -355,7 +362,7 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 func validRefreshDecision(value RefreshDecision) bool {
 	switch value {
 	case RefreshDecisionSkipped, RefreshDecisionFastForwarded, RefreshDecisionRebased, RefreshDecisionMerged,
-		RefreshDecisionConflicted, RefreshDecisionRepaired, RefreshDecisionRefused, RefreshDecisionError:
+		RefreshDecisionConflicted, RefreshDecisionRepaired, RefreshDecisionRefused, RefreshDecisionError, RefreshDecisionCancelled:
 		return true
 	default:
 		return false
@@ -392,6 +399,11 @@ func validRefreshOutcomeTriple(decision RefreshDecision, conflict RefreshConflic
 		return conflict == RefreshConflictStateNone && repair == RefreshRepairStateNotAttempted
 	case RefreshDecisionError:
 		return conflict == RefreshConflictStateNone && (repair == RefreshRepairStateNotAttempted || repair == RefreshRepairStateFailed)
+	case RefreshDecisionCancelled:
+		if conflict == RefreshConflictStateNone {
+			return repair == RefreshRepairStateNotAttempted
+		}
+		return conflict == RefreshConflictStateDetected && (repair == RefreshRepairStateNotAttempted || repair == RefreshRepairStateFailed)
 	default:
 		return false
 	}
@@ -405,7 +417,7 @@ func (d *DB) GetRefreshOperationsByRun(runID string) ([]*RefreshOperation, error
 	rows, err := d.sql.Query(
 		`SELECT o.id, o.run_id, o.kind, o.step_id, o.round_id,
 		        ro.strategy, ro.source_ref, ro.destination_ref, ro.authoritative_base_ref, ro.authoritative_base_sha,
-		        ro.starting_head_sha, ro.decision, ro.resulting_head_sha, ro.conflict_state, ro.repair_state,
+		        ro.starting_head_sha, ro.resolved_target_head_sha, ro.decision, ro.resulting_head_sha, ro.conflict_state, ro.repair_state,
 		        o.started_at, o.completed_at, o.duration_ms, o.diagnostic_artifact_id
 		 FROM operations o
 		 JOIN refresh_operations ro ON ro.operation_id = o.id
@@ -444,11 +456,11 @@ func (d *DB) GetRefreshOperationsByRun(runID string) ([]*RefreshOperation, error
 func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperation, error) {
 	operation := &RefreshOperation{}
 	var kind, strategy, decision, conflictState, repairState string
-	var authoritativeBaseSHA, startingHeadSHA, resultingHeadSHA sql.NullString
+	var authoritativeBaseSHA, startingHeadSHA, resolvedTargetHeadSHA, resultingHeadSHA sql.NullString
 	if err := row.Scan(
 		&operation.ID, &operation.RunID, &kind, &operation.StepID, &operation.RoundID,
 		&strategy, &operation.SourceRef, &operation.DestinationRef, &operation.AuthoritativeBaseRef, &authoritativeBaseSHA,
-		&startingHeadSHA, &decision, &resultingHeadSHA, &conflictState, &repairState,
+		&startingHeadSHA, &resolvedTargetHeadSHA, &decision, &resultingHeadSHA, &conflictState, &repairState,
 		&operation.StartedAt, &operation.CompletedAt, &operation.DurationMS, &operation.DiagnosticArtifactID,
 	); err != nil {
 		return nil, err
@@ -463,6 +475,9 @@ func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperatio
 	}
 	if startingHeadSHA.Valid {
 		operation.StartingHeadSHA = &startingHeadSHA.String
+	}
+	if resolvedTargetHeadSHA.Valid {
+		operation.ResolvedTargetHeadSHA = &resolvedTargetHeadSHA.String
 	}
 	if resultingHeadSHA.Valid {
 		operation.ResultingHeadSHA = &resultingHeadSHA.String
