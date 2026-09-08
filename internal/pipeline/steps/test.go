@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -14,6 +16,20 @@ import (
 
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
+
+type testFixSummary struct {
+	Summary            string  `json:"summary"`
+	ReplacementCommand *string `json:"replacement_command,omitempty"`
+}
+
+var testFixSummarySchema = json.RawMessage(fmt.Sprintf(`{
+	"type": "object",
+	"properties": {
+		"summary": {"type": "string", "maxLength": %d},
+		"replacement_command": {"type": "string"}
+	},
+	"required": ["summary"]
+}`, config.MaxFixMessageSummaryBytes))
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
@@ -61,6 +77,13 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	var fixSummary string
 	if sctx.Fixing {
 		historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + testguidance.Rule + configuredPromptSection(sctx, s.Name())
+		fixSchema := commitSummarySchema
+		replacementRule := ""
+		if plannedTest {
+			fixSchema = testFixSummarySchema
+			replacementRule = `- If the persisted planned test command itself is invalid and you determine its corrected command, include that exact command in the "replacement_command" field of the structured response. Omit it unless you are explicitly correcting the persisted command; the controller will validate and persist any replacement before execution.
+`
+		}
 		fixPrompt := fmt.Sprintf(
 			`Fix the failing tests in this repository. Reproduce the specific failure, identify the root cause, and fix either the tests or the code so that failure passes.
 
@@ -73,7 +96,7 @@ Rules:
 - Make the smallest correct root-cause fix.
 - Do not refactor beyond what is needed for that root-cause fix.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
-- Do NOT run linters, formatters, or static analysis tools.
+%s- Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
@@ -85,6 +108,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			replacementRule,
 			historySection,
 		)
 		if sctx.PreviousFindings != "" {
@@ -96,9 +120,15 @@ Previous test findings to address:
 		summary, err := executeFixMode(sctx, s.Name(), fixExecutionOptions{
 			LogMessage:      "asking agent to fix test failures...",
 			Prompt:          fixPrompt,
+			JSONSchema:      fixSchema,
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
-			AfterAgentRun: func(*agent.Result) error {
+			AfterAgentRun: func(result *agent.Result) error {
+				if plannedTest {
+					if err := applyExplicitPlannedCommandReplacement(sctx, result); err != nil {
+						return err
+					}
+				}
 				var err error
 				newTestsFromFix, err = detectNewTestFiles(ctx, sctx.WorkDir)
 				return err
@@ -108,6 +138,9 @@ Previous test findings to address:
 			return nil, err
 		}
 		fixSummary = summary
+		if plannedTest {
+			testCmd = sctx.PlannedCommand
+		}
 	}
 
 	tested := []string{}
@@ -278,6 +311,27 @@ Rules:
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
 	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+}
+
+func applyExplicitPlannedCommandReplacement(sctx *pipeline.StepContext, result *agent.Result) error {
+	if result == nil || len(result.Output) == 0 {
+		return nil
+	}
+	var response testFixSummary
+	if err := json.Unmarshal(result.Output, &response); err != nil || response.ReplacementCommand == nil {
+		return nil
+	}
+	replacement := strings.TrimSpace(*response.ReplacementCommand)
+	if replacement == "" {
+		return nil
+	}
+	if sctx.DB != nil && sctx.StepResultID != "" {
+		if err := sctx.DB.SetStepPlannedCommand(sctx.StepResultID, replacement); err != nil {
+			return fmt.Errorf("persist replacement planned command: %w", err)
+		}
+	}
+	sctx.PlannedCommand = replacement
+	return nil
 }
 
 func testNotEstablishedOutcome(description string) *pipeline.StepOutcome {
