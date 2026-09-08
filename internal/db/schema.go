@@ -288,9 +288,6 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
     ON artifacts (run_id, created_at, id);
 
-CREATE INDEX IF NOT EXISTS idx_artifacts_operation_id
-    ON artifacts (operation_id) WHERE operation_id IS NOT NULL;
-
 -- Operations are a run-scoped indexed collection. Variant tables carry their
 -- typed facts so Push can join this collection later without duplicating the
 -- shared identity, timing, or reference edges.
