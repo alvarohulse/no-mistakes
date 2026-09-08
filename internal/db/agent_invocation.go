@@ -75,6 +75,9 @@ type AgentInvocation struct {
 	// top-level usage totals account for all work in this invocation.
 	UsageCoverage agent.UsageCoverage
 	Model         string
+	// Effort is the controller-selected reasoning effort. Empty means the
+	// adapter or a legacy row did not expose one.
+	Effort string
 	// ModelProvider is the provider that served the model (openai, anthropic,
 	// ...). Nil when the adapter cannot report it.
 	ModelProvider *string
@@ -149,7 +152,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, round_id, purpose, agent, usage_coverage, model, model_provider, review_candidate_pool_json,
+const agentInvocationColumns = `id, run_id, step_name, round, round_id, purpose, agent, usage_coverage, model, effort, model_provider, review_candidate_pool_json,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -160,7 +163,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, round_id, purpose,
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -193,7 +196,7 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	result, err := d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.Effort, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -237,7 +240,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		roundID = inv.RoundID
 	}
 	result, err := d.sql.Exec(`UPDATE agent_invocations SET
-		run_id = ?, step_name = ?, round = ?, round_id = ?, purpose = ?, agent = ?, usage_coverage = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		run_id = ?, step_name = ?, round = ?, round_id = ?, purpose = ?, agent = ?, usage_coverage = ?, model = ?, effort = ?, model_provider = ?, review_candidate_pool_json = ?,
 		session_mode = ?, session_key = ?, fallback_reason = ?,
 		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
@@ -247,7 +250,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
 		WHERE id = ?`,
-		inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.Effort, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -389,9 +392,10 @@ type scanner interface {
 func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
 	var roundID sql.NullString
+	var effort *string
 	var reviewCandidatePoolJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &roundID, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &roundID, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.Model, &effort, &inv.ModelProvider, &reviewCandidatePoolJSON,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -405,6 +409,9 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	}
 	if roundID.Valid {
 		inv.RoundID = roundID.String
+	}
+	if effort != nil {
+		inv.Effort = *effort
 	}
 	if reviewCandidatePoolJSON != nil {
 		if err := json.Unmarshal([]byte(*reviewCandidatePoolJSON), &inv.ReviewCandidatePool); err != nil {

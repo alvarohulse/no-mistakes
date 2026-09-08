@@ -69,6 +69,7 @@ type MetricInvocation struct {
 	Agent           string              `json:"agent"`
 	UsageCoverage   agent.UsageCoverage `json:"usage_coverage"`
 	Model           *string             `json:"model"`
+	Effort          *string             `json:"effort"`
 	Provider        *string             `json:"provider"`
 	SessionMode     string              `json:"session_mode"`
 	FallbackReason  *string             `json:"fallback_reason"`
@@ -319,7 +320,7 @@ func metricInvocation(invocation Invocation) MetricInvocation {
 	return MetricInvocation{
 		ID: invocation.ID, Step: invocation.Step, Round: invocation.Round, Purpose: invocation.Purpose, Agent: invocation.Agent,
 		UsageCoverage: invocation.UsageCoverage,
-		Model:         cloneString(invocation.Model), Provider: cloneString(invocation.Provider), SessionMode: invocation.SessionMode,
+		Model:         cloneString(invocation.Model), Effort: cloneString(invocation.Effort), Provider: cloneString(invocation.Provider), SessionMode: invocation.SessionMode,
 		FallbackReason: cloneString(invocation.FallbackReason), StartedAt: invocation.StartedAt, CompletedAt: invocation.CompletedAt,
 		DurationMS: invocation.DurationMS, ExitStatus: invocation.ExitStatus, FailureCategory: cloneString(invocation.FailureCategory),
 		RawUsage: cloneTokenMeters(invocation.RawUsage), DeltaUsage: cloneTokenMeters(invocation.DeltaUsage),
@@ -357,7 +358,7 @@ func (receipt MetricReceipt) RunAudit() *RunAudit {
 		audit.Invocations = append(audit.Invocations, Invocation{
 			ID: stored.ID, Step: stored.Step, Round: stored.Round, Purpose: stored.Purpose, Agent: stored.Agent,
 			UsageCoverage: stored.UsageCoverage,
-			Model:         cloneString(stored.Model), Provider: cloneString(stored.Provider), SessionMode: stored.SessionMode, SessionKey: "",
+			Model:         cloneString(stored.Model), Effort: cloneString(stored.Effort), Provider: cloneString(stored.Provider), SessionMode: stored.SessionMode, SessionKey: "",
 			FallbackReason: cloneString(stored.FallbackReason), StartedAt: stored.StartedAt, CompletedAt: stored.CompletedAt,
 			DurationMS: stored.DurationMS, ExitStatus: stored.ExitStatus, FailureCategory: cloneString(stored.FailureCategory),
 			RawUsage: cloneTokenMeters(stored.RawUsage), DeltaUsage: cloneTokenMeters(stored.DeltaUsage), ReportedCostUSD: cloneFloat64(stored.ReportedCostUSD),

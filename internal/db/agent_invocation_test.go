@@ -20,6 +20,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		Agent:                    "codex",
 		UsageCoverage:            agent.UsageCoverageComplete,
 		Model:                    "gpt-5.2-codex",
+		Effort:                   "xhigh",
 		SessionMode:              InvocationModeResumed,
 		SessionKey:               "abcd1234abcd1234",
 		StartedAt:                1_700_000_000,
@@ -51,6 +52,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.UsageCoverage != agent.UsageCoverageComplete {
 		t.Fatalf("usage coverage = %q, want complete", back.UsageCoverage)
+	}
+	if back.Effort != "xhigh" {
+		t.Fatalf("effort = %q, want xhigh", back.Effort)
 	}
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
@@ -663,7 +667,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	if legacy.InputTokens != 500 {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
-	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
+	if legacy.Effort != "" || legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
 		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}

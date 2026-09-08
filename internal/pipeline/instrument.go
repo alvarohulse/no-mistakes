@@ -168,6 +168,7 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 	}
 	configuredModel := agent.ConfiguredModel(a.inner)
 	inv.Model = configuredModel.Name
+	inv.Effort = string(agent.ConfiguredEffort(a.inner))
 	if configuredModel.Vendor != "" {
 		vendor := configuredModel.Vendor
 		inv.ModelProvider = &vendor

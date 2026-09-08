@@ -17,12 +17,13 @@ import (
 )
 
 func TestDecodeMetricReceiptVersion2DefaultsUsageCoverageToUnknown(t *testing.T) {
+	effort := "high"
 	receipt := MetricReceipt{
 		SchemaVersion: 2,
 		Run: MetricRun{
 			ID: "run-1", RepoID: "repo-1", Status: types.RunCompleted, CreatedAt: 10,
 		},
-		Invocations: []MetricInvocation{{ID: "inv-1", Agent: "codex"}},
+		Invocations: []MetricInvocation{{ID: "inv-1", Agent: "codex", Effort: &effort}},
 	}
 	payload, err := json.Marshal(receipt)
 	if err != nil {
@@ -38,6 +39,13 @@ func TestDecodeMetricReceiptVersion2DefaultsUsageCoverageToUnknown(t *testing.T)
 	}
 	if got := decoded.Invocations[0].UsageCoverage; got != agent.UsageCoverageUnknown {
 		t.Fatalf("usage coverage = %q, want unknown for version 2 receipt", got)
+	}
+	raw, err := json.Marshal(decoded.RunAudit())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"effort":"high"`) {
+		t.Fatalf("archived audit omitted effort: %s", raw)
 	}
 }
 
