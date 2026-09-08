@@ -318,6 +318,25 @@ func (d *DB) LinkPushOperationCommandAttempt(operationID, runID, attemptID strin
 	return nil
 }
 
+func persistPushOperationBinding(tx *sql.Tx, operationID, runID string, binding PushBinding, generation int64) error {
+	result, err := tx.Exec(
+		`UPDATE push_operations SET pushed_sha = ?, verified_remote_sha = ?, binding_updated = 1, resulting_generation = ?
+		 WHERE operation_id = ? AND terminalized = 0 AND target_kind = ? AND target_fingerprint = ? AND destination_ref = ?
+		 AND EXISTS (SELECT 1 FROM operations WHERE id = ? AND run_id = ? AND kind = ?)`,
+		binding.HeadSHA, binding.HeadSHA, generation, operationID, binding.TargetKind, binding.TargetFingerprint, binding.Ref,
+		operationID, runID, OperationKindPush,
+	)
+	if err != nil {
+		return fmt.Errorf("persist push operation binding: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("persist push operation binding: rows affected: %w", err)
+	} else if affected != 1 {
+		return fmt.Errorf("persist push operation binding: operation is missing, terminal, or does not match the binding")
+	}
+	return nil
+}
+
 // CompletePushOperation terminalizes a previously started Push receipt while
 // retaining its database-assigned identity and immutable owner scope.
 func (d *DB) CompletePushOperation(operation PushOperation) (*PushOperation, error) {

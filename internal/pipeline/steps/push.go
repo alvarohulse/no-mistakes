@@ -255,14 +255,16 @@ func recordVerifiedPushRemoteSHA(receipt *pushReceiptRecorder, output, expected 
 		if len(fields) > 0 {
 			receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
 		}
+		receipt.persistProgress()
 		observed := "missing"
 		if len(fields) > 0 {
 			observed = fields[0]
 		}
-		return fmt.Errorf("remote head %s does not equal pushed head %s", observed, expected)
+		return errors.Join(fmt.Errorf("remote head %s does not equal pushed head %s", observed, expected), receipt.progressErr)
 	}
 	receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
-	return nil
+	receipt.persistProgress()
+	return receipt.progressErr
 }
 
 func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {

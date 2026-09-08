@@ -553,14 +553,8 @@ func (d *DB) updateRunPushBindingWithGeneration(id string, binding PushBinding, 
 		return 0, fmt.Errorf("update run push binding: committed generation is unavailable")
 	}
 	if operationID != "" {
-		result, err := tx.Exec(`UPDATE push_operations SET binding_updated = 1, resulting_generation = ? WHERE operation_id = ? AND terminalized = 0 AND EXISTS (SELECT 1 FROM operations WHERE id = ? AND run_id = ? AND kind = ?)`, generation.Int64, operationID, operationID, id, OperationKindPush)
-		if err != nil {
-			return 0, fmt.Errorf("update run push binding: record operation generation: %w", err)
-		}
-		if affected, err := result.RowsAffected(); err != nil {
-			return 0, fmt.Errorf("update run push binding: record operation generation rows affected: %w", err)
-		} else if affected != 1 {
-			return 0, fmt.Errorf("update run push binding: operation is missing or already terminal")
+		if err := persistPushOperationBinding(tx, operationID, id, binding, generation.Int64); err != nil {
+			return 0, fmt.Errorf("update run push binding: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

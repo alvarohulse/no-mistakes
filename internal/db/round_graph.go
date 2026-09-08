@@ -557,10 +557,10 @@ func (d *DB) SetStepRoundStructuredRepair(repair StepRoundRepair) error {
 	return nil
 }
 
-func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, binding PushBinding) (int64, error) {
+func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, binding PushBinding, operationID string) (int64, error) {
 	headSHA = strings.TrimSpace(headSHA)
-	if runID == "" || roundID == "" || headSHA == "" || strings.TrimSpace(summary) == "" {
-		return 0, fmt.Errorf("persist CI repair push: run, round, head, and summary are required")
+	if runID == "" || roundID == "" || headSHA == "" || strings.TrimSpace(summary) == "" || strings.TrimSpace(operationID) == "" {
+		return 0, fmt.Errorf("persist CI repair push: run, round, head, summary, and operation are required")
 	}
 	if binding.HeadSHA != headSHA {
 		return 0, fmt.Errorf("persist CI repair push: binding head does not match repair head")
@@ -609,6 +609,9 @@ func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, bin
 	}
 	if !generation.Valid {
 		return 0, fmt.Errorf("persist CI repair push: committed generation is unavailable")
+	}
+	if err := persistPushOperationBinding(tx, operationID, runID, binding, generation.Int64); err != nil {
+		return 0, fmt.Errorf("persist CI repair push: %w", err)
 	}
 
 	result, err = tx.Exec(

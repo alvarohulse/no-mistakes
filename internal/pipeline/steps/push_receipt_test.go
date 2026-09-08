@@ -88,15 +88,33 @@ func TestPushReceiptRecorderCrashRecoveryTerminalizesLinkedAttempts(t *testing.T
 	if err := recorder.start(); err != nil {
 		t.Fatal(err)
 	}
+	pushedSHA := strings.Repeat("c", 40)
+	recorder.setPushedSHA(pushedSHA)
 	if _, err := recorder.runGit("push", "git --version", "--version"); err != nil {
 		t.Fatal(err)
+	}
+	recorder.verifiedRemoteSHA = pushReceiptStringPointer(pushedSHA)
+	recorder.persistProgress()
+	generation, err := sctx.DB.UpdateRunPushBindingWithGenerationForOperation(sctx.Run.ID, db.PushBinding{
+		HeadSHA:           pushedSHA,
+		TargetKind:        recorder.targetKind,
+		TargetFingerprint: recorder.targetFingerprint,
+		Ref:               recorder.destinationRef,
+	}, recorder.operationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 {
+		t.Fatalf("push generation = %d, want 1", generation)
 	}
 	beforeRecovery, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(beforeRecovery) != 1 || beforeRecovery[0].Terminalized || len(beforeRecovery[0].CommandAttemptIDs) != 1 {
-		t.Fatalf("in-progress receipt = %+v, want one linked nonterminal attempt", beforeRecovery)
+	if len(beforeRecovery) != 1 || beforeRecovery[0].Terminalized || len(beforeRecovery[0].CommandAttemptIDs) != 1 ||
+		!beforeRecovery[0].BindingUpdated || beforeRecovery[0].ResultingGeneration == nil || *beforeRecovery[0].ResultingGeneration != 1 ||
+		beforeRecovery[0].VerifiedRemoteSHA == nil || *beforeRecovery[0].VerifiedRemoteSHA != pushedSHA {
+		t.Fatalf("in-progress receipt = %+v, want linked attempt and atomic binding evidence", beforeRecovery)
 	}
 	if recovered, err := sctx.DB.RecoverStaleRun(sctx.Run.ID, "daemon crashed during push"); err != nil || !recovered {
 		t.Fatalf("recover stale run = %v, %v", recovered, err)
@@ -105,8 +123,10 @@ func TestPushReceiptRecorderCrashRecoveryTerminalizesLinkedAttempts(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(afterRecovery) != 1 || !afterRecovery[0].Terminalized || afterRecovery[0].Outcome != db.PushOperationOutcomeProcessError || len(afterRecovery[0].CommandAttemptIDs) != 1 {
-		t.Fatalf("recovered receipt = %+v, want terminal process-error with linked attempt", afterRecovery)
+	if len(afterRecovery) != 1 || !afterRecovery[0].Terminalized || afterRecovery[0].Outcome != db.PushOperationOutcomeProcessError || len(afterRecovery[0].CommandAttemptIDs) != 1 ||
+		!afterRecovery[0].BindingUpdated || afterRecovery[0].ResultingGeneration == nil || *afterRecovery[0].ResultingGeneration != 1 ||
+		afterRecovery[0].VerifiedRemoteSHA == nil || *afterRecovery[0].VerifiedRemoteSHA != pushedSHA {
+		t.Fatalf("recovered receipt = %+v, want terminal process-error retaining attempt and binding evidence", afterRecovery)
 	}
 }
 
