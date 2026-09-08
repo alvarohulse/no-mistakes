@@ -647,13 +647,17 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			cancel(nil)
-			_ = agents.Close()
 			if retainRunOwnership {
+				_ = agents.Close()
 				slog.Error("retaining run ownership after CI repair durability uncertainty and quarantining daemon", "run_id", plan.run.ID)
 				return
 			}
-			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before cleanup so slow agent/process/ref cleanup cannot
+			// keep a completed run's stream open.
 			m.closeSubscribers(plan.run.ID)
+			_ = agents.Close()
+			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.sweepRunWorktreeProcesses(plan.workDir)
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
@@ -1458,9 +1462,8 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				}
 			}
 			cancel(nil)
-			_ = agents.Close()
-			m.sweepRunWorktreeProcesses(wtDir)
 			if retainRunOwnership {
+				_ = agents.Close()
 				// The active database row and its recovery material must remain
 				// together. Startup recovery will fail this run closed after the
 				// daemon is restarted; deleting any part here would make that
@@ -1468,9 +1471,13 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				slog.Error("retaining unresolved run and quarantining daemon", "run_id", run.ID)
 				return
 			}
-			resolved.releaseTrustedRef(context.Background())
-			// Close subscriber channels for this run.
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before cleanup so slow agent/process/ref cleanup cannot
+			// keep a completed run's stream open.
 			m.closeSubscribers(run.ID)
+			_ = agents.Close()
+			m.sweepRunWorktreeProcesses(wtDir)
+			resolved.releaseTrustedRef(context.Background())
 			// Clean up worktree.
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
