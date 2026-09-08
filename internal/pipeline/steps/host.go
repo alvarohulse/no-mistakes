@@ -95,3 +95,8 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		return nil, fmt.Sprintf("provider %s is not supported yet", provider)
 	}
 }
+
+// BuildHostForTest exposes buildHost to tests in other packages.
+func BuildHostForTest(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, string) {
+	return buildHost(sctx, provider)
+}
