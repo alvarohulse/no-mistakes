@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,6 +142,95 @@ func TestOpenCreatesSchema(t *testing.T) {
 		if hasColumn(t, d, "agent_invocations", removed) {
 			t.Fatalf("agent_invocations.%s should be absent from fresh schema", removed)
 		}
+	}
+}
+
+func TestOpenClassifiesFreshSchemaInsideImmediateTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent-open.sqlite")
+	hookCalled := false
+	var competitorStarted bool
+	beforeFreshSchemaInstall := func() error {
+		hookCalled = true
+		competitorSQL, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(0)")
+		if err != nil {
+			return fmt.Errorf("open competing database: %w", err)
+		}
+		defer competitorSQL.Close()
+		competitorSQL.SetMaxOpenConns(1)
+
+		ctx := context.Background()
+		competitorConn, err := competitorSQL.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("connect competing database: %w", err)
+		}
+		defer competitorConn.Close()
+
+		if _, err := competitorConn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+			if !strings.Contains(err.Error(), "SQLITE_BUSY") {
+				return fmt.Errorf("begin competing transaction: %w", err)
+			}
+			return nil
+		}
+		competitorStarted = true
+		if _, err := competitorConn.ExecContext(ctx, `
+			CREATE TABLE repos (
+				id TEXT PRIMARY KEY,
+				working_path TEXT NOT NULL UNIQUE,
+				upstream_url TEXT NOT NULL,
+				default_branch TEXT NOT NULL DEFAULT 'main',
+				created_at INTEGER NOT NULL
+			)`); err != nil {
+			_, _ = competitorConn.ExecContext(ctx, "ROLLBACK")
+			return fmt.Errorf("create competing legacy schema: %w", err)
+		}
+		if _, err := competitorConn.ExecContext(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("commit competing legacy schema: %w", err)
+		}
+		return nil
+	}
+
+	d, err := open(path, beforeFreshSchemaInstall)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	if !hookCalled {
+		t.Fatal("fresh-schema hook was not called")
+	}
+	if competitorStarted {
+		t.Fatal("competing opener acquired the schema transaction")
+	}
+	if !hasColumn(t, d, "repos", "fork_url") {
+		t.Fatal("repos.fork_url column missing after concurrent open")
+	}
+
+	ordinaryTx, err := d.sql.Begin()
+	if err != nil {
+		t.Fatalf("begin ordinary transaction: %v", err)
+	}
+	competitorSQL, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		ordinaryTx.Rollback()
+		t.Fatalf("open ordinary transaction competitor: %v", err)
+	}
+	competitorSQL.SetMaxOpenConns(1)
+	t.Cleanup(func() { competitorSQL.Close() })
+	competitorConn, err := competitorSQL.Conn(context.Background())
+	if err != nil {
+		ordinaryTx.Rollback()
+		t.Fatalf("connect ordinary transaction competitor: %v", err)
+	}
+	t.Cleanup(func() { competitorConn.Close() })
+	if _, err := competitorConn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		ordinaryTx.Rollback()
+		t.Fatalf("ordinary transaction unexpectedly acquired an immediate lock: %v", err)
+	}
+	if _, err := competitorConn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		ordinaryTx.Rollback()
+		t.Fatalf("rollback ordinary transaction competitor: %v", err)
+	}
+	if err := ordinaryTx.Rollback(); err != nil {
+		t.Fatalf("rollback ordinary transaction: %v", err)
 	}
 }
 

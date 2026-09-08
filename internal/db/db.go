@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"fmt"
@@ -25,35 +26,60 @@ type DB struct {
 
 // Open opens (or creates) the SQLite database at path and runs migrations.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate")
+	return open(path, nil)
+}
+
+func open(path string, beforeFreshSchemaInstall func() error) (*DB, error) {
+	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	tx, err := sqlDB.Begin()
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("connect for schema migration: %w", err)
+	}
+	closeConn := func() { _ = conn.Close() }
+	rollback := func() {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		closeConn()
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		closeConn()
 		sqlDB.Close()
 		return nil, fmt.Errorf("begin schema migration: %w", err)
 	}
 	var schemaObjects int
-	if err := tx.QueryRow(`
+	if err := conn.QueryRowContext(ctx, `
 		SELECT count(*)
 		FROM sqlite_master
 		WHERE name NOT LIKE 'sqlite_%'`).Scan(&schemaObjects); err != nil {
-		_ = tx.Rollback()
+		rollback()
 		sqlDB.Close()
 		return nil, fmt.Errorf("inspect db: %w", err)
 	}
 	if schemaObjects == 0 {
-		if _, err := tx.Exec(schemaSQL + freshSchemaObjectsSQL); err != nil {
-			_ = tx.Rollback()
+		if beforeFreshSchemaInstall != nil {
+			if err := beforeFreshSchemaInstall(); err != nil {
+				rollback()
+				sqlDB.Close()
+				return nil, fmt.Errorf("before fresh schema install: %w", err)
+			}
+		}
+		if _, err := conn.ExecContext(ctx, schemaSQL+freshSchemaObjectsSQL); err != nil {
+			rollback()
 			sqlDB.Close()
 			return nil, fmt.Errorf("migrate fresh schema: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+			closeConn()
 			sqlDB.Close()
 			return nil, fmt.Errorf("commit fresh schema migration: %w", err)
 		}
+		closeConn()
 		if err := migrateRoundDecisionSources(sqlDB); err != nil {
 			sqlDB.Close()
 			return nil, fmt.Errorf("migrate db: %w", err)
@@ -68,10 +94,12 @@ func Open(path string) (*DB, error) {
 		}
 		return &DB{sql: sqlDB}, nil
 	}
-	if err := tx.Rollback(); err != nil {
+	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		closeConn()
 		sqlDB.Close()
 		return nil, fmt.Errorf("rollback schema classification: %w", err)
 	}
+	closeConn()
 	if _, err := sqlDB.Exec(schemaSQL); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)
