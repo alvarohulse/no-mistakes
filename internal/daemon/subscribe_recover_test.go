@@ -260,6 +260,52 @@ func TestSubscribeToCompletedRunYieldsOneGapThenCloses(t *testing.T) {
 	}
 }
 
+func TestRecoveredRunClosesTerminalSubscriptionBeforePostRunCleanup(t *testing.T) {
+	f := newEvidenceFixture(t)
+	manager := NewRunManager(f.db, f.p, func() []pipeline.Step { return nil })
+	runID := f.seed("recovered-terminal-subscription", types.RunRunning, time.Minute, nil)
+	run, err := f.db.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+
+	manager.evalCaptureMu.Lock()
+	releasedEvalCapture := false
+	t.Cleanup(func() {
+		if !releasedEvalCapture {
+			manager.evalCaptureMu.Unlock()
+		}
+	})
+	manager.resumeRecoveredRun(recoveredRunPlan{
+		run: run, repo: f.repo, workDir: t.TempDir(), gateDir: t.TempDir(),
+		cfg: evalConfig(true, true), agent: recoveredRunTestAgent{},
+	})
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	for {
+		if _, ok := subscription.Next(closeCtx); !ok {
+			if closeCtx.Err() != nil {
+				t.Fatal("terminal subscription remained open while post-run cleanup was blocked")
+			}
+			break
+		}
+	}
+
+	manager.evalCaptureMu.Unlock()
+	releasedEvalCapture = true
+	manager.wg.Wait()
+}
+
 func TestRecoverStaleRunsOnStartup(t *testing.T) {
 	// Set up a DB with stale runs BEFORE starting the daemon.
 	tmpDir, err := os.MkdirTemp("", "dtest")

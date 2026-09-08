@@ -632,6 +632,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.mu.Unlock()
 
 	retainRunOwnership := false
+	terminalSubscribersClosed := false
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
@@ -649,13 +650,13 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			if retainRunOwnership {
 				_ = agents.Close()
+				m.sweepRunWorktreeProcesses(plan.workDir)
 				slog.Error("retaining run ownership after CI repair durability uncertainty and quarantining daemon", "run_id", plan.run.ID)
 				return
 			}
-			// A terminal executor result ends the subscription contract. Close
-			// subscribers before cleanup so slow agent/process/ref cleanup cannot
-			// keep a completed run's stream open.
-			m.closeSubscribers(plan.run.ID)
+			if !terminalSubscribersClosed {
+				m.closeSubscribers(plan.run.ID)
+			}
 			_ = agents.Close()
 			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.sweepRunWorktreeProcesses(plan.workDir)
@@ -687,6 +688,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+		}
+		if !retainRunOwnership {
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before telemetry and all post-run cleanup.
+			m.closeSubscribers(plan.run.ID)
+			terminalSubscribersClosed = true
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -1429,6 +1436,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	bgOwnsWorktree = true
 	policyRefOwnedByRun = true
 	retainRunOwnership := false
+	terminalSubscribersClosed := false
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1464,6 +1472,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			cancel(nil)
 			if retainRunOwnership {
 				_ = agents.Close()
+				m.sweepRunWorktreeProcesses(wtDir)
 				// The active database row and its recovery material must remain
 				// together. Startup recovery will fail this run closed after the
 				// daemon is restarted; deleting any part here would make that
@@ -1471,10 +1480,9 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				slog.Error("retaining unresolved run and quarantining daemon", "run_id", run.ID)
 				return
 			}
-			// A terminal executor result ends the subscription contract. Close
-			// subscribers before cleanup so slow agent/process/ref cleanup cannot
-			// keep a completed run's stream open.
-			m.closeSubscribers(run.ID)
+			if !terminalSubscribersClosed {
+				m.closeSubscribers(run.ID)
+			}
 			_ = agents.Close()
 			m.sweepRunWorktreeProcesses(wtDir)
 			resolved.releaseTrustedRef(context.Background())
@@ -1532,6 +1540,12 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			addRunPerformanceSummary(m.db, run.ID, fields)
 			telemetry.Track("run", fields)
 			slog.Info("pipeline completed", "run_id", run.ID)
+		}
+		if !retainRunOwnership {
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before telemetry and all post-run cleanup.
+			m.closeSubscribers(run.ID)
+			terminalSubscribersClosed = true
 		}
 		// Collection runs here, on the finished run, because a case is only
 		// honest once the human gate decision it labels is recorded - which is
