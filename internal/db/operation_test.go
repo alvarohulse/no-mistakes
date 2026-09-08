@@ -30,6 +30,13 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	if stored.DiagnosticArtifactID == nil || *stored.DiagnosticArtifactID != artifact.ID {
 		t.Fatalf("stored diagnostic artifact = %+v", stored.DiagnosticArtifactID)
 	}
+	ownedArtifact, err := d.GetArtifact(artifact.ID)
+	if err != nil {
+		t.Fatalf("get owned diagnostic artifact: %v", err)
+	}
+	if ownedArtifact == nil || ownedArtifact.OperationID == nil || *ownedArtifact.OperationID != stored.ID {
+		t.Fatalf("round-tripped diagnostic artifact = %+v, want operation %q", ownedArtifact, stored.ID)
+	}
 	if got := strings.Join(stored.CommandAttemptIDs, ","); got != secondAttempt.ID+","+firstAttempt.ID {
 		t.Fatalf("stored command attempt order = %q", got)
 	}
@@ -60,6 +67,33 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	}
 	if refreshCount != 0 {
 		t.Fatalf("refresh operation rows after run delete = %d, want 0", refreshCount)
+	}
+}
+
+func TestInsertRefreshOperationOwnsDiagnosticArtifact(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newRefreshOperationFixture(t, d)
+	receipt.DiagnosticArtifactID = nil
+	diagnostic := operationDiagnosticArtifact(
+		filepath.ToSlash(filepath.Join(receipt.RunID, "diagnostics", "owned.txt")),
+		receipt.RunID,
+		receipt.StepID,
+		receipt.RoundID,
+	)
+
+	stored, err := d.InsertRefreshOperationWithDiagnostic(receipt, diagnostic)
+	if err != nil {
+		t.Fatalf("insert refresh operation with diagnostic: %v", err)
+	}
+	if stored.DiagnosticArtifactID == nil {
+		t.Fatalf("stored diagnostic artifact = %+v, want an artifact reference", stored)
+	}
+	artifact, err := d.GetArtifact(*stored.DiagnosticArtifactID)
+	if err != nil {
+		t.Fatalf("get owned diagnostic artifact: %v", err)
+	}
+	if artifact == nil || artifact.OperationID == nil || *artifact.OperationID != stored.ID {
+		t.Fatalf("owned diagnostic artifact = %+v, want operation %q", artifact, stored.ID)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -98,6 +99,125 @@ func (d *DB) InsertRefreshOperation(operation RefreshOperation) (*RefreshOperati
 	}
 
 	operation.ID = newID()
+	if err := insertRefreshOperationRows(tx, operation); err != nil {
+		return nil, err
+	}
+	if operation.DiagnosticArtifactID != nil {
+		if _, err := tx.Exec(
+			`UPDATE artifacts SET operation_id = ? WHERE id = ? AND operation_id IS NULL`,
+			operation.ID, *operation.DiagnosticArtifactID,
+		); err != nil {
+			return nil, fmt.Errorf("insert refresh operation: claim diagnostic artifact: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("insert refresh operation: commit: %w", err)
+	}
+	return &operation, nil
+}
+
+// InsertRefreshOperationWithDiagnostic atomically records a Refresh receipt
+// and its operation-owned diagnostic artifact. Both stable IDs are assigned
+// inside the transaction so the artifact cannot be attached to a different
+// operation or outlive a partially inserted receipt.
+func (d *DB) InsertRefreshOperationWithDiagnostic(operation RefreshOperation, diagnostic Artifact) (*RefreshOperation, error) {
+	if operation.ID != "" {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: ID is assigned by the database")
+	}
+	if operation.Kind != "" && operation.Kind != OperationKindRefresh {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: kind must be %q", OperationKindRefresh)
+	}
+	operation.Kind = OperationKindRefresh
+	strategy, err := types.ParseRefreshStrategy(string(operation.Strategy))
+	if err != nil || strategy == "" {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: unsupported strategy %q", operation.Strategy)
+	}
+	operation.Strategy = strategy
+	if operation.DiagnosticArtifactID != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: diagnostic artifact ID is assigned by the database")
+	}
+	if diagnostic.ID != "" || diagnostic.OperationID != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: artifact IDs are assigned by the database")
+	}
+	if diagnostic.CommandAttemptID != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: diagnostic cannot belong to a command attempt")
+	}
+	if diagnostic.Purpose != ArtifactPurposeOperationDiagnostic || diagnostic.Kind != ArtifactKindOperationDiagnostic || diagnostic.StorageRoot != ArtifactStorageRootRun {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: artifact is not an operation diagnostic")
+	}
+	if err := validateArtifactForInsert(diagnostic); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: %w", err)
+	}
+
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := validateRefreshOperation(tx, operation); err != nil {
+		return nil, err
+	}
+
+	operation.ID = newID()
+	diagnostic.ID = newID()
+	diagnostic.OperationID = &operation.ID
+	diagnostic.CreatedAt = time.Now().UnixMilli()
+	operation.DiagnosticArtifactID = &diagnostic.ID
+	if err := insertRefreshOperationRows(tx, RefreshOperation{
+		ID:                   operation.ID,
+		RunID:                operation.RunID,
+		Kind:                 operation.Kind,
+		StepID:               operation.StepID,
+		RoundID:              operation.RoundID,
+		Strategy:             operation.Strategy,
+		SourceRef:            operation.SourceRef,
+		DestinationRef:       operation.DestinationRef,
+		AuthoritativeBaseRef: operation.AuthoritativeBaseRef,
+		AuthoritativeBaseSHA: operation.AuthoritativeBaseSHA,
+		StartingHeadSHA:      operation.StartingHeadSHA,
+		Decision:             operation.Decision,
+		ResultingHeadSHA:     operation.ResultingHeadSHA,
+		ConflictState:        operation.ConflictState,
+		RepairState:          operation.RepairState,
+		CommandAttemptIDs:    operation.CommandAttemptIDs,
+		StartedAt:            operation.StartedAt,
+		CompletedAt:          operation.CompletedAt,
+		DurationMS:           operation.DurationMS,
+		DiagnosticArtifactID: nil,
+	}); err != nil {
+		return nil, err
+	}
+	if err := validateArtifactProducer(tx, diagnostic); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: %w", err)
+	}
+	if existing, err := getArtifactByStoragePath(tx, diagnostic.StorageRoot, diagnostic.RelativePath); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: check artifact path: %w", err)
+	} else if existing != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: artifact already exists at %s", diagnostic.RelativePath)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO artifacts
+		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, operation_id, purpose, label, description,
+		  storage_root, relative_path, kind, media_type, encoding, sha256, source_bytes, state, reason,
+		  publication_state, publication_url, publication_commit_sha, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		diagnostic.ID, diagnostic.RunID, diagnostic.StepID, diagnostic.RoundID, diagnostic.InvocationID, diagnostic.CommandAttemptID, diagnostic.OperationID,
+		diagnostic.Purpose, diagnostic.Label, diagnostic.Description, diagnostic.StorageRoot, diagnostic.RelativePath,
+		diagnostic.Kind, diagnostic.MediaType, diagnostic.Encoding, diagnostic.SHA256, diagnostic.SourceBytes, diagnostic.State,
+		diagnostic.Reason, diagnostic.PublicationState, diagnostic.PublicationURL, diagnostic.PublicationCommitSHA, diagnostic.CreatedAt,
+	); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: insert artifact: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE operations SET diagnostic_artifact_id = ? WHERE id = ?`, diagnostic.ID, operation.ID); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: link artifact: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("insert refresh operation with diagnostic: commit: %w", err)
+	}
+	return &operation, nil
+}
+
+func insertRefreshOperationRows(tx *sql.Tx, operation RefreshOperation) error {
 	if _, err := tx.Exec(
 		`INSERT INTO operations
 		 (id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id)
@@ -105,7 +225,7 @@ func (d *DB) InsertRefreshOperation(operation RefreshOperation) (*RefreshOperati
 		operation.ID, operation.RunID, operation.Kind, operation.StepID, operation.RoundID,
 		operation.StartedAt, operation.CompletedAt, operation.DurationMS, operation.DiagnosticArtifactID,
 	); err != nil {
-		return nil, fmt.Errorf("insert refresh operation: insert operation: %w", err)
+		return fmt.Errorf("insert refresh operation: insert operation: %w", err)
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO refresh_operations
@@ -116,20 +236,17 @@ func (d *DB) InsertRefreshOperation(operation RefreshOperation) (*RefreshOperati
 		operation.AuthoritativeBaseRef, operation.AuthoritativeBaseSHA, operation.StartingHeadSHA,
 		operation.Decision, operation.ResultingHeadSHA, operation.ConflictState, operation.RepairState,
 	); err != nil {
-		return nil, fmt.Errorf("insert refresh operation: insert refresh receipt: %w", err)
+		return fmt.Errorf("insert refresh operation: insert refresh receipt: %w", err)
 	}
 	for index, attemptID := range operation.CommandAttemptIDs {
 		if _, err := tx.Exec(
 			`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`,
 			operation.ID, operation.RunID, attemptID, index+1,
 		); err != nil {
-			return nil, fmt.Errorf("insert refresh operation: link command attempt: %w", err)
+			return fmt.Errorf("insert refresh operation: link command attempt: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("insert refresh operation: commit: %w", err)
-	}
-	return &operation, nil
+	return nil
 }
 
 type operationQuerier interface {
@@ -225,6 +342,13 @@ func validateRefreshOperation(q operationQuerier, operation RefreshOperation) er
 	}
 	if artifactOwnerCount != 1 {
 		return fmt.Errorf("insert refresh operation: diagnostic artifact does not belong to refresh receipt")
+	}
+	var operationID sql.NullString
+	if err := q.QueryRow(`SELECT operation_id FROM artifacts WHERE id = ?`, *operation.DiagnosticArtifactID).Scan(&operationID); err != nil {
+		return fmt.Errorf("insert refresh operation: inspect diagnostic artifact owner: %w", err)
+	}
+	if operationID.Valid {
+		return fmt.Errorf("insert refresh operation: diagnostic artifact already belongs to operation %q", operationID.String)
 	}
 	return nil
 }
