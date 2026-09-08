@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
@@ -160,6 +161,7 @@ func TestRefreshStep_FixModeCallsAgent(t *testing.T) {
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature"}]}`
 	sctx.UserIntent = "user wanted conflict resolution to preserve the extracted intent"
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
@@ -188,6 +190,23 @@ func TestRefreshStep_FixModeCallsAgent(t *testing.T) {
 	if mergeBase != originMain {
 		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 2 {
+		t.Fatalf("repaired refresh receipt = %+v", operations)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/main" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionRepaired || operation.ConflictState != db.RefreshConflictStateResolved || operation.RepairState != db.RefreshRepairStateSucceeded || len(operation.CommandAttemptIDs) != 1 || operation.DiagnosticArtifactID != nil {
+			t.Fatalf("repaired refresh receipt = %+v", operation)
+		}
+		return
+	}
+	t.Fatalf("missing repaired refresh receipt: %+v", operations)
 }
 
 func TestRefreshStep_ForkSyncsPushBranchBeforeDefaultBranch(t *testing.T) {
@@ -296,6 +315,7 @@ func TestRefreshStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Fixing = true
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	_, err := step.Execute(sctx)
@@ -305,6 +325,36 @@ func TestRefreshStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	if len(ag.calls) != 0 {
 		t.Errorf("expected 0 agent calls for non-conflict failure, got %d", len(ag.calls))
 	}
+	operations, receiptErr := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if receiptErr != nil {
+		t.Fatal(receiptErr)
+	}
+	if len(operations) != 2 {
+		t.Fatalf("failed-primary refresh receipt = %+v", operations)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/main" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionError || len(operation.CommandAttemptIDs) != 1 || operation.DiagnosticArtifactID != nil {
+			t.Fatalf("failed-primary refresh receipt = %+v", operation)
+		}
+		attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, attempt := range attempts {
+			if attempt.ID != operation.CommandAttemptIDs[0] {
+				continue
+			}
+			if attempt.OutputArtifactID == nil {
+				t.Fatalf("failed primary attempt has no output artifact: %+v", attempt)
+			}
+			return
+		}
+		t.Fatalf("failed primary attempt %q not found", operation.CommandAttemptIDs[0])
+	}
+	t.Fatalf("missing failed-primary refresh receipt: %+v", operations)
 }
 
 func TestRefreshStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.T) {

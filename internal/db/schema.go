@@ -265,6 +265,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     round_id               TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
     invocation_id          TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
     command_attempt_id     TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+    operation_id           TEXT REFERENCES operations(id) ON DELETE CASCADE,
     purpose                TEXT NOT NULL,
     label                  TEXT NOT NULL,
     description            TEXT,
@@ -286,6 +287,149 @@ CREATE TABLE IF NOT EXISTS artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
     ON artifacts (run_id, created_at, id);
+
+-- Operations are a run-scoped indexed collection. Variant tables carry their
+-- typed facts without duplicating the shared identity, timing, or reference edges.
+CREATE TABLE IF NOT EXISTS operations (
+    id                     TEXT PRIMARY KEY,
+    run_id                 TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    kind                   TEXT NOT NULL CHECK (kind IN ('refresh')),
+    step_id                TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    round_id               TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+    started_at             INTEGER NOT NULL CHECK (started_at > 0),
+    completed_at           INTEGER NOT NULL CHECK (completed_at >= started_at),
+    duration_ms            INTEGER NOT NULL CHECK (duration_ms >= 0),
+    diagnostic_artifact_id TEXT,
+    UNIQUE (run_id, id),
+    FOREIGN KEY (run_id, diagnostic_artifact_id) REFERENCES artifacts(run_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operations_run_started_id
+    ON operations (run_id, started_at, id);
+
+CREATE TABLE IF NOT EXISTS refresh_operations (
+    operation_id            TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+    strategy                TEXT NOT NULL CHECK (strategy IN ('rebase', 'merge')),
+    source_ref              TEXT NOT NULL,
+    destination_ref         TEXT NOT NULL,
+    authoritative_base_ref  TEXT NOT NULL,
+    authoritative_base_sha  TEXT,
+    starting_head_sha       TEXT,
+    resolved_target_head_sha TEXT,
+    decision                TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error', 'cancelled')),
+    resulting_head_sha      TEXT,
+    conflict_state          TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
+    repair_state            TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
+);
+
+CREATE TABLE IF NOT EXISTS operation_command_attempts (
+    operation_id TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    attempt_id   TEXT NOT NULL,
+    sequence     INTEGER NOT NULL CHECK (sequence > 0),
+    PRIMARY KEY (operation_id, sequence),
+    UNIQUE (operation_id, attempt_id),
+    FOREIGN KEY (run_id, operation_id) REFERENCES operations(run_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, attempt_id) REFERENCES command_attempts(run_id, id) ON DELETE CASCADE
+);
+
+CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_insert
+BEFORE INSERT ON operations
+WHEN NEW.kind = 'refresh' AND NOT EXISTS (
+    SELECT 1
+    FROM step_rounds r
+    JOIN step_results s ON s.id = r.step_result_id
+    WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id AND s.step_name = 'refresh'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_update
+BEFORE UPDATE OF run_id, kind, step_id, round_id ON operations
+WHEN NEW.kind = 'refresh' AND NOT EXISTS (
+    SELECT 1
+    FROM step_rounds r
+    JOIN step_results s ON s.id = r.step_result_id
+    WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id AND s.step_name = 'refresh'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_insert
+BEFORE INSERT ON operations
+WHEN NEW.diagnostic_artifact_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM artifacts
+    WHERE id = NEW.diagnostic_artifact_id AND run_id = NEW.run_id AND step_id = NEW.step_id AND round_id = NEW.round_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_update
+BEFORE UPDATE OF run_id, step_id, round_id, diagnostic_artifact_id ON operations
+WHEN NEW.diagnostic_artifact_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM artifacts
+    WHERE id = NEW.diagnostic_artifact_id AND run_id = NEW.run_id AND step_id = NEW.step_id AND round_id = NEW.round_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_insert
+BEFORE INSERT ON artifacts
+WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+      AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+      AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_update
+BEFORE UPDATE OF run_id, step_id, round_id, operation_id ON artifacts
+WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+      AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+      AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_insert
+BEFORE INSERT ON operation_command_attempts
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    JOIN command_attempts a ON a.id = NEW.attempt_id
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id AND a.run_id = NEW.run_id
+      AND a.step_id = o.step_id AND a.round_id = o.round_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'operation command attempt must belong to the same operation step round');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_update
+BEFORE UPDATE OF operation_id, run_id, attempt_id ON operation_command_attempts
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM operations o
+    JOIN command_attempts a ON a.id = NEW.attempt_id
+    WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id AND a.run_id = NEW.run_id
+      AND a.step_id = o.step_id AND a.round_id = o.round_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'operation command attempt must belong to the same operation step round');
+END;
 
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
@@ -434,6 +578,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_output_artifact
 CREATE INDEX IF NOT EXISTS idx_command_attempts_proof_by_tested_sha
     ON command_attempts (run_id, tested_sha) WHERE accepted_as_proof = 1;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_run_id
+    ON command_attempts (run_id, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_run_id
+    ON artifacts (run_id, id);
+
 CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_insert
 BEFORE INSERT ON command_attempts
 WHEN NEW.accepted_as_proof NOT IN (0, 1)
@@ -527,6 +677,7 @@ var migrationStatements = []string{
 		round_id TEXT REFERENCES step_rounds(id) ON DELETE CASCADE,
 		invocation_id TEXT REFERENCES agent_invocations(id) ON DELETE SET NULL,
 		command_attempt_id TEXT UNIQUE REFERENCES command_attempts(id) ON DELETE CASCADE,
+		operation_id TEXT REFERENCES operations(id) ON DELETE CASCADE,
 		purpose TEXT NOT NULL,
 		label TEXT NOT NULL,
 		description TEXT,
@@ -546,6 +697,138 @@ var migrationStatements = []string{
 		UNIQUE (storage_root, relative_path)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id ON artifacts (run_id, created_at, id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_run_id ON command_attempts (run_id, id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_run_id ON artifacts (run_id, id)`,
+	`CREATE TABLE IF NOT EXISTS operations (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		kind TEXT NOT NULL CHECK (kind IN ('refresh')),
+		step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+		started_at INTEGER NOT NULL CHECK (started_at > 0),
+		completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+		duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+		diagnostic_artifact_id TEXT,
+		UNIQUE (run_id, id),
+		FOREIGN KEY (run_id, diagnostic_artifact_id) REFERENCES artifacts(run_id, id)
+	)`,
+	`ALTER TABLE artifacts ADD COLUMN operation_id TEXT REFERENCES operations(id) ON DELETE CASCADE`,
+	`CREATE INDEX IF NOT EXISTS idx_artifacts_operation_id ON artifacts (operation_id) WHERE operation_id IS NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_operations_run_started_id ON operations (run_id, started_at, id)`,
+	`CREATE TABLE IF NOT EXISTS refresh_operations (
+		operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+		strategy TEXT NOT NULL CHECK (strategy IN ('rebase', 'merge')),
+		source_ref TEXT NOT NULL,
+		destination_ref TEXT NOT NULL,
+		authoritative_base_ref TEXT NOT NULL,
+		authoritative_base_sha TEXT,
+		starting_head_sha TEXT,
+		resolved_target_head_sha TEXT,
+		decision TEXT NOT NULL CHECK (decision IN ('skipped', 'fast-forwarded', 'rebased', 'merged', 'conflicted', 'repaired', 'refused', 'error', 'cancelled')),
+		resulting_head_sha TEXT,
+		conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
+		repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS operation_command_attempts (
+		operation_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		attempt_id TEXT NOT NULL,
+		sequence INTEGER NOT NULL CHECK (sequence > 0),
+		PRIMARY KEY (operation_id, sequence),
+		UNIQUE (operation_id, attempt_id),
+		FOREIGN KEY (run_id, operation_id) REFERENCES operations(run_id, id) ON DELETE CASCADE,
+		FOREIGN KEY (run_id, attempt_id) REFERENCES command_attempts(run_id, id) ON DELETE CASCADE
+	)`,
+	`CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_insert
+	BEFORE INSERT ON operations
+	WHEN NEW.kind = 'refresh' AND NOT EXISTS (
+		SELECT 1
+		FROM step_rounds r
+		JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id AND s.step_name = 'refresh'
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_update
+	BEFORE UPDATE OF run_id, kind, step_id, round_id ON operations
+	WHEN NEW.kind = 'refresh' AND NOT EXISTS (
+		SELECT 1
+		FROM step_rounds r
+		JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id AND s.step_name = 'refresh'
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_insert
+	BEFORE INSERT ON operations
+	WHEN NEW.diagnostic_artifact_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM artifacts
+		WHERE id = NEW.diagnostic_artifact_id AND run_id = NEW.run_id AND step_id = NEW.step_id AND round_id = NEW.round_id
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_update
+	BEFORE UPDATE OF run_id, step_id, round_id, diagnostic_artifact_id ON operations
+	WHEN NEW.diagnostic_artifact_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM artifacts
+		WHERE id = NEW.diagnostic_artifact_id AND run_id = NEW.run_id AND step_id = NEW.step_id AND round_id = NEW.round_id
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'refresh operation diagnostic artifact must belong to the same step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_insert
+	BEFORE INSERT ON artifacts
+	WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+		  AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+		  AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_artifact_operation_scope_update
+	BEFORE UPDATE OF run_id, step_id, round_id, operation_id ON artifacts
+	WHEN NEW.operation_id IS NOT NULL AND NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id
+		  AND (NEW.step_id IS NULL OR o.step_id = NEW.step_id)
+		  AND (NEW.round_id IS NULL OR o.round_id = NEW.round_id)
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'artifact operation producer must belong to the same run step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_insert
+	BEFORE INSERT ON operation_command_attempts
+	WHEN NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		JOIN command_attempts a ON a.id = NEW.attempt_id
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id AND a.run_id = NEW.run_id
+		  AND a.step_id = o.step_id AND a.round_id = o.round_id
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'operation command attempt must belong to the same operation step round');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_operation_command_attempt_update
+	BEFORE UPDATE OF operation_id, run_id, attempt_id ON operation_command_attempts
+	WHEN NOT EXISTS (
+		SELECT 1
+		FROM operations o
+		JOIN command_attempts a ON a.id = NEW.attempt_id
+		WHERE o.id = NEW.operation_id AND o.run_id = NEW.run_id AND a.run_id = NEW.run_id
+		  AND a.step_id = o.step_id AND a.round_id = o.round_id
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'operation command attempt must belong to the same operation step round');
+	END`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_retry_of ON command_attempts (retry_of_attempt_id) WHERE retry_of_attempt_id IS NOT NULL`,
 	`ALTER TABLE command_attempts ADD COLUMN output_artifact_id TEXT REFERENCES artifacts(id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_output_artifact ON command_attempts (output_artifact_id) WHERE output_artifact_id IS NOT NULL`,

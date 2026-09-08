@@ -13,10 +13,12 @@ const (
 	ArtifactStorageRootRun      = "run"
 	ArtifactStorageRootEvidence = "evidence"
 
-	ArtifactPurposeCommandOutput = "command_output"
-	ArtifactPurposeTestEvidence  = "test_evidence"
-	ArtifactKindCommandOutput    = "command-output"
-	ArtifactStateAvailable       = "available"
+	ArtifactPurposeCommandOutput       = "command_output"
+	ArtifactPurposeTestEvidence        = "test_evidence"
+	ArtifactPurposeOperationDiagnostic = "operation_diagnostic"
+	ArtifactKindCommandOutput          = "command-output"
+	ArtifactKindOperationDiagnostic    = "operation-diagnostic"
+	ArtifactStateAvailable             = "available"
 )
 
 // Artifact is an immutable formatter-readable file registered for one run.
@@ -29,6 +31,7 @@ type Artifact struct {
 	RoundID              *string
 	InvocationID         *string
 	CommandAttemptID     *string
+	OperationID          *string
 	Purpose              string
 	Label                string
 	Description          *string
@@ -67,6 +70,9 @@ func validateArtifactForInsert(artifact Artifact) error {
 	}
 	if artifact.SourceBytes < 0 {
 		return fmt.Errorf("artifact: source bytes must not be negative")
+	}
+	if artifact.OperationID != nil && strings.TrimSpace(*artifact.OperationID) == "" {
+		return fmt.Errorf("artifact: operation producer is empty")
 	}
 	if !validArtifactSHA256(artifact.SHA256) {
 		return fmt.Errorf("artifact: SHA-256 digest is invalid")
@@ -128,11 +134,11 @@ func (d *DB) RegisterArtifact(artifact Artifact) (*Artifact, error) {
 	artifact.CreatedAt = time.Now().UnixMilli()
 	if _, err := tx.Exec(
 		`INSERT INTO artifacts
-		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, purpose, label, description,
+		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, operation_id, purpose, label, description,
 		  storage_root, relative_path, kind, media_type, encoding, sha256, source_bytes, state, reason,
 		  publication_state, publication_url, publication_commit_sha, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		artifact.ID, artifact.RunID, artifact.StepID, artifact.RoundID, artifact.InvocationID, artifact.CommandAttemptID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		artifact.ID, artifact.RunID, artifact.StepID, artifact.RoundID, artifact.InvocationID, artifact.CommandAttemptID, artifact.OperationID,
 		artifact.Purpose, artifact.Label, artifact.Description, artifact.StorageRoot, artifact.RelativePath,
 		artifact.Kind, artifact.MediaType, artifact.Encoding, artifact.SHA256, artifact.SourceBytes, artifact.State,
 		artifact.Reason, artifact.PublicationState, artifact.PublicationURL, artifact.PublicationCommitSHA, artifact.CreatedAt,
@@ -175,11 +181,34 @@ func getArtifactByStoragePath(q artifactQuerier, storageRoot, relativePath strin
 }
 
 func validateArtifactProducer(q artifactQuerier, artifact Artifact) error {
-	if artifact.StepID == nil && artifact.RoundID == nil && artifact.InvocationID == nil {
+	if artifact.StepID == nil && artifact.RoundID == nil && artifact.InvocationID == nil && artifact.OperationID == nil {
 		return fmt.Errorf("artifact: producer metadata is required")
 	}
 
 	var stepName string
+	var roundNumber int
+	if artifact.OperationID != nil {
+		var runID, operationStepID, operationRoundID string
+		err := q.QueryRow(
+			`SELECT run_id, step_id, round_id FROM operations WHERE id = ?`,
+			*artifact.OperationID,
+		).Scan(&runID, &operationStepID, &operationRoundID)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("artifact: operation producer %q does not exist", *artifact.OperationID)
+		}
+		if err != nil {
+			return fmt.Errorf("artifact: load operation producer: %w", err)
+		}
+		if runID != artifact.RunID {
+			return fmt.Errorf("artifact: operation producer does not belong to run")
+		}
+		if artifact.StepID != nil && operationStepID != *artifact.StepID {
+			return fmt.Errorf("artifact: operation and step producers are not connected")
+		}
+		if artifact.RoundID != nil && operationRoundID != *artifact.RoundID {
+			return fmt.Errorf("artifact: operation and round producers are not connected")
+		}
+	}
 	if artifact.StepID != nil {
 		var runID string
 		err := q.QueryRow(`SELECT run_id, step_name FROM step_results WHERE id = ?`, *artifact.StepID).Scan(&runID, &stepName)
@@ -194,7 +223,6 @@ func validateArtifactProducer(q artifactQuerier, artifact Artifact) error {
 		}
 	}
 
-	var roundNumber int
 	if artifact.RoundID != nil {
 		var runID, roundStepID, roundStepName string
 		err := q.QueryRow(
@@ -262,6 +290,7 @@ func sameArtifactRegistration(left, right Artifact) bool {
 		sameOptionalString(left.RoundID, right.RoundID) &&
 		sameOptionalString(left.InvocationID, right.InvocationID) &&
 		sameOptionalString(left.CommandAttemptID, right.CommandAttemptID) &&
+		sameOptionalString(left.OperationID, right.OperationID) &&
 		left.Purpose == right.Purpose &&
 		left.Label == right.Label &&
 		sameOptionalString(left.Description, right.Description) &&
@@ -309,7 +338,7 @@ func (d *DB) GetArtifactsByRun(runID string) ([]*Artifact, error) {
 	return artifacts, rows.Err()
 }
 
-const artifactSelectColumns = `id, run_id, step_id, round_id, invocation_id, command_attempt_id,
+const artifactSelectColumns = `id, run_id, step_id, round_id, invocation_id, command_attempt_id, operation_id,
 	purpose, label, description, storage_root, relative_path, kind, media_type, encoding,
 	sha256, source_bytes, state, reason, publication_state, publication_url, publication_commit_sha, created_at`
 
@@ -319,7 +348,7 @@ const artifactSelectByRun = `SELECT ` + artifactSelectColumns + ` FROM artifacts
 
 func scanArtifact(row interface{ Scan(...any) error }, artifact *Artifact) error {
 	return row.Scan(
-		&artifact.ID, &artifact.RunID, &artifact.StepID, &artifact.RoundID, &artifact.InvocationID, &artifact.CommandAttemptID,
+		&artifact.ID, &artifact.RunID, &artifact.StepID, &artifact.RoundID, &artifact.InvocationID, &artifact.CommandAttemptID, &artifact.OperationID,
 		&artifact.Purpose, &artifact.Label, &artifact.Description, &artifact.StorageRoot, &artifact.RelativePath,
 		&artifact.Kind, &artifact.MediaType, &artifact.Encoding, &artifact.SHA256, &artifact.SourceBytes,
 		&artifact.State, &artifact.Reason, &artifact.PublicationState, &artifact.PublicationURL, &artifact.PublicationCommitSHA,

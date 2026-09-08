@@ -369,11 +369,11 @@ func (d *DB) completeCommandAttemptWithOutputArtifact(id, outcome string, exitCo
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO artifacts
-		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, purpose, label, description,
+		 (id, run_id, step_id, round_id, invocation_id, command_attempt_id, operation_id, purpose, label, description,
 		  storage_root, relative_path, kind, media_type, encoding, sha256, source_bytes, state, reason,
 		  publication_state, publication_url, publication_commit_sha, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		artifact.ID, artifact.RunID, artifact.StepID, artifact.RoundID, artifact.InvocationID, artifact.CommandAttemptID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		artifact.ID, artifact.RunID, artifact.StepID, artifact.RoundID, artifact.InvocationID, artifact.CommandAttemptID, artifact.OperationID,
 		artifact.Purpose, artifact.Label, artifact.Description, artifact.StorageRoot, artifact.RelativePath,
 		artifact.Kind, artifact.MediaType, artifact.Encoding, artifact.SHA256, artifact.SourceBytes, artifact.State,
 		artifact.Reason, artifact.PublicationState, artifact.PublicationURL, artifact.PublicationCommitSHA, artifact.CreatedAt,

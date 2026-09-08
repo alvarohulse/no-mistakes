@@ -18,6 +18,9 @@ const (
 	SourceLinux           = "linux"
 	SourceMacOS           = "macos"
 	SourceWindows         = "windows"
+	// SourceDirectGit identifies controller-owned Git commands that bypass the
+	// configurable shell and execute Git directly.
+	SourceDirectGit = "direct-git"
 )
 
 // Spec is one shell executable plus the arguments that make its final argv

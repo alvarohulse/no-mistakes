@@ -58,6 +58,7 @@ Fetches the latest authoritative remote state and configured pushed-branch targe
 - With GitHub fork routing, the pushed-branch target is the fork branch fetched into `refs/remotes/no-mistakes-push/<branch>`
 - If the branch is not the base branch, incorporates the pushed-branch target first, then `origin/<base_branch>`
 - Rebase strategy rebases onto each target; merge strategy merges each target with `--no-edit`
+- Resolves each usable target ref to a commit after fetching, then pins every reset, rebase, or merge mutation to that resolved commit so a later ref movement cannot change the target
 - If the push rewrote branch history, skips the pushed-branch refresh target so prior remote autofix commits do not get reintroduced
 - If the push rewrote the default branch and `origin/<default_branch>` advanced after that rewrite, pauses for manual approval before updating the branch
 - If the branch carries commits from the contributor's local default branch that are not on `origin/<default_branch>`, pauses with an `ask-user` finding instead of silently bundling that local work into the PR
@@ -66,6 +67,9 @@ Fetches the latest authoritative remote state and configured pushed-branch targe
 - If a fast-forward is possible, does a hard-reset instead of rewriting or merging history
 - If the diff against the selected base branch is empty after refresh, completes refresh and skips all remaining pipeline steps
 - On conflict: records conflicting files, aborts the in-progress rebase or merge, and reports findings
+- Records one indexed Refresh operation receipt for each target decision, including the source and destination refs, authoritative base ref and SHA, starting, resolved-target, and resulting heads, strategy, outcome, conflict state, repair state, and elapsed time
+- Keeps controller-observed primary reset, rebase, and merge attempts in execution order and links them to immutable command-output artifacts; failed primary operations remain linked when an agent repairs the conflict
+- Refusals, errors, and cancellations carry a bounded immutable redacted diagnostic artifact when no primary command output is available
 
 **Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` or `git merge --continue` for the selected strategy. Rebase continuation uses a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior completed-round history in the prompt. The Refresh step does not synthesize a fix commit subject; Git preserves the rebased subjects or creates the normal merge commit.
 

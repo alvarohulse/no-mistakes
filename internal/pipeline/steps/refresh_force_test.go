@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 )
 
 func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
@@ -61,6 +62,7 @@ func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, autofixSHA, userCommitSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
@@ -86,6 +88,20 @@ func TestRefreshStep_ForcePushSkipsOriginBranch(t *testing.T) {
 	if mergeBase != originMain {
 		t.Fatalf("merge-base = %s, want origin/main %s", mergeBase, originMain)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/feature" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionSkipped || operation.ConflictState != db.RefreshConflictStateNone || operation.RepairState != db.RefreshRepairStateNotNeeded || len(operation.CommandAttemptIDs) != 0 {
+			t.Fatalf("force-push skipped receipt = %+v", operation)
+		}
+		return
+	}
+	t.Fatalf("missing force-push skipped receipt: %+v", operations)
 }
 
 func TestRefreshStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
@@ -123,7 +139,6 @@ func TestRefreshStep_ForcePushOnDefaultBranchSkipsRemoteSync(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, autofixSHA, userCommitSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/main"
 	sctx.Repo.UpstreamURL = upstream
-
 	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
 	if err != nil {
@@ -248,6 +263,7 @@ func TestRefreshStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.
 	sctx := newTestContextWithDBRecords(t, ag, dir, autofixSHA, userCommitSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/main"
 	sctx.Repo.UpstreamURL = upstream
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	outcome, err := step.Execute(sctx)
@@ -262,6 +278,13 @@ func TestRefreshStep_ForcePushOnDefaultBranchStopsWhenRemoteAdvanced(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(dir, "remote.txt")); !os.IsNotExist(err) {
 		t.Fatal("expected remote update to remain unapplied")
+	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].Decision != db.RefreshDecisionRefused || operations[0].DiagnosticArtifactID == nil || len(operations[0].CommandAttemptIDs) != 0 {
+		t.Fatalf("force-push refusal receipt = %+v", operations)
 	}
 }
 
@@ -306,6 +329,7 @@ func TestRefreshStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
+	beginRefreshReceiptRound(t, sctx)
 
 	step := &RefreshStep{}
 	_, err := step.Execute(sctx)
@@ -319,6 +343,33 @@ func TestRefreshStep_NormalPushSyncsOriginBranch(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "extra.txt")); os.IsNotExist(err) {
 		t.Fatalf("expected extra.txt from origin/feature to be present after normal push sync (HEAD=%s, origin/feature=%s)", afterSHA, originFeatureSHA)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/feature" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionFastForwarded || len(operation.CommandAttemptIDs) != 1 || operation.StartingHeadSHA == nil || *operation.StartingHeadSHA != headSHA || operation.ResultingHeadSHA == nil || *operation.ResultingHeadSHA != originFeatureSHA {
+			t.Fatalf("fast-forward receipt = %+v", operation)
+		}
+		attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, attempt := range attempts {
+			if attempt.ID != operation.CommandAttemptIDs[0] {
+				continue
+			}
+			if attempt.OutputArtifactID == nil {
+				t.Fatalf("fast-forward attempt has no output artifact: %+v", attempt)
+			}
+			return
+		}
+		t.Fatalf("fast-forward attempt %q not found", operation.CommandAttemptIDs[0])
+	}
+	t.Fatalf("missing origin/feature fast-forward receipt: %+v", operations)
 }
 
 func TestIsForcePush_IgnoresMergeBaseLookupErrors(t *testing.T) {

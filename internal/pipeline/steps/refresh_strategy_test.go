@@ -88,6 +88,7 @@ func TestRefreshStep_MergesStackedBranch(t *testing.T) {
 	sctx.Run.RefreshStrategy = types.RefreshStrategyMerge
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
+	beginRefreshReceiptRound(t, sctx)
 
 	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -101,6 +102,23 @@ func TestRefreshStep_MergesStackedBranch(t *testing.T) {
 	if len(parents) != 3 {
 		t.Fatalf("merge HEAD parents = %v, want two parents", parents)
 	}
+	operations, err := sctx.DB.GetRefreshOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 2 {
+		t.Fatalf("merge refresh receipts = %+v", operations)
+	}
+	for _, operation := range operations {
+		if operation.DestinationRef != "origin/dependency" {
+			continue
+		}
+		if operation.Decision != db.RefreshDecisionMerged || operation.ConflictState != db.RefreshConflictStateNone || operation.RepairState != db.RefreshRepairStateNotNeeded || len(operation.CommandAttemptIDs) != 1 {
+			t.Fatalf("merged receipt = %+v", operation)
+		}
+		return
+	}
+	t.Fatalf("missing origin/dependency merge receipt: %+v", operations)
 }
 
 func TestRefreshStep_FetchesLatestStackedBranchBeforeRefresh(t *testing.T) {
@@ -192,6 +210,7 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 	}
 	sctx.StepResultID = stepResult.ID
 	sctx.Round = 1
+	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
 
 	outcome, err := (&RefreshStep{}).Execute(sctx)
 	if err != nil {
@@ -221,7 +240,7 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 		t.Fatalf("merge command evidence = %+v, want only the merge the pipeline itself ran", evidence.Commands)
 	}
 	failed := evidence.Commands[0]
-	if failed.Command != "git merge --no-edit origin/dependency" || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
+	if failed.Command != "git merge --no-edit "+dependencySHA || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
 		t.Fatalf("failed merge evidence = %+v", failed)
 	}
 	// The agent, not the pipeline, ran the continuation, and it may have taken
