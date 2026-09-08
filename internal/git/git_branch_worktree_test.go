@@ -93,6 +93,66 @@ func TestWorktreeAddConcurrentSameRepo(t *testing.T) {
 	}
 }
 
+// TestWorktreeAddAndRemoveConcurrentSameCommonDir covers callers that invoke
+// Git from different linked-worktree paths. Those paths can still resolve to
+// one common directory, so add and remove must not mutate its worktree
+// metadata concurrently.
+func TestWorktreeAddAndRemoveConcurrentSameCommonDir(t *testing.T) {
+	ctx := context.Background()
+	const attempts = 16
+	for attempt := 0; attempt < attempts; attempt++ {
+		src := initTestRepo(t)
+		bare := filepath.Join(t.TempDir(), "bare")
+		if err := InitBare(ctx, bare); err != nil {
+			t.Fatal(err)
+		}
+		run(t, src, "git", "remote", "add", "bare", bare)
+		run(t, src, "git", "push", "bare", "HEAD:refs/heads/main")
+		sha := run(t, src, "git", "rev-parse", "HEAD")
+
+		sourceWorktree := filepath.Join(t.TempDir(), "source-worktree")
+		legacyWorktree := filepath.Join(t.TempDir(), "legacy-worktree")
+		if err := WorktreeAdd(ctx, bare, sourceWorktree, sha); err != nil {
+			t.Fatal(err)
+		}
+		if err := WorktreeAdd(ctx, bare, legacyWorktree, sha); err != nil {
+			t.Fatal(err)
+		}
+		addedWorktree := filepath.Join(t.TempDir(), "added-worktree")
+
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() {
+			<-start
+			errs <- WorktreeAdd(ctx, bare, addedWorktree, sha)
+		}()
+		go func() {
+			<-start
+			errs <- WorktreeRemove(ctx, sourceWorktree, legacyWorktree)
+		}()
+		close(start)
+		var firstErr error
+		for worker := 0; worker < 2; worker++ {
+			if err := <-errs; err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if firstErr != nil {
+			t.Fatalf("attempt %d: concurrent WorktreeAdd/WorktreeRemove failed: %v", attempt, firstErr)
+		}
+		if _, err := os.Stat(legacyWorktree); !os.IsNotExist(err) {
+			t.Fatalf("attempt %d: removed worktree still exists: %v", attempt, err)
+		}
+
+		if err := WorktreeRemove(ctx, bare, sourceWorktree); err != nil {
+			t.Fatal(err)
+		}
+		if err := WorktreeRemove(ctx, bare, addedWorktree); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestFindMainRepoRoot(t *testing.T) {
 	ctx := context.Background()
 	mainRepo := initTestRepo(t)

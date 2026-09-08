@@ -757,19 +757,18 @@ func isWorktreeConfigWriteUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
-var worktreeOperationLocks sync.Map // normalized repository path → *sync.Mutex
+var worktreeOperationLocks sync.Map // canonical Git common dir → *sync.Mutex
 
 // withWorktreeOperationLock serializes Git worktree metadata operations for a
-// repository. Git creates a linked-worktree metadata directory before it has
-// finished writing that directory's commondir file, so another concurrent
-// worktree add can observe the partial entry and fail with "failed to read
-// .../commondir". Remove must use the same lock because it mutates the same
-// metadata directory while a new run may be starting.
-func withWorktreeOperationLock(repoDir string, operation func() error) error {
-	key := filepath.Clean(repoDir)
-	if absolute, err := filepath.Abs(key); err == nil {
-		key = absolute
-	}
+// repository. Callers may pass a bare gate or any linked worktree of that
+// gate, so the lock key must be Git's canonical common directory rather than
+// the caller's path. Git creates a linked-worktree metadata directory before
+// it has finished writing that directory's commondir file, so another
+// concurrent worktree operation can observe the partial entry and fail with
+// "failed to read .../commondir". Remove must use the same lock because it
+// mutates the same metadata directory while a new run may be starting.
+func withWorktreeOperationLock(ctx context.Context, repoDir string, extraEnv []string, operation func() error) error {
+	key := worktreeCommonDir(ctx, repoDir, extraEnv)
 	lockValue, _ := worktreeOperationLocks.LoadOrStore(key, &sync.Mutex{})
 	lock := lockValue.(*sync.Mutex)
 	lock.Lock()
@@ -777,9 +776,26 @@ func withWorktreeOperationLock(repoDir string, operation func() error) error {
 	return operation()
 }
 
+func worktreeCommonDir(ctx context.Context, repoDir string, extraEnv []string) string {
+	commonDir, err := RunWithEnv(ctx, repoDir, extraEnv, "rev-parse", "--git-common-dir")
+	if err == nil {
+		if !filepath.IsAbs(commonDir) {
+			commonDir = filepath.Join(repoDir, commonDir)
+		}
+		repoDir = commonDir
+	}
+	if absolute, err := filepath.Abs(repoDir); err == nil {
+		repoDir = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		repoDir = resolved
+	}
+	return filepath.Clean(repoDir)
+}
+
 // WorktreeAdd creates a detached worktree at wtPath checked out to the given SHA.
 func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
-	return withWorktreeOperationLock(repoDir, func() error {
+	return withWorktreeOperationLock(ctx, repoDir, nil, func() error {
 		_, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
 		return err
 	})
@@ -787,8 +803,15 @@ func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
 
 // WorktreeRemove removes a worktree at the given path.
 func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
-	return withWorktreeOperationLock(repoDir, func() error {
-		_, err := Run(ctx, repoDir, "worktree", "remove", "--force", wtPath)
+	return WorktreeRemoveWithEnv(ctx, repoDir, wtPath, nil)
+}
+
+// WorktreeRemoveWithEnv removes a worktree with extra Git environment entries.
+// It preserves callers that intentionally isolate Git configuration while
+// sharing WorktreeRemove's common-directory serialization.
+func WorktreeRemoveWithEnv(ctx context.Context, repoDir, wtPath string, extraEnv []string) error {
+	return withWorktreeOperationLock(ctx, repoDir, extraEnv, func() error {
+		_, err := RunWithEnv(ctx, repoDir, extraEnv, "worktree", "remove", "--force", wtPath)
 		return err
 	})
 }
