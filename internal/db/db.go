@@ -25,29 +25,26 @@ type DB struct {
 
 // Open opens (or creates) the SQLite database at path and runs migrations.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	// Inspect the database before installing the current schema. A database
-	// with no user-defined objects is new, so it does not need compatibility
-	// migrations for older schemas; pre-existing schemas still take the full
-	// migration path below.
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("begin schema migration: %w", err)
+	}
 	var schemaObjects int
-	if err := sqlDB.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT count(*)
 		FROM sqlite_master
 		WHERE name NOT LIKE 'sqlite_%'`).Scan(&schemaObjects); err != nil {
+		_ = tx.Rollback()
 		sqlDB.Close()
 		return nil, fmt.Errorf("inspect db: %w", err)
 	}
 	if schemaObjects == 0 {
-		tx, err := sqlDB.Begin()
-		if err != nil {
-			sqlDB.Close()
-			return nil, fmt.Errorf("begin fresh schema migration: %w", err)
-		}
 		if _, err := tx.Exec(schemaSQL + freshSchemaObjectsSQL); err != nil {
 			_ = tx.Rollback()
 			sqlDB.Close()
@@ -70,6 +67,10 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
 		return &DB{sql: sqlDB}, nil
+	}
+	if err := tx.Rollback(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("rollback schema classification: %w", err)
 	}
 	if _, err := sqlDB.Exec(schemaSQL); err != nil {
 		sqlDB.Close()
