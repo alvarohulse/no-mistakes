@@ -1505,11 +1505,17 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		} else {
 			executeErr = executor.Execute(runCtx, run, repo, wtDir)
 		}
+		if executeErr != nil && pipeline.IsCIFixRepairDurabilityError(executeErr) {
+			m.closeRunAdmission()
+			retainRunOwnership = true
+		}
+		if !retainRunOwnership {
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before telemetry and all post-run cleanup.
+			m.closeSubscribers(run.ID)
+			terminalSubscribersClosed = true
+		}
 		if executeErr != nil {
-			if pipeline.IsCIFixRepairDurabilityError(executeErr) {
-				m.closeRunAdmission()
-				retainRunOwnership = true
-			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -1540,12 +1546,6 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			addRunPerformanceSummary(m.db, run.ID, fields)
 			telemetry.Track("run", fields)
 			slog.Info("pipeline completed", "run_id", run.ID)
-		}
-		if !retainRunOwnership {
-			// A terminal executor result ends the subscription contract. Close
-			// subscribers before telemetry and all post-run cleanup.
-			m.closeSubscribers(run.ID)
-			terminalSubscribersClosed = true
 		}
 		// Collection runs here, on the finished run, because a case is only
 		// honest once the human gate decision it labels is recorded - which is
