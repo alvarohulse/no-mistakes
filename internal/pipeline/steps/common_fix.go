@@ -104,21 +104,28 @@ func hasBlockingFindings(items []Finding) bool {
 // step and the whole run abort (executor.failRun) before doing more work -
 // nothing is committed or shipped.
 func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.StepName) error {
+	return assertPipelineHeadContinuityWithRunner(sctx, stepName, func(args ...string) (string, error) {
+		return git.Run(sctx.Ctx, sctx.WorkDir, args...)
+	})
+}
+
+func assertPipelineHeadContinuityWithRunner(sctx *pipeline.StepContext, stepName types.StepName, gitRun gitRunner) error {
 	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 	if recorded == "" {
 		return nil
 	}
-	currentHead, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	currentHead, err := gitRun("rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("resolve head before %s step: %w", stepName, err)
 	}
+	currentHead = strings.TrimSpace(currentHead)
 	if currentHead == recorded {
 		return nil
 	}
 	// Fail closed: refuse unless the recorded head is genuinely an ancestor of the
 	// live HEAD (a legitimate forward move). A non-ancestor result OR any git error
 	// (e.g. an unknown recorded object) aborts rather than proceeds.
-	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", recorded, currentHead); err != nil {
+	if _, err := gitRun("merge-base", "--is-ancestor", recorded, currentHead); err != nil {
 		return fmt.Errorf("refusing to run %s step: worktree HEAD %s is not a descendant of the pipeline's recorded head %s; "+
 			"the reviewed change was rewritten out-of-band and would be lost - aborting to protect it",
 			stepName, currentHead, recorded)

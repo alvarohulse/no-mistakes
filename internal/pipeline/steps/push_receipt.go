@@ -36,6 +36,7 @@ type pushReceiptRecorder struct {
 	transportStarted    bool
 	refused             bool
 	attemptIDs          []string
+	progressErr         error
 }
 
 func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef string) *pushReceiptRecorder {
@@ -43,7 +44,7 @@ func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef 
 	if sctx != nil && sctx.Repo != nil && strings.TrimSpace(sctx.Repo.ForkURL) != "" {
 		targetKind = "fork"
 	}
-	return &pushReceiptRecorder{
+	recorder := &pushReceiptRecorder{
 		sctx:              sctx,
 		startedAt:         time.Now(),
 		targetKind:        targetKind,
@@ -51,7 +52,15 @@ func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef 
 		targetIdentity:    safeurl.Redact(pushURL),
 		destinationRef:    destinationRef,
 		leaseDecision:     db.PushLeaseOrForceDecisionUnavailable,
+		decisionReason:    "push operation started",
 	}
+	if sctx != nil && sctx.Run != nil && sctx.Run.ReviewApprovedHeadSHA != nil {
+		value := strings.TrimSpace(*sctx.Run.ReviewApprovedHeadSHA)
+		if value != "" {
+			recorder.reviewApprovedSHA = &value
+		}
+	}
+	return recorder
 }
 
 func (r *pushReceiptRecorder) enabled() bool {
@@ -66,18 +75,13 @@ func (r *pushReceiptRecorder) start() error {
 	started, err := r.sctx.DB.StartPushOperation(db.PushOperation{
 		RunID: r.sctx.Run.ID, StepID: r.sctx.StepResultID, RoundID: r.sctx.RoundID,
 		TargetKind: r.targetKind, TargetFingerprint: r.targetFingerprint, TargetIdentity: r.targetIdentity,
-		DestinationRef: r.destinationRef, StartedAt: r.startedAt.UnixMilli(),
+		DestinationRef: r.destinationRef, PushedSHA: r.pushedSHA, ReviewApprovedHeadSHA: r.reviewApprovedSHA,
+		LastSeenSHA: r.lastSeenSHA, StartedAt: r.startedAt.UnixMilli(),
 	})
 	if err != nil {
 		return fmt.Errorf("start push receipt: %w", err)
 	}
 	r.operationID = started.ID
-	if r.sctx.Run.ReviewApprovedHeadSHA != nil {
-		value := strings.TrimSpace(*r.sctx.Run.ReviewApprovedHeadSHA)
-		if value != "" {
-			r.reviewApprovedSHA = &value
-		}
-	}
 	return nil
 }
 
@@ -85,6 +89,7 @@ func (r *pushReceiptRecorder) setPushedSHA(value string) {
 	value = strings.TrimSpace(value)
 	if value != "" {
 		r.pushedSHA = &value
+		r.persistProgress()
 	}
 }
 
@@ -98,6 +103,7 @@ func (r *pushReceiptRecorder) setDecision(decision db.PushLeaseOrForceDecision, 
 		value := strings.TrimSpace(observed)
 		r.observedRemoteSHA = &value
 	}
+	r.persistProgress()
 }
 
 func (r *pushReceiptRecorder) markRefused(reason string) {
@@ -128,13 +134,23 @@ func (r *pushReceiptRecorder) recordBinding(generation int64) {
 	}
 	r.bindingUpdated = true
 	r.resultingGeneration = &generation
+	r.persistProgress()
 }
 
 // runGit routes controller-owned git inspection and transport through the
 // durable command-attempt/artifact seam and records only attempts created by
 // this operation.
 func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...string) (string, error) {
-	result := runStepGitCommandResult(r.sctx, command, purpose, args...)
+	if r.progressErr != nil {
+		return "", r.progressErr
+	}
+	var onAttemptStarted func(string) error
+	if r.enabled() && r.operationID != "" {
+		onAttemptStarted = func(id string) error {
+			return r.sctx.DB.LinkPushOperationCommandAttempt(r.operationID, r.sctx.Run.ID, id)
+		}
+	}
+	result := runStepGitCommandResultWithAttemptHook(r.sctx, command, purpose, onAttemptStarted, args...)
 	r.recordAttempt(result.attemptID)
 	if runErr := result.err(); runErr != nil {
 		return result.output, runErr
@@ -142,7 +158,32 @@ func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...str
 	if result.exitCode != 0 {
 		return result.output, &pushCommandExitError{command: command, code: result.exitCode, output: result.output}
 	}
+	if r.progressErr != nil {
+		return result.output, r.progressErr
+	}
 	return result.output, nil
+}
+
+func (r *pushReceiptRecorder) persistProgress() {
+	if r == nil || r.progressErr != nil || !r.enabled() || r.operationID == "" {
+		return
+	}
+	if err := r.sctx.DB.UpdatePushOperationProgress(r.snapshot()); err != nil {
+		r.progressErr = fmt.Errorf("persist push receipt progress: %w", err)
+	}
+}
+
+func (r *pushReceiptRecorder) snapshot() db.PushOperation {
+	return db.PushOperation{
+		ID: r.operationID, RunID: r.sctx.Run.ID, StepID: r.sctx.StepResultID, RoundID: r.sctx.RoundID,
+		TargetKind: r.targetKind, TargetFingerprint: r.targetFingerprint, TargetIdentity: r.targetIdentity,
+		DestinationRef: r.destinationRef, PushedSHA: r.pushedSHA, ObservedRemoteSHA: r.observedRemoteSHA,
+		LeaseOrForceDecision: r.leaseDecision, DecisionReason: boundedPushReason(r.decisionReason), Outcome: db.PushOperationOutcomeProcessError,
+		ReviewApprovedHeadSHA: r.reviewApprovedSHA, LastSeenSHA: r.lastSeenSHA, VerifiedRemoteSHA: r.verifiedRemoteSHA,
+		BindingUpdated: r.bindingUpdated, ResultingGeneration: r.resultingGeneration,
+		CommandAttemptIDs: append([]string(nil), r.attemptIDs...),
+		StartedAt:         r.startedAt.UnixMilli(), CompletedAt: r.startedAt.UnixMilli(),
+	}
 }
 
 type pushCommandExitError struct {
@@ -161,6 +202,9 @@ func (e *pushCommandExitError) Error() string {
 func (r *pushReceiptRecorder) finish(runErr error) error {
 	if !r.enabled() || r.operationID == "" {
 		return nil
+	}
+	if r.progressErr != nil {
+		runErr = errors.Join(runErr, r.progressErr)
 	}
 	if r.decisionReason == "" {
 		r.decisionReason = safeurl.RedactText(errorReason(runErr, "push completed"))

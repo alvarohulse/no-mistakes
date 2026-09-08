@@ -82,6 +82,34 @@ func TestPushReceiptRecorderRecordsOnlyTheDirectAttempt(t *testing.T) {
 	}
 }
 
+func TestPushReceiptRecorderCrashRecoveryTerminalizesLinkedAttempts(t *testing.T) {
+	sctx := newPushReceiptTestContext(t)
+	recorder := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
+	if err := recorder.start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.runGit("push", "git --version", "--version"); err != nil {
+		t.Fatal(err)
+	}
+	beforeRecovery, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beforeRecovery) != 1 || beforeRecovery[0].Terminalized || len(beforeRecovery[0].CommandAttemptIDs) != 1 {
+		t.Fatalf("in-progress receipt = %+v, want one linked nonterminal attempt", beforeRecovery)
+	}
+	if recovered, err := sctx.DB.RecoverStaleRun(sctx.Run.ID, "daemon crashed during push"); err != nil || !recovered {
+		t.Fatalf("recover stale run = %v, %v", recovered, err)
+	}
+	afterRecovery, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterRecovery) != 1 || !afterRecovery[0].Terminalized || afterRecovery[0].Outcome != db.PushOperationOutcomeProcessError || len(afterRecovery[0].CommandAttemptIDs) != 1 {
+		t.Fatalf("recovered receipt = %+v, want terminal process-error with linked attempt", afterRecovery)
+	}
+}
+
 func TestPushReceiptRecorderClassifiesSignalExitAsProcessError(t *testing.T) {
 	sctx := newPushReceiptTestContext(t)
 	recorder := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")

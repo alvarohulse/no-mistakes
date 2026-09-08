@@ -93,6 +93,9 @@ func TestCIStep_CommitAndPush(t *testing.T) {
 	if receipt.StepID != stepResult.ID || receipt.RoundID != round.ID || receipt.Kind != db.OperationKindPush {
 		t.Fatalf("CI receipt owner = %+v", receipt)
 	}
+	if receipt.LastSeenSHA == nil || *receipt.LastSeenSHA != headSHA {
+		t.Fatalf("CI receipt lease anchor = %+v, want %s", receipt.LastSeenSHA, headSHA)
+	}
 	if receipt.PushedSHA == nil || *receipt.PushedSHA != upstreamSHA {
 		t.Fatalf("CI receipt pushed SHA = %+v, want %s", receipt.PushedSHA, upstreamSHA)
 	}

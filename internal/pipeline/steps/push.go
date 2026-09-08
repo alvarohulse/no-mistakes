@@ -34,7 +34,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOu
 }
 
 func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecorder) (*pipeline.StepOutcome, error) {
-	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+	if err := assertPipelineHeadContinuityWithRunner(sctx, s.Name(), func(args ...string) (string, error) {
+		return durablePushGitCommand(sctx, receipt, pushOperationPurpose(sctx), args...)
+	}); err != nil {
 		receipt.markRefused(err.Error())
 		return nil, err
 	}
@@ -147,7 +149,7 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
 		receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
-		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), "")
+		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
 		var refusal *forcePushWouldDiscardError
 		if errors.As(err, &refusal) {
 			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
@@ -209,7 +211,7 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	}
 	var generation int64
 	if receipt.enabled() {
-		generation, err = sctx.DB.UpdateRunPushBindingWithGeneration(sctx.Run.ID, binding)
+		generation, err = sctx.DB.UpdateRunPushBindingWithGenerationForOperation(sctx.Run.ID, binding, receipt.operationID)
 	} else {
 		err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
 	}

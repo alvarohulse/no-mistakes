@@ -257,6 +257,67 @@ func (d *DB) StartPushOperation(operation PushOperation) (*PushOperation, error)
 	return &operation, nil
 }
 
+func (d *DB) UpdatePushOperationProgress(operation PushOperation) error {
+	if strings.TrimSpace(operation.ID) == "" {
+		return fmt.Errorf("update push operation progress: ID is required")
+	}
+	if operation.Kind != "" && operation.Kind != OperationKindPush {
+		return fmt.Errorf("update push operation progress: kind must be %q", OperationKindPush)
+	}
+	operation.Kind = OperationKindPush
+	redactPushOperation(&operation)
+	if operation.CompletedAt == 0 {
+		operation.CompletedAt = operation.StartedAt
+	}
+	if err := validatePushOperation(d, operation, false); err != nil {
+		return err
+	}
+	result, err := d.sql.Exec(
+		`UPDATE push_operations SET pushed_sha = ?, observed_remote_sha = ?, verified_remote_sha = ?, lease_or_force_decision = ?, decision_reason = ?, outcome = ?, review_approved_head_sha = ?, last_seen_sha = ?, binding_updated = ?, resulting_generation = ?, retry_of_operation_id = ?, retry_reason = ? WHERE operation_id = ? AND terminalized = 0`,
+		operation.PushedSHA, operation.ObservedRemoteSHA, operation.VerifiedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome,
+		operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration,
+		operation.RetryOfOperationID, operation.RetryReason, operation.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update push operation progress: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("update push operation progress: rows affected: %w", err)
+	} else if affected != 1 {
+		return fmt.Errorf("update push operation progress: operation is missing or already terminal")
+	}
+	return nil
+}
+
+func (d *DB) LinkPushOperationCommandAttempt(operationID, runID, attemptID string) error {
+	if strings.TrimSpace(operationID) == "" || strings.TrimSpace(runID) == "" || strings.TrimSpace(attemptID) == "" {
+		return fmt.Errorf("link push operation command attempt: operation, run, and attempt IDs are required")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("link push operation command attempt: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var terminalized int
+	if err := tx.QueryRow(`SELECT po.terminalized FROM push_operations po JOIN operations o ON o.id = po.operation_id WHERE po.operation_id = ? AND o.run_id = ? AND o.kind = ?`, operationID, runID, OperationKindPush).Scan(&terminalized); err != nil {
+		return fmt.Errorf("link push operation command attempt: load operation: %w", err)
+	}
+	if terminalized != 0 {
+		return fmt.Errorf("link push operation command attempt: operation is already terminal")
+	}
+	var sequence int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_command_attempts WHERE operation_id = ?`, operationID).Scan(&sequence); err != nil {
+		return fmt.Errorf("link push operation command attempt: allocate sequence: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`, operationID, runID, attemptID, sequence); err != nil {
+		return fmt.Errorf("link push operation command attempt: insert link: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("link push operation command attempt: commit: %w", err)
+	}
+	return nil
+}
+
 // CompletePushOperation terminalizes a previously started Push receipt while
 // retaining its database-assigned identity and immutable owner scope.
 func (d *DB) CompletePushOperation(operation PushOperation) (*PushOperation, error) {
@@ -409,6 +470,9 @@ func (d *DB) CompletePushOperationWithDiagnostic(operation PushOperation, diagno
 	} else if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		return nil, fmt.Errorf("complete push operation with diagnostic: operation is already terminal")
 	}
+	if _, err := tx.Exec(`DELETE FROM operation_command_attempts WHERE operation_id = ?`, operation.ID); err != nil {
+		return nil, fmt.Errorf("complete push operation with diagnostic: clear attempt links: %w", err)
+	}
 	for index, attemptID := range operation.CommandAttemptIDs {
 		if _, err := tx.Exec(`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`, operation.ID, operation.RunID, attemptID, index+1); err != nil {
 			return nil, fmt.Errorf("complete push operation with diagnostic: link command attempt: %w", err)
@@ -496,8 +560,7 @@ func validatePushOperation(d *DB, operation PushOperation, starting bool) error 
 	}
 	if starting {
 		if operation.LeaseOrForceDecision != PushLeaseOrForceDecisionUnavailable || operation.Outcome != PushOperationOutcomeProcessError ||
-			operation.PushedSHA != nil || operation.ObservedRemoteSHA != nil || operation.VerifiedRemoteSHA != nil ||
-			operation.ReviewApprovedHeadSHA != nil || operation.LastSeenSHA != nil || operation.BindingUpdated ||
+			operation.ObservedRemoteSHA != nil || operation.VerifiedRemoteSHA != nil || operation.BindingUpdated ||
 			operation.ResultingGeneration != nil || operation.RetryOfOperationID != nil || operation.RetryReason != nil ||
 			operation.DiagnosticArtifactID != nil || len(operation.CommandAttemptIDs) != 0 {
 			return fmt.Errorf("push operation: start receipt contains terminal evidence")

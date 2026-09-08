@@ -206,6 +206,9 @@ func TestPushStep_RefusesToClobberAdvancedUpstreamBranch(t *testing.T) {
 	if receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != advancedSHA || receipt.VerifiedRemoteSHA != nil {
 		t.Fatalf("refusal receipt remote state = %+v, want %s", receipt, advancedSHA)
 	}
+	if len(receipt.CommandAttemptIDs) == 0 {
+		t.Fatal("continuity refusal receipt has no command attempts")
+	}
 }
 
 // review-1 regression: a force-push run must not clobber an out-of-band commit

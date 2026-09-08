@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -552,6 +553,7 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	sctx.Repo.ForkURL = "https://user:secret@example.com/fork/project.git"
 	sctx.Run.Branch = "refs/heads/feature"
 	recordReviewApproval(t, sctx, headSHA)
+	enablePushReceipt(t, sctx)
 
 	step := &PushStep{}
 	_, err = step.Execute(sctx)
@@ -563,6 +565,30 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "https://redacted@example.com/fork/project.git") {
 		t.Fatalf("expected redacted fork URL in error, got %v", err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range attempts {
+		if attempt.OutputArtifactID == nil {
+			continue
+		}
+		outputArtifact, err := sctx.DB.GetArtifact(*attempt.OutputArtifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := store.Read(outputArtifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(output), "secret") {
+			t.Fatalf("direct git output artifact leaked credential: %q", output)
+		}
 	}
 }
 

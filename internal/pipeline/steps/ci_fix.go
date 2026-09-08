@@ -256,8 +256,11 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	gitRun := func(args ...string) (string, error) {
 		return durablePushGitCommand(sctx, receipt, purpose, args...)
 	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
+	receipt.persistProgress()
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
 	if err != nil {
+		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
 		var refusal *forcePushWouldDiscardError
 		if errors.As(err, &refusal) {
 			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
@@ -265,6 +268,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		return false, err
 	}
 	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
+	receipt.persistProgress()
 	switch {
 	case decision.newBranch:
 		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
@@ -297,7 +301,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if persistVerifiedPush != nil {
 			generation, err = persistVerifiedPush(binding)
 		} else if receipt.enabled() {
-			generation, err = sctx.DB.UpdateRunPushBindingWithGeneration(sctx.Run.ID, binding)
+			generation, err = sctx.DB.UpdateRunPushBindingWithGenerationForOperation(sctx.Run.ID, binding, receipt.operationID)
 		} else {
 			err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
 		}
