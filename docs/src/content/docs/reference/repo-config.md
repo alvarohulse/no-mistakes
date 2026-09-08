@@ -209,7 +209,7 @@ Every per-step selector, including effort, is code-executing configuration. It c
 
 ACP targets accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
 
-The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent, model, and effort routing but cannot select a strategy.
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select effort or a strategy.
 
 ### refresh.strategy
 

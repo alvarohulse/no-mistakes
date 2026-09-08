@@ -531,6 +531,9 @@ func resolveLegacyStepConfig(refresh, legacyRebase *StepAgentRaw) (StepAgentRaw,
 		return *refresh, nil
 	}
 	if legacyRebase != nil {
+		if legacyRebase.Effort != "" {
+			return StepAgentRaw{}, fmt.Errorf("legacy rebase does not support effort; use refresh.effort")
+		}
 		return *legacyRebase, nil
 	}
 	return StepAgentRaw{}, nil
@@ -591,7 +594,10 @@ func resolveLegacyRepoRefreshConfig(refresh *RefreshRaw, legacyRebase *StepAgent
 		return *refresh, nil
 	}
 	if legacyRebase != nil {
-		return RefreshRaw{Agent: legacyRebase.Agent, Agents: copyAgents(legacyRebase.Agents), Model: legacyRebase.Model, Effort: legacyRebase.Effort}, nil
+		if legacyRebase.Effort != "" {
+			return RefreshRaw{}, fmt.Errorf("legacy rebase does not support effort; use refresh.effort")
+		}
+		return RefreshRaw{Agent: legacyRebase.Agent, Agents: copyAgents(legacyRebase.Agents), Model: legacyRebase.Model}, nil
 	}
 	return RefreshRaw{}, nil
 }
@@ -919,7 +925,7 @@ func overlayRepoConfigWithProvenance(base, override *RepoConfig, provenance *Eff
 	if override.has("refresh.model", "rebase.model") {
 		out.Refresh.Model = override.Refresh.Model
 	}
-	if override.has("refresh.effort", "rebase.effort") {
+	if override.has("refresh.effort") {
 		out.Refresh.Effort = override.Refresh.Effort
 	}
 	if override.has("refresh.strategy") {

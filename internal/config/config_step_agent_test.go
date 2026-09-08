@@ -133,6 +133,13 @@ func TestLoadRepo_LegacyRebaseRejectsNewStrategyField(t *testing.T) {
 	}
 }
 
+func TestLoadRepo_LegacyRebaseRejectsEffort(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte("rebase:\n  effort: high\n"))
+	if err == nil || !strings.Contains(err.Error(), "legacy rebase does not support effort") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want legacy-effort refusal", err)
+	}
+}
+
 func TestLoadGlobal_RejectsRefreshAndLegacyRebaseSections(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := "refresh:\n  agent: codex\nrebase:\n  agent: claude\n"
@@ -142,6 +149,17 @@ func TestLoadGlobal_RejectsRefreshAndLegacyRebaseSections(t *testing.T) {
 	_, err := LoadGlobal(path)
 	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
 		t.Fatalf("LoadGlobal() error = %v, want ambiguous-section refusal", err)
+	}
+}
+
+func TestLoadGlobal_LegacyRebaseRejectsEffort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("rebase:\n  effort: high\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(path)
+	if err == nil || !strings.Contains(err.Error(), "legacy rebase does not support effort") {
+		t.Fatalf("LoadGlobal() error = %v, want legacy-effort refusal", err)
 	}
 }
 
