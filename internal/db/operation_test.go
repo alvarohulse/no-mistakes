@@ -21,7 +21,7 @@ func TestRefreshOperationsRoundTripOrderedReferences(t *testing.T) {
 	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindRefresh {
 		t.Fatalf("stored operation identity = %+v", stored)
 	}
-	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA == nil || *stored.StartingHeadSHA != "starting-head" || stored.ResultingHeadSHA == nil || *stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
+	if stored.Strategy != types.RefreshStrategyMerge || stored.SourceRef != "refs/heads/feature" || stored.DestinationRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseRef != "refs/remotes/origin/main" || stored.AuthoritativeBaseSHA == nil || *stored.AuthoritativeBaseSHA != "authoritative-base" || stored.StartingHeadSHA == nil || *stored.StartingHeadSHA != "starting-head" || stored.ResolvedTargetHeadSHA == nil || *stored.ResolvedTargetHeadSHA != "resolved-target" || stored.ResultingHeadSHA == nil || *stored.ResultingHeadSHA != "resulting-head" || stored.Decision != RefreshDecisionMerged || stored.ConflictState != RefreshConflictStateNone || stored.RepairState != RefreshRepairStateNotNeeded {
 		t.Fatalf("stored receipt fields = %+v", stored)
 	}
 	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
@@ -229,7 +229,7 @@ func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t
 		}
 	}
 
-	for _, decision := range []RefreshDecision{RefreshDecisionRefused, RefreshDecisionError} {
+	for _, decision := range []RefreshDecision{RefreshDecisionRefused, RefreshDecisionError, RefreshDecisionCancelled} {
 		candidate := receipt
 		candidate.Decision = decision
 		candidate.RepairState = RefreshRepairStateNotAttempted
@@ -280,6 +280,9 @@ func TestInsertRefreshOperationEnforcesDecisionConflictRepairTriples(t *testing.
 		{RefreshDecisionRefused, RefreshConflictStateNone, RefreshRepairStateNotAttempted},
 		{RefreshDecisionError, RefreshConflictStateNone, RefreshRepairStateNotAttempted},
 		{RefreshDecisionError, RefreshConflictStateNone, RefreshRepairStateFailed},
+		{RefreshDecisionCancelled, RefreshConflictStateNone, RefreshRepairStateNotAttempted},
+		{RefreshDecisionCancelled, RefreshConflictStateDetected, RefreshRepairStateNotAttempted},
+		{RefreshDecisionCancelled, RefreshConflictStateDetected, RefreshRepairStateFailed},
 	}
 	for _, tt := range valid {
 		t.Run(string(tt.decision)+"/"+string(tt.conflict)+"/"+string(tt.repair), func(t *testing.T) {
@@ -304,6 +307,8 @@ func TestInsertRefreshOperationEnforcesDecisionConflictRepairTriples(t *testing.
 		{RefreshDecisionRepaired, RefreshConflictStateResolved, RefreshRepairStateFailed},
 		{RefreshDecisionRefused, RefreshConflictStateNone, RefreshRepairStateFailed},
 		{RefreshDecisionError, RefreshConflictStateDetected, RefreshRepairStateNotAttempted},
+		{RefreshDecisionCancelled, RefreshConflictStateNone, RefreshRepairStateFailed},
+		{RefreshDecisionCancelled, RefreshConflictStateResolved, RefreshRepairStateNotAttempted},
 	}
 	for _, tt := range invalid {
 		t.Run("reject/"+string(tt.decision)+"/"+string(tt.conflict)+"/"+string(tt.repair), func(t *testing.T) {
@@ -408,24 +413,25 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		t.Fatal(err)
 	}
 	return RefreshOperation{
-		RunID:                run.ID,
-		StepID:               step.ID,
-		RoundID:              round.ID,
-		Strategy:             types.RefreshStrategyMerge,
-		SourceRef:            "refs/heads/feature",
-		DestinationRef:       "refs/remotes/origin/main",
-		AuthoritativeBaseRef: "refs/remotes/origin/main",
-		AuthoritativeBaseSHA: stringPointer("authoritative-base"),
-		StartingHeadSHA:      stringPointer("starting-head"),
-		Decision:             RefreshDecisionMerged,
-		ResultingHeadSHA:     stringPointer("resulting-head"),
-		ConflictState:        RefreshConflictStateNone,
-		RepairState:          RefreshRepairStateNotNeeded,
-		CommandAttemptIDs:    []string{secondAttempt.ID, firstAttempt.ID},
-		StartedAt:            100,
-		CompletedAt:          145,
-		DurationMS:           45,
-		DiagnosticArtifactID: &artifact.ID,
+		RunID:                 run.ID,
+		StepID:                step.ID,
+		RoundID:               round.ID,
+		Strategy:              types.RefreshStrategyMerge,
+		SourceRef:             "refs/heads/feature",
+		DestinationRef:        "refs/remotes/origin/main",
+		AuthoritativeBaseRef:  "refs/remotes/origin/main",
+		AuthoritativeBaseSHA:  stringPointer("authoritative-base"),
+		StartingHeadSHA:       stringPointer("starting-head"),
+		ResolvedTargetHeadSHA: stringPointer("resolved-target"),
+		Decision:              RefreshDecisionMerged,
+		ResultingHeadSHA:      stringPointer("resulting-head"),
+		ConflictState:         RefreshConflictStateNone,
+		RepairState:           RefreshRepairStateNotNeeded,
+		CommandAttemptIDs:     []string{secondAttempt.ID, firstAttempt.ID},
+		StartedAt:             100,
+		CompletedAt:           145,
+		DurationMS:            45,
+		DiagnosticArtifactID:  &artifact.ID,
 	}, firstAttempt, secondAttempt, artifact
 }
 

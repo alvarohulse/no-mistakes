@@ -92,6 +92,104 @@ func TestTestStep_FixMode(t *testing.T) {
 	}
 }
 
+func TestTestStep_FixMode_UsesExplicitReplacementForPersistedPlannedCommand(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	const invalidCommand = "false"
+	const replacementCommand = "true"
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-fix" {
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair planned command","replacement_command":"true"}`)}, nil
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence passed","tested":["true"],"testing_summary":"replacement passed"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.RoundID = round.ID
+	sctx.Round = 1
+	sctx.RoundTrigger = "initial"
+	sctx.PlannedCommand = invalidCommand
+	if err := sctx.DB.SetStepPlannedCommand(step.ID, invalidCommand); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"severity":"error","description":"tests failed","action":"auto-fix"}],"summary":"tests failed"}`
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("replacement command should pass controller validation: %+v", outcome)
+	}
+	stored, err := sctx.DB.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PlannedCommand == nil || *stored.PlannedCommand != replacementCommand {
+		t.Fatalf("stored planned command = %v, want %q", stored.PlannedCommand, replacementCommand)
+	}
+	evidence, err := stored.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 || evidence.Commands[0].Command != replacementCommand || evidence.Commands[0].Outcome != db.CommandOutcomePassed {
+		t.Fatalf("command evidence = %+v, want successful replacement command", evidence.Commands)
+	}
+}
+
+func TestTestStep_FixMode_ConfiguredCommandDoesNotPersistReplacement(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose == "test-fix" {
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair test","replacement_command":"false"}`)}, nil
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence passed","tested":["true"],"testing_summary":"configured command passed"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"severity":"error","description":"tests failed","action":"auto-fix"}],"summary":"tests failed"}`
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("configured test command should pass: %+v", outcome)
+	}
+	stored, err := sctx.DB.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PlannedCommand != nil {
+		t.Fatalf("configured test replacement persisted as %q", *stored.PlannedCommand)
+	}
+}
+
 func TestTestStep_FixMode_UsesConfiguredCommitMessage(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
