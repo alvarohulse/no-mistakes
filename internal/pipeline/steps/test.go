@@ -73,6 +73,7 @@ Rules:
 - Make the smallest correct root-cause fix.
 - Do not refactor beyond what is needed for that root-cause fix.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
+- If the persisted planned test command itself is invalid and you determine its corrected command, include that exact command in the "replacement_command" field of the structured response. Omit it unless you are explicitly correcting the persisted command; the controller will validate and persist any replacement before execution.
 - Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
@@ -98,7 +99,10 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			ErrorPrefix:     "agent fix tests",
 			FallbackSummary: "fix test failures",
-			AfterAgentRun: func(*agent.Result) error {
+			AfterAgentRun: func(result *agent.Result) error {
+				if err := applyExplicitPlannedCommandReplacement(sctx, result); err != nil {
+					return err
+				}
 				var err error
 				newTestsFromFix, err = detectNewTestFiles(ctx, sctx.WorkDir)
 				return err
@@ -108,6 +112,9 @@ Previous test findings to address:
 			return nil, err
 		}
 		fixSummary = summary
+		if plannedTest {
+			testCmd = sctx.PlannedCommand
+		}
 	}
 
 	tested := []string{}

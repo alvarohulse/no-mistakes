@@ -35,7 +35,8 @@ type fixExecutionOptions struct {
 }
 
 type commitSummary struct {
-	Summary string `json:"summary"`
+	Summary            string  `json:"summary"`
+	ReplacementCommand *string `json:"replacement_command,omitempty"`
 }
 
 var errRejectedCommitSummary = errors.New("rejected commit summary")
@@ -52,7 +53,8 @@ var fixCoAuthorByHarness = map[string]string{
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
-		"summary": {"type": "string", "maxLength": %d}
+		"summary": {"type": "string", "maxLength": %d},
+		"replacement_command": {"type": "string"}
 	},
 	"required": ["summary"]
 }`, config.MaxFixMessageSummaryBytes))
@@ -247,6 +249,27 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
+}
+
+func applyExplicitPlannedCommandReplacement(sctx *pipeline.StepContext, result *agent.Result) error {
+	if result == nil || len(result.Output) == 0 {
+		return nil
+	}
+	var response commitSummary
+	if err := json.Unmarshal(result.Output, &response); err != nil || response.ReplacementCommand == nil {
+		return nil
+	}
+	replacement := strings.TrimSpace(*response.ReplacementCommand)
+	if replacement == "" {
+		return nil
+	}
+	if sctx.DB != nil && sctx.StepResultID != "" {
+		if err := sctx.DB.SetStepPlannedCommand(sctx.StepResultID, replacement); err != nil {
+			return fmt.Errorf("persist replacement planned command: %w", err)
+		}
+	}
+	sctx.PlannedCommand = replacement
+	return nil
 }
 
 // executeFixMode runs the fix agent and commits any resulting changes. It
