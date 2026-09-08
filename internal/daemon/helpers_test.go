@@ -89,9 +89,9 @@ func TestMain(m *testing.M) {
 // still making progress. Nothing healthy pays these - every wait returns as
 // soon as its condition holds - and a genuinely stuck run still fails, later.
 const (
-	// testRunTerminalBudget bounds one run reaching a terminal state. Its
-	// critical path includes the repo-URL refresh, the trusted-config fetch,
-	// and the worktree carve, all of which run before the first step.
+	// testRunTerminalBudget bounds one run reaching its terminal cleanup
+	// boundary when a test needs it. Its critical path includes the repo-URL
+	// refresh, trusted-config fetch, worktree carve, and post-run cleanup.
 	testRunTerminalBudget = 30 * time.Second
 	// testDaemonStopBudget bounds shutdown, which drains any in-flight run
 	// before RunWithOptions/RunWithResources returns.
