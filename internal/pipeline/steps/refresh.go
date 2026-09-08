@@ -707,7 +707,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	result := runRefreshPrimaryResult(ctx, sctx, operation, "rebase", prepared.targetSHA)
+	result := runRefreshPrimaryResult(ctx, sctx, operation, "rebase", targetRef)
 	if !result.succeeded {
 		err := result.err
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
@@ -739,7 +739,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	result := runRefreshPrimaryResult(ctx, sctx, operation, "rebase", prepared.targetSHA)
+	result := runRefreshPrimaryResult(ctx, sctx, operation, "rebase", targetRef)
 	if result.succeeded {
 		return errors.Join(result.err, operation.finish(db.RefreshDecisionRebased, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 	}
@@ -819,7 +819,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string,
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	result := runRefreshPrimaryResult(ctx, sctx, operation, "merge", "--no-edit", prepared.targetSHA)
+	result := runRefreshPrimaryResult(ctx, sctx, operation, "merge", "--no-edit", targetRef)
 	if !result.succeeded {
 		err := result.err
 		conflictFiles := refreshConflictFiles(ctx, sctx.WorkDir)
@@ -849,7 +849,7 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	result := runRefreshPrimaryResult(ctx, sctx, operation, "merge", "--no-edit", prepared.targetSHA)
+	result := runRefreshPrimaryResult(ctx, sctx, operation, "merge", "--no-edit", targetRef)
 	if result.succeeded {
 		return errors.Join(result.err, operation.finish(db.RefreshDecisionMerged, db.RefreshConflictStateNone, db.RefreshRepairStateNotNeeded, ""))
 	}
@@ -1038,7 +1038,7 @@ func prepareRefreshTarget(ctx context.Context, sctx *pipeline.StepContext, targe
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetSHA); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
-		result := runRefreshPrimaryResult(ctx, sctx, operation, "reset", "--hard", targetSHA)
+		result := runRefreshPrimaryResult(ctx, sctx, operation, "reset", "--hard", targetRef)
 		if !result.succeeded {
 			return refreshTargetPreparation{}, fmt.Errorf("fast-forward to %s: %w", targetRef, result.err)
 		}

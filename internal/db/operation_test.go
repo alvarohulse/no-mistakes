@@ -339,42 +339,6 @@ func TestOpenAddsOperationsWithoutFabricatingLegacyRefreshReceipts(t *testing.T)
 	}
 }
 
-func TestOperationsSchemaReservesPushDiscriminator(t *testing.T) {
-	for _, tt := range []struct {
-		name  string
-		open  func(*testing.T) *DB
-		runID string
-	}{
-		{name: "fresh", open: openTestDB},
-		{name: "migrated", open: openPreOperationsTestDB, runID: "run"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			d := tt.open(t)
-			runID := tt.runID
-			if runID == "" {
-				repo, err := d.InsertRepo(filepath.Join("/tmp", "push-operation-"+tt.name), "upstream", "main")
-				if err != nil {
-					t.Fatal(err)
-				}
-				run, err := d.InsertRun(repo.ID, "feature", "head", "base")
-				if err != nil {
-					t.Fatal(err)
-				}
-				runID = run.ID
-			}
-			stepID, roundID := insertPushOperationScope(t, d, runID)
-
-			if _, err := d.sql.Exec(
-				`INSERT INTO operations (id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				"push-header", runID, OperationKindPush, stepID, roundID, 100, 120, 20,
-			); err != nil {
-				t.Fatalf("insert reserved push operation header: %v", err)
-			}
-		})
-	}
-}
-
 func openPreOperationsTestDB(t *testing.T) *DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
@@ -401,25 +365,6 @@ func openPreOperationsTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { d.Close() })
 	return d
-}
-
-func insertPushOperationScope(t *testing.T, d *DB, runID string) (string, string) {
-	t.Helper()
-	const stepID = "push-step"
-	const roundID = "push-round"
-	if _, err := d.sql.Exec(
-		`INSERT INTO step_results (id, run_id, step_name, step_order, status) VALUES (?, ?, ?, ?, ?)`,
-		stepID, runID, types.StepPush, 7, types.StepStatusPending,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.sql.Exec(
-		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		roundID, stepID, 1, "initial", 0, 1,
-	); err != nil {
-		t.Fatal(err)
-	}
-	return stepID, roundID
 }
 
 func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *CommandAttempt, *CommandAttempt, *Artifact) {

@@ -13,7 +13,6 @@ type OperationKind string
 
 const (
 	OperationKindRefresh OperationKind = "refresh"
-	OperationKindPush    OperationKind = "push"
 )
 
 type RefreshDecision string
