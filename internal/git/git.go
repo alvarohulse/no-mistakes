@@ -757,7 +757,11 @@ func isWorktreeConfigWriteUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
-var worktreeOperationLocks sync.Map // canonical Git common dir → *sync.Mutex
+type worktreeOperationLock struct {
+	token chan struct{}
+}
+
+var worktreeOperationLocks sync.Map // canonical Git common dir → *worktreeOperationLock
 
 // withWorktreeOperationLock serializes Git worktree metadata operations for a
 // repository. Callers may pass a bare gate or any linked worktree of that
@@ -769,10 +773,16 @@ var worktreeOperationLocks sync.Map // canonical Git common dir → *sync.Mutex
 // mutates the same metadata directory while a new run may be starting.
 func withWorktreeOperationLock(ctx context.Context, repoDir string, extraEnv []string, operation func() error) error {
 	key := worktreeCommonDir(ctx, repoDir, extraEnv)
-	lockValue, _ := worktreeOperationLocks.LoadOrStore(key, &sync.Mutex{})
-	lock := lockValue.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	lockValue, _ := worktreeOperationLocks.LoadOrStore(key, &worktreeOperationLock{
+		token: make(chan struct{}, 1),
+	})
+	lock := lockValue.(*worktreeOperationLock)
+	select {
+	case lock.token <- struct{}{}:
+		defer func() { <-lock.token }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	return operation()
 }
 
