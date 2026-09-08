@@ -211,6 +211,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 		"FAKE_CLI_LOG":      logFile,
 	})
 	beginRefreshReceiptRound(t, sctx)
+	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
 
 	if _, err := (&RefreshStep{}).Execute(sctx); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -219,7 +220,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "rebase origin/dependency") {
+	if !strings.Contains(string(log), "rebase "+dependencySHA) {
 		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
 	}
 }
@@ -415,6 +416,7 @@ func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *
 		completeControllerCommandAttemptWithOutputArtifact = originalComplete
 	})
 
+	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
 	_, err := tryRebase(context.Background(), sctx, "origin/dependency", receipts)
 	if !errors.Is(err, errCommandPersistence) || !strings.Contains(err.Error(), "injected attempt completion failure") {
 		t.Fatalf("refresh error = %v, want attempt completion persistence failure", err)
@@ -439,7 +441,7 @@ func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evidence.Commands) != 1 || evidence.Commands[0].Command != "git rebase origin/dependency" || evidence.Commands[0].Outcome != db.CommandOutcomePassed || evidence.Commands[0].ExitCode == nil || *evidence.Commands[0].ExitCode != 0 {
+	if len(evidence.Commands) != 1 || evidence.Commands[0].Command != "git rebase "+dependencySHA || evidence.Commands[0].Outcome != db.CommandOutcomePassed || evidence.Commands[0].ExitCode == nil || *evidence.Commands[0].ExitCode != 0 {
 		t.Fatalf("successful refresh command evidence = %+v", evidence.Commands)
 	}
 }
