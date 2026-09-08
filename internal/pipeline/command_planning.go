@@ -211,7 +211,7 @@ func (w *CommandPlanningWorkspace) removeLegacyWorktree(ctx context.Context) (bo
 	if plannerCommonDir != sourceCommonDir {
 		return false, fmt.Errorf("refuse to remove command planning path linked to another repository")
 	}
-	if _, err := runIsolatedCommandPlanningGit(ctx, w.sourceDir, "worktree", "remove", "--force", w.dir); err != nil {
+	if err := git.WorktreeRemoveWithEnv(ctx, w.sourceDir, w.dir, CommandPlanningGitEnv()); err != nil {
 		return false, fmt.Errorf("unregister legacy command planning worktree: %w", err)
 	}
 	return true, nil
