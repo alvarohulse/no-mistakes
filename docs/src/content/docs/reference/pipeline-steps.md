@@ -209,6 +209,7 @@ Pushes the validated branch to the configured push target.
 - Updates the run's head SHA in the database to the exact commit delivered
 - Records one indexed Push operation receipt for every controller push decision, including credential-free target identity and fingerprint, destination ref, proposed and observed heads, review/lease safety anchors, force decision and redacted reason, outcome (`created`, `updated`, `already_equal`, `refused`, `failed`, or `process_error`), timing, command-attempt and diagnostic references, and resulting push generation
 - Records refused and failed decisions as well as successful transport, with exact ordered controller Git attempts and an operation-owned diagnostic when needed
+- Starts that receipt before controller inspection or transport, so [crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) can retain the recorded evidence and terminalize an interrupted operation as `process_error`
 - The receipt collection is immutable operation history. The run's push binding remains the authoritative current custody record used by recovery and branch synchronization; a receipt never replaces or independently grants that binding
 - Receipt history is evidence of what the controller decided and observed, not permission to replay a Push
 

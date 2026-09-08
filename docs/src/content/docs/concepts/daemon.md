@@ -148,6 +148,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Restores `effective_config.publish` from resolved-policy v10 for a resumed run. Policies v1 through v9, and older runs with no persisted policy, keep publication disabled because they predate that choice.
 - A pre-v9 run with neither artifact reports its configuration unavailable. If either legacy artifact is present, the pair must still be complete, supported, integrity-matched, and bound to the launch binary; a partial, corrupt, or mismatched pair fails recovery rather than supplying unverified configuration.
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
+- Terminalizes any unfinished controller Push receipt as `process_error`, preserving its already-recorded decision and command-attempt evidence without inferring a remote result or push binding
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Reaps orphaned final effective-config artifact directories with no run record,
