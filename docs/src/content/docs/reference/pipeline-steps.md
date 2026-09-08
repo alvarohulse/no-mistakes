@@ -302,7 +302,8 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - If both CI failures and a GitHub, GitLab, or Azure DevOps merge conflict are present: fixes both in the same attempt
 - If a fix attempt produces no Git content change, automatic mode spends that attempt and stops immediately for manual intervention; manual fix mode also returns immediately
 - Deduplicates fix attempts only after a fix is actually committed and pushed
-- Persists the spent automatic CI repair count before launching each fix agent, so recreating or recovering the CI step cannot reset its budget. Legacy runs without that counter are treated as having exhausted automatic repair, while an explicit user-requested fix remains available
+- Before every CI repair agent launches, reserves an `attempted` receipt on its active repair round; automatic repairs also persist the spent count, so recreating or recovering the CI step cannot reset its budget. A verified repair push stores its resulting head and summary in that same receipt before the local branch ref advances. Legacy runs without the count are treated as having exhausted automatic repair, while an explicit user-requested fix remains available
+- If a verified repair cannot durably reconcile that receipt or local ref, preserves the incomplete state and stops admitting new runs rather than guessing a terminal outcome; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does) owns that recovery quarantine
 - Exits cleanly when the PR is merged, closed, or declined
 - If the idle timeout is reached while the PR is still open: pauses for user approval, even when CI checks are currently healthy
 - If the idle timeout is reached while CI failures or, on GitHub, GitLab, or Azure DevOps, a merge conflict are still known: pauses for user approval with findings for the remaining issues

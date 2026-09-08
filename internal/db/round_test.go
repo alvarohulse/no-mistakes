@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -22,7 +23,7 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 		INSERT INTO repos VALUES ('repo', '/tmp/legacy-rounds', 'https://example.com/repo.git', 'main', 1);
 		INSERT INTO runs VALUES ('run', 'repo', 'feature', 'head', 'base', 'completed', 1, 1);
 		INSERT INTO step_results VALUES ('step', 'run', 'review', 3, 'completed');
-		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'initial', '{"findings":[{"id":"r1","severity":"warning","description":"legacy"}]}', 10, 1);
+		INSERT INTO step_rounds VALUES ('round', 'step', 1, 'user_fix', '{"findings":[{"id":"r1","severity":"warning","description":"legacy"}]}', 10, 1);
 	`); err != nil {
 		legacy.Close()
 		t.Fatal(err)
@@ -36,12 +37,24 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
+	if !hasColumn(t, database, "round_decision_findings", "selection_ordinal") {
+		t.Fatal("legacy migration did not create round_decision_findings.selection_ordinal")
+	}
+	if !hasUniquePartialIndex(t, database, "round_decision_findings", "idx_round_decision_findings_selection_ordinal") {
+		t.Fatal("legacy migration did not create the unique partial selection-order index")
+	}
 	rounds, err := database.GetRoundsByStep("step")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rounds) != 1 || rounds[0].Status != RoundStatusCompleted {
 		t.Fatalf("migrated rounds = %+v", rounds)
+	}
+	if rounds[0].Trigger != RoundTriggerAutoFix || rounds[0].TriggerProvenance == nil || *rounds[0].TriggerProvenance != RoundTriggerProvenanceLegacyUserFix {
+		t.Fatalf("migrated trigger = %#v", rounds[0])
+	}
+	if rounds[0].Evaluation != nil || rounds[0].FindingsJSON == nil {
+		t.Fatalf("migration fabricated structured history: %#v", rounds[0])
 	}
 	stats, err := database.StepFindingStats(&StepResult{ID: "step", StepName: types.StepReview})
 	if err != nil {
@@ -451,6 +464,91 @@ func TestSetStepRoundUserDecision(t *testing.T) {
 	}
 }
 
+func TestPersistStepRoundFixDecisionAndMarkStepFixingRollsBackOnIgnoredLegacyReceipts(t *testing.T) {
+	tests := []struct {
+		name          string
+		stepName      types.StepName
+		ignoredFields string
+		wantError     string
+		persist       func(*DB, *StepResult, *StepRound, *string) error
+	}{
+		{
+			name:          "decision",
+			stepName:      types.StepRefresh,
+			ignoredFields: "selected_finding_ids, selection_source, user_findings_json",
+			wantError:     "expected one legacy decision, updated 0",
+			persist: func(database *DB, step *StepResult, round *StepRound, selected *string) error {
+				userFindings := `{"findings":[{"id":"legacy","description":"fix refresh"}]}`
+				return database.PersistStepRoundFixDecisionAndMarkStepFixing(step.ID, round.ID, selected, RoundSelectionSourceUser, &userFindings)
+			},
+		},
+		{
+			name:          "attempted audit",
+			stepName:      types.StepPush,
+			ignoredFields: "repair_failure_fingerprint, repair_result",
+			wantError:     "expected one legacy repair audit, updated 0",
+			persist: func(database *DB, step *StepResult, round *StepRound, selected *string) error {
+				fingerprint, result := "sha256:legacy", RoundRepairAttempted
+				return database.PersistStepRoundAutoFixDecisionAndMarkStepFixing(step.ID, round.ID, selected, StepRoundRepair{
+					FailureFingerprint: &fingerprint,
+					Result:             &result,
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, err := database.InsertRepo("/tmp/legacy-receipt-rollback", "https://example.com/repo.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(run.ID, tt.stepName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			round, err := database.InsertStepRound(step.ID, 1, RoundTriggerInitial, nil, nil, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.sql.Exec(`CREATE TRIGGER ignore_legacy_` + strings.ReplaceAll(tt.name, " ", "_") + `
+				BEFORE UPDATE OF ` + tt.ignoredFields + ` ON step_rounds
+				WHEN NEW.id = '` + round.ID + `'
+				BEGIN
+					SELECT RAISE(IGNORE);
+				END`); err != nil {
+				t.Fatal(err)
+			}
+
+			selected := `["legacy"]`
+			err = tt.persist(database, step, round, &selected)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("persist legacy receipt error = %v, want %q", err, tt.wantError)
+			}
+
+			rounds, err := database.GetRoundsByStep(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 || rounds[0].SelectedFindingIDs != nil || rounds[0].SelectionSource != nil || rounds[0].UserFindingsJSON != nil || rounds[0].RepairFailureFingerprint != nil || rounds[0].RepairResult != nil {
+				t.Fatalf("legacy receipt after ignored update = %#v, want no selection or audit", rounds)
+			}
+			persistedStep, err := database.GetStepResult(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persistedStep.Status != types.StepStatusPending {
+				t.Fatalf("step status after ignored update = %q, want %q", persistedStep.Status, types.StepStatusPending)
+			}
+		})
+	}
+}
+
 func TestSetStepRoundRepairAudit(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -473,5 +571,68 @@ func TestSetStepRoundRepairAudit(t *testing.T) {
 	}
 	if rounds[0].RepairResult == nil || *rounds[0].RepairResult != "stopped_no_progress" {
 		t.Fatalf("repair result = %#v", rounds[0].RepairResult)
+	}
+}
+
+func TestSetStepRoundRepairAuditClearsStructuredRepairFields(t *testing.T) {
+	tests := []struct {
+		name                       string
+		failureFingerprint, result string
+		wantFingerprint            string
+		wantResult                 string
+		wantFingerprintSet         bool
+		wantResultSet              bool
+	}{
+		{
+			name: "both fields",
+		},
+		{
+			name:          "fingerprint only",
+			result:        RoundRepairResolved,
+			wantResult:    RoundRepairResolved,
+			wantResultSet: true,
+		},
+		{
+			name:               "result only",
+			failureFingerprint: "sha256:replacement",
+			wantFingerprint:    "sha256:replacement",
+			wantFingerprintSet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, _ := database.InsertRepo("/tmp/structured-repair-audit", "https://example.com/repo.git", "main")
+			run, _ := database.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := database.InsertStepResult(run.ID, types.StepTest)
+			summary := "fix the test"
+			resultingHead := "repaired-head"
+			round, err := database.BeginStepRound(step.ID, 1, RoundTriggerAutoFix)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteStepRoundStructured(round.ID, StepRoundEvaluation{Kind: RoundEvaluationValidation}, StructuredRoundSubject{ResultingHeadSHA: &resultingHead}, &summary, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepRoundRepairAudit(round.ID, "sha256:stale", RoundRepairStoppedNoProgress); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepRoundRepairAudit(round.ID, tt.failureFingerprint, tt.result); err != nil {
+				t.Fatal(err)
+			}
+
+			repair, err := database.GetRoundRepair(round.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repair == nil || repair.FixSummary == nil || *repair.FixSummary != summary || repair.ResultingHeadSHA == nil || *repair.ResultingHeadSHA != resultingHead {
+				t.Fatalf("repair preserved fields = %#v", repair)
+			}
+			if (repair.FailureFingerprint != nil) != tt.wantFingerprintSet || (repair.FailureFingerprint != nil && *repair.FailureFingerprint != tt.wantFingerprint) ||
+				(repair.Result != nil) != tt.wantResultSet || (repair.Result != nil && *repair.Result != tt.wantResult) {
+				t.Fatalf("repair audit = %#v, want fingerprint %v and result %v", repair, tt.wantFingerprint, tt.wantResult)
+			}
+		})
 	}
 }

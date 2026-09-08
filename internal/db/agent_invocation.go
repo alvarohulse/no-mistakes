@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -61,6 +62,7 @@ type AgentInvocation struct {
 	RunID    string
 	StepName string
 	Round    int
+	RoundID  string
 	// Purpose is the pipeline duty served: review, review-fix,
 	// test-evidence, document, pr, intent, a
 	// `<step>-plan` read-only command plan, or a step-derived default.
@@ -144,7 +146,7 @@ type AgentInvocation struct {
 
 // agentInvocationColumns is the canonical column order shared by insert and
 // select so the placeholder list and scan destinations cannot drift apart.
-const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, usage_coverage, model, model_provider, review_candidate_pool_json,
+const agentInvocationColumns = `id, run_id, step_name, round, round_id, purpose, agent, usage_coverage, model, model_provider, review_candidate_pool_json,
 	session_mode, session_key, fallback_reason,
 	started_at, completed_at, duration_ms, subprocess_wait_ms, exit_status, failure_category,
 	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
@@ -155,7 +157,7 @@ const agentInvocationColumns = `id, run_id, step_name, round, purpose, agent, us
 	workload_files, workload_lines, finding_count`
 
 // agentInvocationInsertPlaceholders has one '?' per agentInvocationColumns entry.
-const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?,
@@ -173,15 +175,22 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
+	if err := d.validateAgentInvocationRound(inv); err != nil {
+		return nil, err
+	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
 	if err != nil {
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
 	}
 	inv.ID = newID()
-	_, err = d.sql.Exec(
+	var roundID any
+	if inv.RoundID != "" {
+		roundID = inv.RoundID
+	}
+	result, err := d.sql.Exec(
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
-		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.ID, inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -193,6 +202,13 @@ func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert agent invocation: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("insert agent invocation rows affected: %w", err)
+	}
+	if inserted != 1 {
+		return nil, fmt.Errorf("insert agent invocation: expected 1 row, inserted %d", inserted)
 	}
 	return &inv, nil
 }
@@ -206,12 +222,19 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	if err := normalizeUsageCoverage(&inv); err != nil {
 		return nil, err
 	}
+	if err := d.validateAgentInvocationRound(inv); err != nil {
+		return nil, err
+	}
 	reviewCandidatePoolJSON, err := encodeReviewCandidatePool(inv.ReviewCandidatePool)
 	if err != nil {
 		return nil, fmt.Errorf("encode review candidate pool: %w", err)
 	}
+	var roundID any
+	if inv.RoundID != "" {
+		roundID = inv.RoundID
+	}
 	result, err := d.sql.Exec(`UPDATE agent_invocations SET
-		run_id = ?, step_name = ?, round = ?, purpose = ?, agent = ?, usage_coverage = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
+		run_id = ?, step_name = ?, round = ?, round_id = ?, purpose = ?, agent = ?, usage_coverage = ?, model = ?, model_provider = ?, review_candidate_pool_json = ?,
 		session_mode = ?, session_key = ?, fallback_reason = ?,
 		started_at = ?, completed_at = ?, duration_ms = ?, subprocess_wait_ms = ?, exit_status = ?, failure_category = ?,
 		input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
@@ -221,7 +244,7 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 		tool_wait_calls = ?, tool_test_lint_calls = ?, tool_edit_calls = ?, tool_read_calls = ?, tool_git_calls = ?, tool_other_calls = ?,
 		workload_files = ?, workload_lines = ?, finding_count = ?
 		WHERE id = ?`,
-		inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
+		inv.RunID, inv.StepName, inv.Round, roundID, inv.Purpose, inv.Agent, inv.UsageCoverage, inv.Model, inv.ModelProvider, reviewCandidatePoolJSON,
 		inv.SessionMode, inv.SessionKey, inv.FallbackReason,
 		inv.StartedAt, inv.CompletedAt, inv.DurationMS, inv.SubprocessWaitMS, inv.ExitStatus, inv.FailureCategory,
 		inv.InputTokens, inv.OutputTokens, inv.CacheReadTokens, inv.CacheCreationTokens,
@@ -245,6 +268,30 @@ func (d *DB) UpdateAgentInvocation(inv AgentInvocation) (*AgentInvocation, error
 	return &inv, nil
 }
 
+// validateAgentInvocationRound prevents a receipt from linking a round from a
+// different execution subject. The foreign key alone proves that a round exists;
+// this check preserves the run, step, and numeric-round identity of the
+// invocation that claims it.
+func (d *DB) validateAgentInvocationRound(inv AgentInvocation) error {
+	if inv.RoundID == "" {
+		return nil
+	}
+	var found int
+	err := d.sql.QueryRow(`SELECT 1
+		FROM step_rounds r
+		JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = ? AND s.run_id = ? AND s.step_name = ? AND r.round = ?`,
+		inv.RoundID, inv.RunID, inv.StepName, inv.Round,
+	).Scan(&found)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("agent invocation round subject does not match run %q step %q round %d", inv.RunID, inv.StepName, inv.Round)
+	}
+	if err != nil {
+		return fmt.Errorf("validate agent invocation round subject: %w", err)
+	}
+	return nil
+}
+
 // GetAgentInvocationsByRun returns a run's invocations in execution order.
 func (d *DB) GetAgentInvocationsByRun(runID string) ([]AgentInvocation, error) {
 	rows, err := d.sql.Query(
@@ -265,6 +312,28 @@ func (d *DB) GetAgentInvocationsByRun(runID string) ([]AgentInvocation, error) {
 		invocations = append(invocations, inv)
 	}
 	return invocations, rows.Err()
+}
+
+// GetAgentInvocationsByRound returns invocations linked to one normalized
+// round. Historical rows without an explicit round identity remain absent.
+func (d *DB) GetAgentInvocationsByRound(roundID string) ([]AgentInvocation, error) {
+	rows, err := d.sql.Query(`SELECT `+agentInvocationColumns+` FROM agent_invocations WHERE round_id = ? ORDER BY started_at, id`, roundID)
+	if err != nil {
+		return nil, fmt.Errorf("get agent invocations by round: %w", err)
+	}
+	defer rows.Close()
+	var invocations []AgentInvocation
+	for rows.Next() {
+		invocation, err := scanAgentInvocation(rows)
+		if err != nil {
+			return nil, err
+		}
+		invocations = append(invocations, invocation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return invocations, nil
 }
 
 // AgentInvocationAuditTotals is an independent SQL aggregate used to verify
@@ -316,9 +385,10 @@ type scanner interface {
 
 func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 	var inv AgentInvocation
+	var roundID sql.NullString
 	var reviewCandidatePoolJSON *string
 	if err := row.Scan(
-		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
+		&inv.ID, &inv.RunID, &inv.StepName, &inv.Round, &roundID, &inv.Purpose, &inv.Agent, &inv.UsageCoverage, &inv.Model, &inv.ModelProvider, &reviewCandidatePoolJSON,
 		&inv.SessionMode, &inv.SessionKey, &inv.FallbackReason,
 		&inv.StartedAt, &inv.CompletedAt, &inv.DurationMS, &inv.SubprocessWaitMS, &inv.ExitStatus, &inv.FailureCategory,
 		&inv.InputTokens, &inv.OutputTokens, &inv.CacheReadTokens, &inv.CacheCreationTokens,
@@ -329,6 +399,9 @@ func scanAgentInvocation(row scanner) (AgentInvocation, error) {
 		&inv.WorkloadFiles, &inv.WorkloadLines, &inv.FindingCount,
 	); err != nil {
 		return AgentInvocation{}, fmt.Errorf("scan agent invocation: %w", err)
+	}
+	if roundID.Valid {
+		inv.RoundID = roundID.String
 	}
 	if reviewCandidatePoolJSON != nil {
 		if err := json.Unmarshal([]byte(*reviewCandidatePoolJSON), &inv.ReviewCandidatePool); err != nil {

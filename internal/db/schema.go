@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     round                INTEGER NOT NULL,
     trigger_type         TEXT NOT NULL,
     status               TEXT NOT NULL DEFAULT 'completed',
+    trigger_provenance   TEXT,
     findings_json        TEXT,
     reviewed_head_sha    TEXT,
     starting_head_sha    TEXT,
@@ -103,9 +104,109 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     fix_summary          TEXT,
     repair_failure_fingerprint TEXT,
     repair_result        TEXT,
+    resulting_head_sha   TEXT,
+    evaluated_head_sha   TEXT,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS round_evaluations (
+    id                 TEXT PRIMARY KEY,
+    run_id             TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round_id           TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+    kind               TEXT NOT NULL CHECK (kind IN ('initial_review', 'rereview', 'validation', 'revalidation', 'documentation')),
+    summary            TEXT NOT NULL DEFAULT '',
+    tested_json        TEXT NOT NULL DEFAULT '[]',
+    testing_summary    TEXT NOT NULL DEFAULT '',
+    risk_level         TEXT NOT NULL DEFAULT '',
+    risk_rationale     TEXT NOT NULL DEFAULT '',
+    risk_scope         TEXT NOT NULL DEFAULT '',
+    created_at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_evaluations_run_created_id
+    ON round_evaluations (run_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS round_findings (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    evaluation_id         TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+    ordinal               INTEGER NOT NULL CHECK (ordinal >= 0),
+    external_id           TEXT NOT NULL,
+    severity              TEXT NOT NULL,
+    file                  TEXT NOT NULL DEFAULT '',
+    line                  INTEGER NOT NULL DEFAULT 0,
+    description           TEXT NOT NULL,
+    action                TEXT NOT NULL,
+    source                TEXT NOT NULL DEFAULT 'agent',
+    user_instructions     TEXT NOT NULL DEFAULT '',
+    review_scope          TEXT NOT NULL DEFAULT '',
+    requires_human_review INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (evaluation_id, ordinal),
+    UNIQUE (evaluation_id, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_findings_evaluation_ordinal
+    ON round_findings (evaluation_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS round_evaluation_artifacts (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    evaluation_id  TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+    ordinal        INTEGER NOT NULL CHECK (ordinal >= 0),
+    kind           TEXT NOT NULL DEFAULT '',
+    label          TEXT NOT NULL DEFAULT '',
+    path           TEXT NOT NULL DEFAULT '',
+    url            TEXT NOT NULL DEFAULT '',
+    content        TEXT NOT NULL DEFAULT '',
+    UNIQUE (evaluation_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_evaluation_artifacts_evaluation_ordinal
+    ON round_evaluation_artifacts (evaluation_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS round_decisions (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round_id       TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+    source         TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined', 'user_skipped', 'user_aborted')),
+    terminal_source TEXT CHECK (terminal_source IS NULL OR terminal_source IN ('user_skipped', 'user_aborted')),
+    explicit_empty INTEGER NOT NULL DEFAULT 0,
+    created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS round_decision_findings (
+    decision_id       TEXT NOT NULL REFERENCES round_decisions(id) ON DELETE CASCADE,
+    finding_id        TEXT NOT NULL REFERENCES round_findings(id) ON DELETE CASCADE,
+    ordinal           INTEGER NOT NULL CHECK (ordinal >= 0),
+    selection_ordinal INTEGER CHECK (selection_ordinal IS NULL OR selection_ordinal >= 0),
+    state             TEXT NOT NULL CHECK (state IN ('selected', 'unselected')),
+    user_instructions TEXT NOT NULL DEFAULT '',
+    edited            INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (decision_id, finding_id),
+    UNIQUE (decision_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_decision_findings_finding
+    ON round_decision_findings (finding_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_round_decision_findings_selection_ordinal
+    ON round_decision_findings (decision_id, selection_ordinal)
+    WHERE selection_ordinal IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS round_repairs (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round_id              TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+    fix_summary           TEXT,
+    failure_fingerprint   TEXT,
+    result                TEXT CHECK (result IS NULL OR result IN ('attempted', 'resolved', 'stopped_no_progress', 'stopped_repeated_failure', 'stopped_attempt_limit')),
+    resulting_head_sha    TEXT,
+    created_at            INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_round_repairs_run_created_id
+    ON round_repairs (run_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS command_definitions (
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -188,6 +289,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     step_name             TEXT NOT NULL,
     round                 INTEGER NOT NULL,
+    round_id              TEXT REFERENCES step_rounds(id) ON DELETE SET NULL,
     purpose               TEXT NOT NULL,
     agent                 TEXT NOT NULL,
 	usage_coverage        TEXT NOT NULL DEFAULT 'unknown',
@@ -458,7 +560,91 @@ var migrationStatements = []string{
 	// prompts, output, diffs, paths, and tool arguments stay out of this table.
 	`ALTER TABLE step_rounds ADD COLUMN repair_failure_fingerprint TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN repair_result TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN trigger_provenance TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN resulting_head_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN evaluated_head_sha TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'`,
+	`CREATE TABLE IF NOT EXISTS round_evaluations (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+		kind TEXT NOT NULL CHECK (kind IN ('initial_review', 'rereview', 'validation', 'revalidation', 'documentation')),
+		summary TEXT NOT NULL DEFAULT '',
+		tested_json TEXT NOT NULL DEFAULT '[]',
+		testing_summary TEXT NOT NULL DEFAULT '',
+		risk_level TEXT NOT NULL DEFAULT '',
+		risk_rationale TEXT NOT NULL DEFAULT '',
+		risk_scope TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_evaluations_run_created_id ON round_evaluations (run_id, created_at, id)`,
+	`CREATE TABLE IF NOT EXISTS round_findings (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		evaluation_id TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+		external_id TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		file TEXT NOT NULL DEFAULT '',
+		line INTEGER NOT NULL DEFAULT 0,
+		description TEXT NOT NULL,
+		action TEXT NOT NULL,
+		source TEXT NOT NULL DEFAULT 'agent',
+		user_instructions TEXT NOT NULL DEFAULT '',
+		review_scope TEXT NOT NULL DEFAULT '',
+		requires_human_review INTEGER NOT NULL DEFAULT 0,
+		UNIQUE (evaluation_id, ordinal),
+		UNIQUE (evaluation_id, external_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_findings_evaluation_ordinal ON round_findings (evaluation_id, ordinal)`,
+	`CREATE TABLE IF NOT EXISTS round_evaluation_artifacts (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		evaluation_id TEXT NOT NULL REFERENCES round_evaluations(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+		kind TEXT NOT NULL DEFAULT '',
+		label TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		content TEXT NOT NULL DEFAULT '',
+		UNIQUE (evaluation_id, ordinal)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_evaluation_artifacts_evaluation_ordinal ON round_evaluation_artifacts (evaluation_id, ordinal)`,
+	`CREATE TABLE IF NOT EXISTS round_decisions (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+		source TEXT NOT NULL CHECK (source IN ('user', 'auto_fix', 'user_declined', 'user_skipped', 'user_aborted')),
+		terminal_source TEXT CHECK (terminal_source IS NULL OR terminal_source IN ('user_skipped', 'user_aborted')),
+		explicit_empty INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS round_decision_findings (
+		decision_id TEXT NOT NULL REFERENCES round_decisions(id) ON DELETE CASCADE,
+		finding_id TEXT NOT NULL REFERENCES round_findings(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+		selection_ordinal INTEGER CHECK (selection_ordinal IS NULL OR selection_ordinal >= 0),
+		state TEXT NOT NULL CHECK (state IN ('selected', 'unselected')),
+		user_instructions TEXT NOT NULL DEFAULT '',
+		edited INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (decision_id, finding_id),
+		UNIQUE (decision_id, ordinal)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_decision_findings_finding ON round_decision_findings (finding_id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_round_decision_findings_selection_ordinal ON round_decision_findings (decision_id, selection_ordinal) WHERE selection_ordinal IS NOT NULL`,
+	`CREATE TABLE IF NOT EXISTS round_repairs (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+		fix_summary TEXT,
+		failure_fingerprint TEXT,
+		result TEXT CHECK (result IS NULL OR result IN ('attempted', 'resolved', 'stopped_no_progress', 'stopped_repeated_failure', 'stopped_attempt_limit')),
+		resulting_head_sha TEXT,
+		created_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_round_repairs_run_created_id ON round_repairs (run_id, created_at, id)`,
+	`ALTER TABLE agent_invocations ADD COLUMN round_id TEXT REFERENCES step_rounds(id) ON DELETE SET NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_invocations_round_started_id ON agent_invocations (round_id, started_at, id)`,
 	`ALTER TABLE runs ADD COLUMN intent TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
 	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,

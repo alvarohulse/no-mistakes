@@ -459,7 +459,21 @@ func (d *DB) GetActiveRuns() ([]*Run, error) {
 
 // UpdateRunStatus updates a run's status and updated_at timestamp.
 func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
-	_, err := d.sql.Exec(`UPDATE runs SET status = ?, push_active = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN 0 ELSE push_active END, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, status, status, now(), id)
+	ts := now()
+	_, err := d.sql.Exec(
+		`UPDATE runs SET status = ?,
+			push_active = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN 0 ELSE push_active END,
+			terminal_head_verified_at = NULL,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled')
+					AND awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled') THEN NULL
+				ELSE awaiting_agent_since END,
+			updated_at = ? WHERE id = ?`,
+		status, status, status, ts, ts, status, ts, id,
+	)
 	if err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
@@ -701,7 +715,20 @@ func (d *DB) UpdateRunError(id, errMsg string) error {
 
 // UpdateRunErrorStatus sets the error message and terminal status on a run.
 func (d *DB) UpdateRunErrorStatus(id, errMsg string, status types.RunStatus) error {
-	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, errMsg, status, now(), id)
+	ts := now()
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, push_active = 0,
+			terminal_head_verified_at = NULL,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled')
+					AND awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled') THEN NULL
+				ELSE awaiting_agent_since END,
+			updated_at = ? WHERE id = ?`,
+		errMsg, status, status, ts, ts, status, ts, id,
+	)
 	if err != nil {
 		return fmt.Errorf("update run error: %w", err)
 	}
@@ -710,7 +737,19 @@ func (d *DB) UpdateRunErrorStatus(id, errMsg string, status types.RunStatus) err
 
 func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status types.RunStatus, headSHA string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, errMsg, status, headSHA, ts, ts, id)
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0,
+			terminal_head_verified_at = ?,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled')
+					AND awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled') THEN NULL
+				ELSE awaiting_agent_since END,
+			updated_at = ? WHERE id = ?`,
+		errMsg, status, headSHA, ts, status, ts, ts, status, ts, id,
+	)
 	if err != nil {
 		return fmt.Errorf("update run error with verified head: %w", err)
 	}
@@ -719,7 +758,19 @@ func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status type
 
 func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, headSHA string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, status, headSHA, ts, ts, id)
+	_, err := d.sql.Exec(
+		`UPDATE runs SET status = ?, head_sha = ?, push_active = 0,
+			terminal_head_verified_at = ?,
+			parked_ms = COALESCE(parked_ms, 0) + CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled')
+					AND awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+			awaiting_agent_since = CASE
+				WHEN ? IN ('completed', 'failed', 'cancelled') THEN NULL
+				ELSE awaiting_agent_since END,
+			updated_at = ? WHERE id = ?`,
+		status, headSHA, ts, status, ts, ts, status, ts, id,
+	)
 	if err != nil {
 		return fmt.Errorf("update run status with verified head: %w", err)
 	}
@@ -781,6 +832,21 @@ func (d *DB) ParkRunForEnvironmentFailure(id, errMsg string) error {
 	return nil
 }
 
+// FailRunAfterEnvironmentParkFailure records a terminal fallback when the
+// environment-failure park could not be written. The failed park never made
+// the run await an agent, so this must not touch awaiting-agent accounting.
+func (d *DB) FailRunAfterEnvironmentParkFailure(id, errMsg string) error {
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, push_active = 0,
+			terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`,
+		errMsg, types.RunFailed, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("fail run after environment park failure: %w", err)
+	}
+	return nil
+}
+
 // SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
 // stamping awaiting_agent_since with the current time. Called by the executor
 // when a step enters a gate (awaiting_approval / fix_review). Launch-time
@@ -831,6 +897,29 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 	)
 	if err != nil {
 		return fmt.Errorf("complete run awaiting agent: %w", err)
+	}
+	return nil
+}
+
+// TerminalizeAwaitingRun durably completes a parked run in one write. Its
+// status, diagnostic, awaiting marker, and parked duration must move together:
+// a caller must never observe a terminal event for a run whose park remains.
+func (d *DB) TerminalizeAwaitingRun(id, errMsg string, status types.RunStatus, ms int64) error {
+	if status != types.RunCompleted && status != types.RunFailed && status != types.RunCancelled {
+		return fmt.Errorf("terminalize awaiting run: status %q is not terminal", status)
+	}
+	if ms < 0 {
+		ms = 0
+	}
+	_, err := d.sql.Exec(
+		`UPDATE runs SET error = ?, status = ?, push_active = 0,
+			terminal_head_verified_at = NULL,
+			parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
+			awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`,
+		errMsg, status, ms, now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("terminalize awaiting run: %w", err)
 	}
 	return nil
 }

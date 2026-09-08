@@ -208,6 +208,28 @@ func TestRoundHistoryPromptSection_DoesNotTreatAutoFixFilteringAsUserIgnore(t *t
 	}
 }
 
+func TestRenderRoundHistoryEntry_RendersUserTerminalDecisions(t *testing.T) {
+	findings := `{"findings":[{"id":"review-1","severity":"error","description":"needs a decision","action":"ask-user"}]}`
+	for source, label := range map[string]string{
+		db.RoundSelectionSourceUserSkipped: "user_chose_to_skip:",
+		db.RoundSelectionSourceUserAborted: "user_chose_to_abort:",
+	} {
+		source := source
+		emptySelection := db.DeclinedSelectionJSON
+		rendered := renderRoundHistoryEntry(&db.StepRound{
+			Round:              1,
+			Trigger:            db.RoundTriggerInitial,
+			Status:             db.RoundStatusCompleted,
+			FindingsJSON:       &findings,
+			SelectedFindingIDs: &emptySelection,
+			SelectionSource:    &source,
+		})
+		if !strings.Contains(rendered, label) || !strings.Contains(rendered, `"id":"review-1"`) {
+			t.Fatalf("rendered terminal decision history = %q, want %q and finding", rendered, label)
+		}
+	}
+}
+
 func TestRoundHistoryPromptSection_IncludesSourceAndUserInstructions(t *testing.T) {
 	sctx, stepID := newRoundHistoryContext(t)
 	round1 := `{"findings":[{"id":"review-1","severity":"error","description":"panic risk","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"secondary","action":"auto-fix"}],"summary":"2"}`

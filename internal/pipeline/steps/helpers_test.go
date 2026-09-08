@@ -176,8 +176,8 @@ func setupGitRepo(t *testing.T) (string, string, string) {
 func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {
 	t.Helper()
 
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	database, err := db.Open(dbPath)
+	p := paths.WithRoot(t.TempDir())
+	database, err := db.Open(p.DB())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,6 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 	run := &db.Run{ID: "run-1", RepoID: "repo-1", Branch: "refs/heads/feature", HeadSHA: headSHA, BaseSHA: baseSHA}
 	repo := &db.Repo{ID: "repo-1", WorkingPath: workDir, UpstreamURL: "https://github.com/test/repo", DefaultBranch: "main"}
 	cfg := &config.Config{Agent: types.AgentClaude, Commands: cmds}
-	p := paths.WithRoot(t.TempDir())
 	commandPlanning := pipeline.NewCommandPlanningWorkspace(p, cfg, run, repo, workDir)
 	t.Cleanup(func() {
 		if err := commandPlanning.Close(context.Background()); err != nil {
@@ -524,6 +523,23 @@ func fakeCIGH(t *testing.T, state, checksJSON string) []string {
 	})
 }
 
+// fakeCIGHWithGitUpdateRefError creates one cross-platform fake CLI directory
+// for CI provider calls and Git calls. The combined mode dispatches by the
+// linked executable name so the Git failure injection does not replace the
+// fake GitHub provider used by the same step.
+func fakeCIGHWithGitUpdateRefError(t *testing.T, state, checksJSON, realGit string) []string {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "gh")
+	linkTestBinary(t, binDir, "git")
+	return fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":     "ci-gh-git-update-ref-error",
+		"FAKE_CLI_STATE":    state,
+		"FAKE_CLI_CHECKS":   checksJSON,
+		"FAKE_CLI_REAL_GIT": realGit,
+	})
+}
+
 func fakeCIGHMergeable(t *testing.T, state, checksJSON, mergeable string) []string {
 	t.Helper()
 	binDir := fakeCLIBinDir(t)
@@ -615,6 +631,37 @@ func fakeCIGHSequence(t *testing.T, state string, checks []string) []string {
 		"FAKE_CLI_STATE":             state,
 		"FAKE_CLI_CHECKS_PATH":       checksPath,
 		"FAKE_CLI_CHECKS_INDEX_PATH": indexPath,
+	})
+}
+
+func fakeCIGHStateSequence(t *testing.T, states, checks []string) []string {
+	t.Helper()
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "gh")
+
+	tempDir := t.TempDir()
+	statePath := filepath.Join(tempDir, "states.txt")
+	stateIndexPath := filepath.Join(tempDir, "states-index.txt")
+	checksPath := filepath.Join(tempDir, "checks.txt")
+	checksIndexPath := filepath.Join(tempDir, "checks-index.txt")
+	if err := os.WriteFile(statePath, []byte(strings.Join(states, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateIndexPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checksPath, []byte(strings.Join(checks, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checksIndexPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return fakeCLIEnv(binDir, map[string]string{
+		"FAKE_CLI_MODE":              "ci-gh-seq",
+		"FAKE_CLI_STATE_PATH":        statePath,
+		"FAKE_CLI_STATE_INDEX_PATH":  stateIndexPath,
+		"FAKE_CLI_CHECKS_PATH":       checksPath,
+		"FAKE_CLI_CHECKS_INDEX_PATH": checksIndexPath,
 	})
 }
 

@@ -45,6 +45,10 @@ type RunManager struct {
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
+	admissionMu  sync.Mutex                         // linearizes shutdown with run insertion; never hold alongside mu
+	admissions   sync.WaitGroup
+	shutdownCtx  context.Context
+	shutdown     context.CancelCauseFunc
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
@@ -89,10 +93,13 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
+	shutdownCtx, shutdown := context.WithCancelCause(context.Background())
 	return &RunManager{
 		executors:        make(map[string]*pipeline.Executor),
 		cancels:          make(map[string]context.CancelCauseFunc),
 		dones:            make(map[string]chan struct{}),
+		shutdownCtx:      shutdownCtx,
+		shutdown:         shutdown,
 		db:               database,
 		paths:            p,
 		steps:            stepFactory,
@@ -622,6 +629,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.dones[plan.run.ID] = done
 	m.mu.Unlock()
 
+	retainRunOwnership := false
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
@@ -638,6 +646,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			cancel(nil)
 			_ = agents.Close()
+			if retainRunOwnership {
+				slog.Error("retaining run ownership after CI repair durability uncertainty and quarantining daemon", "run_id", plan.run.ID)
+				return
+			}
 			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
 			m.closeSubscribers(plan.run.ID)
 			m.sweepRunWorktreeProcesses(plan.workDir)
@@ -657,7 +669,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
-			if plan.run.Status == types.RunRunning {
+			if pipeline.IsCIFixRepairDurabilityError(err) {
+				m.closeRunAdmission()
+				retainRunOwnership = true
+			} else if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
@@ -684,7 +699,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		telemetry.Track("run", fields)
 		// Recovery is the second run-completion path. It must feed the same
 		// self-populating eval corpus as a run that never lost its daemon.
-		m.autoCaptureEvalCase(runCtx, plan.cfg, plan.run.ID)
+		if !retainRunOwnership {
+			m.autoCaptureEvalCase(runCtx, plan.cfg, plan.run.ID)
+		}
 	}()
 }
 
@@ -1259,8 +1276,24 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		}
 	}()
 
+	releaseAdmission, err := m.reserveRunAdmission()
+	if err != nil {
+		trackStartFailure("daemon_shutdown")
+		return "", err
+	}
+	defer releaseAdmission()
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
+	activeRun, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		trackStartFailure("verify_supersession")
+		return "", fmt.Errorf("verify superseded run: %w", err)
+	}
+	if activeRun != nil {
+		trackStartFailure("supersession_incomplete")
+		return "", fmt.Errorf("active run %s for branch %q remained unresolved after supersession", activeRun.ID, branch)
+	}
 
 	// Create run record.
 	// Persist the operator PR note atomically with the run. Unlike inferred
@@ -1304,10 +1337,21 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 
 	// Create the worktree only after the complete policy has resolved and been
 	// persisted. From this point, setup cleanup owns every pre-launch failure.
+	setupCtx, cancelSetup := m.shutdownAwareContext(ctx)
+	defer cancelSetup()
+	recordSetupFailure := func(message string) {
+		if shutdownCause := context.Cause(m.shutdownCtx); shutdownCause != nil {
+			if err := m.db.UpdateRunErrorStatus(run.ID, shutdownCause.Error(), types.RunCancelled); err != nil {
+				slog.Error("failed to record cancelled run setup", "run_id", run.ID, "error", err)
+			}
+			return
+		}
+		m.db.UpdateRunError(run.ID, message)
+	}
 	gateDir := m.paths.RepoDir(repo.ID)
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, resolved.HeadSHA); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
+	if err := git.WorktreeAdd(setupCtx, gateDir, wtDir, resolved.HeadSHA); err != nil {
+		recordSetupFailure(fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
@@ -1319,8 +1363,8 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 		}
 	}()
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
+	if err := git.CopyLocalUserIdentity(setupCtx, repo.WorkingPath, wtDir); err != nil {
+		recordSetupFailure(fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
@@ -1366,6 +1410,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	// Background goroutine now owns worktree cleanup.
 	bgOwnsWorktree = true
 	policyRefOwnedByRun = true
+	retainRunOwnership := false
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1400,10 +1445,18 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			}
 			cancel(nil)
 			_ = agents.Close()
+			m.sweepRunWorktreeProcesses(wtDir)
+			if retainRunOwnership {
+				// The active database row and its recovery material must remain
+				// together. Startup recovery will fail this run closed after the
+				// daemon is restarted; deleting any part here would make that
+				// recovery unsafe.
+				slog.Error("retaining unresolved run and quarantining daemon", "run_id", run.ID)
+				return
+			}
 			resolved.releaseTrustedRef(context.Background())
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.sweepRunWorktreeProcesses(wtDir)
 			// Clean up worktree.
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
@@ -1424,6 +1477,10 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 			executeErr = executor.Execute(runCtx, run, repo, wtDir)
 		}
 		if executeErr != nil {
+			if pipeline.IsCIFixRepairDurabilityError(executeErr) {
+				m.closeRunAdmission()
+				retainRunOwnership = true
+			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -1460,7 +1517,9 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		// exactly what reaching this point means. It is last on purpose: the
 		// pipeline's own outcome is already decided and reported above, so
 		// nothing below can change it.
-		m.autoCaptureEvalCase(runCtx, cfg, run.ID)
+		if !retainRunOwnership {
+			m.autoCaptureEvalCase(runCtx, cfg, run.ID)
+		}
 	}()
 
 	return run.ID, nil
@@ -1636,8 +1695,40 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
-	m.shuttingDown.Store(true)
+	m.closeRunAdmission()
+	if m.shutdown != nil {
+		m.shutdown(fmt.Errorf("daemon shutting down"))
+	}
+	m.cancelTrackedRunsForShutdown()
 
+	admissionsDone := make(chan struct{})
+	go func() {
+		m.waitForRunAdmissions()
+		close(admissionsDone)
+	}()
+	drainTimer := time.NewTimer(30 * time.Second)
+	defer drainTimer.Stop()
+	select {
+	case <-admissionsDone:
+		m.cancelTrackedRunsForShutdown()
+	case <-drainTimer.C:
+		slog.Warn("timed out waiting for run setup during shutdown")
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-drainTimer.C:
+		slog.Warn("timed out waiting for runs to finish during shutdown")
+	}
+}
+
+func (m *RunManager) cancelTrackedRunsForShutdown() {
 	m.mu.Lock()
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
 	for id, cancel := range m.cancels {
@@ -1649,17 +1740,37 @@ func (m *RunManager) Shutdown() {
 		cancel(fmt.Errorf("daemon shutting down"))
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
+}
 
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		slog.Warn("timed out waiting for runs to finish during shutdown")
+func (m *RunManager) closeRunAdmission() {
+	m.admissionMu.Lock()
+	m.shuttingDown.Store(true)
+	m.admissionMu.Unlock()
+}
+
+func (m *RunManager) waitForRunAdmissions() {
+	m.admissions.Wait()
+}
+
+func (m *RunManager) shutdownAwareContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	stop := context.AfterFunc(m.shutdownCtx, func() {
+		cancel(fmt.Errorf("daemon shutting down"))
+	})
+	return ctx, func() {
+		stop()
+		cancel(nil)
 	}
+}
+
+func (m *RunManager) reserveRunAdmission() (func(), error) {
+	m.admissionMu.Lock()
+	defer m.admissionMu.Unlock()
+	if m.shuttingDown.Load() {
+		return nil, fmt.Errorf("daemon is shutting down")
+	}
+	m.admissions.Add(1)
+	return m.admissions.Done, nil
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.

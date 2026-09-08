@@ -23,6 +23,33 @@ const commandEvidenceTruncationMarker = "… [command truncated]"
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
+type CIFixRepairDurabilityError struct {
+	cause error
+}
+
+func NewCIFixRepairDurabilityError(cause error) error {
+	return &CIFixRepairDurabilityError{cause: cause}
+}
+
+func (e *CIFixRepairDurabilityError) Error() string {
+	if e == nil || e.cause == nil {
+		return "CI repair durability uncertain"
+	}
+	return "CI repair durability uncertain: " + e.cause.Error()
+}
+
+func (e *CIFixRepairDurabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func IsCIFixRepairDurabilityError(err error) bool {
+	var target *CIFixRepairDurabilityError
+	return errors.As(err, &target)
+}
+
 // AgentRoutes is an immutable run-scoped routing table. Steps with no explicit
 // entry use Default, preserving the run-wide agent behavior.
 type AgentRoutes struct {
@@ -68,10 +95,11 @@ type StepContext struct {
 	RoundTrigger string
 	// PlannedCommand is retained across repair rounds so an unconfigured
 	// command gate reruns the exact command selected before the failure.
-	PlannedCommand  string
-	commandSequence int
-	EvidenceDir     string
-	Env             []string // extra environment variables for subprocesses (used in tests)
+	PlannedCommand     string
+	commandSequence    int
+	agentRoundOverride func(string, int) func()
+	EvidenceDir        string
+	Env                []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an
@@ -193,6 +221,13 @@ func (sctx *StepContext) RunAgentSession(role SessionRole, opts agent.RunOpts) (
 	return sctx.Sessions.Run(sctx.Ctx, sctx.Agent, role, opts, sctx.Log)
 }
 
+func (sctx *StepContext) WithAgentRound(roundID string, round int) func() {
+	if sctx == nil || sctx.agentRoundOverride == nil {
+		return func() {}
+	}
+	return sctx.agentRoundOverride(roundID, round)
+}
+
 // StepOutcome is the result of executing a pipeline step.
 type StepOutcome struct {
 	NeedsApproval bool // whether the step pauses for user action
@@ -214,7 +249,10 @@ type StepOutcome struct {
 	// RepairAudit carries only a normalized failure hash and low-cardinality
 	// progress result. The executor persists it with the round after the step
 	// returns; raw prompts, findings, diffs, and paths are never duplicated.
-	RepairAudit RepairAudit
+	RepairAudit                  RepairAudit
+	RepairReceiptsPersisted      bool
+	RoundCursor                  int
+	CIFixRepairPendingCompletion bool
 	// ReviewApprovedHeadSHA is set only by a successfully executed full review
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.

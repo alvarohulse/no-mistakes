@@ -1,17 +1,24 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const (
-	RoundSelectionSourceUser    = "user"
-	RoundSelectionSourceAutoFix = "auto_fix"
+	RoundSelectionSourceUser        = "user"
+	RoundSelectionSourceAutoFix     = "auto_fix"
+	RoundSelectionSourceUserWaived  = "user_declined"
+	RoundSelectionSourceUserSkipped = "user_skipped"
+	RoundSelectionSourceUserAborted = "user_aborted"
 	// RoundSelectionSourceUserDeclined records that a human resolved the
 	// approval gate without selecting a finding to fix. The explicit empty
 	// selection distinguishes this decision from an unresolved round.
-	RoundSelectionSourceUserDeclined = "user_declined"
+	RoundSelectionSourceUserDeclined = RoundSelectionSourceUserWaived
 
 	RoundStatusActive    = "active"
 	RoundStatusCompleted = "completed"
@@ -22,18 +29,19 @@ const DeclinedSelectionJSON = "[]"
 
 // StepRound represents one execution round within a pipeline step.
 type StepRound struct {
-	ID               string
-	StepResultID     string
-	Round            int
-	Trigger          string // "initial", "auto_fix"; legacy "user_fix" is treated as "auto_fix"
-	Status           string
-	FindingsJSON     *string // nullable - findings produced by this round
-	ReviewedHeadSHA  *string // non-authoritative commit candidate captured by a review round
-	StartingHeadSHA  *string
-	TrustedConfigSHA *string
-	ReplayConfigJSON []byte
-	GlobalConfigYAML []byte
-	RepoConfigYAML   []byte
+	ID                string
+	StepResultID      string
+	Round             int
+	Trigger           string // "initial" or "auto_fix" in the normalized view
+	TriggerProvenance *string
+	Status            string
+	FindingsJSON      *string // nullable - findings produced by this round
+	ReviewedHeadSHA   *string // non-authoritative commit candidate captured by a review round
+	StartingHeadSHA   *string
+	TrustedConfigSHA  *string
+	ReplayConfigJSON  []byte
+	GlobalConfigYAML  []byte
+	RepoConfigYAML    []byte
 	// UserFindingsJSON, when non-nil, is the merged finding list that was
 	// dispatched to the fix agent after the user edited per-finding
 	// instructions or added their own findings. It includes both the
@@ -56,6 +64,14 @@ type StepRound struct {
 	// normalized failure identity; no finding or output content is duplicated.
 	RepairFailureFingerprint *string
 	RepairResult             *string
+	ResultingHeadSHA         *string
+	EvaluatedHeadSHA         *string
+	Evaluation               *StepRoundEvaluation
+	Decision                 *StepRoundDecision
+	Repair                   *StepRoundRepair
+	InvocationIDs            []string
+	CommandAttemptIDs        []string
+	ArtifactIDs              []string
 	DurationMS               int64
 	CreatedAt                int64
 }
@@ -80,7 +96,7 @@ type StepRoundStats struct {
 // IsFixRound reports whether this round was a fix attempt. Legacy "user_fix"
 // rounds count: they were fix rounds dispatched by an explicit user selection.
 func (r *StepRound) IsFixRound() bool {
-	return r.Trigger == "auto_fix" || r.Trigger == "user_fix"
+	return r.Trigger == RoundTriggerAutoFix || r.Trigger == RoundTriggerUserFix
 }
 
 // StepFixSummaries returns one entry per fix round for a step, in round order:
@@ -167,6 +183,9 @@ func (d *DB) InsertStepRound(stepResultID string, round int, trigger string, fin
 // BeginStepRound creates the durable round identity before its work starts so
 // command attempts can reference the exact owning round as they execute.
 func (d *DB) BeginStepRound(stepResultID string, round int, trigger string) (*StepRound, error) {
+	if trigger != RoundTriggerInitial && trigger != RoundTriggerAutoFix {
+		return nil, fmt.Errorf("begin step round: unsupported trigger %q", trigger)
+	}
 	return d.insertStepRound(stepResultID, round, trigger, RoundStatusActive, nil, nil, nil, nil, nil, nil, nil, nil, 0)
 }
 
@@ -260,26 +279,33 @@ func (d *DB) insertReviewStepRoundWithConfig(stepResultID string, round int, tri
 }
 
 func (d *DB) insertStepRound(stepResultID string, round int, trigger, status string, findingsJSON *string, fixSummary, reviewedHeadSHA, startingHeadSHA, trustedConfigSHA *string, replayConfigJSON, globalConfigYAML, repoConfigYAML []byte, durationMS int64) (*StepRound, error) {
+	var triggerProvenance *string
+	if trigger == RoundTriggerUserFix {
+		trigger = RoundTriggerAutoFix
+		legacy := RoundTriggerProvenanceLegacyUserFix
+		triggerProvenance = &legacy
+	}
 	r := &StepRound{
-		ID:               newID(),
-		StepResultID:     stepResultID,
-		Round:            round,
-		Trigger:          trigger,
-		Status:           status,
-		FindingsJSON:     findingsJSON,
-		ReviewedHeadSHA:  reviewedHeadSHA,
-		StartingHeadSHA:  startingHeadSHA,
-		TrustedConfigSHA: trustedConfigSHA,
-		ReplayConfigJSON: append([]byte(nil), replayConfigJSON...),
-		GlobalConfigYAML: append([]byte(nil), globalConfigYAML...),
-		RepoConfigYAML:   append([]byte(nil), repoConfigYAML...),
-		FixSummary:       fixSummary,
-		DurationMS:       durationMS,
-		CreatedAt:        now(),
+		ID:                newID(),
+		StepResultID:      stepResultID,
+		Round:             round,
+		Trigger:           trigger,
+		TriggerProvenance: triggerProvenance,
+		Status:            status,
+		FindingsJSON:      findingsJSON,
+		ReviewedHeadSHA:   reviewedHeadSHA,
+		StartingHeadSHA:   startingHeadSHA,
+		TrustedConfigSHA:  trustedConfigSHA,
+		ReplayConfigJSON:  append([]byte(nil), replayConfigJSON...),
+		GlobalConfigYAML:  append([]byte(nil), globalConfigYAML...),
+		RepoConfigYAML:    append([]byte(nil), repoConfigYAML...),
+		FixSummary:        fixSummary,
+		DurationMS:        durationMS,
+		CreatedAt:         now(),
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, status, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.StepResultID, r.Round, r.Trigger, r.Status, r.FindingsJSON, r.ReviewedHeadSHA, r.StartingHeadSHA, r.TrustedConfigSHA, r.ReplayConfigJSON, r.GlobalConfigYAML, r.RepoConfigYAML, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixSummary, r.DurationMS, r.CreatedAt,
+		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, status, trigger_provenance, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, resulting_head_sha, evaluated_head_sha, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.StepResultID, r.Round, r.Trigger, r.Status, r.TriggerProvenance, r.FindingsJSON, r.ReviewedHeadSHA, r.StartingHeadSHA, r.TrustedConfigSHA, r.ReplayConfigJSON, r.GlobalConfigYAML, r.RepoConfigYAML, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixSummary, r.ResultingHeadSHA, r.EvaluatedHeadSHA, r.DurationMS, r.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert step round: %w", err)
@@ -293,6 +319,21 @@ func (d *DB) insertStepRound(stepResultID string, round int, trigger, status str
 // both columns. Passing DeclinedSelectionJSON with a source records a decision
 // that selected nothing.
 func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source string) error {
+	if normalized, err := d.roundHasEvaluation(id); err != nil {
+		return err
+	} else if normalized {
+		var selected []string
+		if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+			if err := json.Unmarshal([]byte(*selectedFindingIDs), &selected); err != nil {
+				return fmt.Errorf("set step round selection: decode selected finding IDs: %w", err)
+			}
+		}
+		if len(selected) == 0 && (selectedFindingIDs == nil || strings.TrimSpace(*selectedFindingIDs) == "") {
+			return d.clearStructuredRoundDecision(id)
+		}
+		explicitEmpty := selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) == DeclinedSelectionJSON
+		return d.setStructuredDecisionByExternalIDs(id, selected, source, nil, explicitEmpty)
+	}
 	var selectionSource *string
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {
 		selectionSource = &source
@@ -310,18 +351,70 @@ func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source
 // gate without selecting any finding to fix. It never overwrites an existing
 // selection.
 func (d *DB) SetStepRoundDeclined(id string) error {
+	return d.SetStepRoundWaived(id)
+}
+
+func (d *DB) SetStepRoundWaived(id string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("set step round declined: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if err := setStepRoundWaivedTx(tx, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set step round declined: commit: %w", err)
+	}
+	return nil
+}
+
+func setStepRoundWaivedTx(tx *sql.Tx, id string) error {
+	return setStepRoundExplicitEmptyDecisionTx(tx, id, RoundSelectionSourceUserWaived)
+}
+
+func setStepRoundExplicitEmptyDecisionTx(tx *sql.Tx, id, source string) error {
+	if !validRoundDecisionSource(source) {
+		return fmt.Errorf("set step round decision: invalid source %q", source)
+	}
+	evaluation, err := getRoundEvaluation(tx, id)
+	if err != nil {
+		return err
+	}
+	if evaluation != nil {
+		var existingDecisionID string
+		err := tx.QueryRow(`SELECT id FROM round_decisions WHERE round_id = ?`, id).Scan(&existingDecisionID)
+		if err == nil {
+			return nil
+		}
+		if err != sql.ErrNoRows {
+			return fmt.Errorf("set step round decision: load existing decision: %w", err)
+		}
+		return setStructuredDecisionByExternalIDsTx(tx, id, nil, source, nil, true)
+	}
 	declined := DeclinedSelectionJSON
-	if _, err := d.sql.Exec(
+	if _, err := tx.Exec(
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
 		  WHERE id = ? AND selection_source IS NULL`,
-		declined, RoundSelectionSourceUserDeclined, id,
+		declined, source, id,
 	); err != nil {
-		return fmt.Errorf("set step round declined: %w", err)
+		return fmt.Errorf("set step round decision: %w", err)
 	}
 	return nil
 }
 
 func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, source string, userFindingsJSON *string) error {
+	if normalized, err := d.roundHasEvaluation(id); err != nil {
+		return err
+	} else if normalized {
+		var selected []string
+		if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+			if err := json.Unmarshal([]byte(*selectedFindingIDs), &selected); err != nil {
+				return fmt.Errorf("set step round user decision: decode selected finding IDs: %w", err)
+			}
+		}
+		return d.setStructuredDecisionByExternalIDs(id, selected, source, userFindingsJSON, false)
+	}
 	var selectionSource *string
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {
 		selectionSource = &source
@@ -331,6 +424,137 @@ func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, sou
 		selectedFindingIDs, selectionSource, userFindingsJSON, id,
 	); err != nil {
 		return fmt.Errorf("set step round user decision: %w", err)
+	}
+	return nil
+}
+
+// PersistStepRoundFixDecisionAndMarkStepFixing records the decision that
+// authorizes a user-requested repair and exposes the step as fixing in one
+// transaction. A repair must never begin from a decision that is absent or
+// only partly stored.
+func (d *DB) PersistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, source string, userFindingsJSON *string) error {
+	return d.persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID, selectedFindingIDs, source, userFindingsJSON, nil)
+}
+
+// PersistStepRoundAutoFixDecisionAndMarkStepFixing atomically records the
+// automatic repair decision, its attempted audit receipt, and the fixing
+// transition that authorizes the next repair invocation. Normalized rounds
+// receive graph records; legacy rounds keep both values in step_rounds.
+func (d *DB) PersistStepRoundAutoFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, attemptedRepair StepRoundRepair) error {
+	if selectedFindingIDs == nil || strings.TrimSpace(*selectedFindingIDs) == "" || strings.TrimSpace(*selectedFindingIDs) == DeclinedSelectionJSON {
+		return fmt.Errorf("persist step round fix decision: automatic repair requires selected findings")
+	}
+	return d.persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID, selectedFindingIDs, RoundSelectionSourceAutoFix, nil, &attemptedRepair)
+}
+
+func (d *DB) persistStepRoundFixDecisionAndMarkStepFixing(stepResultID, roundID string, selectedFindingIDs *string, source string, userFindingsJSON *string, attemptedRepair *StepRoundRepair) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if !validRoundDecisionSource(source) {
+		return fmt.Errorf("persist step round fix decision: invalid source %q", source)
+	}
+	var runID string
+	if err := tx.QueryRow(`SELECT s.run_id FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ? AND r.step_result_id = ?`, roundID, stepResultID).Scan(&runID); err != nil {
+		return fmt.Errorf("persist step round fix decision: load round: %w", err)
+	}
+
+	var selected []string
+	if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+		if err := json.Unmarshal([]byte(*selectedFindingIDs), &selected); err != nil {
+			return fmt.Errorf("persist step round fix decision: decode selected finding IDs: %w", err)
+		}
+	}
+	evaluation, err := getRoundEvaluation(tx, roundID)
+	if err != nil {
+		return err
+	}
+	if evaluation != nil {
+		if err := setStructuredDecisionByExternalIDsTx(tx, roundID, selected, source, userFindingsJSON, false); err != nil {
+			return err
+		}
+	} else {
+		var selectionSource *string
+		if selectedFindingIDs != nil && strings.TrimSpace(*selectedFindingIDs) != "" {
+			selectionSource = &source
+		}
+		result, err := tx.Exec(
+			`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`,
+			selectedFindingIDs, selectionSource, userFindingsJSON, roundID,
+		)
+		if err != nil {
+			return fmt.Errorf("persist step round fix decision: update legacy decision: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("persist step round fix decision: legacy decision rows affected: %w", err)
+		}
+		if changed != 1 {
+			return fmt.Errorf("persist step round fix decision: expected one legacy decision, updated %d", changed)
+		}
+	}
+	if attemptedRepair != nil {
+		if source != RoundSelectionSourceAutoFix || attemptedRepair.FailureFingerprint == nil || attemptedRepair.Result == nil || *attemptedRepair.Result != RoundRepairAttempted {
+			return fmt.Errorf("persist step round fix decision: automatic repair audit must record an attempted fingerprint")
+		}
+		if attemptedRepair.RoundID == "" {
+			attemptedRepair.RoundID = roundID
+		}
+		if attemptedRepair.RunID == "" {
+			attemptedRepair.RunID = runID
+		}
+		if attemptedRepair.RoundID != roundID || attemptedRepair.RunID != runID {
+			return fmt.Errorf("persist step round fix decision: automatic repair audit does not belong to round")
+		}
+		if attemptedRepair.ID == "" {
+			attemptedRepair.ID = newID()
+		}
+		if attemptedRepair.CreatedAt == 0 {
+			attemptedRepair.CreatedAt = now()
+		}
+		if evaluation != nil {
+			if err := upsertRoundRepair(tx, *attemptedRepair); err != nil {
+				return fmt.Errorf("persist step round fix decision: insert automatic repair audit: %w", err)
+			}
+		} else {
+			// Refresh and Push rounds intentionally stay on the legacy receipt
+			// path. Keep their repair audit in step_rounds as well; inserting a
+			// normalized round_repairs row would create an orphan graph record.
+			result, err := tx.Exec(
+				`UPDATE step_rounds SET repair_failure_fingerprint = ?, repair_result = ? WHERE id = ?`,
+				attemptedRepair.FailureFingerprint, attemptedRepair.Result, roundID,
+			)
+			if err != nil {
+				return fmt.Errorf("persist step round fix decision: update legacy repair audit: %w", err)
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("persist step round fix decision: legacy repair audit rows affected: %w", err)
+			}
+			if changed != 1 {
+				return fmt.Errorf("persist step round fix decision: expected one legacy repair audit, updated %d", changed)
+			}
+		}
+	}
+	result, err := tx.Exec(
+		`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
+		types.StepStatusFixing, now(), fmt.Sprintf("status: %s", types.StepStatusFixing), stepResultID,
+	)
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: mark step fixing: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("persist step round fix decision: mark step fixing rows affected: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("persist step round fix decision: expected one step result, updated %d", changed)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("persist step round fix decision: commit: %w", err)
 	}
 	return nil
 }
@@ -345,6 +569,22 @@ func (d *DB) SetStepRoundSelectedFindingIDs(id string, selectedFindingIDs *strin
 // instructions attached and user-added findings appended) that was
 // dispatched to the fix agent for the round. Passing nil clears the column.
 func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error {
+	if normalized, err := d.roundHasEvaluation(id); err != nil {
+		return err
+	} else if normalized {
+		decision, err := d.GetRoundDecision(id)
+		if err != nil {
+			return err
+		}
+		if decision == nil {
+			return fmt.Errorf("set step round user findings: normalized round has no decision")
+		}
+		selected := make([]string, 0, len(decision.Findings))
+		for _, finding := range orderedSelectedDecisionFindings(decision) {
+			selected = append(selected, finding.FindingID)
+		}
+		return d.setStructuredDecisionByExternalIDs(id, selected, decision.Source, userFindingsJSON, decision.ExplicitEmpty)
+	}
 	if _, err := d.sql.Exec(
 		`UPDATE step_rounds SET user_findings_json = ? WHERE id = ?`,
 		userFindingsJSON, id,
@@ -357,6 +597,11 @@ func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error
 // SetStepRoundRepairAudit records privacy-safe progress facts for one round.
 // Empty values clear their columns.
 func (d *DB) SetStepRoundRepairAudit(id, failureFingerprint, result string) error {
+	if normalized, err := d.roundHasEvaluation(id); err != nil {
+		return err
+	} else if normalized {
+		return d.SetStepRoundStructuredRepair(StepRoundRepair{RoundID: id, FailureFingerprint: optionalString(failureFingerprint), Result: optionalString(result)})
+	}
 	var fingerprintValue, resultValue *string
 	if failureFingerprint != "" {
 		fingerprintValue = &failureFingerprint
@@ -376,7 +621,7 @@ func (d *DB) SetStepRoundRepairAudit(id, failureFingerprint, result string) erro
 // GetRoundsByStep returns all rounds for a step result, ordered by round number.
 func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, step_result_id, round, trigger_type, status, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_failure_fingerprint, repair_result, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
+		`SELECT id, step_result_id, round, trigger_type, status, trigger_provenance, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, replay_config_json, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_failure_fingerprint, repair_result, resulting_head_sha, evaluated_head_sha, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`,
 		stepResultID,
 	)
 	if err != nil {
@@ -386,10 +631,27 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}
-		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.Status, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairFailureFingerprint, &r.RepairResult, &r.DurationMS, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.StepResultID, &r.Round, &r.Trigger, &r.Status, &r.TriggerProvenance, &r.FindingsJSON, &r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA, &r.ReplayConfigJSON, &r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON, &r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary, &r.RepairFailureFingerprint, &r.RepairResult, &r.ResultingHeadSHA, &r.EvaluatedHeadSHA, &r.DurationMS, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan step round: %w", err)
+		}
+		if r.Trigger == RoundTriggerUserFix {
+			legacy := RoundTriggerProvenanceLegacyUserFix
+			r.Trigger = RoundTriggerAutoFix
+			r.TriggerProvenance = &legacy
 		}
 		rounds = append(rounds, r)
 	}
-	return rounds, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, round := range rounds {
+		if err := d.hydrateRoundGraph(round); err != nil {
+			return nil, err
+		}
+	}
+	return rounds, nil
 }

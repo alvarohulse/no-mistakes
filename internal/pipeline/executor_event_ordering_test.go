@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -167,11 +169,25 @@ func TestExecutor_ApprovalPersistenceFailureDoesNotPublishOrWaitAtGate(t *testin
 	})
 
 	err = exec.Execute(context.Background(), run, repo, t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "persist review approval gate") {
-		t.Fatalf("Execute error = %v, want approval persistence failure", err)
+	if err == nil || !strings.Contains(err.Error(), "findings write failed") {
+		t.Fatalf("Execute error = %v, want compatibility projection failure", err)
 	}
 	if responseErr := exec.Respond(types.StepReview, types.ActionApprove, nil); responseErr == nil {
 		t.Fatal("executor remained parked after approval persistence failed")
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].FindingsJSON != nil {
+		t.Fatalf("step findings survived failed structured completion: %#v", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil {
+		t.Fatalf("round after failed compatibility projection = %#v", rounds)
 	}
 
 	eventsMu.Lock()
@@ -183,5 +199,287 @@ func TestExecutor_ApprovalPersistenceFailureDoesNotPublishOrWaitAtGate(t *testin
 		if *event.Status == string(types.StepStatusAwaitingApproval) || *event.Status == string(types.StepStatusFixReview) {
 			t.Fatalf("unpersisted approval gate event was published: %#v", event)
 		}
+	}
+}
+
+func TestExecutor_InitialAutoFixPersistenceFailureRollsBackRound(t *testing.T) {
+	tests := []struct {
+		name          string
+		trigger       string
+		failureReason string
+	}{
+		{
+			name: "decision",
+			trigger: `CREATE TRIGGER reject_round_decision
+				BEFORE INSERT ON round_decisions
+				BEGIN
+					SELECT RAISE(FAIL, 'injected decision write failure');
+				END`,
+			failureReason: "injected decision write failure",
+		},
+		{
+			name: "fixing transition",
+			trigger: `CREATE TRIGGER reject_step_fixing
+				BEFORE UPDATE OF status ON step_results
+				WHEN NEW.status = 'fixing'
+				BEGIN
+					SELECT RAISE(FAIL, 'injected fixing write failure');
+				END`,
+			failureReason: "injected fixing write failure",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := t.TempDir()
+			initGitRepo(t, workDir)
+
+			raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(test.trigger); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			calls := 0
+			step := &adaptiveCallStep{
+				name: types.StepReview,
+				fn: func(*StepContext) (*StepOutcome, error) {
+					calls++
+					return &StepOutcome{
+						AutoFixable: true,
+						Findings:    `{"findings":[{"id":"review-1","severity":"warning","description":"repair me","action":"auto-fix"}]}`,
+					}, nil
+				},
+			}
+			events := &eventCollector{}
+			exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, events.handler)
+
+			err = exec.Execute(context.Background(), run, repo, workDir)
+			if err == nil || !strings.Contains(err.Error(), test.failureReason) {
+				t.Fatalf("Execute() error = %v, want %q", err, test.failureReason)
+			}
+			if calls != 1 {
+				t.Fatalf("step executions = %d, want no repair execution after failed persistence", calls)
+			}
+			for _, event := range events.all() {
+				if event.StepName != nil && *event.StepName == types.StepReview && event.Status != nil && *event.Status == string(types.StepStatusFixing) {
+					t.Fatalf("unpersisted fixing transition was published: %#v", event)
+				}
+			}
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+				t.Fatalf("step status after persistence failure = %#v, want failed without fixing", steps)
+			}
+			rounds, err := database.GetRoundsByStep(steps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil || rounds[0].Decision != nil || rounds[0].SelectedFindingIDs != nil || rounds[0].SelectionSource != nil || rounds[0].Repair != nil {
+				t.Fatalf("round receipts after failed initial auto-fix persistence = %#v, want no completed evaluation, decision, or repair", rounds)
+			}
+		})
+	}
+}
+
+func TestExecutor_RepairAuditPersistenceFailureStopsBeforeRepair(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TRIGGER reject_round_repair
+		BEFORE INSERT ON round_repairs
+		BEGIN
+			SELECT RAISE(FAIL, 'injected repair write failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			calls++
+			return &StepOutcome{
+				AutoFixable: true,
+				Findings:    `{"findings":[{"id":"review-1","severity":"warning","description":"repair me","action":"auto-fix"}]}`,
+			}, nil
+		},
+	}
+	events := &eventCollector{}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, events.handler)
+
+	err = exec.Execute(context.Background(), run, repo, workDir)
+	if err == nil || !strings.Contains(err.Error(), "injected repair write failure") {
+		t.Fatalf("Execute() error = %v, want repair audit persistence failure", err)
+	}
+	if calls != 1 {
+		t.Fatalf("step executions = %d, want no repair execution after failed audit persistence", calls)
+	}
+	for _, event := range events.all() {
+		if event.StepName != nil && *event.StepName == types.StepReview && event.Status != nil && *event.Status == string(types.StepStatusFixing) {
+			t.Fatalf("unpersisted fixing transition was published: %#v", event)
+		}
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status after repair audit failure = %#v, want failed without fixing", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil || rounds[0].Repair != nil || rounds[0].Decision != nil {
+		t.Fatalf("round receipts after failed repair audit = %#v, want no completed evaluation, repair, or decision", rounds)
+	}
+}
+
+func TestExecutor_AutoFixRoundCompletionAndFinalAuditAreAtomic(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TRIGGER reject_auto_fix_repair_insert
+		BEFORE INSERT ON round_repairs
+		WHEN NEW.result IS NOT NULL
+			AND (SELECT trigger_type FROM step_rounds WHERE id = NEW.round_id) = 'auto_fix'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected final repair write failure');
+		END;
+
+		CREATE TRIGGER reject_auto_fix_repair_update
+		BEFORE UPDATE OF failure_fingerprint, result ON round_repairs
+		WHEN (SELECT trigger_type FROM step_rounds WHERE id = NEW.round_id) = 'auto_fix'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected final repair write failure');
+		END;
+	`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			calls++
+			if !sctx.Fixing {
+				return &StepOutcome{
+					AutoFixable: true,
+					Findings:    `{"findings":[{"id":"review-1","severity":"warning","description":"repair me","action":"auto-fix"}]}`,
+				}, nil
+			}
+			return &StepOutcome{FixSummary: "repair the review finding"}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+
+	err = exec.Execute(context.Background(), run, repo, workDir)
+	if err == nil || !strings.Contains(err.Error(), "injected final repair write failure") {
+		t.Fatalf("Execute() error = %v, want final repair persistence failure", err)
+	}
+	if calls != 2 {
+		t.Fatalf("step executions = %d, want initial and one auto-fix execution", calls)
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status after final repair persistence failure = %#v, want failed", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 {
+		t.Fatalf("rounds = %#v, want initial and failed auto-fix rounds", rounds)
+	}
+	if rounds[0].Decision == nil || rounds[0].Repair == nil || rounds[0].Repair.Result == nil || *rounds[0].Repair.Result != RepairResultAttempted {
+		t.Fatalf("initial repair decision = %#v, want preserved attempted repair", rounds[0])
+	}
+	if rounds[1].Status != db.RoundStatusFailed || rounds[1].Evaluation != nil || rounds[1].Repair != nil || rounds[1].FixSummary != nil || rounds[1].ResultingHeadSHA != nil {
+		t.Fatalf("auto-fix round retained an incomplete repair receipt: %#v", rounds[1])
+	}
+}
+
+func TestExecutor_InitialRoundCompletionAndFinalAuditAreAtomic(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TRIGGER reject_initial_round_repair
+		BEFORE INSERT ON round_repairs
+		WHEN (SELECT trigger_type FROM step_rounds WHERE id = NEW.round_id) = 'initial'
+		BEGIN
+			SELECT RAISE(FAIL, 'injected initial repair write failure');
+		END`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				RepairAudit: RepairAudit{
+					FailureFingerprint: "sha256:ci-repair",
+					Result:             RepairResultResolved,
+				},
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	err = exec.Execute(context.Background(), run, repo, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "injected initial repair write failure") {
+		t.Fatalf("Execute() error = %v, want initial repair persistence failure", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status = %#v, want failed", steps)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Status != db.RoundStatusFailed || rounds[0].Evaluation != nil || rounds[0].Repair != nil {
+		t.Fatalf("round retained partial initial repair receipt: %#v", rounds)
 	}
 }

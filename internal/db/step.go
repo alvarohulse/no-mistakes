@@ -333,6 +333,60 @@ func (d *DB) CompleteStepWithStatus(id string, status types.StepStatus, exitCode
 	return nil
 }
 
+func (d *DB) CompleteStepWithUserSkipDecision(roundID, stepResultID, runID string, exitCode int, durationMS int64, logPath string) error {
+	return d.completeStepWithUserDecision(roundID, stepResultID, runID, RoundSelectionSourceUserSkipped, types.StepStatusSkipped, exitCode, durationMS, logPath, "")
+}
+
+func (d *DB) FailStepWithUserAbortDecision(roundID, stepResultID, runID string, durationMS int64) error {
+	return d.completeStepWithUserDecision(roundID, stepResultID, runID, RoundSelectionSourceUserAborted, types.StepStatusFailed, 0, durationMS, "", "aborted by user")
+}
+
+func (d *DB) completeStepWithUserDecision(roundID, stepResultID, runID, source string, status types.StepStatus, exitCode int, durationMS int64, logPath, errMsg string) error {
+	if (source != RoundSelectionSourceUserSkipped || status != types.StepStatusSkipped) && (source != RoundSelectionSourceUserAborted || status != types.StepStatusFailed) {
+		return fmt.Errorf("complete step with user decision: unsupported decision %q and status %q", source, status)
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin complete step with user decision: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, recordedStepID string
+	if err := tx.QueryRow(`SELECT s.run_id, s.id FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id WHERE r.id = ?`, roundID).Scan(&recordedRunID, &recordedStepID); err != nil {
+		return fmt.Errorf("complete step with user decision: load round: %w", err)
+	}
+	if recordedRunID != runID || recordedStepID != stepResultID {
+		return fmt.Errorf("complete step with user decision: round does not belong to step result")
+	}
+	if err := setStepRoundExplicitEmptyDecisionTx(tx, roundID, source); err != nil {
+		return fmt.Errorf("complete step with user decision: persist decision: %w", err)
+	}
+
+	ts := now()
+	var result sql.Result
+	if source == RoundSelectionSourceUserSkipped {
+		result, err = tx.Exec(
+			`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+			status, exitCode, durationMS, logPath, ts, ts, fmt.Sprintf("status: %s", status), stepResultID,
+		)
+	} else {
+		result, err = tx.Exec(
+			`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+			status, errMsg, durationMS, ts, ts, "step failed: "+errMsg, stepResultID,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("complete step with user decision: update step: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("complete step with user decision: step row not found")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete step with user decision: %w", err)
+	}
+	return nil
+}
+
 // CompleteStepAsSkipped persists a source-aware pre-run skip receipt.
 func (d *DB) CompleteStepAsSkipped(id string, source types.SkipSource) error {
 	if !source.Valid() {
@@ -380,6 +434,55 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit completed review: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) CompleteApprovedStepWithWaiver(roundID, stepResultID, runID, approvedHeadSHA string, exitCode int, durationMS int64, logPath string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin complete approved step: %w", err)
+	}
+	defer tx.Rollback()
+
+	var recordedRunID, recordedStepID, stepName string
+	if err := tx.QueryRow(`SELECT s.run_id, s.id, s.step_name
+		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = ?`, roundID).Scan(&recordedRunID, &recordedStepID, &stepName); err != nil {
+		return fmt.Errorf("complete approved step: load round: %w", err)
+	}
+	if recordedRunID != runID || recordedStepID != stepResultID {
+		return fmt.Errorf("complete approved step: round does not belong to step result")
+	}
+	if err := setStepRoundWaivedTx(tx, roundID); err != nil {
+		return fmt.Errorf("complete approved step: persist waiver: %w", err)
+	}
+
+	ts := now()
+	result, err := tx.Exec(
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		types.StepStatusCompleted, exitCode, durationMS, logPath, ts, ts, fmt.Sprintf("status: %s", types.StepStatusCompleted), stepResultID,
+	)
+	if err != nil {
+		return fmt.Errorf("complete approved step: complete step: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return fmt.Errorf("complete approved step: step row not found")
+	}
+	if approvedHeadSHA != "" {
+		if stepName != string(types.StepReview) {
+			return fmt.Errorf("complete approved step: non-review step has an approved head")
+		}
+		result, err = tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, approvedHeadSHA, ts, runID)
+		if err != nil {
+			return fmt.Errorf("complete approved step: record review-approved head: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return fmt.Errorf("complete approved step: run row not found")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete approved step: %w", err)
 	}
 	return nil
 }

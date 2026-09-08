@@ -67,6 +67,17 @@ func handleFakeCLI(mode string) {
 		fakeCIGlabSequenceHandler(args)
 	case "ci-gh-reconcile":
 		fakeCIGHReconcileHandler(args)
+	case "ci-gh-git-update-ref-error":
+		executableName := filepath.Base(os.Args[0])
+		executableName = strings.TrimSuffix(executableName, filepath.Ext(executableName))
+		switch executableName {
+		case "gh":
+			fakeCIGHHandler(args)
+		case "git":
+			fakeGitUpdateRefErrorHandler(args)
+		default:
+			os.Exit(1)
+		}
 	default:
 		os.Exit(1)
 	}
@@ -250,6 +261,14 @@ func fakeGitRemoteErrorHandler(args []string) {
 		os.Exit(1)
 	}
 	fakeGitForward(args, realGit)
+}
+
+func fakeGitUpdateRefErrorHandler(args []string) {
+	if len(args) > 0 && args[0] == "update-ref" {
+		fmt.Fprintln(os.Stderr, "injected local update-ref failure")
+		os.Exit(1)
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
 }
 
 func fakeGitForward(args []string, realGit string) {
@@ -449,6 +468,8 @@ func fakeCIGHRerun() {
 
 func fakeCIGHSequenceHandler(args []string) {
 	state := os.Getenv("FAKE_CLI_STATE")
+	statePath := os.Getenv("FAKE_CLI_STATE_PATH")
+	stateIndexPath := os.Getenv("FAKE_CLI_STATE_INDEX_PATH")
 	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
 	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")
 	mergeable := os.Getenv("FAKE_CLI_MERGEABLE")
@@ -470,6 +491,33 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
+		if statePath != "" {
+			data, err := os.ReadFile(statePath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			entries := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(entries) == 0 || entries[0] == "" {
+				fmt.Println(state)
+				os.Exit(0)
+			}
+
+			index := 0
+			if rawIndex, err := os.ReadFile(stateIndexPath); err == nil {
+				if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil {
+					index = parsed
+				}
+			}
+			if index >= len(entries) {
+				index = len(entries) - 1
+			}
+			if err := os.WriteFile(stateIndexPath, []byte(strconv.Itoa(index+1)), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			state = entries[index]
+		}
 		fmt.Println(state)
 		os.Exit(0)
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -174,6 +175,136 @@ func TestPostWorktreeParkFailureKeepsDatabaseAuthoritative(t *testing.T) {
 	})
 }
 
+func TestRunStartRetainsCIFixRepairDurabilityUncertainty(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "ci-repair-durability-uncertain")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	step := &controlledFailureStep{
+		name:    types.StepCI,
+		started: started,
+		release: release,
+		err:     pipeline.NewCIFixRepairDurabilityError(errors.New("pushed CI repair receipt transaction failed")),
+	}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "CI repair durability uncertainty", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("CI step did not start")
+	}
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	revisionBeforeFailure := manager.StateRev(runID)
+	manager.mu.Lock()
+	done := manager.dones[runID]
+	manager.mu.Unlock()
+	if done == nil {
+		t.Fatal("durability-uncertain run lost its completion handle")
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("durability-uncertain run did not stop")
+	}
+	if manager.StateRev(runID) != revisionBeforeFailure {
+		t.Fatal("durability uncertainty emitted a terminal state event")
+	}
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+	got, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunRunning {
+		t.Fatalf("run status = %s, want running", got.Status)
+	}
+	stepResults, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stepResults) != 1 || stepResults[0].Status != types.StepStatusRunning {
+		t.Fatalf("step results = %#v, want active CI step", stepResults)
+	}
+	manager.mu.Lock()
+	_, executorRetained := manager.executors[runID]
+	_, cancelRetained := manager.cancels[runID]
+	_, doneRetained := manager.dones[runID]
+	manager.mu.Unlock()
+	if !executorRetained || !cancelRetained || !doneRetained {
+		t.Fatalf("run tracking retained = executor:%v cancel:%v done:%v, want all true", executorRetained, cancelRetained, doneRetained)
+	}
+	manager.subMu.Lock()
+	completed := manager.completedRuns[runID]
+	subscriberCount := len(manager.subscribers[runID])
+	manager.subMu.Unlock()
+	if completed || subscriberCount != 1 {
+		t.Fatalf("subscriber retention = completed:%v count:%d, want false and one", completed, subscriberCount)
+	}
+	if !manager.shuttingDown.Load() {
+		t.Fatal("durability uncertainty did not quarantine the daemon")
+	}
+	if info, err := os.Stat(p.WorktreeDir(repo.ID, runID)); err != nil || !info.IsDir() {
+		t.Fatalf("retained worktree = %v, want directory", err)
+	}
+	if _, err := os.Stat(p.EffectiveConfigYAML(runID)); err != nil {
+		t.Fatalf("retained effective config missing: %v", err)
+	}
+	if _, err := git.RunBare(context.Background(), p.RepoDir(repo.ID), "rev-parse", "--verify", policyTrustedRunRef(runID)); err != nil {
+		t.Fatalf("retained trusted ref missing: %v", err)
+	}
+}
+
+func TestRunStartOrdinaryPipelineFailureDoesNotQuarantineAdmission(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "ordinary-pipeline-failure")
+	step := &controlledFailureStep{
+		name: types.StepCI,
+		err:  errors.New("ordinary CI failure"),
+	}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+	t.Cleanup(manager.Shutdown)
+	setSafeBareRepositoryExplicitForDaemonTest(t)
+
+	runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "ordinary pipeline failure", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	if manager.shuttingDown.Load() {
+		t.Fatal("ordinary pipeline failure quarantined the daemon")
+	}
+	nextRunID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "ordinary replacement", "", "", "")
+	if err != nil {
+		t.Fatalf("replacement after ordinary failure: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, nextRunID); run.Status != types.RunFailed {
+		t.Fatalf("replacement status = %s, want failed", run.Status)
+	}
+}
+
 type assertPostWorktreeEffectStep struct {
 	check      func(string) error
 	executions int
@@ -193,6 +324,25 @@ type unexpectedHookEffectError struct{ got string }
 
 func (e *unexpectedHookEffectError) Error() string {
 	return "unexpected post-worktree marker: " + e.got
+}
+
+type controlledFailureStep struct {
+	name    types.StepName
+	started chan struct{}
+	release <-chan struct{}
+	err     error
+}
+
+func (s *controlledFailureStep) Name() types.StepName { return s.name }
+
+func (s *controlledFailureStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if s.started != nil {
+		close(s.started)
+	}
+	if s.release != nil {
+		<-s.release
+	}
+	return nil, s.err
 }
 
 // postWorktreeSuccessHook writes the "ready" marker the effect step verifies.
@@ -265,7 +415,7 @@ func waitForRunStatus(t *testing.T, database *db.DB, runID string, status types.
 	return nil
 }
 
-func installRunUpdateTrigger(t *testing.T, databasePath, statement string) {
+func installRunUpdateTrigger(t *testing.T, databasePath, statement string) *sql.DB {
 	t.Helper()
 	raw, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -275,4 +425,5 @@ func installRunUpdateTrigger(t *testing.T, databasePath, statement string) {
 	if _, err := raw.Exec(statement); err != nil {
 		t.Fatal(err)
 	}
+	return raw
 }

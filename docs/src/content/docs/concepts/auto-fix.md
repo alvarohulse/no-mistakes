@@ -108,19 +108,8 @@ Push refuses unexplained uncommitted changes instead of assigning them to its ro
 
 ## Step rounds
 
-Each execution pass of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database. A round starts as `active` before its work begins and ends as `completed` or `failed`.
-A completed round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution. Sanitized prompt history includes completed rounds only, never the in-progress or failed round.
-Automatic repair also stores only a normalized failure hash and a low-cardinality progress result (`attempted`, `resolved`, repeated failure, no content progress, or attempt limit). It never duplicates prompts, outputs, diffs, paths, or tool arguments into that receipt.
-That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
+[Pipeline](/no-mistakes/concepts/pipeline/#execution-vocabulary) owns the durable round, evaluation, finding, decision, and repair records. Sanitized prompt history includes completed rounds only, never the in-progress or failed round.
 AXI status uses the operational round count, including an active round, and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.
 Review, Build, Test, Document, Lint, and CI automatic repair is capped at three attempts even when configuration asks for more. It stops earlier when the normalized failure repeats or Git HEAD/worktree content does not change; timestamp-only log changes do not count as progress.
 The generated PR surfaces this recorded evidence in deterministic Risk Assessment, Testing, and Pipeline sections. The [pipeline steps reference](/no-mistakes/reference/pipeline-steps/#pr) owns the PR body composition and size-limit contract.
-The full round history remains available in the run log.
-
-Round trigger types:
-- `initial` - first execution
-- `auto_fix` - triggered by the automatic fix loop
-- `auto_fix` - also used when you press `f` in the TUI or use `no-mistakes axi respond --action fix` to run a follow-up fix
-
-Legacy `user_fix` rounds are still rendered as `auto-fix` in PR summaries for backward compatibility.

@@ -289,7 +289,7 @@ func TestCIStep_MergeConflictAutoFixPromptUsesBaseBranchTip(t *testing.T) {
 		t.Fatalf("buildHost returned nil: %s", skip)
 	}
 	pr := &scm.PR{Number: "42", URL: prURL}
-	_, err := step.autoFixCI(sctx, host, pr, nil, true)
+	_, _, err := step.autoFixCI(sctx, host, pr, nil, true, nil)
 	if err != nil {
 		t.Fatalf("auto-fix CI: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestCIStep_MergeConflictAutoFixPromptUsesStackedBaseTip(t *testing.T) {
 	if host == nil {
 		t.Fatalf("buildHost returned nil: %s", skip)
 	}
-	if _, err := (&CIStep{}).autoFixCI(sctx, host, &scm.PR{Number: "42", URL: prURL}, nil, true); err != nil {
+	if _, _, err := (&CIStep{}).autoFixCI(sctx, host, &scm.PR{Number: "42", URL: prURL}, nil, true, nil); err != nil {
 		t.Fatalf("auto-fix CI: %v", err)
 	}
 	if !strings.Contains(capturedPrompt, "base commit: "+stackedTip) {

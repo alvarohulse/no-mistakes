@@ -2,12 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	_ "modernc.org/sqlite"
 )
 
 func TestExecutor_RecordsCompletedReviewApprovedHead(t *testing.T) {
@@ -127,4 +129,77 @@ func TestExecutor_ParkedOrFailedReviewDoesNotAdvanceExistingApproval(t *testing.
 			t.Fatalf("failed review advanced approval: %#v", got.ReviewApprovedHeadSHA)
 		}
 	})
+}
+
+func TestExecutor_ApprovalWaiverAndCompletionRollBackTogether(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		trigger string
+	}{
+		{
+			name: "waiver write failure",
+			trigger: `CREATE TRIGGER reject_waiver
+				BEFORE INSERT ON round_decisions
+				BEGIN SELECT RAISE(FAIL, 'injected waiver write failure'); END`,
+		},
+		{
+			name: "completion write failure",
+			trigger: `CREATE TRIGGER reject_step_completion
+				BEFORE UPDATE OF status ON step_results
+				WHEN NEW.status = 'completed'
+				BEGIN SELECT RAISE(FAIL, 'injected completion write failure'); END`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(tt.trigger); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			const reviewedHead = "1111111111111111111111111111111111111111"
+			step := &mockStep{name: types.StepReview, outcome: &StepOutcome{
+				NeedsApproval:         true,
+				Findings:              `{"findings":[{"id":"review-1","severity":"error","description":"needs approval","action":"ask-user"}]}`,
+				ReviewApprovedHeadSHA: reviewedHead,
+			}}
+			exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+			done := make(chan error, 1)
+			go func() { done <- exec.Execute(context.Background(), run, repo, t.TempDir()) }()
+
+			waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err == nil {
+				t.Fatal("approval completed despite injected persistence failure")
+			}
+
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := database.GetRoundsByStep(steps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 || rounds[0].Decision != nil {
+				t.Fatalf("waiver survived failed completion: %#v", rounds)
+			}
+			gotRun, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotRun.ReviewApprovedHeadSHA != nil {
+				t.Fatalf("review approval survived failed completion: %#v", gotRun.ReviewApprovedHeadSHA)
+			}
+		})
+	}
 }

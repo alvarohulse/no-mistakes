@@ -365,7 +365,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix","source":"user"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
@@ -382,7 +382,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	instructions := map[string]string{"review-1": "only touch parser.go, skip helpers"}
-	added := []types.Finding{{Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
+	added := []types.Finding{{ID: "review-2", Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
 	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added); err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +433,76 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 	if !strings.Contains(*round.SelectedFindingIDs, "user-1") {
 		t.Errorf("expected user-added finding id in selected list, got %s", *round.SelectedFindingIDs)
 	}
+	if round.Evaluation == nil || round.Decision == nil || len(round.Evaluation.Findings) != 3 {
+		t.Fatalf("structured round = %#v", round)
+	}
+	states := make(map[string]string, len(round.Decision.Findings))
+	for _, reference := range round.Decision.Findings {
+		for _, finding := range round.Evaluation.Findings {
+			if finding.ID == reference.FindingID {
+				states[finding.ExternalID] = reference.State
+			}
+		}
+	}
+	if states["review-2"] != db.RoundDecisionFindingUnselected || states["user-1"] != db.RoundDecisionFindingSelected {
+		t.Fatalf("decision states = %#v", states)
+	}
+}
+
+func TestExecutorDropsAgentSuppliedUserInstructionsBeforeRepair(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	var repairFindings string
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			if callCount == 1 {
+				return &StepOutcome{
+					NeedsApproval: true,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"needs repair","action":"ask-user","user_instructions":"agent-controlled repair instructions"}]}`,
+				}, nil
+			}
+			repairFindings = sctx.PreviousFindings
+			return &StepOutcome{}, nil
+		},
+	}
+	executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), run, repo, t.TempDir()) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := mustParseFindingItems(t, *steps[0].FindingsJSON)
+	if len(stored) != 1 || stored[0].UserInstructions != "" {
+		t.Fatalf("agent instructions persisted in findings: %#v", stored)
+	}
+
+	if err := executor.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+	repair := mustParseFindingItems(t, repairFindings)
+	if len(repair) != 1 || repair[0].UserInstructions != "" {
+		t.Fatalf("agent instructions reached repair: %#v", repair)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) == 0 || rounds[0].Evaluation == nil || rounds[0].Evaluation.Findings[0].UserInstructions != "" {
+		t.Fatalf("agent instructions persisted in structured round: %#v", rounds)
+	}
 }
 
 func firstStepID(t *testing.T, database *db.DB, runID string) string {
@@ -460,7 +530,7 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix","source":"user"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
@@ -495,6 +565,16 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 	}
 	if items[0].ID != "review-2" || items[0].Description != "second" {
 		t.Fatalf("unexpected selected finding: %#v", items[0])
+	}
+	rounds, err := database.GetRoundsByStep(firstStepID(t, database, run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 2 || rounds[0].Evaluation == nil || len(rounds[0].Evaluation.Findings) != 2 {
+		t.Fatalf("rounds = %#v", rounds)
+	}
+	if rounds[0].Evaluation.Findings[0].Source != types.FindingSourceAgent {
+		t.Fatalf("step finding source = %q, want %q", rounds[0].Evaluation.Findings[0].Source, types.FindingSourceAgent)
 	}
 }
 
@@ -542,8 +622,15 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dbSteps[0].FindingsJSON != nil {
-		t.Fatalf("expected findings to be cleared, got %q", *dbSteps[0].FindingsJSON)
+	if dbSteps[0].FindingsJSON == nil {
+		t.Fatal("expected explicit empty findings projection")
+	}
+	findings, err := types.ParseFindingsJSON(*dbSteps[0].FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 0 {
+		t.Fatalf("final findings = %#v, want empty", findings.Items)
 	}
 }
 
@@ -605,8 +692,14 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 	if rounds[0].Trigger != "initial" {
 		t.Fatalf("round 1 trigger = %q, want %q", rounds[0].Trigger, "initial")
 	}
+	if rounds[0].Evaluation == nil || rounds[0].Evaluation.Kind != db.RoundEvaluationInitialReview {
+		t.Fatalf("round 1 evaluation = %#v, want initial_review", rounds[0].Evaluation)
+	}
 	if rounds[1].Trigger != "auto_fix" {
 		t.Fatalf("round 2 trigger = %q, want %q", rounds[1].Trigger, "auto_fix")
+	}
+	if rounds[1].Evaluation == nil || rounds[1].Evaluation.Kind != db.RoundEvaluationRereview {
+		t.Fatalf("round 2 evaluation = %#v, want rereview", rounds[1].Evaluation)
 	}
 }
 

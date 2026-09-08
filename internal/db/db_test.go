@@ -81,7 +81,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result"} {
+	for _, column := range []string{"trigger_provenance", "reviewed_head_sha", "replay_config_json", "repair_failure_fingerprint", "repair_result", "resulting_head_sha", "evaluated_head_sha"} {
 		if !hasColumn(t, d, "step_rounds", column) {
 			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
 		}
@@ -91,10 +91,18 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
-	for _, column := range []string{"delta_cache_creation_tokens", "reported_cost_usd"} {
+	for _, column := range []string{"round_id", "delta_cache_creation_tokens", "reported_cost_usd"} {
 		if !hasColumn(t, d, "agent_invocations", column) {
 			t.Fatalf("agent_invocations.%s column missing from fresh schema", column)
 		}
+	}
+	for _, table := range []string{"round_evaluations", "round_findings", "round_evaluation_artifacts", "round_decisions", "round_decision_findings", "round_repairs"} {
+		if err := d.sql.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("%s table missing: %v", table, err)
+		}
+	}
+	if !hasColumn(t, d, "round_decision_findings", "selection_ordinal") {
+		t.Fatal("round_decision_findings.selection_ordinal column missing from fresh schema")
 	}
 	for _, removed := range []string{"invocation_mode", "agent_observations_json", "nested_agent_count", "pricing_receipt_json"} {
 		if hasColumn(t, d, "agent_invocations", removed) {
@@ -465,6 +473,29 @@ func hasColumn(t *testing.T, d *DB, table, column string) bool {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate table_info: %v", err)
+	}
+	return false
+}
+
+func hasUniquePartialIndex(t *testing.T, d *DB, table, index string) bool {
+	t.Helper()
+	rows, err := d.sql.Query(`SELECT name, "unique", partial FROM pragma_index_list(?)`, table)
+	if err != nil {
+		t.Fatalf("pragma index_list(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var unique, partial int
+		if err := rows.Scan(&name, &unique, &partial); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		if name == index && unique != 0 && partial != 0 {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
 	}
 	return false
 }

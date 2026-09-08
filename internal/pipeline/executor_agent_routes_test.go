@@ -135,6 +135,29 @@ func TestExecutor_RoutesEachStepAndAttributesActualAgent(t *testing.T) {
 	if invocations[1].StepName != string(types.StepTest) || invocations[1].Agent != "pi" {
 		t.Fatalf("test invocation = %+v", invocations[1])
 	}
+	for _, invocation := range invocations {
+		steps, err := database.GetStepsByRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stepResultID string
+		for _, step := range steps {
+			if string(step.StepName) == invocation.StepName {
+				stepResultID = step.ID
+				break
+			}
+		}
+		if stepResultID == "" {
+			t.Fatalf("no step result for invocation %+v", invocation)
+		}
+		rounds, err := database.GetRoundsByStep(stepResultID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rounds) != 1 || len(rounds[0].InvocationIDs) != 1 || rounds[0].InvocationIDs[0] != invocation.ID {
+			t.Fatalf("round invocation references for %s = %#v, want %q", invocation.StepName, rounds, invocation.ID)
+		}
+	}
 }
 
 func TestExecutor_ReviewPoolSelectsPerColdReviewAndPersistsReceipts(t *testing.T) {

@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +137,200 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 	}
 	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != db.DeclinedSelectionJSON {
 		t.Fatalf("approved review selection = %#v, want explicit empty selection", rounds[0].SelectedFindingIDs)
+	}
+}
+
+func TestExecutorRecoveredGateKeepsEmptyStructuredFindingsAsArray(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(stepResult.ID, 1, db.RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(round.ID, db.StepRoundEvaluation{
+		Kind:     db.RoundEvaluationValidation,
+		Findings: []db.StepRoundFinding{},
+	}, db.StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].FindingsJSON == nil {
+		t.Fatalf("structured empty findings projection = %#v", rounds)
+	}
+	if strings.Contains(*rounds[0].FindingsJSON, `"findings":null`) || !strings.Contains(*rounds[0].FindingsJSON, `"findings":[]`) {
+		t.Fatalf("empty findings projection = %s, want findings array", *rounds[0].FindingsJSON)
+	}
+	if err := database.SetStepFindings(stepResult.ID, *rounds[0].FindingsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+	gate, err := executor.recoveredGate(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.findings != *rounds[0].FindingsJSON {
+		t.Fatalf("recovered findings = %q, want %q", gate.findings, *rounds[0].FindingsJSON)
+	}
+}
+
+func TestExecutor_ApprovingValidationFindingsPersistsWaiver(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"test-1","severity":"error","description":"validation failed","action":"ask-user"}],"summary":"validation failed"}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- exec.Execute(context.Background(), run, repo, t.TempDir())
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor timed out")
+	}
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].Decision == nil || rounds[0].Decision.Source != db.RoundSelectionSourceUserWaived || !rounds[0].Decision.ExplicitEmpty {
+		t.Fatalf("validation waiver = %#v", rounds)
+	}
+	if len(rounds[0].Decision.Findings) != 1 || rounds[0].Decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+		t.Fatalf("validation waiver findings = %#v", rounds[0].Decision.Findings)
+	}
+}
+
+func TestExecutor_SkipAndAbortPersistDistinctDecisionReceipts(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionSkip, types.ActionAbort} {
+		t.Run(string(action), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &adaptiveCallStep{
+				name: types.StepTest,
+				fn: func(*StepContext) (*StepOutcome, error) {
+					return &StepOutcome{
+						NeedsApproval: true,
+						Findings:      `{"findings":[{"id":"test-1","severity":"error","description":"validation failed","action":"ask-user"}],"summary":"validation failed"}`,
+					}, nil
+				},
+			}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			done := make(chan error, 1)
+			go func() {
+				done <- exec.Execute(context.Background(), run, repo, t.TempDir())
+			}()
+
+			waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(types.StepTest, action, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if action == types.ActionAbort && err == nil {
+					t.Fatal("abort completed without an error")
+				}
+				if action == types.ActionSkip && err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("executor timed out")
+			}
+
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := database.GetRoundsByStep(steps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 {
+				t.Fatalf("rounds = %#v, want one terminal-decision round", rounds)
+			}
+			wantSource := db.RoundSelectionSourceUserSkipped
+			if action == types.ActionAbort {
+				wantSource = db.RoundSelectionSourceUserAborted
+			}
+			decision := rounds[0].Decision
+			if decision == nil || decision.Source != wantSource || !decision.ExplicitEmpty || len(decision.Findings) != 1 || decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+				t.Fatalf("terminal action decision = %#v, want explicit empty %s receipt", decision, wantSource)
+			}
+		})
+	}
+}
+
+func TestExecutor_ResumeSkipAndAbortPersistDistinctDecisionReceipts(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionSkip, types.ActionAbort} {
+		t.Run(string(action), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			run, stepResult := persistStructuredParkedBuildGate(t, database, run)
+			executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+			done := make(chan error, 1)
+			go func() {
+				done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if err := executor.Respond(types.StepBuild, action, nil); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("recovered gate never accepted response")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := <-done; (action == types.ActionAbort && err == nil) || (action == types.ActionSkip && err != nil) {
+				t.Fatalf("recovered %s result = %v", action, err)
+			}
+
+			rounds, err := database.GetRoundsByStep(stepResult.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 1 {
+				t.Fatalf("rounds = %#v, want one terminal-decision round", rounds)
+			}
+			wantSource := db.RoundSelectionSourceUserSkipped
+			if action == types.ActionAbort {
+				wantSource = db.RoundSelectionSourceUserAborted
+			}
+			decision := rounds[0].Decision
+			if decision == nil || decision.Source != wantSource || !decision.ExplicitEmpty || len(decision.Findings) != 1 || decision.Findings[0].State != db.RoundDecisionFindingUnselected {
+				t.Fatalf("recovered terminal action decision = %#v, want explicit empty %s receipt", decision, wantSource)
+			}
+		})
 	}
 }
 
@@ -570,4 +766,243 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 	if got := fixEvent.fields["attempt"]; fmt.Sprint(got) != "1" {
 		t.Fatalf("fix attempt = %v, want 1", got)
 	}
+}
+
+func TestExecutor_ParkedFindingsCanonicalizeDefaultActionForRecovery(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{
+		name: types.StepBuild,
+		fn: func(*StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings:      `{"findings":[{"id":"build-1","severity":"error","description":"needs decision","action":""}]}`,
+			}, nil
+		},
+	}
+	steps := []Step{step}
+	executor := NewExecutor(database, p, nil, nil, steps, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Execute(context.Background(), run, repo, t.TempDir())
+	}()
+
+	waitForStepStatus(t, database, run.ID, types.StepBuild, types.StepStatusAwaitingApproval)
+	parked, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRecoveredRun(database, parked, steps); err != nil {
+		t.Fatalf("parked gate cannot be recovered: %v", err)
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := types.ParseFindingsJSON(*results[0].FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser {
+		t.Fatalf("stored findings = %#v", findings.Items)
+	}
+	if err := executor.Respond(types.StepBuild, types.ActionAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("aborted parked run completed without error")
+	}
+}
+
+func TestExecutor_LeavesResultingHeadAbsentWhenObservationFails(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].ResultingHeadSHA != nil {
+		t.Fatalf("round resulting head = %#v, want absent after failed observation", rounds)
+	}
+}
+
+func TestExecutor_ResumeTerminalizesGateWhenDecisionPersistenceFails(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     types.ApprovalAction
+		findingIDs []string
+	}{
+		{name: "waiver", action: types.ActionApprove},
+		{name: "skip", action: types.ActionSkip},
+		{name: "abort", action: types.ActionAbort},
+		{name: "user fix", action: types.ActionFix, findingIDs: []string{"build-1"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			run, stepResult := persistStructuredParkedBuildGate(t, database, run)
+			raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rejectRunAwaitingCompletion(t, raw)
+			if _, err := raw.Exec(`CREATE TRIGGER reject_recovered_decision
+				BEFORE INSERT ON round_decisions
+				BEGIN
+					SELECT RAISE(FAIL, 'injected decision persistence failure');
+				END`); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+			done := make(chan error, 1)
+			go func() {
+				done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if err := executor.Respond(types.StepBuild, test.action, test.findingIDs); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("recovered gate never accepted response")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err := <-done; err == nil {
+				t.Fatal("recovered decision persistence failure completed without error")
+			}
+			gotStep, err := database.GetStepResult(stepResult.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotStep.Status != types.StepStatusFailed {
+				t.Fatalf("step after recovered decision persistence failure = %#v", gotStep)
+			}
+			recoveredRun, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recoveredRun.Status != types.RunFailed || recoveredRun.AwaitingAgentSince != nil {
+				t.Fatalf("run after recovered decision persistence failure = %#v", recoveredRun)
+			}
+		})
+	}
+}
+
+func TestExecutor_ResumeCompletesAfterAwaitingStatePersistenceFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	run, stepResult := persistStructuredParkedBuildGate(t, database, run)
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectRunAwaitingCompletion(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	executor := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepBuild)}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- executor.Resume(context.Background(), run, repo, t.TempDir())
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := executor.Respond(types.StepBuild, types.ActionApprove, nil); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered gate never accepted response")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	completedStep, err := database.GetStepResult(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedStep.Status != types.StepStatusCompleted {
+		t.Fatalf("step after awaiting-state persistence failure = %#v", completedStep)
+	}
+	recoveredRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredRun.Status != types.RunCompleted || recoveredRun.AwaitingAgentSince != nil {
+		t.Fatalf("run after awaiting-state persistence failure = %#v", recoveredRun)
+	}
+}
+
+func rejectRunAwaitingCompletion(t *testing.T, raw *sql.DB) {
+	t.Helper()
+	if _, err := raw.Exec(`CREATE TRIGGER reject_awaiting_completion
+		BEFORE UPDATE OF awaiting_agent_since ON runs
+		WHEN NEW.awaiting_agent_since IS NULL AND NEW.status = OLD.status
+		BEGIN
+			SELECT RAISE(FAIL, 'injected awaiting-agent completion failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func persistStructuredParkedBuildGate(t *testing.T, database *db.DB, run *db.Run) (*db.Run, *db.StepResult) {
+	t.Helper()
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, err := database.InsertStepResult(run.ID, types.StepBuild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(stepResult.ID); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.BeginStepRound(stepResult.ID, 1, db.RoundTriggerInitial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepRoundStructured(round.ID, db.StepRoundEvaluation{
+		Kind: db.RoundEvaluationValidation,
+		Findings: []db.StepRoundFinding{{
+			ExternalID: "build-1", Severity: "error", Description: "needs approval", Action: types.ActionAskUser,
+		}},
+	}, db.StructuredRoundSubject{}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(stepResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].FindingsJSON == nil {
+		t.Fatalf("structured parked round = %#v", rounds)
+	}
+	if err := database.SetStepFindings(stepResult.ID, *rounds[0].FindingsJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run, stepResult
 }
