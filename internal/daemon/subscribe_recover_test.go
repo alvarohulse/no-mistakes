@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -261,6 +262,11 @@ func TestSubscribeToCompletedRunYieldsOneGapThenCloses(t *testing.T) {
 }
 
 func TestRecoveredRunClosesTerminalSubscriptionBeforePostRunCleanup(t *testing.T) {
+	sink := newBlockingFinishedTelemetry()
+	restoreTelemetry := telemetry.SetDefaultForTesting(sink)
+	defer restoreTelemetry()
+	t.Cleanup(sink.releaseTelemetry)
+
 	f := newEvidenceFixture(t)
 	manager := NewRunManager(f.db, f.p, func() []pipeline.Step { return nil })
 	runID := f.seed("recovered-terminal-subscription", types.RunRunning, time.Minute, nil)
@@ -278,31 +284,24 @@ func TestRecoveredRunClosesTerminalSubscriptionBeforePostRunCleanup(t *testing.T
 		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
 	}
 
-	manager.evalCaptureMu.Lock()
-	releasedEvalCapture := false
-	t.Cleanup(func() {
-		if !releasedEvalCapture {
-			manager.evalCaptureMu.Unlock()
-		}
-	})
 	manager.resumeRecoveredRun(recoveredRunPlan{
 		run: run, repo: f.repo, workDir: t.TempDir(), gateDir: t.TempDir(),
 		cfg: evalConfig(true, true), agent: recoveredRunTestAgent{},
 	})
 
-	closeCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	for {
-		if _, ok := subscription.Next(closeCtx); !ok {
-			if closeCtx.Err() != nil {
-				t.Fatal("terminal subscription remained open while post-run cleanup was blocked")
-			}
-			break
-		}
+	select {
+	case <-sink.finishedEntered:
+	case <-time.After(testRunTerminalBudget):
+		t.Fatal("recovered run did not reach terminal telemetry")
+	}
+	manager.subMu.Lock()
+	subscriberCount := len(manager.subscribers[runID])
+	manager.subMu.Unlock()
+	if subscriberCount != 0 {
+		t.Fatalf("subscriber count while terminal telemetry is blocked = %d, want 0", subscriberCount)
 	}
 
-	manager.evalCaptureMu.Unlock()
-	releasedEvalCapture = true
+	sink.releaseTelemetry()
 	manager.wg.Wait()
 }
 

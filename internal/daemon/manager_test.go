@@ -155,7 +155,11 @@ func TestStartRunClosesTerminalSubscriptionBeforeTelemetry(t *testing.T) {
 			}
 
 			step.releaseExecution()
-			<-sink.finishedEntered
+			select {
+			case <-sink.finishedEntered:
+			case <-time.After(testRunTerminalBudget):
+				t.Fatal("run did not reach terminal telemetry")
+			}
 			manager.subMu.Lock()
 			subscriberCount := len(manager.subscribers[runID])
 			manager.subMu.Unlock()
