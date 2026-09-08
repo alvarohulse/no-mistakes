@@ -20,6 +20,18 @@ func TestOpenMigratesHistoricalRoundsAsCompleted(t *testing.T) {
 		CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL, head_sha TEXT NOT NULL, base_sha TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 		CREATE TABLE step_results (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_name TEXT NOT NULL, step_order INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending');
 		CREATE TABLE step_rounds (id TEXT PRIMARY KEY, step_result_id TEXT NOT NULL, round INTEGER NOT NULL, trigger_type TEXT NOT NULL, findings_json TEXT, duration_ms INTEGER NOT NULL, created_at INTEGER NOT NULL);
+		-- This is the intermediate structured-round schema from before the
+		-- selection-order column was added.
+		CREATE TABLE round_decision_findings (
+			decision_id TEXT NOT NULL,
+			finding_id TEXT NOT NULL,
+			ordinal INTEGER NOT NULL,
+			state TEXT NOT NULL,
+			user_instructions TEXT NOT NULL DEFAULT '',
+			edited INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (decision_id, finding_id),
+			UNIQUE (decision_id, ordinal)
+		);
 		INSERT INTO repos VALUES ('repo', '/tmp/legacy-rounds', 'https://example.com/repo.git', 'main', 1);
 		INSERT INTO runs VALUES ('run', 'repo', 'feature', 'head', 'base', 'completed', 1, 1);
 		INSERT INTO step_results VALUES ('step', 'run', 'review', 3, 'completed');
