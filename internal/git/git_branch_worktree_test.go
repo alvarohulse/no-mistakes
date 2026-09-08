@@ -2,11 +2,13 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWorktreeAddAndRemove(t *testing.T) {
@@ -150,6 +152,48 @@ func TestWorktreeAddAndRemoveConcurrentSameCommonDir(t *testing.T) {
 		if err := WorktreeRemove(ctx, bare, addedWorktree); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestWorktreeOperationLockHonorsContextWhileWaiting(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "bare")
+	if err := InitBare(context.Background(), repoDir); err != nil {
+		t.Fatal(err)
+	}
+
+	holderEntered := make(chan struct{})
+	holderRelease := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- withWorktreeOperationLock(context.Background(), repoDir, nil, func() error {
+			close(holderEntered)
+			<-holderRelease
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waiterDone := make(chan error, 1)
+	go func() {
+		waiterDone <- withWorktreeOperationLock(ctx, repoDir, nil, func() error {
+			return errors.New("canceled waiter entered operation")
+		})
+	}()
+	cancel()
+
+	select {
+	case err := <-waiterDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context cancellation, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("context cancellation did not release the waiting operation")
+	}
+
+	close(holderRelease)
+	if err := <-holderDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
