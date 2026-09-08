@@ -725,6 +725,35 @@ func TestPushOperationStartsWithStableIDBeforeTerminalUpdate(t *testing.T) {
 	}
 }
 
+func TestUpdatePushOperationProgressPersistsResolvedTarget(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.TargetFingerprint = "resolved-target-fingerprint"
+	started.TargetIdentity = "ssh://user:secret@example.com/owner/repo.git"
+	if err := d.UpdatePushOperationProgress(*started); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := d.GetPushOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("push operations = %+v", operations)
+	}
+	if operations[0].TargetFingerprint != "resolved-target-fingerprint" || operations[0].TargetIdentity != "ssh://redacted@example.com/owner/repo.git" {
+		t.Fatalf("resolved target = %+v", operations[0])
+	}
+}
+
 func TestCompletePushOperationWithDiagnosticOwnsArtifactAtomically(t *testing.T) {
 	d := openTestDB(t)
 	receipt, _, _, _ := newPushOperationFixture(t, d)

@@ -273,8 +273,8 @@ func (d *DB) UpdatePushOperationProgress(operation PushOperation) error {
 		return err
 	}
 	result, err := d.sql.Exec(
-		`UPDATE push_operations SET pushed_sha = ?, observed_remote_sha = ?, verified_remote_sha = ?, lease_or_force_decision = ?, decision_reason = ?, outcome = ?, review_approved_head_sha = ?, last_seen_sha = ?, binding_updated = ?, resulting_generation = ?, retry_of_operation_id = ?, retry_reason = ? WHERE operation_id = ? AND terminalized = 0`,
-		operation.PushedSHA, operation.ObservedRemoteSHA, operation.VerifiedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome,
+		`UPDATE push_operations SET target_kind = ?, target_fingerprint = ?, target_identity = ?, pushed_sha = ?, observed_remote_sha = ?, verified_remote_sha = ?, lease_or_force_decision = ?, decision_reason = ?, outcome = ?, review_approved_head_sha = ?, last_seen_sha = ?, binding_updated = ?, resulting_generation = ?, retry_of_operation_id = ?, retry_reason = ? WHERE operation_id = ? AND terminalized = 0`,
+		operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity, operation.PushedSHA, operation.ObservedRemoteSHA, operation.VerifiedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome,
 		operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration,
 		operation.RetryOfOperationID, operation.RetryReason, operation.ID,
 	)
