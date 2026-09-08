@@ -18,22 +18,46 @@ type PushStep struct{}
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
-func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
-	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+func (s *PushStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, runErr error) {
+	pushURL := initialPushURL(sctx)
+	ref := normalizedBranchRef(sctx.Run.Branch)
+	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
+	if err := receipt.start(); err != nil {
 		return nil, err
 	}
-	ctx := sctx.Ctx
+	defer func() {
+		if receiptErr := receipt.finish(runErr); receiptErr != nil {
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
+	pushURL, err := receipt.resolveTargetURL()
+	if err != nil {
+		return nil, err
+	}
+	return s.execute(sctx, receipt, pushURL)
+}
+
+func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecorder, pushURL string) (*pipeline.StepOutcome, error) {
+	if err := assertPipelineHeadContinuityWithRunner(sctx, s.Name(), func(args ...string) (string, error) {
+		return durablePushGitCommand(sctx, receipt, pushOperationPurpose(sctx), args...)
+	}); err != nil {
+		receipt.markRefused(err.Error())
+		return nil, err
+	}
 	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
-	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	purpose := pushOperationPurpose(sctx)
+	status, err := durablePushGitCommand(sctx, receipt, purpose, "status", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("check for uncommitted changes before push: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
-		return nil, fmt.Errorf("refusing to push uncommitted changes without agent authorship metadata")
+		err := fmt.Errorf("refusing to push uncommitted changes without agent authorship metadata")
+		receipt.markRefused(err.Error())
+		return nil, err
 	}
 
 	// Run format command if configured (before committing, so changes are formatted)
@@ -57,30 +81,29 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// Commit any changes made by the configured formatter. Test evidence is
 	// deliberately not among them: it is retained outside the worktree in
 	// owner-local storage, so no artifact enters repository history.
-	status, err = git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	status, err = durablePushGitCommand(sctx, receipt, purpose, "status", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("check formatter changes: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing formatter changes...")
-		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
+		if _, err := durablePushGitCommand(sctx, receipt, purpose, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage formatter changes: %w", err)
 		}
-		_, err := git.Run(ctx, sctx.WorkDir, "commit", "-m", "chore(format): apply configured formatting")
+		_, err := durablePushGitCommand(sctx, receipt, purpose, "commit", "-m", "chore(format): apply configured formatting")
 		if err != nil {
 			return nil, fmt.Errorf("commit formatter changes: %w", err)
 		}
-		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
+		headSHA, err := durablePushGitCommand(sctx, receipt, purpose, "rev-parse", "HEAD")
 		if err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
-		newHeadSHA = headSHA
+		newHeadSHA = strings.TrimSpace(headSHA)
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
-	pushURL := resolvePushURL(sctx)
 	pushTarget := "upstream"
 	usingFork := strings.TrimSpace(sctx.Repo.ForkURL) != ""
 	if usingFork {
@@ -90,11 +113,22 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		sctx.Log(fmt.Sprintf("pushing to %s (%s)...", safeurl.Redact(pushURL), ref))
 	}
 
-	headBeingPushed, err := git.HeadSHA(ctx, sctx.WorkDir)
+	headBeingPushed, err := durablePushGitCommand(sctx, receipt, purpose, "rev-parse", "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
-	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+	headBeingPushed = strings.TrimSpace(headBeingPushed)
+	receipt.setPushedSHA(headBeingPushed)
+	if sctx.Run.ReviewApprovedHeadSHA != nil {
+		approved := strings.TrimSpace(*sctx.Run.ReviewApprovedHeadSHA)
+		if approved != "" {
+			receipt.reviewApprovedSHA = &approved
+		}
+	}
+	if err := assertReviewApprovedPushHeadWithRunner(sctx, headBeingPushed, func(args ...string) (string, error) {
+		return durablePushGitCommand(sctx, receipt, purpose, args...)
+	}); err != nil {
+		receipt.markRefused(err.Error())
 		return nil, err
 	}
 
@@ -104,11 +138,42 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// would clobber an out-of-band or stale-mirror commit fails loudly instead
 	// of silently dropping it. A bare --force-with-lease offers no protection
 	// when pushing to a URL (no remote-tracking refs), so the anchor is explicit.
-	lastSeen := lastFetchedBranchTip(ctx, sctx.WorkDir, branch, usingFork)
-	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	trackingRef := "refs/remotes/origin/" + branch
+	if usingFork {
+		trackingRef = forkBranchTrackingRef(branch)
+	}
+	lastSeen := ""
+	if tracked, trackErr := durablePushGitCommand(sctx, receipt, purpose, "rev-parse", "--verify", "--quiet", trackingRef+"^{commit}"); trackErr == nil {
+		lastSeen = strings.TrimSpace(tracked)
+	} else if !isExpectedMissingRefError(trackErr) {
+		return nil, fmt.Errorf("resolve last-seen remote head: %w", trackErr)
+	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
+	receipt.persistProgress()
+	if receipt.progressErr != nil {
+		return nil, receipt.progressErr
+	}
+	gitRun := func(args ...string) (string, error) {
+		return durablePushGitCommand(sctx, receipt, purpose, args...)
+	}
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA, receipt.setObservedRemoteSHA)
 	if err != nil {
+		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
+		var refusal *forcePushWouldDiscardError
+		if errors.As(err, &refusal) {
+			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
+		}
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
+	}
+	switch {
+	case decision.newBranch:
+		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
+	case decision.upToDate:
+		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	case decision.incorporated:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote movement passed incorporation safety checks", decision.remoteSHA)
+	default:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
 	pushCommand := fmt.Sprintf("git push %s %s:%s", pushURL, headBeingPushed, ref)
 	pushRan := false
@@ -116,7 +181,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	case decision.newBranch:
 		// New branch: regular push (no force needed).
 		pushRan = true
-		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, "", false); err != nil {
+		receipt.transportStarted = true
+		if _, err := durablePushGitCommand(sctx, receipt, purpose, "push", pushURL, headBeingPushed+":"+ref); err != nil {
 			sctx.RecordCommand(pushCommand, nil, err)
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
@@ -127,7 +193,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// Existing branch: force-with-lease anchored to the verified remote head.
 		pushRan = true
 		pushCommand = fmt.Sprintf("git push --force-with-lease=%s:%s %s %s:%s", ref, decision.remoteSHA, pushURL, headBeingPushed, ref)
-		if err := git.PushCommit(ctx, sctx.WorkDir, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
+		receipt.transportStarted = true
+		if _, err := durablePushGitCommand(sctx, receipt, purpose, "push", pushURL, "--force-with-lease="+ref+":"+decision.remoteSHA, headBeingPushed+":"+ref); err != nil {
 			sctx.RecordCommand(pushCommand, nil, err)
 			return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 		}
@@ -136,24 +203,35 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		zero := 0
 		sctx.RecordCommand(pushCommand, &zero, nil)
 	}
-	verifiedRemote, err := git.LsRemote(ctx, sctx.WorkDir, pushURL, ref)
-	if err != nil || verifiedRemote != headBeingPushed {
-		if err != nil {
-			return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
-		}
-		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
+	verifiedRemote, err := durablePushGitCommand(sctx, receipt, purpose, "ls-remote", pushURL, ref)
+	if err != nil {
+		return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 	}
-	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+	if err := recordVerifiedPushRemoteSHA(receipt, verifiedRemote, headBeingPushed); err != nil {
+		return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
+	}
+	verifiedRemote = *receipt.verifiedRemoteSHA
+	binding := db.PushBinding{
 		HeadSHA:           headBeingPushed,
 		TargetKind:        pushTarget,
 		TargetFingerprint: branchsync.TargetFingerprint(pushURL),
 		Ref:               ref,
-	}); err != nil {
+	}
+	var generation int64
+	if receipt.enabled() {
+		generation, err = sctx.DB.UpdateRunHeadAndPushBindingWithGenerationForOperation(sctx.Run.ID, headBeingPushed, binding, receipt.operationID)
+	} else {
+		err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
+	}
+	if err != nil {
 		return nil, err
+	}
+	if receipt.enabled() {
+		receipt.recordBinding(generation)
 	}
 
 	if newHeadSHA != "" {
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, newHeadSHA); err != nil {
+		if _, err := durablePushGitCommand(sctx, receipt, purpose, "update-ref", ref, newHeadSHA); err != nil {
 			return nil, fmt.Errorf("update local branch ref: %w", err)
 		}
 	}
@@ -162,8 +240,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// fresh read of mutable worktree HEAD after the push.
 	if headBeingPushed != sctx.Run.HeadSHA {
 		sctx.Run.HeadSHA = headBeingPushed
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
-			return nil, err
+		if !receipt.enabled() {
+			if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -171,7 +251,39 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	return &pipeline.StepOutcome{}, nil
 }
 
+func pushReceiptStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func recordVerifiedPushRemoteSHA(receipt *pushReceiptRecorder, output, expected string) error {
+	fields := strings.Fields(output)
+	if len(fields) == 0 || fields[0] != expected {
+		if len(fields) > 0 {
+			receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
+		}
+		receipt.persistProgress()
+		observed := "missing"
+		if len(fields) > 0 {
+			observed = fields[0]
+		}
+		return errors.Join(fmt.Errorf("remote head %s does not equal pushed head %s", observed, expected), receipt.progressErr)
+	}
+	receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
+	receipt.persistProgress()
+	return receipt.progressErr
+}
+
 func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {
+	return assertReviewApprovedPushHeadWithRunner(sctx, proposedHead, func(args ...string) (string, error) {
+		return git.Run(sctx.Ctx, sctx.WorkDir, args...)
+	})
+}
+
+func assertReviewApprovedPushHeadWithRunner(sctx *pipeline.StepContext, proposedHead string, gitRun gitRunner) error {
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		return fmt.Errorf("load durable review approval before push: %w", err)
@@ -183,12 +295,12 @@ func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead strin
 	if !isFullGitObjectID(approvedHead) {
 		return fmt.Errorf("refusing to push: durable review-approved head is malformed")
 	}
-	resolved, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "--verify", approvedHead+"^{commit}")
+	resolved, err := gitRun("rev-parse", "--verify", approvedHead+"^{commit}")
 	if err != nil || !strings.EqualFold(strings.TrimSpace(resolved), approvedHead) {
 		return fmt.Errorf("refusing to push: durable review-approved head is unreachable")
 	}
 	if proposedHead != approvedHead {
-		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", approvedHead, proposedHead); err != nil {
+		if _, err := gitRun("merge-base", "--is-ancestor", approvedHead, proposedHead); err != nil {
 			return fmt.Errorf("refusing to push: proposed head %s violates continuity with review-approved head %s (it is not an equal or descendant commit)", shortObjectID(proposedHead), shortObjectID(approvedHead))
 		}
 	}

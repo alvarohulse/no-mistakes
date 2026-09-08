@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,8 +40,10 @@ var (
 // even if provenance persistence later fails.
 type persistedStepCommandResult struct {
 	output         string
+	stderr         string
 	exitCode       int
 	executed       bool
+	attemptID      string
 	executionErr   error
 	persistenceErr error
 }
@@ -341,6 +344,10 @@ func runPersistedStepCommand(sctx *pipeline.StepContext, resolved runner.Resolve
 }
 
 func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, execute func() (runner.Result, error)) persistedStepCommandResult {
+	return runPersistedStepCommandResultWithAttemptHook(sctx, resolved, purpose, definitionSource, sequence, nil, execute)
+}
+
+func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, onAttemptStarted func(db.CommandAttempt) (*db.CommandAttempt, error), execute func() (runner.Result, error)) persistedStepCommandResult {
 	var attempt *db.CommandAttempt
 	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
 		definitionResolution := resolved
@@ -384,7 +391,7 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 				break
 			}
 		}
-		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
+		attemptInput := db.CommandAttempt{
 			RunID:               sctx.Run.ID,
 			CommandID:           definition.ID,
 			StepID:              sctx.StepResultID,
@@ -401,7 +408,12 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 			InputStateID:        inputStateID,
 			RetryOfAttemptID:    retryOf,
 			RetryReason:         retryReason,
-		})
+		}
+		if onAttemptStarted != nil {
+			attempt, persistErr = onAttemptStarted(attemptInput)
+		} else {
+			attempt, persistErr = sctx.DB.StartCommandAttempt(attemptInput)
+		}
 		if persistErr != nil {
 			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)}
 		}
@@ -410,6 +422,17 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 	runnerResult, executionErr := execute()
 	if executionErr != nil {
 		executionErr = fmt.Errorf("%w: run command %q: %w", errCommandExecution, resolved.Script, executionErr)
+	}
+	output := runnerResult.Output
+	if resolved.Provenance.Source == runner.SourceDirectGit {
+		output = runnerResult.Stdout
+		if output == "" && runnerResult.Stderr == "" {
+			output = runnerResult.Output
+		}
+	}
+	artifactOutput := runnerResult.Output
+	if resolved.Provenance.Source == runner.SourceDirectGit {
+		artifactOutput = safeurl.RedactText(artifactOutput)
 	}
 	var recordedExitCode *int
 	if executionErr == nil {
@@ -450,7 +473,7 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 		if storeErr != nil {
 			persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output store: %w", errCommandPersistence, storeErr))
 		} else {
-			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(runnerResult.Output))
+			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(artifactOutput))
 			if artifactErr != nil {
 				persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr))
 			} else if _, persistErr := completeControllerCommandAttemptWithOutputArtifact(sctx.DB, attempt.ID, attemptOutcome, attemptExitCode, runnerResult.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
@@ -479,13 +502,18 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 			persistenceErr = errors.Join(outcomeErr, persistenceErr)
 		}
 	}
-	return persistedStepCommandResult{
-		output:         runnerResult.Output,
+	result := persistedStepCommandResult{
+		output:         output,
+		stderr:         runnerResult.Stderr,
 		exitCode:       runnerResult.ExitCode,
 		executed:       true,
 		executionErr:   executionErr,
 		persistenceErr: persistenceErr,
 	}
+	if attempt != nil {
+		result.attemptID = attempt.ID
+	}
+	return result
 }
 
 // runStepGitCommand executes a controller-owned Git command without routing
@@ -498,6 +526,10 @@ func runStepGitCommand(sctx *pipeline.StepContext, command, purpose string, args
 }
 
 func runStepGitCommandResult(sctx *pipeline.StepContext, command, purpose string, args ...string) persistedStepCommandResult {
+	return runStepGitCommandResultWithAttemptHook(sctx, command, purpose, nil, args...)
+}
+
+func runStepGitCommandResultWithAttemptHook(sctx *pipeline.StepContext, command, purpose string, onAttemptStarted func(db.CommandAttempt) (*db.CommandAttempt, error), args ...string) persistedStepCommandResult {
 	sequence := sctx.NextCommandSequence()
 	gitArgs := append([]string(nil), args...)
 	if git.LooksLikeBareRepository(sctx.WorkDir) {
@@ -514,7 +546,7 @@ func runStepGitCommandResult(sctx *pipeline.StepContext, command, purpose string
 			Executable:    "git",
 		},
 	}
-	return runPersistedStepCommandResult(sctx, resolved, purpose, "", sequence, func() (runner.Result, error) {
+	return runPersistedStepCommandResultWithAttemptHook(sctx, resolved, purpose, "", sequence, onAttemptStarted, func() (runner.Result, error) {
 		return executeStepGitCommand(sctx, gitArgs)
 	})
 }
@@ -527,8 +559,16 @@ func executeStepGitCommand(sctx *pipeline.StepContext, args []string) (runner.Re
 		grace = sctx.Config.ProcessTerminationGrace
 	}
 	shellenv.ConfigureShellCommand(cmd, grace)
-	output, err := shellenv.CombinedOutputShellCommand(cmd)
-	result := runner.Result{Output: string(output), ExitCode: 0}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := shellenv.RunShellCommand(cmd)
+	result := runner.Result{
+		Output:   stdout.String() + stderr.String(),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+	}
 	if err == nil {
 		return result, nil
 	}

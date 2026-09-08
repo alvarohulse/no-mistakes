@@ -157,6 +157,11 @@ func TestTargetIdentityNeverPersistsOrDisplaysHTTPUserinfo(t *testing.T) {
 	if TargetFingerprint(credentialed) != TargetFingerprint(plain) {
 		t.Fatal("credential stripping changed target identity")
 	}
+	credentialedSSH := "ssh://git:secret@Example.com/owner/repo.git"
+	redactedSSH := "ssh://redacted@Example.com/owner/repo.git"
+	if TargetFingerprint(credentialedSSH) != TargetFingerprint(redactedSSH) {
+		t.Fatal("SSH credential stripping changed target identity")
+	}
 	if got := displayTarget(credentialed); got != plain || strings.Contains(got, "secret") || strings.Contains(got, "token") {
 		t.Fatalf("display target = %q", got)
 	}

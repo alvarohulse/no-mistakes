@@ -7,7 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestPushStep_RejectsUnattributedAgentChanges(t *testing.T) {
@@ -260,6 +264,7 @@ func TestPushStep_BindsRemoteAndDatabaseToVerifiedCommitWhenHEADMovesDuringPush(
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "refs/heads/feature"
 	recordReviewApproval(t, sctx, approvedHead)
+	stepResultID, roundID := enablePushReceipt(t, sctx)
 
 	if _, err := (&PushStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
@@ -276,6 +281,23 @@ func TestPushStep_BindsRemoteAndDatabaseToVerifiedCommitWhenHEADMovesDuringPush(
 	}
 	if dbRun.HeadSHA != approvedHead || dbRun.LastPushedSHA == nil || *dbRun.LastPushedSHA != approvedHead {
 		t.Fatalf("durable push binding did not retain verified commit %s: %#v", approvedHead, dbRun)
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResultID || receipt.RoundID != roundID || receipt.Outcome != db.PushOperationOutcomeUpdated || receipt.LeaseOrForceDecision != db.PushLeaseOrForceDecisionForceWithLease {
+		t.Fatalf("push receipt = %+v", receipt)
+	}
+	if receipt.PushedSHA == nil || *receipt.PushedSHA != approvedHead || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != submittedHead || receipt.VerifiedRemoteSHA == nil || *receipt.VerifiedRemoteSHA != approvedHead {
+		t.Fatalf("push receipt heads = %+v", receipt)
+	}
+	if !receipt.BindingUpdated || receipt.ResultingGeneration == nil || *receipt.ResultingGeneration != 1 {
+		t.Fatalf("push receipt binding = %+v", receipt)
 	}
 	t.Logf(
 		"review-approved=%s concurrent-HEAD=%s remote-delivered=%s durable-head=%s durable-last-pushed=%s",
@@ -319,9 +341,20 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, staleHeadSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstream
 	recordReviewApproval(t, sctx, actualHeadSHA)
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	step := &PushStep{}
-	_, err := step.Execute(sctx)
+	_, err = step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +377,26 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	}
 	if dbRun.PushActive {
 		t.Fatal("push-active marker remained set after successful step")
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResult.ID || receipt.RoundID != round.ID || receipt.Outcome != db.PushOperationOutcomeAlreadyEqual || receipt.LeaseOrForceDecision != db.PushLeaseOrForceDecisionAlreadyEqual {
+		t.Fatalf("push receipt = %+v", receipt)
+	}
+	if receipt.PushedSHA == nil || *receipt.PushedSHA != actualHeadSHA || receipt.VerifiedRemoteSHA == nil || *receipt.VerifiedRemoteSHA != actualHeadSHA {
+		t.Fatalf("push receipt heads = %+v", receipt)
+	}
+	if !receipt.BindingUpdated || receipt.ResultingGeneration == nil || *receipt.ResultingGeneration != 1 {
+		t.Fatalf("push receipt binding = %+v", receipt)
+	}
+	if len(receipt.CommandAttemptIDs) == 0 {
+		t.Fatal("push receipt has no durable command attempts")
 	}
 }
 
@@ -438,6 +491,7 @@ func TestPushStep_TargetsForkWhenConfigured(t *testing.T) {
 	sctx.Repo.ForkURL = fork
 	sctx.Run.Branch = "feature"
 	recordReviewApproval(t, sctx, headSHA)
+	stepResultID, roundID := enablePushReceipt(t, sctx)
 
 	step := &PushStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -461,6 +515,23 @@ func TestPushStep_TargetsForkWhenConfigured(t *testing.T) {
 	if dbRun.PushTargetFingerprint == nil || strings.Contains(*dbRun.PushTargetFingerprint, fork) {
 		t.Fatalf("push target fingerprint persisted a URL: %#v", dbRun.PushTargetFingerprint)
 	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResultID || receipt.RoundID != roundID || receipt.TargetKind != "fork" || receipt.Outcome != db.PushOperationOutcomeCreated || receipt.LeaseOrForceDecision != db.PushLeaseOrForceDecisionNewBranch {
+		t.Fatalf("fork push receipt = %+v", receipt)
+	}
+	if receipt.PushedSHA == nil || *receipt.PushedSHA != headSHA || receipt.ObservedRemoteSHA != nil || receipt.VerifiedRemoteSHA == nil || *receipt.VerifiedRemoteSHA != headSHA {
+		t.Fatalf("fork push receipt heads = %+v", receipt)
+	}
+	if !receipt.BindingUpdated || receipt.ResultingGeneration == nil || *receipt.ResultingGeneration != 1 {
+		t.Fatalf("fork push receipt binding = %+v", receipt)
+	}
 }
 
 func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
@@ -482,6 +553,7 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	sctx.Repo.ForkURL = "https://user:secret@example.com/fork/project.git"
 	sctx.Run.Branch = "refs/heads/feature"
 	recordReviewApproval(t, sctx, headSHA)
+	enablePushReceipt(t, sctx)
 
 	step := &PushStep{}
 	_, err = step.Execute(sctx)
@@ -494,4 +566,44 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "https://redacted@example.com/fork/project.git") {
 		t.Fatalf("expected redacted fork URL in error, got %v", err)
 	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range attempts {
+		if attempt.OutputArtifactID == nil {
+			continue
+		}
+		outputArtifact, err := sctx.DB.GetArtifact(*attempt.OutputArtifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := store.Read(outputArtifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(output), "secret") {
+			t.Fatalf("direct git output artifact leaked credential: %q", output)
+		}
+	}
+}
+
+func enablePushReceipt(t *testing.T, sctx *pipeline.StepContext) (string, string) {
+	t.Helper()
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
+	return stepResult.ID, round.ID
 }

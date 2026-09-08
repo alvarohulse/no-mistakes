@@ -16,9 +16,10 @@ type gitRunner func(args ...string) (string, error)
 // Exactly one of newBranch / upToDate is true, or neither (a guarded
 // force-push anchored to remoteSHA is required).
 type forcePushDecision struct {
-	remoteSHA string // current remote head; the lease anchor for a force-push
-	newBranch bool   // the branch does not exist on the remote -> plain push
-	upToDate  bool   // the remote already points at the head -> no push needed
+	remoteSHA    string // current remote head; the lease anchor for a force-push
+	newBranch    bool   // the branch does not exist on the remote -> plain push
+	upToDate     bool   // the remote already points at the head -> no push needed
+	incorporated bool   // remote moved, but patch-ID analysis proved its changes are included
 }
 
 // forcePushWouldDiscardError reports that a force-push would discard commits
@@ -63,13 +64,18 @@ func (e *forcePushWouldDiscardError) Error() string {
 // incorporated, by content (patch-id), into newHeadSHA, or is part of the
 // history the run already knew (reachable from baseSHA) and is thus a deliberate
 // rewrite rather than a clobber. Anything else is refused rather than discarded.
-func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSeenSHA, baseSHA string) (forcePushDecision, error) {
+func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSeenSHA, baseSHA string, observed ...func(string) error) (forcePushDecision, error) {
 	current, err := lsRemoteSHA(gitRun, pushURL, ref)
 	if err != nil {
 		return forcePushDecision{}, fmt.Errorf("resolve remote head for %s: %w", ref, err)
 	}
 	if current == "" {
 		return forcePushDecision{newBranch: true}, nil
+	}
+	if len(observed) > 0 && observed[0] != nil {
+		if err := observed[0](current); err != nil {
+			return forcePushDecision{remoteSHA: current}, err
+		}
 	}
 	if current == newHeadSHA {
 		return forcePushDecision{remoteSHA: current, upToDate: true}, nil
@@ -85,10 +91,10 @@ func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSe
 	// refuse rather than discard it.
 	dropped, err := remoteCommitsNotIncorporated(gitRun, pushURL, ref, newHeadSHA, current, baseSHA)
 	if err != nil {
-		return forcePushDecision{}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
+		return forcePushDecision{remoteSHA: current}, fmt.Errorf("verify force-push safety for %s: %w", ref, err)
 	}
 	if len(dropped) == 0 {
-		return forcePushDecision{remoteSHA: current}, nil
+		return forcePushDecision{remoteSHA: current, incorporated: true}, nil
 	}
 	return forcePushDecision{}, &forcePushWouldDiscardError{ref: ref, remoteSHA: current, dropped: dropped}
 }
@@ -135,6 +141,8 @@ func remoteCommitsNotIncorporated(gitRun gitRunner, pushURL, ref, newHeadSHA, re
 	if baseSHA != "" && !git.IsZeroSHA(baseSHA) {
 		if _, err := gitRun("rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err == nil {
 			args = append(args, "^"+baseSHA)
+		} else if !isExpectedMissingRefError(err) {
+			return nil, fmt.Errorf("resolve force-push base %s: %w", baseSHA, err)
 		}
 	}
 	out, err := gitRun(args...)

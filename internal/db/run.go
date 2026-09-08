@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -516,6 +518,78 @@ func (d *DB) UpdateRunPushBinding(id string, binding PushBinding) error {
 	return nil
 }
 
+// UpdateRunPushBindingWithGeneration advances a run's successful-push
+// provenance and returns the generation committed by that same transaction.
+func (d *DB) UpdateRunPushBindingWithGeneration(id string, binding PushBinding) (int64, error) {
+	return d.updateRunPushBindingWithGeneration(id, binding, "")
+}
+
+func (d *DB) UpdateRunPushBindingWithGenerationForOperation(id string, binding PushBinding, operationID string) (int64, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return 0, fmt.Errorf("update run push binding: operation ID is required")
+	}
+	return d.updateRunPushBindingWithGeneration(id, binding, operationID)
+}
+
+func (d *DB) UpdateRunHeadAndPushBindingWithGenerationForOperation(id, headSHA string, binding PushBinding, operationID string) (int64, error) {
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" || strings.TrimSpace(operationID) == "" {
+		return 0, fmt.Errorf("update run head and push binding: head SHA and operation ID are required")
+	}
+	if binding.HeadSHA != headSHA {
+		return 0, fmt.Errorf("update run head and push binding: binding head does not match run head")
+	}
+	return d.updateRunHeadAndPushBindingWithGeneration(id, headSHA, binding, operationID)
+}
+
+func (d *DB) updateRunPushBindingWithGeneration(id string, binding PushBinding, operationID string) (int64, error) {
+	return d.updateRunHeadAndPushBindingWithGeneration(id, "", binding, operationID)
+}
+
+func (d *DB) updateRunHeadAndPushBindingWithGeneration(id, headSHA string, binding PushBinding, operationID string) (int64, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("update run push binding: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	ts := now()
+	var result sql.Result
+	if headSHA != "" {
+		result, err = tx.Exec(
+			`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+			headSHA, binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
+		)
+	} else {
+		result, err = tx.Exec(
+			`UPDATE runs SET last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+			binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
+		)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("update run push binding: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return 0, fmt.Errorf("update run push binding: expected one run, updated %d", affected)
+	}
+	var generation sql.NullInt64
+	if err := tx.QueryRow(`SELECT push_generation FROM runs WHERE id = ?`, id).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("update run push binding: read generation: %w", err)
+	}
+	if !generation.Valid {
+		return 0, fmt.Errorf("update run push binding: committed generation is unavailable")
+	}
+	if operationID != "" {
+		if err := persistPushOperationBinding(tx, operationID, id, binding, generation.Int64); err != nil {
+			return 0, fmt.Errorf("update run push binding: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("update run push binding: commit: %w", err)
+	}
+	return generation.Int64, nil
+}
+
 // SetRunCustodyReturned stamps the moment a guarded recovery explicitly
 // returned custody of this run's branch to the operator worktree. Stamping is
 // idempotent: the first timestamp wins so the record keeps the original
@@ -966,6 +1040,9 @@ func (d *DB) RecoverStaleRun(id, errMsg string) (bool, error) {
 	); err != nil {
 		return false, fmt.Errorf("recover stale run rounds: %w", err)
 	}
+	if err := terminalizeInProgressPushOperations(tx, "SELECT id FROM runs WHERE id = ? AND status IN (?, ?)", []any{id, types.RunPending, types.RunRunning}, errMsg, time.Now().UnixMilli()); err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(
 		`UPDATE runs SET status = ?, error = ?, push_active = 0,
 			parked_ms = COALESCE(parked_ms, 0) + CASE
@@ -1030,6 +1107,11 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	); err != nil {
 		return 0, fmt.Errorf("recover stale rounds: %w", err)
 	}
+	operationRunArgs := []any{types.RunPending, types.RunRunning}
+	operationRunArgs = append(operationRunArgs, args...)
+	if err := terminalizeInProgressPushOperations(tx, "SELECT id FROM runs WHERE status IN (?, ?)"+placeholders, operationRunArgs, errMsg, time.Now().UnixMilli()); err != nil {
+		return 0, err
+	}
 
 	// Fail stale runs. Clear any awaiting-agent marker so a recovered (now
 	// failed) run is never reported as still parked awaiting the agent,
@@ -1058,6 +1140,24 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("commit transaction: %w", err)
 	}
 	return int(count), nil
+}
+
+func terminalizeInProgressPushOperations(tx *sql.Tx, runQuery string, runArgs []any, errMsg string, completedAt int64) error {
+	opIDs := "SELECT po.operation_id FROM push_operations po JOIN operations o ON o.id = po.operation_id WHERE po.terminalized = 0 AND o.kind = ? AND o.run_id IN (" + runQuery + ")"
+	opArgs := []any{OperationKindPush}
+	opArgs = append(opArgs, runArgs...)
+	timingArgs := []any{completedAt, completedAt, OperationKindPush}
+	timingArgs = append(timingArgs, opArgs...)
+	if _, err := tx.Exec(`UPDATE operations SET completed_at = ?, duration_ms = MAX(0, ? - started_at) WHERE kind = ? AND id IN (`+opIDs+`)`, timingArgs...); err != nil {
+		return fmt.Errorf("recover stale push operations: update operation timing: %w", err)
+	}
+	redacted := safeurl.RedactText(strings.TrimSpace(errMsg))
+	terminalArgs := []any{PushOperationOutcomeProcessError, redacted}
+	terminalArgs = append(terminalArgs, opArgs...)
+	if _, err := tx.Exec(`UPDATE push_operations SET outcome = ?, decision_reason = CASE WHEN TRIM(decision_reason) = '' OR decision_reason = 'push operation started' THEN ? ELSE decision_reason END, terminalized = 1 WHERE terminalized = 0 AND operation_id IN (`+opIDs+`)`, terminalArgs...); err != nil {
+		return fmt.Errorf("recover stale push operations: terminalize receipt: %w", err)
+	}
+	return nil
 }
 
 func recoveryExclusionClause(preserved map[string]struct{}) (string, []any) {

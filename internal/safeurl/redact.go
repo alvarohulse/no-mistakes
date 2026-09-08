@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var httpURLPattern = regexp.MustCompile(`https?://[^\s'"<>]+`)
+var urlPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s'"<>]+`)
 
 // Redact hides URL userinfo while leaving non-URL and credential-free values
 // unchanged.
@@ -24,5 +24,5 @@ func Redact(raw string) string {
 }
 
 func RedactText(text string) string {
-	return httpURLPattern.ReplaceAllStringFunc(text, Redact)
+	return urlPattern.ReplaceAllStringFunc(text, Redact)
 }

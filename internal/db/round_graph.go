@@ -557,18 +557,18 @@ func (d *DB) SetStepRoundStructuredRepair(repair StepRoundRepair) error {
 	return nil
 }
 
-func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, binding PushBinding) error {
+func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, binding PushBinding, operationID string) (int64, error) {
 	headSHA = strings.TrimSpace(headSHA)
-	if runID == "" || roundID == "" || headSHA == "" || strings.TrimSpace(summary) == "" {
-		return fmt.Errorf("persist CI repair push: run, round, head, and summary are required")
+	if runID == "" || roundID == "" || headSHA == "" || strings.TrimSpace(summary) == "" || strings.TrimSpace(operationID) == "" {
+		return 0, fmt.Errorf("persist CI repair push: run, round, head, summary, and operation are required")
 	}
 	if binding.HeadSHA != headSHA {
-		return fmt.Errorf("persist CI repair push: binding head does not match repair head")
+		return 0, fmt.Errorf("persist CI repair push: binding head does not match repair head")
 	}
 
 	tx, err := d.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("persist CI repair push: begin transaction: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -576,18 +576,18 @@ func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, bin
 	if err := tx.QueryRow(`SELECT s.run_id, s.step_name, r.trigger_type, r.status
 		FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
 		WHERE r.id = ?`, roundID).Scan(&recordedRunID, &stepName, &trigger, &status); err != nil {
-		return fmt.Errorf("persist CI repair push: load round: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: load round: %w", err)
 	}
 	if recordedRunID != runID || stepName != string(types.StepCI) || trigger != RoundTriggerAutoFix || status != RoundStatusActive {
-		return fmt.Errorf("persist CI repair push: round is not an active CI auto-fix round for run")
+		return 0, fmt.Errorf("persist CI repair push: round is not an active CI auto-fix round for run")
 	}
 
 	var receiptResult sql.NullString
 	if err := tx.QueryRow(`SELECT result FROM round_repairs WHERE round_id = ? AND run_id = ?`, roundID, runID).Scan(&receiptResult); err != nil {
-		return fmt.Errorf("persist CI repair push: load attempted receipt: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: load attempted receipt: %w", err)
 	}
 	if !receiptResult.Valid || receiptResult.String != RoundRepairAttempted {
-		return fmt.Errorf("persist CI repair push: receipt is not attempted")
+		return 0, fmt.Errorf("persist CI repair push: receipt is not attempted")
 	}
 
 	ts := now()
@@ -598,10 +598,20 @@ func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, bin
 		headSHA, binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, runID,
 	)
 	if err != nil {
-		return fmt.Errorf("persist CI repair push: update run head and binding: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: update run head and binding: %w", err)
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return fmt.Errorf("persist CI repair push: update run head and binding: expected one run, updated %d", changed)
+		return 0, fmt.Errorf("persist CI repair push: update run head and binding: expected one run, updated %d", changed)
+	}
+	var generation sql.NullInt64
+	if err := tx.QueryRow(`SELECT push_generation FROM runs WHERE id = ?`, runID).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("persist CI repair push: read generation: %w", err)
+	}
+	if !generation.Valid {
+		return 0, fmt.Errorf("persist CI repair push: committed generation is unavailable")
+	}
+	if err := persistPushOperationBinding(tx, operationID, runID, binding, generation.Int64); err != nil {
+		return 0, fmt.Errorf("persist CI repair push: %w", err)
 	}
 
 	result, err = tx.Exec(
@@ -610,24 +620,24 @@ func (d *DB) PersistCIFixRepairPush(runID, roundID, headSHA, summary string, bin
 		summary, headSHA, roundID, runID, RoundRepairAttempted,
 	)
 	if err != nil {
-		return fmt.Errorf("persist CI repair push: update repair receipt: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: update repair receipt: %w", err)
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return fmt.Errorf("persist CI repair push: update repair receipt: expected one receipt, updated %d", changed)
+		return 0, fmt.Errorf("persist CI repair push: update repair receipt: expected one receipt, updated %d", changed)
 	}
 
 	result, err = tx.Exec(`UPDATE step_rounds SET resulting_head_sha = ? WHERE id = ? AND status = ?`, headSHA, roundID, RoundStatusActive)
 	if err != nil {
-		return fmt.Errorf("persist CI repair push: update round head: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: update round head: %w", err)
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return fmt.Errorf("persist CI repair push: update round head: expected one round, updated %d", changed)
+		return 0, fmt.Errorf("persist CI repair push: update round head: expected one round, updated %d", changed)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("persist CI repair push: commit: %w", err)
+		return 0, fmt.Errorf("persist CI repair push: commit: %w", err)
 	}
-	return nil
+	return generation.Int64, nil
 }
 
 // ReserveCIFixAttemptAndRecordRoundRepair spends one automatic CI repair

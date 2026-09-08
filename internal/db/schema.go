@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS command_definitions (
     platform              TEXT NOT NULL,
     runner_executable     TEXT NOT NULL,
     runner_args_json      TEXT NOT NULL,
+    argv_json             TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, id)
 );
 
@@ -293,7 +294,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
 CREATE TABLE IF NOT EXISTS operations (
     id                     TEXT PRIMARY KEY,
     run_id                 TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    kind                   TEXT NOT NULL CHECK (kind IN ('refresh')),
+    kind                   TEXT NOT NULL CHECK (kind IN ('refresh', 'push')),
     step_id                TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
     round_id               TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
     started_at             INTEGER NOT NULL CHECK (started_at > 0),
@@ -322,6 +323,27 @@ CREATE TABLE IF NOT EXISTS refresh_operations (
     repair_state            TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
 );
 
+CREATE TABLE IF NOT EXISTS push_operations (
+    operation_id              TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+    target_kind               TEXT NOT NULL CHECK (target_kind IN ('upstream', 'fork')),
+    target_fingerprint        TEXT NOT NULL,
+    target_identity            TEXT NOT NULL,
+    destination_ref           TEXT NOT NULL,
+    pushed_sha                TEXT,
+    observed_remote_sha       TEXT,
+    verified_remote_sha       TEXT,
+    lease_or_force_decision   TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
+    decision_reason            TEXT NOT NULL,
+    outcome                    TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
+    review_approved_head_sha  TEXT,
+    last_seen_sha              TEXT,
+    binding_updated            INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
+    resulting_generation       INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
+    retry_of_operation_id     TEXT REFERENCES operations(id),
+    retry_reason              TEXT,
+    terminalized               INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))
+);
+
 CREATE TABLE IF NOT EXISTS operation_command_attempts (
     operation_id TEXT NOT NULL,
     run_id       TEXT NOT NULL,
@@ -332,6 +354,9 @@ CREATE TABLE IF NOT EXISTS operation_command_attempts (
     FOREIGN KEY (run_id, operation_id) REFERENCES operations(run_id, id) ON DELETE CASCADE,
     FOREIGN KEY (run_id, attempt_id) REFERENCES command_attempts(run_id, id) ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_diagnostic_artifact_id
+    ON operations (diagnostic_artifact_id) WHERE diagnostic_artifact_id IS NOT NULL;
 
 CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_insert
 BEFORE INSERT ON operations
@@ -355,6 +380,32 @@ WHEN NEW.kind = 'refresh' AND NOT EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_push_operation_scope_insert
+BEFORE INSERT ON operations
+WHEN NEW.kind = 'push' AND NOT EXISTS (
+    SELECT 1
+    FROM step_rounds r
+    JOIN step_results s ON s.id = r.step_result_id
+    WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id
+      AND s.step_name IN ('push', 'ci')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'push operation step and round must belong to the same push or ci run');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_push_operation_scope_update
+BEFORE UPDATE OF run_id, kind, step_id, round_id ON operations
+WHEN NEW.kind = 'push' AND NOT EXISTS (
+    SELECT 1
+    FROM step_rounds r
+    JOIN step_results s ON s.id = r.step_result_id
+    WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id
+      AND s.step_name IN ('push', 'ci')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'push operation step and round must belong to the same push or ci run');
 END;
 
 CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_insert
@@ -635,6 +686,7 @@ var migrationStatements = []string{
 		platform TEXT NOT NULL,
 		runner_executable TEXT NOT NULL,
 		runner_args_json TEXT NOT NULL,
+		argv_json TEXT NOT NULL DEFAULT '[]',
 		PRIMARY KEY (run_id, id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS command_attempts (
@@ -702,7 +754,7 @@ var migrationStatements = []string{
 	`CREATE TABLE IF NOT EXISTS operations (
 		id TEXT PRIMARY KEY,
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-		kind TEXT NOT NULL CHECK (kind IN ('refresh')),
+		kind TEXT NOT NULL CHECK (kind IN ('refresh', 'push')),
 		step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
 		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
 		started_at INTEGER NOT NULL CHECK (started_at > 0),
@@ -729,6 +781,31 @@ var migrationStatements = []string{
 		conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
 		repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
 	)`,
+	`CREATE TABLE IF NOT EXISTS push_operations (
+		operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+		target_kind TEXT NOT NULL CHECK (target_kind IN ('upstream', 'fork')),
+		target_fingerprint TEXT NOT NULL,
+		target_identity TEXT NOT NULL,
+		destination_ref TEXT NOT NULL,
+		pushed_sha TEXT,
+		observed_remote_sha TEXT,
+		verified_remote_sha TEXT,
+		lease_or_force_decision TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
+		decision_reason TEXT NOT NULL,
+		outcome TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
+		review_approved_head_sha TEXT,
+		last_seen_sha TEXT,
+		binding_updated INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
+		resulting_generation INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
+		retry_of_operation_id TEXT REFERENCES operations(id),
+		retry_reason TEXT,
+		terminalized INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))
+	)`,
+	`ALTER TABLE push_operations ADD COLUMN retry_of_operation_id TEXT REFERENCES operations(id)`,
+	`ALTER TABLE push_operations ADD COLUMN retry_reason TEXT`,
+	`ALTER TABLE push_operations ADD COLUMN terminalized INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))`,
+	`ALTER TABLE push_operations ADD COLUMN verified_remote_sha TEXT`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_diagnostic_artifact_id ON operations (diagnostic_artifact_id) WHERE diagnostic_artifact_id IS NOT NULL`,
 	`CREATE TABLE IF NOT EXISTS operation_command_attempts (
 		operation_id TEXT NOT NULL,
 		run_id TEXT NOT NULL,
@@ -760,6 +837,26 @@ var migrationStatements = []string{
 	)
 	BEGIN
 		SELECT RAISE(ABORT, 'refresh operation step and round must belong to the same refresh run');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_push_operation_scope_insert
+	BEFORE INSERT ON operations
+	WHEN NEW.kind = 'push' AND NOT EXISTS (
+		SELECT 1 FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id
+		  AND s.step_name IN ('push', 'ci')
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'push operation step and round must belong to the same push or ci run');
+	END`,
+	`CREATE TRIGGER IF NOT EXISTS validate_push_operation_scope_update
+	BEFORE UPDATE OF run_id, kind, step_id, round_id ON operations
+	WHEN NEW.kind = 'push' AND NOT EXISTS (
+		SELECT 1 FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		WHERE r.id = NEW.round_id AND s.id = NEW.step_id AND s.run_id = NEW.run_id
+		  AND s.step_name IN ('push', 'ci')
+	)
+	BEGIN
+		SELECT RAISE(ABORT, 'push operation step and round must belong to the same push or ci run');
 	END`,
 	`CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_diagnostic_insert
 	BEFORE INSERT ON operations

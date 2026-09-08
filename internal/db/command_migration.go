@@ -6,6 +6,7 @@ import (
 )
 
 const commandDefinitionProvenanceRemovalMigration = "command_definition_provenance_removal_v1"
+const commandDefinitionArgvMigration = "command_definition_argv_v1"
 
 var obsoleteCommandDefinitionColumns = []string{
 	"source",
@@ -103,6 +104,40 @@ func migrateCommandDefinitionProvenanceColumns(sqlDB *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit command definition provenance migration: %w", err)
+	}
+	return nil
+}
+
+func migrateCommandDefinitionArgv(sqlDB *sql.DB) error {
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin command definition argv migration: %w", err)
+	}
+	defer tx.Rollback()
+	var completed bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`, commandDefinitionArgvMigration).Scan(&completed); err != nil {
+		return fmt.Errorf("read command definition argv migration marker: %w", err)
+	}
+	if completed {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit completed command definition argv migration check: %w", err)
+		}
+		return nil
+	}
+	var present bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('command_definitions') WHERE name = 'argv_json')`).Scan(&present); err != nil {
+		return fmt.Errorf("inspect command definition argv column: %w", err)
+	}
+	if !present {
+		if _, err := tx.Exec(`ALTER TABLE command_definitions ADD COLUMN argv_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add command definition argv column: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, commandDefinitionArgvMigration); err != nil {
+		return fmt.Errorf("record command definition argv migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit command definition argv migration: %w", err)
 	}
 	return nil
 }

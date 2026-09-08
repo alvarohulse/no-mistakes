@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -113,6 +114,29 @@ func TestResolveForcePushDecision_RefusesUnincorporatedRemoteCommit(t *testing.T
 	}
 }
 
+func TestResolveForcePushDecision_PreservesObservedRemoteWhenSafetyCheckFails(t *testing.T) {
+	t.Parallel()
+	dir, baseRunner, remote, featureSHA := newForcePushFixture(t)
+	os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "local")
+	newHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitRun := func(args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "fetch" {
+			return "", errors.New("injected fetch failure")
+		}
+		return baseRunner(args...)
+	}
+
+	decision, err := resolveForcePushDecision(gitRun, remote, "refs/heads/feature", newHead, "", "")
+	if err == nil {
+		t.Fatal("expected safety-check failure")
+	}
+	if decision.remoteSHA != featureSHA {
+		t.Fatalf("observed remote SHA = %q, want %q", decision.remoteSHA, featureSHA)
+	}
+}
+
 // When the remote moved past lastSeen but its commits are already incorporated
 // (by content) into the head being pushed, the push is safe and must be allowed
 // even though the lease anchor differs from lastSeen.
@@ -146,7 +170,7 @@ func TestResolveForcePushDecision_AllowsWhenRemoteContentIncorporated(t *testing
 	if err != nil {
 		t.Fatalf("expected push allowed when remote content is incorporated, got %v", err)
 	}
-	if d.newBranch || d.upToDate || d.remoteSHA != remoteTip {
+	if d.newBranch || d.upToDate || !d.incorporated || d.remoteSHA != remoteTip {
 		t.Fatalf("expected guarded force-push anchored to %s, got %#v", remoteTip, d)
 	}
 }

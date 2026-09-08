@@ -97,6 +97,60 @@ func TestInsertRefreshOperationOwnsDiagnosticArtifact(t *testing.T) {
 	}
 }
 
+func TestPushOperationsRoundTripOrderedReferences(t *testing.T) {
+	d := openTestDB(t)
+	receipt, firstAttempt, secondAttempt, artifact := newPushOperationFixture(t, d)
+
+	stored, err := d.InsertPushOperation(receipt)
+	if err != nil {
+		t.Fatalf("insert push operation: %v", err)
+	}
+	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindPush || !stored.Terminalized {
+		t.Fatalf("stored operation identity = %+v", stored)
+	}
+	if stored.TargetKind != "upstream" || stored.TargetFingerprint != "target-fingerprint" || stored.TargetIdentity != "https://github.com/test/repo" || stored.DestinationRef != "refs/heads/feature" || stored.PushedSHA == nil || *stored.PushedSHA != "pushed-head" || stored.ObservedRemoteSHA == nil || *stored.ObservedRemoteSHA != "remote-before" || stored.LeaseOrForceDecision != PushLeaseOrForceDecisionForceWithLease || stored.Outcome != PushOperationOutcomeUpdated {
+		t.Fatalf("stored push receipt fields = %+v", stored)
+	}
+	if stored.ReviewApprovedHeadSHA == nil || *stored.ReviewApprovedHeadSHA != "review-approved" || stored.LastSeenSHA == nil || *stored.LastSeenSHA != "last-seen" || stored.VerifiedRemoteSHA == nil || *stored.VerifiedRemoteSHA != "pushed-head" || !stored.BindingUpdated || stored.ResultingGeneration == nil || *stored.ResultingGeneration != 2 {
+		t.Fatalf("stored push safety facts = %+v", stored)
+	}
+	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
+		t.Fatalf("stored timing = %+v", stored)
+	}
+	if stored.DiagnosticArtifactID == nil || *stored.DiagnosticArtifactID != artifact.ID {
+		t.Fatalf("stored diagnostic artifact = %+v", stored.DiagnosticArtifactID)
+	}
+	if got := strings.Join(stored.CommandAttemptIDs, ","); got != secondAttempt.ID+","+firstAttempt.ID {
+		t.Fatalf("stored command attempt order = %q", got)
+	}
+
+	operations, err := d.GetPushOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatalf("get push operations: %v", err)
+	}
+	if len(operations) != 1 || operations[0].ID != stored.ID || strings.Join(operations[0].CommandAttemptIDs, ",") != secondAttempt.ID+","+firstAttempt.ID {
+		t.Fatalf("round-tripped operations = %+v", operations)
+	}
+
+	if _, err := d.sql.Exec(`DELETE FROM runs WHERE id = ?`, receipt.RunID); err != nil {
+		t.Fatalf("delete run with push receipt: %v", err)
+	}
+	for _, table := range []string{"operations", "push_operations", "operation_command_attempts", "artifacts"} {
+		var count int
+		if err := d.sql.QueryRow(`SELECT count(*) FROM `+table+` WHERE `+map[string]string{"push_operations": "operation_id", "operations": "run_id", "operation_command_attempts": "run_id", "artifacts": "run_id"}[table]+` = ?`, func() string {
+			if table == "push_operations" {
+				return stored.ID
+			}
+			return receipt.RunID
+		}()).Scan(&count); err != nil {
+			t.Fatalf("count %s after run delete: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows after run delete = %d, want 0", table, count)
+		}
+	}
+}
+
 func TestInsertRefreshOperationRejectsInvalidReferencesAndDecisions(t *testing.T) {
 	d := openTestDB(t)
 	receipt, firstAttempt, _, _ := newRefreshOperationFixture(t, d)
@@ -344,6 +398,440 @@ func TestOpenAddsOperationsWithoutFabricatingLegacyRefreshReceipts(t *testing.T)
 	}
 }
 
+func TestOperationsSchemaReservesPushDiscriminator(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		open  func(*testing.T) *DB
+		runID string
+	}{
+		{name: "fresh", open: openTestDB},
+		{name: "migrated", open: openPreOperationsTestDB, runID: "run"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := tt.open(t)
+			runID := tt.runID
+			if runID == "" {
+				repo, err := d.InsertRepo(filepath.Join("/tmp", "push-operation-"+tt.name), "upstream", "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				runID = run.ID
+			}
+			stepID, roundID := insertPushOperationScope(t, d, runID)
+
+			if _, err := d.sql.Exec(
+				`INSERT INTO operations (id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				"push-header", runID, OperationKindPush, stepID, roundID, 100, 120, 20,
+			); err != nil {
+				t.Fatalf("insert reserved push operation header: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenRebuildsRefreshOnlyOperationsForPushWithoutLosingRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "operations.sqlite")
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, firstAttempt, secondAttempt, artifact := newRefreshOperationFixture(t, d)
+	stored, err := d.InsertRefreshOperation(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		PRAGMA foreign_keys = OFF;
+		DROP TABLE push_operations;
+		DROP TRIGGER validate_refresh_operation_scope_insert;
+		DROP TRIGGER validate_refresh_operation_scope_update;
+		DROP TRIGGER validate_push_operation_scope_insert;
+		DROP TRIGGER validate_push_operation_scope_update;
+		DROP TRIGGER validate_refresh_operation_diagnostic_insert;
+		DROP TRIGGER validate_refresh_operation_diagnostic_update;
+		DROP TRIGGER validate_artifact_operation_scope_insert;
+		DROP TRIGGER validate_artifact_operation_scope_update;
+		DROP TRIGGER validate_operation_command_attempt_insert;
+		DROP TRIGGER validate_operation_command_attempt_update;
+		CREATE TABLE operations_refresh_only (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (kind IN ('refresh')),
+			step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+			round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+			started_at INTEGER NOT NULL CHECK (started_at > 0),
+			completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+			duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+			diagnostic_artifact_id TEXT,
+			UNIQUE (run_id, id),
+			FOREIGN KEY (run_id, diagnostic_artifact_id) REFERENCES artifacts(run_id, id)
+		);
+		INSERT INTO operations_refresh_only
+			(id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id)
+		SELECT id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id
+		FROM operations;
+		DROP TABLE operations;
+		ALTER TABLE operations_refresh_only RENAME TO operations;
+		PRAGMA foreign_keys = ON;
+	`); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen migrated db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	operations, err := d.GetRefreshOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].ID != stored.ID || strings.Join(operations[0].CommandAttemptIDs, ",") != secondAttempt.ID+","+firstAttempt.ID {
+		t.Fatalf("migrated refresh operation = %+v, want preserved receipt %q", operations, stored.ID)
+	}
+	preservedArtifact, err := d.GetArtifact(artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preservedArtifact == nil || preservedArtifact.OperationID == nil || *preservedArtifact.OperationID != stored.ID {
+		t.Fatalf("migrated diagnostic artifact = %+v, want operation %q", preservedArtifact, stored.ID)
+	}
+	var foreignKeyViolations int
+	if err := d.sql.QueryRow(`SELECT count(*) FROM pragma_foreign_key_check`).Scan(&foreignKeyViolations); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeyViolations != 0 {
+		t.Fatalf("foreign key violations after operations migration = %d", foreignKeyViolations)
+	}
+	pushStep, err := d.InsertStepResult(receipt.RunID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushRound, err := d.InsertStepRound(pushStep.ID, 1, RoundTriggerInitial, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushOperation, err := d.InsertPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: pushStep.ID, RoundID: pushRound.ID,
+		TargetKind: "upstream", TargetFingerprint: "target-fingerprint", TargetIdentity: "upstream",
+		DestinationRef: "refs/heads/feature", LeaseOrForceDecision: PushLeaseOrForceDecisionRefused,
+		DecisionReason: "migration verification", Outcome: PushOperationOutcomeRefused,
+		StartedAt: 110, CompletedAt: 110,
+	})
+	if err != nil {
+		t.Fatalf("insert push operation after migration: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen current operation schema: %v", err)
+	}
+	pushOperations, err := d.GetPushOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pushOperations) != 1 || pushOperations[0].ID != pushOperation.ID {
+		t.Fatalf("push operations after current-schema reopen = %+v, want %q", pushOperations, pushOperation.ID)
+	}
+}
+
+func TestPushOperationAllowsCIStepAndRejectsOtherOwners(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	ciStep, err := d.InsertStepResult(receipt.RunID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciRound, err := d.InsertStepRound(ciStep.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.StepID, receipt.RoundID = ciStep.ID, ciRound.ID
+	receipt.CommandAttemptIDs = nil
+	receipt.DiagnosticArtifactID = nil
+	if _, err := d.InsertPushOperation(receipt); err != nil {
+		t.Fatalf("insert CI push receipt: %v", err)
+	}
+
+	badStep, err := d.InsertStepResult(receipt.RunID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badRound, err := d.InsertStepRound(badStep.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.StepID, receipt.RoundID = badStep.ID, badRound.ID
+	if _, err := d.InsertPushOperation(receipt); err == nil || !strings.Contains(err.Error(), "push or ci") {
+		t.Fatalf("other step insert error = %v, want owner rejection", err)
+	}
+}
+
+func TestPushOperationRejectsInvalidOutcomeEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*PushOperation)
+		want   string
+	}{
+		{
+			name: "success without binding generation",
+			mutate: func(operation *PushOperation) {
+				operation.BindingUpdated = false
+				operation.ResultingGeneration = nil
+			},
+			want: "successful outcome requires binding",
+		},
+		{
+			name: "success without verified remote",
+			mutate: func(operation *PushOperation) {
+				operation.VerifiedRemoteSHA = nil
+			},
+			want: "verified remote",
+		},
+		{
+			name: "created with observed remote",
+			mutate: func(operation *PushOperation) {
+				operation.Outcome = PushOperationOutcomeCreated
+				operation.LeaseOrForceDecision = PushLeaseOrForceDecisionNewBranch
+			},
+			want: "absent observed remote",
+		},
+		{
+			name: "updated with wrong decision",
+			mutate: func(operation *PushOperation) {
+				operation.LeaseOrForceDecision = PushLeaseOrForceDecisionNewBranch
+			},
+			want: "force_with_lease",
+		},
+		{
+			name: "refused claims binding",
+			mutate: func(operation *PushOperation) {
+				operation.Outcome = PushOperationOutcomeRefused
+				operation.LeaseOrForceDecision = PushLeaseOrForceDecisionRefused
+			},
+			want: "cannot claim a binding",
+		},
+		{
+			name: "unsupported target kind",
+			mutate: func(operation *PushOperation) {
+				operation.TargetKind = "mirror"
+			},
+			want: "target kind",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := openTestDB(t)
+			operation, _, _, _ := newPushOperationFixture(t, d)
+			operation.CommandAttemptIDs = nil
+			operation.DiagnosticArtifactID = nil
+			tt.mutate(&operation)
+			if _, err := d.InsertPushOperation(operation); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("insert error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPushOperationRetryValidationAndGenerationBounds(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	receipt.Outcome = PushOperationOutcomeFailed
+	receipt.LeaseOrForceDecision = PushLeaseOrForceDecisionUnavailable
+	receipt.BindingUpdated = false
+	receipt.ResultingGeneration = nil
+	receipt.VerifiedRemoteSHA = nil
+	first, err := d.InsertPushOperation(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := receipt
+	second.RetryOfOperationID = &first.ID
+	second.RetryReason = stringPointer("retry after https://user:secret@example.com/repo transient process error")
+	second.ResultingGeneration = int64Pointer(0)
+	second.BindingUpdated = true
+	second.DiagnosticArtifactID = nil
+	storedSecond, err := d.InsertPushOperation(second)
+	if err != nil {
+		t.Fatalf("insert valid retry: %v", err)
+	}
+	if storedSecond.RetryReason == nil || strings.Contains(*storedSecond.RetryReason, "secret") {
+		t.Fatalf("retry reason was not redacted: %+v", storedSecond.RetryReason)
+	}
+	invalidGeneration := receipt
+	invalidGeneration.ResultingGeneration = int64Pointer(-1)
+	if _, err := d.InsertPushOperation(invalidGeneration); err == nil || !strings.Contains(err.Error(), "generation") {
+		t.Fatalf("negative generation error = %v", err)
+	}
+	foreign := receipt
+	foreign.RetryOfOperationID = stringPointer("missing-operation")
+	foreign.RetryReason = stringPointer("retry")
+	if _, err := d.InsertPushOperation(foreign); err == nil || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("foreign retry error = %v", err)
+	}
+}
+
+func TestPushOperationStartsWithStableIDBeforeTerminalUpdate(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatalf("start push operation: %v", err)
+	}
+	if started.ID == "" || started.Outcome != PushOperationOutcomeProcessError {
+		t.Fatalf("started operation = %+v", started)
+	}
+	started.PushedSHA = stringPointer("pushed-head")
+	started.VerifiedRemoteSHA = stringPointer("pushed-head")
+	started.BindingUpdated = true
+	started.ResultingGeneration = int64Pointer(2)
+	started.Outcome = PushOperationOutcomeCreated
+	started.LeaseOrForceDecision = PushLeaseOrForceDecisionNewBranch
+	started.DecisionReason = "remote branch did not exist"
+	finished, err := d.CompletePushOperation(*started)
+	if err != nil {
+		t.Fatalf("complete push operation: %v", err)
+	}
+	if finished.ID != started.ID || finished.Outcome != PushOperationOutcomeCreated {
+		t.Fatalf("finished operation = %+v", finished)
+	}
+	if _, err := d.CompletePushOperation(*finished); err == nil || !strings.Contains(err.Error(), "already terminal") {
+		t.Fatalf("second completion error = %v, want already terminal", err)
+	}
+}
+
+func TestUpdatePushOperationProgressPersistsResolvedTarget(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.TargetFingerprint = "resolved-target-fingerprint"
+	started.TargetIdentity = "ssh://user:secret@example.com/owner/repo.git"
+	if err := d.UpdatePushOperationProgress(*started); err != nil {
+		t.Fatal(err)
+	}
+	operations, err := d.GetPushOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("push operations = %+v", operations)
+	}
+	if operations[0].TargetFingerprint != "resolved-target-fingerprint" || operations[0].TargetIdentity != "ssh://redacted@example.com/owner/repo.git" {
+		t.Fatalf("resolved target = %+v", operations[0])
+	}
+}
+
+func TestUpdateRunHeadAndPushBindingWithGenerationForOperationIsAtomic(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := "delivered-head"
+	generation, err := d.UpdateRunHeadAndPushBindingWithGenerationForOperation(started.RunID, delivered, PushBinding{
+		HeadSHA:           delivered,
+		TargetKind:        started.TargetKind,
+		TargetFingerprint: started.TargetFingerprint,
+		Ref:               started.DestinationRef,
+	}, started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 {
+		t.Fatalf("push generation = %d, want 1", generation)
+	}
+	run, err := d.GetRun(started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != delivered || run.LastPushedSHA == nil || *run.LastPushedSHA != delivered {
+		t.Fatalf("run push state = %+v", run)
+	}
+	operations, err := d.GetPushOperationsByRun(started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || !operations[0].BindingUpdated || operations[0].ResultingGeneration == nil || *operations[0].ResultingGeneration != generation {
+		t.Fatalf("push operation = %+v", operations)
+	}
+}
+
+func TestCompletePushOperationWithDiagnosticOwnsArtifactAtomically(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.PushedSHA = stringPointer("pushed-head")
+	started.VerifiedRemoteSHA = stringPointer("pushed-head")
+	started.ObservedRemoteSHA = stringPointer("remote-before")
+	started.LeaseOrForceDecision = PushLeaseOrForceDecisionForceWithLease
+	started.DecisionReason = "updated with lease"
+	started.Outcome = PushOperationOutcomeUpdated
+	started.BindingUpdated = true
+	started.ResultingGeneration = int64Pointer(2)
+	diagnostic := operationDiagnosticArtifact(filepath.ToSlash(filepath.Join(receipt.RunID, "diagnostics", "atomic-push.txt")), receipt.RunID, receipt.StepID, receipt.RoundID)
+	completed, err := d.CompletePushOperationWithDiagnostic(*started, diagnostic)
+	if err != nil {
+		t.Fatalf("complete push operation with diagnostic: %v", err)
+	}
+	if completed.DiagnosticArtifactID == nil || !completed.Terminalized {
+		t.Fatalf("completed operation = %+v, want owned terminal diagnostic", completed)
+	}
+	owned, err := d.GetArtifact(*completed.DiagnosticArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned == nil || owned.OperationID == nil || *owned.OperationID != completed.ID {
+		t.Fatalf("owned diagnostic = %+v, want operation %q", owned, completed.ID)
+	}
+}
+
 func openPreOperationsTestDB(t *testing.T) *DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
@@ -370,6 +858,19 @@ func openPreOperationsTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { d.Close() })
 	return d
+}
+
+func insertPushOperationScope(t *testing.T, d *DB, runID string) (string, string) {
+	t.Helper()
+	step, err := d.InsertStepResult(runID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := d.InsertStepRound(step.ID, 1, RoundTriggerInitial, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return step.ID, round.ID
 }
 
 func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *CommandAttempt, *CommandAttempt, *Artifact) {
@@ -434,6 +935,74 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		DiagnosticArtifactID:  &artifact.ID,
 	}, firstAttempt, secondAttempt, artifact
 }
+
+func newPushOperationFixture(t *testing.T, d *DB) (PushOperation, *CommandAttempt, *CommandAttempt, *Artifact) {
+	t.Helper()
+	repo, err := d.InsertRepo("/home/user/push-operation", "git@github.com:user/push-operation.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "pushed-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := d.EnsureCommandDefinition(run.ID, refreshCommandDefinition())
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttempt := func(sequence int) *CommandAttempt {
+		t.Helper()
+		attempt, err := d.StartCommandAttempt(CommandAttempt{
+			RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+			Sequence: sequence, Purpose: "push", Observer: CommandObserverController, Trigger: "initial", BeforeSHA: "pushed-head",
+			InputStateID: stringPointer("git:pushed-head"), CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	firstAttempt := startAttempt(1)
+	secondAttempt := startAttempt(2)
+	artifact, err := d.RegisterArtifact(operationDiagnosticArtifact(filepath.ToSlash(filepath.Join(run.ID, "diagnostics", "push.txt")), run.ID, step.ID, round.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PushOperation{
+		RunID:                 run.ID,
+		StepID:                step.ID,
+		RoundID:               round.ID,
+		TargetKind:            "upstream",
+		TargetFingerprint:     "target-fingerprint",
+		TargetIdentity:        "https://github.com/test/repo",
+		DestinationRef:        "refs/heads/feature",
+		PushedSHA:             stringPointer("pushed-head"),
+		ObservedRemoteSHA:     stringPointer("remote-before"),
+		VerifiedRemoteSHA:     stringPointer("pushed-head"),
+		LeaseOrForceDecision:  PushLeaseOrForceDecisionForceWithLease,
+		DecisionReason:        "remote head was last observed by this run",
+		Outcome:               PushOperationOutcomeUpdated,
+		ReviewApprovedHeadSHA: stringPointer("review-approved"),
+		LastSeenSHA:           stringPointer("last-seen"),
+		BindingUpdated:        true,
+		ResultingGeneration:   int64Pointer(2),
+		CommandAttemptIDs:     []string{secondAttempt.ID, firstAttempt.ID},
+		StartedAt:             100,
+		CompletedAt:           145,
+		DurationMS:            45,
+		DiagnosticArtifactID:  &artifact.ID,
+	}, firstAttempt, secondAttempt, artifact
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func refreshCommandDefinition() runner.Resolved {
 	return runner.Resolved{

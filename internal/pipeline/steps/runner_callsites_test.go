@@ -142,8 +142,10 @@ func assertFirstCommandRunnerReceipt(t *testing.T, sctx *pipeline.StepContext, s
 	if len(evidence.Commands) == 0 {
 		t.Fatal("missing command receipt")
 	}
-	receipt := evidence.Commands[0]
-	if receipt.CommandSource != wantSource || receipt.Runner == nil || receipt.Runner.Source != wantSource || receipt.Runner.Executable != "bash" || receipt.Runner.Version == nil {
-		t.Fatalf("command receipt = %+v", receipt)
+	for _, receipt := range evidence.Commands {
+		if receipt.CommandSource == wantSource && receipt.Runner != nil && receipt.Runner.Source == wantSource && receipt.Runner.Executable == "bash" && receipt.Runner.Version != nil {
+			return
+		}
 	}
+	t.Fatalf("command receipts contain no structured %s runner: %+v", wantSource, evidence.Commands)
 }

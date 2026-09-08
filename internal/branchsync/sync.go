@@ -189,8 +189,8 @@ func canonicalTarget(raw string) string {
 	raw = strings.TrimSpace(raw)
 	parsed, err := url.Parse(raw)
 	if err == nil && parsed.Scheme != "" {
+		parsed.User = nil
 		if parsed.Scheme == "http" || parsed.Scheme == "https" {
-			parsed.User = nil
 			parsed.Scheme = strings.ToLower(parsed.Scheme)
 			parsed.Host = strings.ToLower(parsed.Host)
 		}

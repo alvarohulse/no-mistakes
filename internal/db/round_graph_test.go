@@ -949,6 +949,57 @@ func TestCompleteStructuredRoundUpdatesReservedCIFixRepair(t *testing.T) {
 	}
 }
 
+func TestPersistCIFixRepairPushPersistsOperationBindingBeforeRecovery(t *testing.T) {
+	database := openTestDB(t)
+	repo, _ := database.InsertRepo("/tmp/ci-repair-push-operation", "https://example.com/repo.git", "main")
+	run, _ := database.InsertRun(repo.ID, "feature", "starting-head", "base")
+	step, _ := database.InsertStepResult(run.ID, types.StepCI)
+	attempted := RoundRepairAttempted
+	round, err := database.BeginCIFixRepairRound(step.ID, run.ID, 0, StepRoundRepair{Result: &attempted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushedSHA := "repaired-head"
+	operation, err := database.StartPushOperation(PushOperation{
+		RunID: run.ID, StepID: step.ID, RoundID: round.ID,
+		TargetKind: "upstream", TargetFingerprint: "target-fingerprint", TargetIdentity: "https://example.com/repo.git",
+		DestinationRef: "refs/heads/feature", PushedSHA: &pushedSHA, StartedAt: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := PushBinding{HeadSHA: pushedSHA, TargetKind: "upstream", TargetFingerprint: "target-fingerprint", Ref: "refs/heads/feature"}
+	generation, err := database.PersistCIFixRepairPush(run.ID, round.ID, pushedSHA, "repair failing CI", binding, operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 {
+		t.Fatalf("push generation = %d, want 1", generation)
+	}
+	operations, err := database.GetPushOperationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].Terminalized || !operations[0].BindingUpdated ||
+		operations[0].ResultingGeneration == nil || *operations[0].ResultingGeneration != 1 ||
+		operations[0].PushedSHA == nil || *operations[0].PushedSHA != pushedSHA ||
+		operations[0].VerifiedRemoteSHA == nil || *operations[0].VerifiedRemoteSHA != pushedSHA {
+		t.Fatalf("in-progress CI push receipt = %+v, want atomic binding evidence", operations)
+	}
+	if recovered, err := database.RecoverStaleRun(run.ID, "daemon crashed after CI repair push"); err != nil || !recovered {
+		t.Fatalf("recover stale run = %v, %v", recovered, err)
+	}
+	operations, err = database.GetPushOperationsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || !operations[0].Terminalized || operations[0].Outcome != PushOperationOutcomeProcessError ||
+		!operations[0].BindingUpdated || operations[0].ResultingGeneration == nil || *operations[0].ResultingGeneration != 1 ||
+		operations[0].VerifiedRemoteSHA == nil || *operations[0].VerifiedRemoteSHA != pushedSHA {
+		t.Fatalf("recovered CI push receipt = %+v, want retained atomic binding evidence", operations)
+	}
+}
+
 func TestCompleteCIFixRepairRoundDoesNotOverwriteActiveStepFindings(t *testing.T) {
 	database := openTestDB(t)
 	repo, _ := database.InsertRepo("/tmp/ci-repair-findings", "https://example.com/repo.git", "main")

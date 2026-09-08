@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -126,14 +127,15 @@ CI logs:
 		return false, "", fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	var persistRepairPush func(string, string, db.PushBinding) error
+	var persistRepairPush func(string, string, db.PushBinding, string) (int64, error)
 	if repairRound != nil {
-		persistRepairPush = func(headSHA, summary string, binding db.PushBinding) error {
+		persistRepairPush = func(headSHA, summary string, binding db.PushBinding, operationID string) (int64, error) {
 			repairRound.verifiedPush = true
-			if err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding); err != nil {
-				return pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
+			generation, err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding, operationID)
+			if err != nil {
+				return 0, pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
 			}
-			return nil
+			return generation, nil
 		}
 	}
 	return s.commitAndPushAttributed(sctx, result, agentStartingHeadSHA, persistRepairPush)
@@ -151,7 +153,7 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext, summary string) (bool
 	return pushed, err
 }
 
-func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) error) (bool, string, error) {
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding, string) (int64, error)) (bool, string, error) {
 	recordedHeadSHA := sctx.Run.HeadSHA
 	_, summary, err := s.commitAndPushResolved(sctx, result, "", agentStartingHeadSHA, persistRepairPush)
 	if err != nil {
@@ -163,7 +165,7 @@ func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *age
 	return true, summary, nil
 }
 
-func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) error) (bool, string, error) {
+func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding, string) (int64, error)) (bool, string, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, "", fmt.Errorf("check CI changes: %w", err)
@@ -184,7 +186,7 @@ func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent
 			if persistRepairPush != nil && strings.TrimSpace(summary) == "" {
 				return false, "", fmt.Errorf("read CI repair commit summary: summary is empty")
 			}
-			pushed, err := s.pushCIFixHeadSHA(sctx, headSHA, summary, persistRepairPush)
+			pushed, err := s.pushCIFixHeadSHA(sctx, strings.TrimSpace(headSHA), summary, persistRepairPush)
 			if err != nil || summary == "" {
 				return pushed, summary, err
 			}
@@ -217,22 +219,37 @@ func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent
 		return false, "", fmt.Errorf("resolve head after commit: %w", err)
 	}
 
-	pushed, err := s.pushCIFixHeadSHA(sctx, headSHA, summary, persistRepairPush)
+	pushed, err := s.pushCIFixHeadSHA(sctx, strings.TrimSpace(headSHA), summary, persistRepairPush)
 	return pushed, summary, err
 }
 
-func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary string, persistRepairPush func(string, string, db.PushBinding) error) (bool, error) {
+func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary string, persistRepairPush func(string, string, db.PushBinding, string) (int64, error)) (bool, error) {
 	if persistRepairPush == nil {
 		return s.pushUpdatedHeadSHA(sctx, headSHA, nil)
 	}
-	return s.pushUpdatedHeadSHA(sctx, headSHA, func(binding db.PushBinding) error {
-		return persistRepairPush(headSHA, summary, binding)
+	return s.pushUpdatedHeadSHA(sctx, headSHA, func(binding db.PushBinding, operationID string) (int64, error) {
+		return persistRepairPush(headSHA, summary, binding, operationID)
 	})
 }
 
-func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding) error) (bool, error) {
+func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding, string) (int64, error)) (pushed bool, runErr error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	pushURL := resolvePushURL(sctx)
+	pushURL := initialPushURL(sctx)
+	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
+	if err := receipt.start(); err != nil {
+		return false, err
+	}
+	defer func() {
+		if receiptErr := receipt.finish(runErr); receiptErr != nil {
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
+	purpose := pushOperationPurpose(sctx)
+	pushURL, err := receipt.resolveTargetURL()
+	if err != nil {
+		return false, err
+	}
+	receipt.setPushedSHA(newHeadSHA)
 
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
@@ -240,27 +257,43 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	// passes and lets an auto-fix rebased from stale local state overwrite a
 	// commit that reached origin out of band. resolveForcePushDecision refuses
 	// the push when the remote carries commits this run never incorporated.
-	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	gitRun := func(args ...string) (string, error) {
+		return durablePushGitCommand(sctx, receipt, purpose, args...)
+	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
+	receipt.persistProgress()
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA, receipt.setObservedRemoteSHA)
 	if err != nil {
+		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
+		var refusal *forcePushWouldDiscardError
+		if errors.As(err, &refusal) {
+			receipt.markRefusedAtRemote(err.Error(), refusal.remoteSHA)
+		}
 		return false, err
+	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
+	receipt.persistProgress()
+	switch {
+	case decision.newBranch:
+		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
+	case decision.upToDate:
+		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	case decision.incorporated:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote movement passed incorporation safety checks", decision.remoteSHA)
+	default:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
 	targetKind := "upstream"
 	if strings.TrimSpace(sctx.Repo.ForkURL) != "" {
 		targetKind = "fork"
 	}
 	persistBinding := func() error {
-		remoteOut, err := stepGitRun(sctx, "ls-remote", pushURL, ref)
+		remoteOut, err := durablePushGitCommand(sctx, receipt, purpose, "ls-remote", pushURL, ref)
 		if err != nil {
 			return fmt.Errorf("verify successful push: %w", err)
 		}
-		fields := strings.Fields(remoteOut)
-		if len(fields) == 0 || fields[0] != newHeadSHA {
-			observed := "missing"
-			if len(fields) > 0 {
-				observed = fields[0]
-			}
-			return fmt.Errorf("verify successful push: remote head %s does not equal pushed head %s", observed, newHeadSHA)
+		if err := recordVerifiedPushRemoteSHA(receipt, remoteOut, newHeadSHA); err != nil {
+			return fmt.Errorf("verify successful push: %w", err)
 		}
 		binding := db.PushBinding{
 			HeadSHA:           newHeadSHA,
@@ -268,16 +301,27 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 			TargetFingerprint: branchsync.TargetFingerprint(pushURL),
 			Ref:               ref,
 		}
+		var generation int64
 		if persistVerifiedPush != nil {
-			return persistVerifiedPush(binding)
+			generation, err = persistVerifiedPush(binding, receipt.operationID)
+		} else if receipt.enabled() {
+			generation, err = sctx.DB.UpdateRunPushBindingWithGenerationForOperation(sctx.Run.ID, binding, receipt.operationID)
+		} else {
+			err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
 		}
-		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
+		if err != nil {
+			return err
+		}
+		if receipt.enabled() {
+			receipt.recordBinding(generation)
+		}
+		return nil
 	}
 	if decision.upToDate {
 		if err := persistBinding(); err != nil {
 			return false, err
 		}
-		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
+		if _, err := durablePushGitCommand(sctx, receipt, purpose, "update-ref", ref, newHeadSHA); err != nil {
 			updateErr := fmt.Errorf("update local branch ref: %w", err)
 			if persistVerifiedPush != nil {
 				return false, pipeline.NewCIFixRepairDurabilityError(updateErr)
@@ -292,14 +336,20 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		}
 		return false, nil
 	}
-	if err := stepGitPush(sctx, pushURL, ref, decision.remoteSHA, !decision.newBranch); err != nil {
+	receipt.transportStarted = true
+	pushArgs := []string{"push", pushURL}
+	if !decision.newBranch {
+		pushArgs = append(pushArgs, "--force-with-lease="+ref+":"+decision.remoteSHA)
+	}
+	pushArgs = append(pushArgs, newHeadSHA+":"+ref)
+	if _, err := durablePushGitCommand(sctx, receipt, purpose, pushArgs...); err != nil {
 		return false, fmt.Errorf("push: %w", err)
 	}
 	if err := persistBinding(); err != nil {
 		return false, err
 	}
 
-	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
+	if _, err := durablePushGitCommand(sctx, receipt, purpose, "update-ref", ref, newHeadSHA); err != nil {
 		updateErr := fmt.Errorf("update local branch ref: %w", err)
 		if persistVerifiedPush != nil {
 			return false, pipeline.NewCIFixRepairDurabilityError(updateErr)
