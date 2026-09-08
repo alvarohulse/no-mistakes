@@ -223,7 +223,7 @@ func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...str
 		return result.output, runErr
 	}
 	if result.exitCode != 0 {
-		return result.output, &pushCommandExitError{command: command, code: result.exitCode, output: result.output}
+		return result.output, &pushCommandExitError{command: command, args: append([]string(nil), args...), code: result.exitCode, output: result.output}
 	}
 	if r.progressErr != nil {
 		return result.output, r.progressErr
@@ -255,6 +255,7 @@ func (r *pushReceiptRecorder) snapshot() db.PushOperation {
 
 type pushCommandExitError struct {
 	command string
+	args    []string
 	code    int
 	output  string
 }
@@ -375,7 +376,13 @@ func boundedPushDiagnostic(value string) []byte {
 
 func isExpectedMissingRefError(err error) bool {
 	var exitErr *pushCommandExitError
-	return errors.As(err, &exitErr) && (exitErr.code == 1 || exitErr.code == 128)
+	if !errors.As(err, &exitErr) || (exitErr.code != 1 && exitErr.code != 128) {
+		return false
+	}
+	if len(exitErr.args) != 4 || exitErr.args[0] != "rev-parse" || exitErr.args[1] != "--verify" || exitErr.args[2] != "--quiet" || !strings.HasSuffix(exitErr.args[3], "^{commit}") {
+		return false
+	}
+	return strings.TrimSpace(exitErr.output) == ""
 }
 
 func durablePushGitCommand(sctx *pipeline.StepContext, receipt *pushReceiptRecorder, purpose string, args ...string) (string, error) {

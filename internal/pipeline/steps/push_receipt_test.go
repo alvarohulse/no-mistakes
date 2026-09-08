@@ -149,6 +149,39 @@ func TestPushReceiptRecorderClassifiesSignalExitAsProcessError(t *testing.T) {
 	}
 }
 
+func TestExpectedMissingRefErrorRejectsOtherGitFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "missing ref",
+			err:  &pushCommandExitError{args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/missing^{commit}"}, code: 1},
+			want: true,
+		},
+		{
+			name: "fatal git output",
+			err:  &pushCommandExitError{args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/missing^{commit}"}, code: 128, output: "fatal: not a git repository"},
+		},
+		{
+			name: "other command",
+			err:  &pushCommandExitError{args: []string{"push", "origin", "HEAD:refs/heads/main"}, code: 1},
+		},
+		{
+			name: "signal",
+			err:  &pushCommandExitError{args: []string{"rev-parse", "--verify", "--quiet", "refs/heads/missing^{commit}"}, code: -1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isExpectedMissingRefError(tt.err); got != tt.want {
+				t.Fatalf("isExpectedMissingRefError() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPushReceiptRecorderRetainsObservedVerificationMismatch(t *testing.T) {
 	for _, want := range []string{"normal push", "CI repair push"} {
 		t.Run(want, func(t *testing.T) {
