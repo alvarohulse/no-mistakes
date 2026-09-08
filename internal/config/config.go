@@ -2381,7 +2381,7 @@ agent: auto
 
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. A model is a typed name plus an
-# explicit lowercase vendor; `effort` accepts minimal, low, medium, high,
+# explicit lowercase vendor; effort accepts minimal, low, medium, high,
 # xhigh, or max. Adapters translate both through their verified interfaces.
 # OpenCode names use provider/model. Rovo Dev rejects model and effort routes.
 # ACP accepts bare model families but rejects bracketed parameter variants and
