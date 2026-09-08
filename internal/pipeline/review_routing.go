@@ -69,7 +69,7 @@ func reviewCandidateReceipts(candidates []config.ReviewCandidate) []db.ReviewCan
 	receipts := make([]db.ReviewCandidateReceipt, len(candidates))
 	for i, candidate := range candidates {
 		receipts[i] = db.ReviewCandidateReceipt{
-			Agent: string(candidate.Agent), Model: candidate.Model.Name, Vendor: candidate.Model.Vendor, Optional: candidate.Optional,
+			Agent: string(candidate.Agent), Model: candidate.Model.Name, Vendor: candidate.Model.Vendor, Effort: candidate.Effort, Optional: candidate.Optional,
 		}
 	}
 	return receipts

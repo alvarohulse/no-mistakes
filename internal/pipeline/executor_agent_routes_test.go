@@ -184,8 +184,8 @@ func TestExecutor_ReviewPoolSelectsPerColdReviewAndPersistsReceipts(t *testing.T
 		},
 	}
 	candidates := []config.ReviewCandidate{
-		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
-		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+		{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}, Effort: "high"},
+		{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}, Effort: "xhigh"},
 	}
 	exec := NewExecutorWithAgentRoutes(
 		database,
@@ -219,8 +219,8 @@ func TestExecutor_ReviewPoolSelectsPerColdReviewAndPersistsReceipts(t *testing.T
 		t.Fatal(err)
 	}
 	wantPool := []db.ReviewCandidateReceipt{
-		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
-		{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"},
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic", Effort: "high"},
+		{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai", Effort: "xhigh"},
 	}
 	reviews := 0
 	fixes := 0

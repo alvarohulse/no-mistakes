@@ -20,6 +20,7 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 		Agent:                    "codex",
 		UsageCoverage:            agent.UsageCoverageComplete,
 		Model:                    "gpt-5.2-codex",
+		Effort:                   "xhigh",
 		SessionMode:              InvocationModeResumed,
 		SessionKey:               "abcd1234abcd1234",
 		StartedAt:                1_700_000_000,
@@ -51,6 +52,9 @@ func TestAgentInvocations_InsertAndReadBack(t *testing.T) {
 	}
 	if back.UsageCoverage != agent.UsageCoverageComplete {
 		t.Fatalf("usage coverage = %q, want complete", back.UsageCoverage)
+	}
+	if back.Effort != "xhigh" {
+		t.Fatalf("effort = %q, want xhigh", back.Effort)
 	}
 	if back.CacheCreationTokens == nil || *back.CacheCreationTokens != 50 {
 		t.Fatalf("cache creation readback = %v, want 50", back.CacheCreationTokens)
@@ -146,8 +150,8 @@ func TestAgentInvocationRoundMustMatchInvocationSubject(t *testing.T) {
 func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	d, _, run := openSessionTestDB(t)
 	pool := []ReviewCandidateReceipt{
-		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic"},
-		{Agent: "cursor", Model: "grok-4.6", Vendor: "xai", Optional: true},
+		{Agent: "claude", Model: "claude-opus-5", Vendor: "anthropic", Effort: "high"},
+		{Agent: "cursor", Model: "grok-4.6", Vendor: "xai", Effort: "medium", Optional: true},
 	}
 	inv := AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "claude",
@@ -169,7 +173,7 @@ func TestAgentInvocations_ReviewCandidatePoolRoundTrip(t *testing.T) {
 	if err := d.sql.QueryRow(`SELECT review_candidate_pool_json FROM agent_invocations WHERE run_id = ?`, run.ID).Scan(&encoded); err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `[{"agent":"claude","model":"claude-opus-5","vendor":"anthropic"},{"agent":"cursor","model":"grok-4.6","vendor":"xai","optional":true}]`
+	wantJSON := `[{"agent":"claude","model":"claude-opus-5","vendor":"anthropic","effort":"high"},{"agent":"cursor","model":"grok-4.6","vendor":"xai","effort":"medium","optional":true}]`
 	if encoded == nil || *encoded != wantJSON {
 		t.Fatalf("candidate pool JSON = %v, want %s", encoded, wantJSON)
 	}
@@ -663,7 +667,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	if legacy.InputTokens != 500 {
 		t.Fatalf("legacy input tokens = %d, want 500", legacy.InputTokens)
 	}
-	if legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
+	if legacy.Effort != "" || legacy.ModelProvider != nil || legacy.SubprocessWaitMS != nil ||
 		legacy.ModelRoundtrips != nil || legacy.ToolCalls != nil || legacy.FindingCount != nil || legacy.ReviewCandidatePool != nil {
 		t.Fatalf("legacy row must read new columns as unknown, got %+v", legacy)
 	}

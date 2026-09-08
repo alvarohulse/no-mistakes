@@ -33,7 +33,7 @@ func TestRunAuditCanonicalJSONHasStableShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schema_version":9,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"integrity_errors":[]}`
+	want := `{"schema_version":10,"run":{"id":"run-1","repo_id":"repo-1","branch":"feature","head_sha":"abc","base_sha":"def","refresh_strategy":"merge","status":"completed","created_at":10,"updated_at":20,"parked_ms":0,"pinned_at":null,"rich_data_retained":true,"no_mistakes_version":null,"no_mistakes_build_sha":null,"policy_digest":null,"config_sources":[]},"steps":[],"skip_receipts":[],"invocations":[],"metrics":{"invocation_count":0,"delta_input_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_output_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_read_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"delta_cache_write_tokens":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null},"reported_cost_usd":{"value":null,"coverage":{"reported":0,"total":0},"integrity_error":null}},"integrity_errors":[]}`
 	if got != want {
 		t.Fatalf("canonical JSON mismatch:\n got: %s\nwant: %s", got, want)
 	}
@@ -222,7 +222,7 @@ func TestBuildRunAuditOrdersRecordsAndCarriesSkipAndReviewReceipts(t *testing.T)
 	if err := database.UpdateRunConfigSources(run.ID, sources); err != nil {
 		t.Fatal(err)
 	}
-	policy := `{"version":5,"managed":true,"steps":[{"name":"review","status":"enabled"},{"name":"ci","status":"skipped","skip_source":"global-override"}],"routing":{"review_candidates":[{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"}}]}}`
+	policy := `{"version":5,"managed":true,"steps":[{"name":"review","status":"enabled"},{"name":"ci","status":"skipped","skip_source":"global-override"}],"routing":{"review_candidates":[{"agent":"codex","model":{"name":"gpt-5.6-sol","vendor":"openai"},"effort":"xhigh"}]}}`
 	digest := sha256.Sum256([]byte(policy))
 	if err := database.UpdateRunResolvedPolicy(run.ID, policy, hex.EncodeToString(digest[:])); err != nil {
 		t.Fatal(err)
@@ -250,8 +250,8 @@ func TestBuildRunAuditOrdersRecordsAndCarriesSkipAndReviewReceipts(t *testing.T)
 	provider := "openai"
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 2, Purpose: "review", Agent: "codex", Model: "gpt-5.6-sol", ModelProvider: &provider,
-		ReviewCandidatePool: []db.ReviewCandidateReceipt{{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai"}},
-		SessionMode:         db.InvocationModeCold, StartedAt: 20, CompletedAt: 21, ExitStatus: "ok",
+		Effort: "xhigh", ReviewCandidatePool: []db.ReviewCandidateReceipt{{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai", Effort: "xhigh"}},
+		SessionMode: db.InvocationModeCold, StartedAt: 20, CompletedAt: 21, ExitStatus: "ok",
 	})
 	seedInvocation(t, database, db.AgentInvocation{
 		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review-fix", Agent: "cursor",
@@ -274,12 +274,33 @@ func TestBuildRunAuditOrdersRecordsAndCarriesSkipAndReviewReceipts(t *testing.T)
 	if len(audit.Invocations) != 2 || audit.Invocations[0].Round != 1 || audit.Invocations[1].Review == nil || audit.Invocations[1].Review.Selected.Agent != "codex" {
 		t.Fatalf("invocation receipts = %+v", audit.Invocations)
 	}
+	if got := audit.Invocations[1].Effort; got == nil || *got != "xhigh" || audit.Invocations[1].Review.Selected.Effort == nil || *audit.Invocations[1].Review.Selected.Effort != "xhigh" {
+		t.Fatalf("effort receipts = %+v", audit.Invocations[1])
+	}
 	if got := audit.Run.ConfigSources; len(got) != 2 || got[1].Kind != db.ConfigSourceGlobalOverride || got[1].Digest != strings.Repeat("b", 64) {
 		t.Fatalf("config digests = %+v", got)
 	}
 	encoded := mustJSON(t, audit)
 	if strings.Contains(encoded, "/private/config") || strings.Contains(encoded, "owner/repo") {
 		t.Fatal("audit leaked private config source metadata")
+	}
+}
+
+func TestBuildRunAuditReportsReviewSelectionEffortDrift(t *testing.T) {
+	database, run := newAuditRun(t)
+	provider := "openai"
+	seedInvocation(t, database, db.AgentInvocation{
+		RunID: run.ID, StepName: "review", Round: 1, Purpose: "review", Agent: "codex", Model: "gpt-5.6-sol", Effort: "medium", ModelProvider: &provider,
+		ReviewCandidatePool: []db.ReviewCandidateReceipt{{Agent: "codex", Model: "gpt-5.6-sol", Vendor: "openai", Effort: "high"}},
+		SessionMode:         db.InvocationModeCold, StartedAt: 1, CompletedAt: 2, ExitStatus: "ok",
+	})
+
+	audit, err := BuildRunAudit(database, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(audit.IntegrityErrors, "\n"), "selected route is absent from its candidate pool") {
+		t.Fatalf("integrity errors = %v", audit.IntegrityErrors)
 	}
 }
 

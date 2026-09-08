@@ -290,6 +290,7 @@ CREATE TABLE IF NOT EXISTS agent_invocations (
     agent                 TEXT NOT NULL,
 	usage_coverage        TEXT NOT NULL DEFAULT 'unknown',
     model                 TEXT,
+    effort                TEXT,
     model_provider        TEXT,
 	review_candidate_pool_json TEXT,
     session_mode          TEXT NOT NULL,
@@ -692,6 +693,7 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN skip_source TEXT`,
 	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
 	// back as unknown, never a fabricated zero).
+	`ALTER TABLE agent_invocations ADD COLUMN effort TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN review_candidate_pool_json TEXT`,
 	`ALTER TABLE agent_invocations ADD COLUMN fallback_reason TEXT`,

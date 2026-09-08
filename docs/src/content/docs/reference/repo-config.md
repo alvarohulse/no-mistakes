@@ -6,14 +6,14 @@ description: All fields for .no-mistakes.yaml.
 Committed per-repo configuration lives in `.no-mistakes.yaml` at the repository root. The global config's [`overrides`](/no-mistakes/reference/global-config/#overrides) map can carry an optional machine-local overlay in this same shape, keyed by the repository's `<owner>/<repo>` identity.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` route, and the Review candidate pool select which processes and models launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
+`commands.*` execute arbitrary shell through the resolved runner on the daemon host, while `hooks.{post_worktree,pr_body}` retain their platform-shell contract. The run-wide `agent`, every `<step>.agent` / `<step>.model` / `<step>.effort` route, and the Review candidate pool select which processes, models, and reasoning budgets launch there (including ordered fallback lists, native Cursor, and `acp:` targets) with the maintainer's credentials.
 `prompts` steers those launched agents.
-To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
+To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands`, `hooks`, `agent`, per-step agent/model/effort routes, the Review candidate pool, and `prompts` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `refresh.strategy`, `effective_config.publish`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, and intent settings other than its agent/model route) are still read from the pushed branch. `refresh.strategy` is trusted-only because it controls branch-history mutation.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, and intent settings other than its agent/model/effort route) are still read from the pushed branch. `refresh.strategy` is trusted-only because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
@@ -34,11 +34,14 @@ agent: codex
 review:
   agent: cursor
   model: {name: gpt-5.6-luna-medium, vendor: openai}
+  effort: high
   candidates:
     - agent: claude
       model: {name: claude-opus-5, vendor: anthropic}
+      effort: high
     - agent: codex
       model: {name: gpt-5.6-sol, vendor: openai}
+      effort: xhigh
   # Optional trusted guidance scoped to changed paths.
   path_instructions:
     - path: "internal/scm/**"
@@ -148,7 +151,7 @@ If a pipeline invocation fails because that agent process cannot start or exits 
 Structured findings and schema/output validation problems do not trigger fallback.
 This per-repo `agent` value, including every fallback entry, is still read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands` is enabled there.
 
-### Per-step agent and model routes
+### Per-step agent, model, and effort routes
 
 Set `<step>.agent` to route `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
 
@@ -172,9 +175,11 @@ review:
     vendor: openai
 ```
 
-Supported steps are `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent nor a model. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
+Set `<step>.effort` to `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; omission uses the selected harness default. Effort is checked against the selected agent and model before a run starts. Claude, Codex, Cursor, OpenCode, Pi, and Copilot translate it through verified native interfaces; Rovo Dev and ACP targets reject it. With `agent: auto` or an ordered fallback list, effort compatibility is part of backend selection.
 
-Each supported backend receives the model through its verified interface, with the trusted per-step selection winning over a model default in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex/Cursor resumed Review sessions. Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameters. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. `auto` skips incompatible or unsupported backends; if none is runnable, startup fails with the requested model and vendor. Explicit incompatible routes also fail.
+Supported steps are `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, and `ci`. `push` is controller-deterministic and accepts neither an agent, model, nor effort. The vendor is required and is never inferred from model naming. Vendor identifiers are lowercase letters, digits, and interior hyphens.
+
+Each supported backend receives the model and effort through its verified interface, with the trusted per-step selections winning over model and effort defaults in `agent_args_override` for fresh invocations, fix rounds, and Claude/Codex/Cursor resumed Review sessions. Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameters. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model and effort routing are refused because its managed server exposes no verified selection interfaces. For native backends, `auto` and ordered fallback lists skip entries incompatible or unsupported for the requested model and effort; an explicit ACP route with an incompatible model or effort is rejected rather than skipped. If none is runnable, startup fails with the requested model and vendor.
 
 ACP targets, including `acp:cursor`, accept bracket-free model families. Any model name containing `[` or `]` is rejected during launch-time config validation before the ACP route is probed, covering parameterized, empty, nested, repeated, and unmatched bracket forms. Native Cursor continues accepting its parameterized model syntax. The controller retains the exact configured name and vendor for telemetry; it never reports the family default as a requested parameterized variant.
 
@@ -194,17 +199,17 @@ review:
       optional: true
 ```
 
-`review.candidates` is a closed quality-routing pool, not an ordered availability fallback. Every candidate names exactly one concrete harness and complete model identity. Unavailable required candidates fail policy resolution; unavailable optional candidates are removed, including native Cursor models absent from its reported catalog. Catalog probe errors fail closed, and an empty usable pool is rejected. Every full Review and rereview selects uniformly from the final pool and runs cold under `/review-changes`; `review.agent` and `review.model` remain the stable fixer route. Each review invocation records both the final pool and selected harness/model.
+`review.candidates` is a closed quality-routing pool, not an ordered availability fallback. Every candidate names exactly one concrete harness, complete model identity, and optional effort. Unavailable required candidates or incompatible effort fail policy resolution; unavailable optional candidates are removed, including native Cursor models absent from its reported catalog. Catalog probe errors fail closed, and an empty usable pool is rejected. Every full Review and rereview selects uniformly from the final pool and runs cold under `/review-changes`; `review.agent`, `review.model`, and `review.effort` remain the stable fixer route. Each review invocation records both the final pool and selected harness/model/effort.
 
 The removed `review.adversary_agent` and `review.adversary_model` fields are rejected with a migration hint.
 
 When `commands.build`, `commands.test`, or `commands.lint` is empty, that step's route plans one exact command in a read-only agent pass. The pipeline executes and records the plan, and the same route owns any repair before the pipeline reruns the command.
 
-Every per-step selector is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
+Every per-step selector, including effort, is code-executing configuration. It comes from the pinned trusted default-branch copy unless trusted `allow_repo_commands: true` opts into the pushed copy; a pushed branch cannot self-enable or replace a route under the secure default.
 
 ACP targets accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
 
-The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select effort or a strategy.
 
 ### refresh.strategy
 
@@ -222,14 +227,14 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model/effort route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
 | Type | `bool` |
 | Default | `false` |
 
-This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, per-step routes, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `effective_config.publish`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
+This field is itself read **only from the trusted default-branch copy** of `.no-mistakes.yaml`, never from the pushed SHA, so a contributor cannot self-enable it by setting it on a feature branch. By default the daemon reads `commands`, `hooks`, `agent`, every per-step agent/model/effort route, and `prompts` from your default branch (e.g. `origin/main`) so a pushed SHA cannot inject shell, pick the launched agent, or steer that agent on the daemon host. This opt-in covers those fields only; `refresh.strategy`, `effective_config.publish`, `document.instructions`, `review.path_instructions`, `disable_project_settings`, `no_ci`, and `ci.rerun_transient` stay trusted-only either way. Leave this `false` for any repo that accepts contributions. Set it to `true` only for a single-developer environment where you trust every branch you push (for example, a personal repo gated by your own daemon).
 
 ### effective_config.publish
 

@@ -165,7 +165,7 @@ Before execution, no-mistakes resolves the binary, records the canonical configu
 | Type    | `{ executable: string, args: [] }`   |
 | Default | `sh -c` (POSIX), `pwsh` (Windows)    |
 
-### Per-step agent and model routes
+### Per-step agent, model, and effort routes
 
 Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, and `ci`.
 
@@ -177,20 +177,21 @@ test:
   agent: pi
 ```
 
-An unconfigured step inherits the run-wide `agent` unless `managed: true` requires an explicit route. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. For Review, `review.agent` and `review.model` are the stable fixer route when a candidate pool is configured.
+An unconfigured step inherits the run-wide `agent` unless `managed: true` requires an explicit route. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. For Review, `review.agent`, `review.model`, and `review.effort` are the stable fixer route when a candidate pool is configured.
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
-`<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. Repo model routes override matching global model routes. Each supported backend receives the model through its verified interface on every invocation and fix round; the first-class field wins over a model default in `agent_args_override`. `push` has no agent or model route.
+`<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. `<step>.effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; omission uses the selected harness default. Repo model and effort routes override matching global routes. Each supported backend receives the model and effort through its verified interface on every invocation and fix round; the first-class fields win over defaults in `agent_args_override`. `push` has no agent, model, or effort route.
 
 ```yaml
 review:
   agent: codex
   model: {name: gpt-5.6-sol, vendor: openai}
+  effort: xhigh
 ```
 
-Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameter overrides. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. When the effective agent is `auto`, no-mistakes skips incompatible or unsupported backends. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
+Claude and Codex accept their native model names. Native Cursor accepts Cursor's exact cross-vendor model string, including bracketed parameter overrides. OpenCode requires `name` in `provider/model` form and receives the parsed provider and model IDs in each message request. Pi and Copilot accept their native model names. Rovo Dev model routing is refused because its managed server exposes no verified model-selection interface. Claude, Codex, Cursor, OpenCode, Pi, and Copilot translate effort through verified native interfaces; Rovo Dev and ACP targets reject it. For native backends, `auto` and ordered fallback lists skip entries incompatible with the requested model and effort. An explicit ACP route with an incompatible model or effort is rejected rather than skipped. Vendor identity is never derived from the model name. If no compatible backend is runnable, startup fails loudly.
 
-`review.candidates` is a closed full-review pool, not an ordered fallback list. Every entry names one explicit `agent` and complete `model`; `agent: auto` and duplicate pairs are rejected. Set `optional: true` only for a route that may legitimately be absent. Policy resolution removes an optional route whose harness is unavailable or whose exact native Cursor model is absent from `cursor-agent models`; required absence and catalog-probe errors fail before run creation. At least one usable candidate must remain. Every initial full review and rereview selects one usable candidate uniformly at random, runs it cold under the `/review-changes` contract, and records the final pool plus selected route. The fixer route remains stable across rounds.
+`review.candidates` is a closed full-review pool, not an ordered fallback list. Every entry names one explicit `agent`, complete `model`, and optional `effort`; `agent: auto` and duplicate routes are rejected. Set `optional: true` only for a route that may legitimately be absent. Policy resolution removes an optional route whose harness is unavailable or whose exact native Cursor model is absent from `cursor-agent models`; required absence, incompatible effort, and catalog-probe errors fail before run creation. At least one usable candidate must remain. Every initial full review and rereview selects one usable candidate uniformly at random, runs it cold under the `/review-changes` contract, and records the final pool plus selected route including effort. The fixer route remains stable across rounds.
 
 The removed `review.adversary_agent` and `review.adversary_model` fields now fail config parsing with a migration hint to use `review.candidates`.
 
@@ -629,7 +630,7 @@ Machine-local per-repository configuration, keyed by repository identity.
 | Type | `map` of `<owner>/<repo>` keys to [repo-config](/no-mistakes/reference/repo-config/)-shaped objects |
 | Default | Empty (no repository is overridden) |
 
-Use an entry here for repo-specific values that cannot be committed to the repository's default branch - for example canonical commands in a repository whose default branch you do not control. This is machine-owner-trusted configuration with the same standing the retired machine-local config file had: it can set code-executing fields (`commands`, `hooks`), the run-wide `agent`, per-step agent/model routes, and per-key `prompts`.
+Use an entry here for repo-specific values that cannot be committed to the repository's default branch - for example canonical commands in a repository whose default branch you do not control. This is machine-owner-trusted configuration with the same standing the retired machine-local config file had: it can set code-executing fields (`commands`, `hooks`), the run-wide `agent`, per-step agent/model/effort routes, and per-key `prompts`.
 
 ```yaml
 overrides:

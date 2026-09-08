@@ -56,6 +56,78 @@ ci:
 	}
 }
 
+func TestLoadRepo_StepRoutesCarryExplicitEffort(t *testing.T) {
+	cfg, err := LoadRepoFromBytes([]byte(`
+intent:
+  agent: codex
+  model: {name: gpt-5.6-terra, vendor: openai}
+  effort: high
+refresh:
+  agent: codex
+  model: {name: gpt-5.6-luna, vendor: openai}
+  effort: xhigh
+review:
+  agent: codex
+  model: {name: gpt-5.6-luna, vendor: openai}
+  effort: xhigh
+  candidates:
+    - agent: claude
+      model: {name: claude-opus-5, vendor: anthropic}
+      effort: high
+    - agent: cursor
+      model: {name: grok-4.6, vendor: xai}
+      effort: high
+build:
+  effort: xhigh
+test:
+  effort: xhigh
+document:
+  effort: high
+lint:
+  effort: xhigh
+pr:
+  effort: xhigh
+ci:
+  effort: xhigh
+`))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+
+	want := map[types.StepName]string{
+		types.StepIntent:   "high",
+		types.StepRefresh:  "xhigh",
+		types.StepReview:   "xhigh",
+		types.StepBuild:    "xhigh",
+		types.StepTest:     "xhigh",
+		types.StepDocument: "high",
+		types.StepLint:     "xhigh",
+		types.StepPR:       "xhigh",
+		types.StepCI:       "xhigh",
+	}
+	if got := cfg.ConfiguredStepEfforts(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ConfiguredStepEfforts() = %#v, want %#v", got, want)
+	}
+	wantCandidates := []ReviewCandidate{
+		{Agent: types.AgentClaude, Model: ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}, Effort: "high"},
+		{Agent: types.AgentCursor, Model: ModelRoute{Name: "grok-4.6", Vendor: "xai"}, Effort: "high"},
+	}
+	if got := cfg.Review.Candidates; !reflect.DeepEqual(got, wantCandidates) {
+		t.Fatalf("review candidates = %#v, want %#v", got, wantCandidates)
+	}
+}
+
+func TestLoadRepo_RejectsRouteEffortUnsupportedByAgent(t *testing.T) {
+	_, err := LoadRepoFromBytes([]byte(`
+review:
+  agent: rovodev
+  effort: high
+`))
+	if err == nil || !strings.Contains(err.Error(), "effort") {
+		t.Fatalf("LoadRepoFromBytes() error = %v, want unsupported-effort refusal", err)
+	}
+}
+
 func TestLoadRepo_StepModelSchemaIsStrict(t *testing.T) {
 	tests := []struct {
 		name string

@@ -1398,6 +1398,10 @@ func (a *metadataAgent) ConfiguredModel() agent.ModelIdentity {
 	return agent.ConfiguredModel(a.inner)
 }
 
+func (a *metadataAgent) ConfiguredEffort() agent.Effort {
+	return agent.ConfiguredEffort(a.inner)
+}
+
 func (a *metadataAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Env = append(append([]string(nil), opts.Env...), a.env...)
 	opts.Prompt += a.promptSection
@@ -1426,6 +1430,10 @@ func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
 func (a *gateStepBoundaryAgent) ConfiguredModel() agent.ModelIdentity {
 	return agent.ConfiguredModel(a.inner)
+}
+
+func (a *gateStepBoundaryAgent) ConfiguredEffort() agent.Effort {
+	return agent.ConfiguredEffort(a.inner)
 }
 
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -1462,6 +1470,10 @@ func (a *lifecycleAgent) Name() string {
 
 func (a *lifecycleAgent) ConfiguredModel() agent.ModelIdentity {
 	return agent.ConfiguredModel(a.inner)
+}
+
+func (a *lifecycleAgent) ConfiguredEffort() agent.Effort {
+	return agent.ConfiguredEffort(a.inner)
 }
 
 func (a *lifecycleAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {

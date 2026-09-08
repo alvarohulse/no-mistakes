@@ -13,7 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 type RunAudit struct {
 	SchemaVersion   int           `json:"schema_version"`
@@ -101,6 +101,7 @@ type Invocation struct {
 	Agent           string              `json:"agent"`
 	UsageCoverage   agent.UsageCoverage `json:"usage_coverage"`
 	Model           *string             `json:"model"`
+	Effort          *string             `json:"effort"`
 	Provider        *string             `json:"provider"`
 	Review          *ReviewReceipt      `json:"review"`
 	SessionMode     string              `json:"session_mode"`
@@ -149,6 +150,7 @@ type ReviewReceipt struct {
 type ReviewCandidate struct {
 	Agent    string `json:"agent"`
 	Model    string `json:"model"`
+	Effort   string `json:"effort,omitempty"`
 	Provider string `json:"provider"`
 	Optional bool   `json:"optional"`
 }
@@ -156,6 +158,7 @@ type ReviewCandidate struct {
 type Route struct {
 	Agent    string  `json:"agent"`
 	Model    *string `json:"model"`
+	Effort   *string `json:"effort"`
 	Provider *string `json:"provider"`
 }
 
@@ -382,7 +385,7 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	result := Invocation{
 		ID: row.ID, Step: types.StepName(row.StepName).Canonical(), Round: row.Round, Purpose: row.Purpose, Agent: row.Agent,
 		UsageCoverage: row.UsageCoverage,
-		Model:         nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider),
+		Model:         nonEmptyValue(row.Model), Effort: nonEmptyValue(row.Effort), Provider: cloneString(row.ModelProvider),
 		SessionMode: row.SessionMode, SessionKey: row.SessionKey, FallbackReason: cloneString(row.FallbackReason),
 		StartedAt: row.StartedAt, CompletedAt: row.CompletedAt, DurationMS: row.DurationMS, ExitStatus: row.ExitStatus,
 		FailureCategory: nonEmptyValue(row.FailureCategory), ReportedCostUSD: cloneFloat64(row.ReportedCostUSD),
@@ -414,11 +417,11 @@ func buildInvocation(row db.AgentInvocation, requireManagedReviewReceipt bool, e
 	if row.ReviewCandidatePool != nil {
 		candidates := make([]ReviewCandidate, 0, len(row.ReviewCandidatePool))
 		for _, candidate := range row.ReviewCandidatePool {
-			candidates = append(candidates, ReviewCandidate{Agent: candidate.Agent, Model: candidate.Model, Provider: candidate.Vendor, Optional: candidate.Optional})
+			candidates = append(candidates, ReviewCandidate{Agent: candidate.Agent, Model: candidate.Model, Effort: candidate.Effort, Provider: candidate.Vendor, Optional: candidate.Optional})
 		}
 		result.Review = &ReviewReceipt{
 			CandidatePool: candidates,
-			Selected:      Route{Agent: row.Agent, Model: nonEmptyValue(row.Model), Provider: cloneString(row.ModelProvider)},
+			Selected:      Route{Agent: row.Agent, Model: nonEmptyValue(row.Model), Effort: nonEmptyValue(row.Effort), Provider: cloneString(row.ModelProvider)},
 		}
 	}
 	integrityErrors = append(integrityErrors, reviewReceiptErrors(result, requireManagedReviewReceipt, expectedReviewPool)...)
@@ -436,9 +439,10 @@ func reviewReceiptErrors(invocation Invocation, requireManagedReviewReceipt bool
 		return []string{fmt.Sprintf("managed review invocation %s candidate pool differs from resolved policy", invocation.ID)}
 	}
 	selectedModel := stringOrEmpty(invocation.Review.Selected.Model)
+	selectedEffort := stringOrEmpty(invocation.Review.Selected.Effort)
 	selectedProvider := stringOrEmpty(invocation.Review.Selected.Provider)
 	for _, candidate := range invocation.Review.CandidatePool {
-		if candidate.Agent == invocation.Review.Selected.Agent && candidate.Model == selectedModel && candidate.Provider == selectedProvider {
+		if candidate.Agent == invocation.Review.Selected.Agent && candidate.Model == selectedModel && candidate.Effort == selectedEffort && candidate.Provider == selectedProvider {
 			return nil
 		}
 	}

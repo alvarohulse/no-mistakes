@@ -125,6 +125,7 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		r.Provenance.recordResolvedAgents(prefix+".agents", sourcePath, configuredAgents, resolvedAgents, origins.Steps[step])
 		r.Provenance.setSubtree(prefix+".model.name", r.Provenance.Value(string(step)+".model.name"))
 		r.Provenance.setSubtree(prefix+".model.vendor", r.Provenance.Value(string(step)+".model.vendor"))
+		r.Provenance.setSubtree(prefix+".effort", r.Provenance.Value(string(step)+".effort"))
 	}
 
 	usedCandidates := make([]bool, len(configuredCandidates))
@@ -134,7 +135,7 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		agentValue := value
 		matched := -1
 		for j, configured := range configuredCandidates {
-			if usedCandidates[j] || configured.Model != candidate.Model || configured.Optional != candidate.Optional {
+			if usedCandidates[j] || configured.Model != candidate.Model || configured.Effort != candidate.Effort || configured.Optional != candidate.Optional {
 				continue
 			}
 			matched = j
@@ -157,6 +158,7 @@ func (r *EffectiveConfigResolution) ResolveAgent(ctx context.Context, lookPath f
 		r.Provenance.setSubtree(prefix+".agent", agentValue)
 		r.Provenance.setSubtree(prefix+".model.name", value)
 		r.Provenance.setSubtree(prefix+".model.vendor", value)
+		r.Provenance.setSubtree(prefix+".effort", value)
 		r.Provenance.setSubtree(prefix+".optional", value)
 	}
 	if candidatesRuntime {
@@ -409,6 +411,9 @@ func globalEffectiveConfigAppliedPaths(raw *globalConfigRaw, cfg *GlobalConfig) 
 	for step := range cfg.configuredStepModels() {
 		mark(string(step)+".model.name", true)
 		mark(string(step)+".model.vendor", true)
+	}
+	for step := range cfg.configuredStepEfforts() {
+		mark(string(step)+".effort", true)
 	}
 	for _, field := range []string{"shared", "intent", "refresh", "review", "build", "test", "document", "lint", "pr", "ci"} {
 		mark("prompts."+field, strings.TrimSpace(promptConfigValue(cfg.Prompts, field)) != "")
@@ -711,7 +716,7 @@ func effectiveConfigKnownInputPaths() []string {
 		"review.path_instructions", "refresh.strategy", "disable_project_settings", "no_ci", "review.candidates",
 	}
 	for _, step := range []string{"intent", "refresh", "review", "build", "test", "document", "lint", "pr", "ci"} {
-		paths = append(paths, step+".agent", step+".model.name", step+".model.vendor")
+		paths = append(paths, step+".agent", step+".model.name", step+".model.vendor", step+".effort")
 	}
 	for _, prefix := range []string{"auto_fix", "eval", "prompts"} {
 		var fields []string

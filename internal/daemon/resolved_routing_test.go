@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -164,6 +165,27 @@ func TestValidateResolvedAgentRoutingRejectsChangedConcreteFallback(t *testing.T
 	}
 }
 
+func TestValidateResolvedAgentRoutingAcceptsLegacyV2Snapshot(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	encoded, err := marshalResolvedAgentRouting(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot resolvedAgentRouting
+	if err := json.Unmarshal([]byte(encoded), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Version = 2
+	legacyEncoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := string(legacyEncoded)
+	if err := validateResolvedAgentRouting(cfg, &legacy, false); err != nil {
+		t.Fatalf("validateResolvedAgentRouting() rejected legacy v2 snapshot: %v", err)
+	}
+}
+
 func TestLoadRecoveredConfigRestoresLaunchRoutesAfterGlobalAndDefaultAdvance(t *testing.T) {
 	p, database := newRefreshRunFixture(t)
 	repo, _ := setupTestGitRepo(t, p, database, "resolved-routing-recovery")
@@ -320,9 +342,13 @@ func resolvedRoutingTestConfig() *config.Config {
 			types.StepReview: {Name: "gpt-5.6-sol", Vendor: "openai"},
 			types.StepTest:   {Name: "google/gemini-3.5-pro", Vendor: "google"},
 		},
+		StepEfforts: map[types.StepName]string{
+			types.StepReview: "xhigh",
+			types.StepTest:   "high",
+		},
 		ReviewCandidates: []config.ReviewCandidate{
-			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}},
-			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}},
+			{Agent: types.AgentClaude, Model: config.ModelRoute{Name: "claude-opus-5", Vendor: "anthropic"}, Effort: "high"},
+			{Agent: types.AgentCodex, Model: config.ModelRoute{Name: "gpt-5.6-sol", Vendor: "openai"}, Effort: "medium"},
 		},
 	}
 }

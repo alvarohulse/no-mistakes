@@ -296,6 +296,7 @@ func TestValidateResolvedPolicyAcceptsVersionTwoLegacyRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy.Version = 2
+	policy.Routing.Version = 2
 	encoded, digest, err := marshalResolvedPolicyDTO(policy)
 	if err != nil {
 		t.Fatal(err)

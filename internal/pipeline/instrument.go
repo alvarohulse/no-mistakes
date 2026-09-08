@@ -40,6 +40,10 @@ func (a *perfRecordingAgent) ConfiguredModel() agent.ModelIdentity {
 	return agent.ConfiguredModel(a.inner)
 }
 
+func (a *perfRecordingAgent) ConfiguredEffort() agent.Effort {
+	return agent.ConfiguredEffort(a.inner)
+}
+
 func (a *perfRecordingAgent) Close() error { return a.inner.Close() }
 
 // SupportsSessionResume forwards the wrapped adapter's session capability.
@@ -164,6 +168,7 @@ func (a *perfRecordingAgent) newInvocation(ctx context.Context, opts agent.RunOp
 	}
 	configuredModel := agent.ConfiguredModel(a.inner)
 	inv.Model = configuredModel.Name
+	inv.Effort = string(agent.ConfiguredEffort(a.inner))
 	if configuredModel.Vendor != "" {
 		vendor := configuredModel.Vendor
 		inv.ModelProvider = &vendor

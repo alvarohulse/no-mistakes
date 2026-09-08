@@ -33,7 +33,8 @@ type policyReviewCandidate struct {
 		Name   string `json:"name"`
 		Vendor string `json:"vendor"`
 	} `json:"model"`
-	Optional bool `json:"optional"`
+	Effort   string `json:"effort"`
+	Optional bool   `json:"optional"`
 }
 
 type policyFacts struct {
@@ -104,7 +105,7 @@ func resolvedPolicyFacts(encoded, digest *string) (policyFacts, bool, []string) 
 	}
 	for _, candidate := range policy.Routing.ReviewCandidates {
 		facts.ReviewCandidates = append(facts.ReviewCandidates, ReviewCandidate{
-			Agent: candidate.Agent, Model: candidate.Model.Name, Provider: candidate.Model.Vendor, Optional: candidate.Optional,
+			Agent: candidate.Agent, Model: candidate.Model.Name, Effort: candidate.Effort, Provider: candidate.Model.Vendor, Optional: candidate.Optional,
 		})
 	}
 	if len(policy.Steps) == 0 {

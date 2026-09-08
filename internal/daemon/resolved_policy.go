@@ -264,10 +264,8 @@ func validateResolvedPolicy(cfg *config.Config, run *db.Run, steps []pipeline.St
 // removal of the evidence publisher. Their missing or retired fields are
 // normalized before semantic comparison.
 func normalizeResolvedPolicyForComparison(policy *resolvedPolicy) {
-	if policy.Version == 1 {
-		if policy.Routing.Version == 1 {
-			policy.Routing.Version = resolvedAgentRoutingVersion
-		}
+	if policy.Version >= 1 && policy.Version <= resolvedPolicyVersion {
+		normalizeResolvedAgentRoutingForComparison(&policy.Routing)
 	}
 	if policy.Version >= 1 && policy.Version <= 3 {
 		policy.Preflight = []runner.Command{}
