@@ -54,6 +54,53 @@ func beginRefreshReceiptRound(t *testing.T, sctx *pipeline.StepContext) *db.Step
 	return round
 }
 
+func TestRefreshReceiptCapturesMultipleAttemptsInDurableOrder(t *testing.T) {
+	dir, _, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, headSHA, headSHA, config.Commands{})
+	beginRefreshReceiptRound(t, sctx)
+	definition, err := sctx.DB.EnsureCommandDefinition(sctx.Run.ID, runner.Resolved{
+		Script:        "git merge --no-edit origin/main",
+		CommandSource: runner.SourceDirectGit,
+		Provenance: runner.Provenance{
+			SchemaVersion: runner.SchemaVersion,
+			Platform:      runtime.GOOS,
+			Source:        runner.SourceDirectGit,
+			Executable:    "git",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttempt := func(sequence int) *db.CommandAttempt {
+		t.Helper()
+		attempt, err := sctx.DB.StartCommandAttempt(db.CommandAttempt{
+			RunID: sctx.Run.ID, CommandID: definition.ID, StepID: sctx.StepResultID, RoundID: sctx.RoundID,
+			Sequence: sequence, Purpose: string(types.StepRefresh), Observer: db.CommandObserverController,
+			Trigger: sctx.RoundTrigger, BeforeSHA: headSHA, CommandSource: runner.SourceDirectGit,
+			RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDirectGit,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	startAttempt(1)
+	recorder := newRefreshReceiptRecorder(sctx, types.RefreshStrategyRebase, "refs/heads/feature", "origin/main")
+	operation := recorder.begin("origin/main")
+	before, err := operation.refreshScopeAttemptIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstNew := startAttempt(2)
+	secondNew := startAttempt(3)
+	if err := operation.captureAttemptsStartedAfter(before); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(operation.commandAttemptIDs, ","), firstNew.ID+","+secondNew.ID; got != want {
+		t.Fatalf("captured attempt order = %q, want %q", got, want)
+	}
+}
+
 func TestRefreshStepRecordsTargetDecisionsAndPrimaryArtifacts(t *testing.T) {
 	t.Parallel()
 	dir, upstream, featureHead := setupStackedRefreshRepo(t)
