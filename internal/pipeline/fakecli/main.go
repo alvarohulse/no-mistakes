@@ -68,7 +68,9 @@ func handleFakeCLI(mode string) {
 	case "ci-gh-reconcile":
 		fakeCIGHReconcileHandler(args)
 	case "ci-gh-git-update-ref-error":
-		switch filepath.Base(os.Args[0]) {
+		executableName := filepath.Base(os.Args[0])
+		executableName = strings.TrimSuffix(executableName, filepath.Ext(executableName))
+		switch executableName {
 		case "gh":
 			fakeCIGHHandler(args)
 		case "git":
