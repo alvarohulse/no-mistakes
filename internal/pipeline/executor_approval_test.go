@@ -36,10 +36,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	steps := []Step{step, newPassStep(types.StepTest)}
 	exec := NewExecutor(database, p, nil, nil, steps, nil)
 
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), run, repo, workDir)
-	}()
+	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	// Wait for awaiting_approval
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
@@ -48,14 +45,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	exec.Respond(types.StepReview, types.ActionFix, nil)
 
 	// Wait for step to re-execute and complete (it passes on second call)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("expected no error, got: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("executor timed out")
-	}
+	waitExecutorDone(t, done)
 
 	// Both steps should be completed
 	dbSteps, _ := database.GetStepsByRun(run.ID)
