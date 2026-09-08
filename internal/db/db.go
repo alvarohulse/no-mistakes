@@ -30,6 +30,47 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
+	// Inspect the database before installing the current schema. A database
+	// with no user-defined objects is new, so it does not need compatibility
+	// migrations for older schemas; pre-existing schemas still take the full
+	// migration path below.
+	var schemaObjects int
+	if err := sqlDB.QueryRow(`
+		SELECT count(*)
+		FROM sqlite_master
+		WHERE name NOT LIKE 'sqlite_%'`).Scan(&schemaObjects); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("inspect db: %w", err)
+	}
+	if schemaObjects == 0 {
+		tx, err := sqlDB.Begin()
+		if err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("begin fresh schema migration: %w", err)
+		}
+		if _, err := tx.Exec(schemaSQL + freshSchemaObjectsSQL); err != nil {
+			_ = tx.Rollback()
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate fresh schema: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("commit fresh schema migration: %w", err)
+		}
+		if err := migrateRoundDecisionSources(sqlDB); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate db: %w", err)
+		}
+		if err := migrateCommandDefinitionProvenanceColumns(sqlDB); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate db: %w", err)
+		}
+		if err := migrateRunMetricReceipts(sqlDB); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate db: %w", err)
+		}
+		return &DB{sql: sqlDB}, nil
+	}
 	if _, err := sqlDB.Exec(schemaSQL); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)

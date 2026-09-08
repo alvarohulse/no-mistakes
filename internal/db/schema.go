@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS runs (
     resolved_agent_routing_json TEXT,
     resolved_policy_json    TEXT,
     resolved_policy_digest  TEXT,
+    intent                 TEXT,
+    intent_source          TEXT,
+    intent_session_id      TEXT,
+    intent_score           REAL,
     submitted_head_sha      TEXT,
     no_mistakes_version     TEXT,
     no_mistakes_build_sha   TEXT,
@@ -38,6 +42,7 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_state_observed_at    INTEGER,
     ci_ready_at             INTEGER,
     ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    ci_rerun_state          TEXT,
     ci_fix_attempts         INTEGER,
     last_pushed_sha         TEXT,
     push_target_kind        TEXT,
@@ -47,10 +52,12 @@ CREATE TABLE IF NOT EXISTS runs (
     push_generation         INTEGER,
     push_active             INTEGER NOT NULL DEFAULT 0,
     terminal_head_verified_at INTEGER,
+    custody_returned_at     INTEGER,
     error                   TEXT,
     awaiting_agent_since INTEGER,
     parked_ms            INTEGER,
 	metadata             TEXT,
+    pr_note             TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -412,6 +419,45 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (repo_id, branch)
 );
+`
+
+// freshSchemaObjectsSQL contains objects whose columns were introduced by
+// compatibility migrations. Keep them out of schemaSQL so opening an older
+// database can install the base schema before those migrations add the columns.
+const freshSchemaObjectsSQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_retry_of
+    ON command_attempts (retry_of_attempt_id) WHERE retry_of_attempt_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_command_attempts_output_artifact
+    ON command_attempts (output_artifact_id) WHERE output_artifact_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_command_attempts_proof_by_tested_sha
+    ON command_attempts (run_id, tested_sha) WHERE accepted_as_proof = 1;
+
+CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_insert
+BEFORE INSERT ON command_attempts
+WHEN NEW.accepted_as_proof NOT IN (0, 1)
+  OR (NEW.accepted_as_proof = 0 AND NEW.proof_reason IS NOT NULL)
+  OR (NEW.accepted_as_proof = 1 AND NEW.proof_reason IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'command attempt proof state must pair acceptance and reason');
+END;
+
+CREATE TRIGGER IF NOT EXISTS validate_command_attempt_proof_state_update
+BEFORE UPDATE OF accepted_as_proof, proof_reason ON command_attempts
+WHEN NEW.accepted_as_proof NOT IN (0, 1)
+  OR (NEW.accepted_as_proof = 0 AND NEW.proof_reason IS NOT NULL)
+  OR (NEW.accepted_as_proof = 1 AND NEW.proof_reason IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'command attempt proof state must pair acceptance and reason');
+END;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_round_decision_findings_selection_ordinal
+    ON round_decision_findings (decision_id, selection_ordinal)
+    WHERE selection_ordinal IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_agent_invocations_round_started_id
+    ON agent_invocations (round_id, started_at, id);
 `
 
 // migrationStatements hold additive schema changes applied to databases that

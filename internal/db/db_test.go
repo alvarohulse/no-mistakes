@@ -76,7 +76,7 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"refresh_strategy", "stacked_on", "config_sources_json", "resolved_agent_routing_json", "resolved_policy_json", "resolved_policy_digest", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "ci_fix_attempts", "custody_returned_at", "metadata"} {
+	for _, column := range []string{"refresh_strategy", "stacked_on", "config_sources_json", "resolved_agent_routing_json", "resolved_policy_json", "resolved_policy_digest", "intent", "intent_source", "intent_session_id", "intent_score", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "ci_rerun_state", "ci_fix_attempts", "custody_returned_at", "pr_note", "metadata"} {
 		if !hasColumn(t, d, "runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
@@ -99,6 +99,37 @@ func TestOpenCreatesSchema(t *testing.T) {
 	for _, table := range []string{"round_evaluations", "round_findings", "round_evaluation_artifacts", "round_decisions", "round_decision_findings", "round_repairs"} {
 		if err := d.sql.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
 			t.Fatalf("%s table missing: %v", table, err)
+		}
+	}
+	for _, tc := range []struct {
+		table string
+		index string
+	}{
+		{table: "command_attempts", index: "idx_command_attempts_proof_by_tested_sha"},
+		{table: "agent_invocations", index: "idx_agent_invocations_round_started_id"},
+	} {
+		if !hasIndex(t, d, tc.table, tc.index) {
+			t.Fatalf("%s index missing from fresh schema", tc.index)
+		}
+	}
+	for _, tc := range []struct {
+		table string
+		index string
+	}{
+		{table: "command_attempts", index: "idx_command_attempts_retry_of"},
+		{table: "command_attempts", index: "idx_command_attempts_output_artifact"},
+		{table: "round_decision_findings", index: "idx_round_decision_findings_selection_ordinal"},
+	} {
+		if !hasUniquePartialIndex(t, d, tc.table, tc.index) {
+			t.Fatalf("%s unique partial index missing from fresh schema", tc.index)
+		}
+	}
+	for _, trigger := range []string{
+		"validate_command_attempt_proof_state_insert",
+		"validate_command_attempt_proof_state_update",
+	} {
+		if !hasTrigger(t, d, trigger) {
+			t.Fatalf("%s trigger missing from fresh schema", trigger)
 		}
 	}
 	if !hasColumn(t, d, "round_decision_findings", "selection_ordinal") {
@@ -498,6 +529,37 @@ func hasUniquePartialIndex(t *testing.T, d *DB, table, index string) bool {
 		t.Fatalf("iterate index_list: %v", err)
 	}
 	return false
+}
+
+func hasIndex(t *testing.T, d *DB, table, index string) bool {
+	t.Helper()
+	rows, err := d.sql.Query(`SELECT name FROM pragma_index_list(?)`, table)
+	if err != nil {
+		t.Fatalf("pragma index_list(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan index_list: %v", err)
+		}
+		if name == index {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index_list: %v", err)
+	}
+	return false
+}
+
+func hasTrigger(t *testing.T, d *DB, trigger string) bool {
+	t.Helper()
+	var count int
+	if err := d.sql.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, trigger).Scan(&count); err != nil {
+		t.Fatalf("find trigger %s: %v", trigger, err)
+	}
+	return count != 0
 }
 
 func TestOpenWaitsForTransientMigrationLock(t *testing.T) {
