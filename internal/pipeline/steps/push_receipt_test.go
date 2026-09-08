@@ -23,7 +23,9 @@ func TestPushReceiptRecorderRedactsTargetAndPersistsOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder.setPushedSHA(strings.Repeat("c", 40))
+	recorder.verifiedRemoteSHA = pushReceiptStringPointer(strings.Repeat("c", 40))
 	recorder.setDecision(db.PushLeaseOrForceDecisionNewBranch, "created branch on https://user:secret@example.com/repo", "")
+	recorder.recordBinding(1)
 	if err := recorder.finish(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -43,58 +45,40 @@ func TestPushReceiptRecorderRedactsTargetAndPersistsOutcome(t *testing.T) {
 	}
 }
 
-func TestPushReceiptRecorderPreservesAttemptOrder(t *testing.T) {
+func TestRunStepGitCommandResultReturnsPersistedAttemptID(t *testing.T) {
 	sctx := newPushReceiptTestContext(t)
+
+	result := runStepGitCommandResult(sctx, "git --version", "push", "--version")
+	if err := result.err(); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || result.attemptID != attempts[0].ID {
+		t.Fatalf("command attempt result = %q, attempts = %+v", result.attemptID, attempts)
+	}
+}
+
+func TestPushReceiptRecorderRecordsOnlyTheDirectAttempt(t *testing.T) {
+	sctx := newPushReceiptTestContext(t)
+	if _, _, err := runStepGitCommand(sctx, "git --version", "push", "--version"); err != nil {
+		t.Fatal(err)
+	}
 	recorder := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
 	if err := recorder.start(); err != nil {
 		t.Fatal(err)
-	}
-	call := 0
-	recorder.attemptSnapshot = func() ([]string, error) {
-		call++
-		if call == 1 {
-			return []string{"before"}, nil
-		}
-		return []string{"before", "attempt-2", "attempt-1"}, nil
 	}
 	if _, err := recorder.runGit("push", "git --version", "--version"); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(recorder.attemptIDs, ","); got != "attempt-2,attempt-1" {
-		t.Fatalf("attempt order = %q, want attempt-2,attempt-1", got)
-	}
-}
-
-func TestPushReceiptRecorderSurfacesPostCommandAttemptLookupFailure(t *testing.T) {
-	sctx := newPushReceiptTestContext(t)
-	recorder := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
-	if err := recorder.start(); err != nil {
-		t.Fatal(err)
-	}
-	call := 0
-	recorder.attemptSnapshot = func() ([]string, error) {
-		call++
-		if call == 1 {
-			return nil, nil
-		}
-		return nil, errors.New("attempt lookup unavailable")
-	}
-	runErr := func() error {
-		_, err := recorder.runGit("push", "git --version", "--version")
-		return err
-	}()
-	if runErr == nil || !strings.Contains(runErr.Error(), "record push command attempts") {
-		t.Fatalf("run error = %v, want post-command lookup failure", runErr)
-	}
-	if err := recorder.finish(runErr); err != nil {
-		t.Fatal(err)
-	}
-	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(receipts) != 1 || receipts[0].Outcome != db.PushOperationOutcomeFailed {
-		t.Fatalf("terminal receipt = %+v", receipts)
+	if len(attempts) != 2 || len(recorder.attemptIDs) != 1 || recorder.attemptIDs[0] != attempts[1].ID {
+		t.Fatalf("receipt attempts = %+v, all attempts = %+v", recorder.attemptIDs, attempts)
 	}
 }
 
@@ -125,14 +109,14 @@ func TestPushReceiptRecorderRetainsObservedVerificationMismatch(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected verification mismatch")
 			}
-			if recorder.remoteAfterSHA == nil || *recorder.remoteAfterSHA != strings.Repeat("d", 40) {
-				t.Fatalf("observed remote SHA = %+v, want mismatch SHA", recorder.remoteAfterSHA)
+			if recorder.verifiedRemoteSHA == nil || *recorder.verifiedRemoteSHA != strings.Repeat("d", 40) {
+				t.Fatalf("verified remote SHA = %+v, want mismatch SHA", recorder.verifiedRemoteSHA)
 			}
 		})
 	}
 }
 
-func TestPushReceiptRecorderLinksRepeatedPushAndUsesUniqueDiagnostics(t *testing.T) {
+func TestPushReceiptRecorderDoesNotInferRetryAndUsesUniqueDiagnostics(t *testing.T) {
 	sctx := newPushReceiptTestContext(t)
 	first := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
 	if err := first.start(); err != nil {
@@ -158,11 +142,8 @@ func TestPushReceiptRecorderLinksRepeatedPushAndUsesUniqueDiagnostics(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(receipts) != 2 || receipts[1].RetryOfOperationID == nil || *receipts[1].RetryOfOperationID != receipts[0].ID || receipts[1].RetryReason == nil {
+	if len(receipts) != 2 || receipts[1].RetryOfOperationID != nil || receipts[1].RetryReason != nil {
 		t.Fatalf("retry linkage = %+v", receipts)
-	}
-	if strings.Contains(*receipts[1].RetryReason, "https://") {
-		t.Fatalf("retry reason leaked URL: %q", *receipts[1].RetryReason)
 	}
 	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
 	if err != nil {
@@ -173,6 +154,15 @@ func TestPushReceiptRecorderLinksRepeatedPushAndUsesUniqueDiagnostics(t *testing
 	}
 	if receipts[0].DiagnosticArtifactID == nil || receipts[1].DiagnosticArtifactID == nil || *receipts[0].DiagnosticArtifactID == *receipts[1].DiagnosticArtifactID || artifacts[0].RelativePath == artifacts[1].RelativePath {
 		t.Fatalf("diagnostic linkage/path collision = %+v / %+v", receipts, artifacts)
+	}
+	for _, receipt := range receipts {
+		diagnostic, err := sctx.DB.GetArtifact(*receipt.DiagnosticArtifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diagnostic == nil || diagnostic.OperationID == nil || *diagnostic.OperationID != receipt.ID {
+			t.Fatalf("diagnostic = %+v, want operation %q", diagnostic, receipt.ID)
+		}
 	}
 }
 

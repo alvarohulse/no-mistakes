@@ -41,6 +41,7 @@ type persistedStepCommandResult struct {
 	output         string
 	exitCode       int
 	executed       bool
+	attemptID      string
 	executionErr   error
 	persistenceErr error
 }
@@ -479,13 +480,17 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 			persistenceErr = errors.Join(outcomeErr, persistenceErr)
 		}
 	}
-	return persistedStepCommandResult{
+	result := persistedStepCommandResult{
 		output:         runnerResult.Output,
 		exitCode:       runnerResult.ExitCode,
 		executed:       true,
 		executionErr:   executionErr,
 		persistenceErr: persistenceErr,
 	}
+	if attempt != nil {
+		result.attemptID = attempt.ID
+	}
+	return result
 }
 
 // runStepGitCommand executes a controller-owned Git command without routing

@@ -200,16 +200,25 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	if err := recordVerifiedPushRemoteSHA(receipt, verifiedRemote, headBeingPushed); err != nil {
 		return nil, fmt.Errorf("verify successful push to %s: %w", pushTarget, err)
 	}
-	verifiedRemote = *receipt.remoteAfterSHA
-	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
+	verifiedRemote = *receipt.verifiedRemoteSHA
+	binding := db.PushBinding{
 		HeadSHA:           headBeingPushed,
 		TargetKind:        pushTarget,
 		TargetFingerprint: branchsync.TargetFingerprint(pushURL),
 		Ref:               ref,
-	}); err != nil {
+	}
+	var generation int64
+	if receipt.enabled() {
+		generation, err = sctx.DB.UpdateRunPushBindingWithGeneration(sctx.Run.ID, binding)
+	} else {
+		err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
+	}
+	if err != nil {
 		return nil, err
 	}
-	receipt.bindingUpdated = true
+	if receipt.enabled() {
+		receipt.recordBinding(generation)
+	}
 
 	if newHeadSHA != "" {
 		if _, err := durablePushGitCommand(sctx, receipt, purpose, "update-ref", ref, newHeadSHA); err != nil {
@@ -242,7 +251,7 @@ func recordVerifiedPushRemoteSHA(receipt *pushReceiptRecorder, output, expected 
 	fields := strings.Fields(output)
 	if len(fields) == 0 || fields[0] != expected {
 		if len(fields) > 0 {
-			receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
+			receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
 		}
 		observed := "missing"
 		if len(fields) > 0 {
@@ -250,7 +259,7 @@ func recordVerifiedPushRemoteSHA(receipt *pushReceiptRecorder, output, expected 
 		}
 		return fmt.Errorf("remote head %s does not equal pushed head %s", observed, expected)
 	}
-	receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
+	receipt.verifiedRemoteSHA = pushReceiptStringPointer(fields[0])
 	return nil
 }
 

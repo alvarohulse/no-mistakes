@@ -127,14 +127,15 @@ CI logs:
 		return false, "", fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	var persistRepairPush func(string, string, db.PushBinding) error
+	var persistRepairPush func(string, string, db.PushBinding) (int64, error)
 	if repairRound != nil {
-		persistRepairPush = func(headSHA, summary string, binding db.PushBinding) error {
+		persistRepairPush = func(headSHA, summary string, binding db.PushBinding) (int64, error) {
 			repairRound.verifiedPush = true
-			if err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding); err != nil {
-				return pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
+			generation, err := sctx.DB.PersistCIFixRepairPush(sctx.Run.ID, repairRound.id, headSHA, summary, binding)
+			if err != nil {
+				return 0, pipeline.NewCIFixRepairDurabilityError(fmt.Errorf("persist pushed CI repair: %w", err))
 			}
-			return nil
+			return generation, nil
 		}
 	}
 	return s.commitAndPushAttributed(sctx, result, agentStartingHeadSHA, persistRepairPush)
@@ -152,7 +153,7 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext, summary string) (bool
 	return pushed, err
 }
 
-func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) error) (bool, string, error) {
+func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *agent.Result, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) (int64, error)) (bool, string, error) {
 	recordedHeadSHA := sctx.Run.HeadSHA
 	_, summary, err := s.commitAndPushResolved(sctx, result, "", agentStartingHeadSHA, persistRepairPush)
 	if err != nil {
@@ -164,7 +165,7 @@ func (s *CIStep) commitAndPushAttributed(sctx *pipeline.StepContext, result *age
 	return true, summary, nil
 }
 
-func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) error) (bool, string, error) {
+func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent.Result, summary, agentStartingHeadSHA string, persistRepairPush func(string, string, db.PushBinding) (int64, error)) (bool, string, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return false, "", fmt.Errorf("check CI changes: %w", err)
@@ -222,16 +223,16 @@ func (s *CIStep) commitAndPushResolved(sctx *pipeline.StepContext, result *agent
 	return pushed, summary, err
 }
 
-func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary string, persistRepairPush func(string, string, db.PushBinding) error) (bool, error) {
+func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary string, persistRepairPush func(string, string, db.PushBinding) (int64, error)) (bool, error) {
 	if persistRepairPush == nil {
 		return s.pushUpdatedHeadSHA(sctx, headSHA, nil)
 	}
-	return s.pushUpdatedHeadSHA(sctx, headSHA, func(binding db.PushBinding) error {
+	return s.pushUpdatedHeadSHA(sctx, headSHA, func(binding db.PushBinding) (int64, error) {
 		return persistRepairPush(headSHA, summary, binding)
 	})
 }
 
-func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding) error) (pushed bool, runErr error) {
+func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding) (int64, error)) (pushed bool, runErr error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	pushURL := resolvePushURL(sctx)
 	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
@@ -292,14 +293,20 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 			TargetFingerprint: branchsync.TargetFingerprint(pushURL),
 			Ref:               ref,
 		}
+		var generation int64
 		if persistVerifiedPush != nil {
-			if err := persistVerifiedPush(binding); err != nil {
-				return err
-			}
-		} else if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding); err != nil {
+			generation, err = persistVerifiedPush(binding)
+		} else if receipt.enabled() {
+			generation, err = sctx.DB.UpdateRunPushBindingWithGeneration(sctx.Run.ID, binding)
+		} else {
+			err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
+		}
+		if err != nil {
 			return err
 		}
-		receipt.bindingUpdated = true
+		if receipt.enabled() {
+			receipt.recordBinding(generation)
+		}
 		return nil
 	}
 	if decision.upToDate {

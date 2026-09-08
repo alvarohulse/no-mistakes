@@ -16,29 +16,26 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const maxPushDiagnosticBytes = 32 * 1024
-
 type pushReceiptRecorder struct {
-	sctx              *pipeline.StepContext
-	startedAt         time.Time
-	operationID       string
-	targetKind        string
-	targetFingerprint string
-	targetIdentity    string
-	destinationRef    string
-	pushedSHA         *string
-	observedRemoteSHA *string
-	leaseDecision     db.PushLeaseOrForceDecision
-	decisionReason    string
-	reviewApprovedSHA *string
-	lastSeenSHA       *string
-	remoteBeforeSHA   *string
-	remoteAfterSHA    *string
-	bindingUpdated    bool
-	transportStarted  bool
-	refused           bool
-	attemptIDs        []string
-	attemptSnapshot   func() ([]string, error)
+	sctx                *pipeline.StepContext
+	startedAt           time.Time
+	operationID         string
+	targetKind          string
+	targetFingerprint   string
+	targetIdentity      string
+	destinationRef      string
+	pushedSHA           *string
+	observedRemoteSHA   *string
+	leaseDecision       db.PushLeaseOrForceDecision
+	decisionReason      string
+	reviewApprovedSHA   *string
+	lastSeenSHA         *string
+	verifiedRemoteSHA   *string
+	bindingUpdated      bool
+	resultingGeneration *int64
+	transportStarted    bool
+	refused             bool
+	attemptIDs          []string
 }
 
 func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef string) *pushReceiptRecorder {
@@ -100,7 +97,6 @@ func (r *pushReceiptRecorder) setDecision(decision db.PushLeaseOrForceDecision, 
 	if strings.TrimSpace(observed) != "" {
 		value := strings.TrimSpace(observed)
 		r.observedRemoteSHA = &value
-		r.remoteBeforeSHA = &value
 	}
 }
 
@@ -112,7 +108,6 @@ func (r *pushReceiptRecorder) markRefused(reason string) {
 func (r *pushReceiptRecorder) markRefusedAtRemote(reason, remoteSHA string) {
 	r.refused = true
 	r.setDecision(db.PushLeaseOrForceDecisionRefused, reason, remoteSHA)
-	r.remoteAfterSHA = pushReceiptStringPointer(remoteSHA)
 }
 
 func (r *pushReceiptRecorder) recordAttempt(id string) {
@@ -127,42 +122,27 @@ func (r *pushReceiptRecorder) recordAttempt(id string) {
 	r.attemptIDs = append(r.attemptIDs, id)
 }
 
+func (r *pushReceiptRecorder) recordBinding(generation int64) {
+	if r == nil {
+		return
+	}
+	r.bindingUpdated = true
+	r.resultingGeneration = &generation
+}
+
 // runGit routes controller-owned git inspection and transport through the
 // durable command-attempt/artifact seam and records only attempts created by
 // this operation.
 func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...string) (string, error) {
-	before, err := r.snapshotAttempts()
-	if err != nil {
-		return "", err
+	result := runStepGitCommandResult(r.sctx, command, purpose, args...)
+	r.recordAttempt(result.attemptID)
+	if runErr := result.err(); runErr != nil {
+		return result.output, runErr
 	}
-	output, exitCode, runErr := runStepGitCommand(r.sctx, command, purpose, args...)
-	after, afterErr := r.snapshotAttempts()
-	if afterErr != nil {
-		return output, errors.Join(runErr, fmt.Errorf("record push command attempts: %w", afterErr))
+	if result.exitCode != 0 {
+		return result.output, &pushCommandExitError{command: command, code: result.exitCode, output: result.output}
 	}
-	seen := make(map[string]struct{}, len(before))
-	for _, id := range before {
-		seen[id] = struct{}{}
-	}
-	for _, id := range after {
-		if _, existed := seen[id]; !existed {
-			r.recordAttempt(id)
-		}
-	}
-	if runErr != nil {
-		return output, runErr
-	}
-	if exitCode != 0 {
-		return output, &pushCommandExitError{command: command, code: exitCode, output: output}
-	}
-	return output, nil
-}
-
-func (r *pushReceiptRecorder) snapshotAttempts() ([]string, error) {
-	if r.attemptSnapshot != nil {
-		return r.attemptSnapshot()
-	}
-	return commandAttemptIDsForScope(r.sctx)
+	return result.output, nil
 }
 
 type pushCommandExitError struct {
@@ -176,20 +156,6 @@ func (e *pushCommandExitError) Error() string {
 		return fmt.Sprintf("git %s exited with code %d", e.command, e.code)
 	}
 	return fmt.Sprintf("git %s exited with code %d: %s", e.command, e.code, safeurl.RedactText(strings.TrimSpace(e.output)))
-}
-
-func commandAttemptIDsForScope(sctx *pipeline.StepContext) ([]string, error) {
-	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(attempts))
-	for _, attempt := range attempts {
-		if attempt.StepID == sctx.StepResultID && attempt.RoundID == sctx.RoundID {
-			ids = append(ids, attempt.ID)
-		}
-	}
-	return ids, nil
 }
 
 func (r *pushReceiptRecorder) finish(runErr error) error {
@@ -226,7 +192,8 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 		outcome = db.PushOperationOutcomeAlreadyEqual
 	}
 
-	var diagnosticID *string
+	var diagnostic db.Artifact
+	var hasDiagnostic bool
 	var diagnosticErr error
 	if runErr != nil && r.sctx.Paths != nil {
 		store, storeErr := artifact.NewStore(r.sctx.Paths, "")
@@ -242,12 +209,8 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 				stepID, roundID := r.sctx.StepResultID, r.sctx.RoundID
 				metadata.StepID = &stepID
 				metadata.RoundID = &roundID
-				registered, registerErr := r.sctx.DB.RegisterArtifact(metadata)
-				if registerErr != nil {
-					diagnosticErr = fmt.Errorf("register push diagnostic: %w", registerErr)
-				} else {
-					diagnosticID = &registered.ID
-				}
+				diagnostic = metadata
+				hasDiagnostic = true
 			}
 		}
 	}
@@ -259,54 +222,19 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 		DestinationRef: r.destinationRef, PushedSHA: r.pushedSHA, ObservedRemoteSHA: r.observedRemoteSHA,
 		LeaseOrForceDecision: r.leaseDecision, DecisionReason: boundedPushReason(r.decisionReason), Outcome: outcome,
 		ReviewApprovedHeadSHA: r.reviewApprovedSHA, LastSeenSHA: r.lastSeenSHA,
-		RemoteBeforeSHA: r.remoteBeforeSHA, RemoteAfterSHA: r.remoteAfterSHA,
-		BindingUpdated: r.bindingUpdated, CommandAttemptIDs: append([]string(nil), r.attemptIDs...),
-		StartedAt: r.startedAt.UnixMilli(), CompletedAt: completedAt.UnixMilli(),
-		DurationMS: maxInt64(0, completedAt.Sub(r.startedAt).Milliseconds()), DiagnosticArtifactID: diagnosticID,
+		VerifiedRemoteSHA: r.verifiedRemoteSHA,
+		BindingUpdated:    r.bindingUpdated, ResultingGeneration: r.resultingGeneration,
+		CommandAttemptIDs: append([]string(nil), r.attemptIDs...),
+		StartedAt:         r.startedAt.UnixMilli(), CompletedAt: completedAt.UnixMilli(),
+		DurationMS: maxInt64(0, completedAt.UnixMilli()-r.startedAt.UnixMilli()),
 	}
-	if retryOf, retryReason, retryErr := r.findRetry(operation); retryErr != nil {
-		diagnosticErr = errors.Join(diagnosticErr, fmt.Errorf("find push retry predecessor: %w", retryErr))
+	var completeErr error
+	if hasDiagnostic && diagnosticErr == nil {
+		_, completeErr = r.sctx.DB.CompletePushOperationWithDiagnostic(operation, diagnostic)
 	} else {
-		operation.RetryOfOperationID = retryOf
-		operation.RetryReason = retryReason
+		_, completeErr = r.sctx.DB.CompletePushOperation(operation)
 	}
-	if r.bindingUpdated {
-		current, getErr := r.sctx.DB.GetRun(r.sctx.Run.ID)
-		if getErr != nil {
-			diagnosticErr = errors.Join(diagnosticErr, fmt.Errorf("read resulting push generation: %w", getErr))
-		} else if current == nil || current.PushGeneration == nil {
-			diagnosticErr = errors.Join(diagnosticErr, fmt.Errorf("read resulting push generation: unavailable"))
-		} else {
-			operation.ResultingGeneration = current.PushGeneration
-		}
-	}
-	_, completeErr := r.sctx.DB.CompletePushOperation(operation)
 	return errors.Join(diagnosticErr, completeErr)
-}
-
-func (r *pushReceiptRecorder) findRetry(operation db.PushOperation) (*string, *string, error) {
-	if operation.PushedSHA == nil {
-		return nil, nil, nil
-	}
-	operations, err := r.sctx.DB.GetPushOperationsByRun(operation.RunID)
-	if err != nil {
-		return nil, nil, err
-	}
-	for index := len(operations) - 1; index >= 0; index-- {
-		prior := operations[index]
-		if prior.ID == operation.ID || (prior.Outcome != db.PushOperationOutcomeFailed && prior.Outcome != db.PushOperationOutcomeProcessError) {
-			continue
-		}
-		if prior.TargetKind != operation.TargetKind || prior.TargetFingerprint != operation.TargetFingerprint ||
-			prior.TargetIdentity != operation.TargetIdentity || prior.DestinationRef != operation.DestinationRef ||
-			prior.PushedSHA == nil || *prior.PushedSHA != *operation.PushedSHA {
-			continue
-		}
-		id := prior.ID
-		reason := "retrying after prior push operation failure"
-		return &id, &reason, nil
-	}
-	return nil, nil, nil
 }
 
 func errorReason(err error, fallback string) string {
@@ -326,11 +254,12 @@ func boundedPushReason(value string) string {
 
 func boundedPushDiagnostic(value string) []byte {
 	value = safeurl.RedactText(strings.TrimSpace(value))
-	if len(value) <= maxPushDiagnosticBytes {
+	limit := db.MaxOperationDiagnosticBytes()
+	if len(value) <= limit {
 		return []byte(value)
 	}
 	marker := "\n… [push diagnostic truncated]"
-	return []byte(value[:maxPushDiagnosticBytes-len(marker)] + marker)
+	return []byte(value[:limit-len(marker)] + marker)
 }
 
 func durablePushGitCommand(sctx *pipeline.StepContext, receipt *pushReceiptRecorder, purpose string, args ...string) (string, error) {

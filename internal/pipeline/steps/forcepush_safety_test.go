@@ -114,7 +114,7 @@ func TestCIStep_CommitAndPush_RefusesToClobberUnseenUpstreamCommit(t *testing.T)
 		t.Fatalf("CI push receipts = %d, want 1", len(receipts))
 	}
 	receipt := receipts[0]
-	if receipt.StepID != stepResult.ID || receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != approvedSHA || receipt.RemoteAfterSHA == nil || *receipt.RemoteAfterSHA != approvedSHA {
+	if receipt.StepID != stepResult.ID || receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != approvedSHA || receipt.VerifiedRemoteSHA != nil {
 		t.Fatalf("CI refusal receipt remote state = %+v, want %s", receipt, approvedSHA)
 	}
 }
@@ -203,7 +203,7 @@ func TestPushStep_RefusesToClobberAdvancedUpstreamBranch(t *testing.T) {
 		t.Fatalf("push receipts = %d, want 1", len(receipts))
 	}
 	receipt := receipts[0]
-	if receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != advancedSHA || receipt.RemoteAfterSHA == nil || *receipt.RemoteAfterSHA != advancedSHA {
+	if receipt.Outcome != db.PushOperationOutcomeRefused || receipt.ObservedRemoteSHA == nil || *receipt.ObservedRemoteSHA != advancedSHA || receipt.VerifiedRemoteSHA != nil {
 		t.Fatalf("refusal receipt remote state = %+v, want %s", receipt, advancedSHA)
 	}
 }

@@ -803,11 +803,19 @@ func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 		t.Fatalf("new run provenance = %#v", run)
 	}
 	binding := PushBinding{HeadSHA: "pushed-1", TargetKind: "fork", TargetFingerprint: "digest-only", Ref: "refs/heads/feature"}
-	if err := d.UpdateRunPushBinding(run.ID, binding); err != nil {
+	generation, err := d.UpdateRunPushBindingWithGeneration(run.ID, binding)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.UpdateRunPushBinding(run.ID, PushBinding{HeadSHA: "pushed-2", TargetKind: "fork", TargetFingerprint: "digest-only", Ref: "refs/heads/feature"}); err != nil {
+	if generation != 1 {
+		t.Fatalf("first push generation = %d, want 1", generation)
+	}
+	generation, err = d.UpdateRunPushBindingWithGeneration(run.ID, PushBinding{HeadSHA: "pushed-2", TargetKind: "fork", TargetFingerprint: "digest-only", Ref: "refs/heads/feature"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if generation != 2 {
+		t.Fatalf("second push generation = %d, want 2", generation)
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.LastPushedSHA == nil || *got.LastPushedSHA != "pushed-2" || got.PushGeneration == nil || *got.PushGeneration != 2 {

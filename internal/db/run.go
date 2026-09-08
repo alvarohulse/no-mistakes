@@ -516,6 +516,35 @@ func (d *DB) UpdateRunPushBinding(id string, binding PushBinding) error {
 	return nil
 }
 
+// UpdateRunPushBindingWithGeneration advances a run's successful-push
+// provenance and returns the generation committed by that same transaction.
+func (d *DB) UpdateRunPushBindingWithGeneration(id string, binding PushBinding) (int64, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("update run push binding: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	ts := now()
+	if _, err := tx.Exec(
+		`UPDATE runs SET last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+		binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
+	); err != nil {
+		return 0, fmt.Errorf("update run push binding: %w", err)
+	}
+	var generation sql.NullInt64
+	if err := tx.QueryRow(`SELECT push_generation FROM runs WHERE id = ?`, id).Scan(&generation); err != nil {
+		return 0, fmt.Errorf("update run push binding: read generation: %w", err)
+	}
+	if !generation.Valid {
+		return 0, fmt.Errorf("update run push binding: committed generation is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("update run push binding: commit: %w", err)
+	}
+	return generation.Int64, nil
+}
+
 // SetRunCustodyReturned stamps the moment a guarded recovery explicitly
 // returned custody of this run's branch to the operator worktree. Stamping is
 // idempotent: the first timestamp wins so the record keeps the original
