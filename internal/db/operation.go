@@ -298,22 +298,29 @@ func (d *DB) LinkPushOperationCommandAttempt(operationID, runID, attemptID strin
 		return fmt.Errorf("link push operation command attempt: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	var terminalized int
-	if err := tx.QueryRow(`SELECT po.terminalized FROM push_operations po JOIN operations o ON o.id = po.operation_id WHERE po.operation_id = ? AND o.run_id = ? AND o.kind = ?`, operationID, runID, OperationKindPush).Scan(&terminalized); err != nil {
-		return fmt.Errorf("link push operation command attempt: load operation: %w", err)
-	}
-	if terminalized != 0 {
-		return fmt.Errorf("link push operation command attempt: operation is already terminal")
-	}
-	var sequence int
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_command_attempts WHERE operation_id = ?`, operationID).Scan(&sequence); err != nil {
-		return fmt.Errorf("link push operation command attempt: allocate sequence: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`, operationID, runID, attemptID, sequence); err != nil {
-		return fmt.Errorf("link push operation command attempt: insert link: %w", err)
+	if err := linkPushOperationCommandAttempt(tx, operationID, runID, attemptID); err != nil {
+		return fmt.Errorf("link push operation command attempt: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("link push operation command attempt: commit: %w", err)
+	}
+	return nil
+}
+
+func linkPushOperationCommandAttempt(tx *sql.Tx, operationID, runID, attemptID string) error {
+	var terminalized int
+	if err := tx.QueryRow(`SELECT po.terminalized FROM push_operations po JOIN operations o ON o.id = po.operation_id WHERE po.operation_id = ? AND o.run_id = ? AND o.kind = ?`, operationID, runID, OperationKindPush).Scan(&terminalized); err != nil {
+		return fmt.Errorf("load operation: %w", err)
+	}
+	if terminalized != 0 {
+		return fmt.Errorf("operation is already terminal")
+	}
+	var sequence int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sequence), 0) + 1 FROM operation_command_attempts WHERE operation_id = ?`, operationID).Scan(&sequence); err != nil {
+		return fmt.Errorf("allocate sequence: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`, operationID, runID, attemptID, sequence); err != nil {
+		return fmt.Errorf("insert link: %w", err)
 	}
 	return nil
 }

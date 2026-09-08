@@ -64,13 +64,18 @@ func (e *forcePushWouldDiscardError) Error() string {
 // incorporated, by content (patch-id), into newHeadSHA, or is part of the
 // history the run already knew (reachable from baseSHA) and is thus a deliberate
 // rewrite rather than a clobber. Anything else is refused rather than discarded.
-func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSeenSHA, baseSHA string) (forcePushDecision, error) {
+func resolveForcePushDecision(gitRun gitRunner, pushURL, ref, newHeadSHA, lastSeenSHA, baseSHA string, observed ...func(string) error) (forcePushDecision, error) {
 	current, err := lsRemoteSHA(gitRun, pushURL, ref)
 	if err != nil {
 		return forcePushDecision{}, fmt.Errorf("resolve remote head for %s: %w", ref, err)
 	}
 	if current == "" {
 		return forcePushDecision{newBranch: true}, nil
+	}
+	if len(observed) > 0 && observed[0] != nil {
+		if err := observed[0](current); err != nil {
+			return forcePushDecision{remoteSHA: current}, err
+		}
 	}
 	if current == newHeadSHA {
 		return forcePushDecision{remoteSHA: current, upToDate: true}, nil
@@ -136,6 +141,8 @@ func remoteCommitsNotIncorporated(gitRun gitRunner, pushURL, ref, newHeadSHA, re
 	if baseSHA != "" && !git.IsZeroSHA(baseSHA) {
 		if _, err := gitRun("rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err == nil {
 			args = append(args, "^"+baseSHA)
+		} else if !isExpectedMissingRefError(err) {
+			return nil, fmt.Errorf("resolve force-push base %s: %w", baseSHA, err)
 		}
 	}
 	out, err := gitRun(args...)

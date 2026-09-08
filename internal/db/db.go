@@ -91,6 +91,10 @@ func open(path string, beforeFreshSchemaInstall func() error) (*DB, error) {
 			sqlDB.Close()
 			return nil, fmt.Errorf("migrate db: %w", err)
 		}
+		if err := migrateCommandDefinitionArgv(sqlDB); err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("migrate db: %w", err)
+		}
 		if err := migrateRunMetricReceipts(sqlDB); err != nil {
 			sqlDB.Close()
 			return nil, fmt.Errorf("migrate db: %w", err)
@@ -126,6 +130,10 @@ func open(path string, beforeFreshSchemaInstall func() error) (*DB, error) {
 		return nil, fmt.Errorf("migrate db: %w", err)
 	}
 	if err := migrateCommandDefinitionProvenanceColumns(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
+	}
+	if err := migrateCommandDefinitionArgv(sqlDB); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)
 	}

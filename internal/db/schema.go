@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS command_definitions (
     platform              TEXT NOT NULL,
     runner_executable     TEXT NOT NULL,
     runner_args_json      TEXT NOT NULL,
+    argv_json             TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (run_id, id)
 );
 
@@ -685,6 +686,7 @@ var migrationStatements = []string{
 		platform TEXT NOT NULL,
 		runner_executable TEXT NOT NULL,
 		runner_args_json TEXT NOT NULL,
+		argv_json TEXT NOT NULL DEFAULT '[]',
 		PRIMARY KEY (run_id, id)
 	)`,
 	`CREATE TABLE IF NOT EXISTS command_attempts (

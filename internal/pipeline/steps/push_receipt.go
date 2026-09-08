@@ -23,6 +23,7 @@ type pushReceiptRecorder struct {
 	targetKind          string
 	targetFingerprint   string
 	targetIdentity      string
+	targetURL           string
 	destinationRef      string
 	pushedSHA           *string
 	observedRemoteSHA   *string
@@ -50,6 +51,7 @@ func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef 
 		targetKind:        targetKind,
 		targetFingerprint: branchsync.TargetFingerprint(pushURL),
 		targetIdentity:    safeurl.Redact(pushURL),
+		targetURL:         pushURL,
 		destinationRef:    destinationRef,
 		leaseDecision:     db.PushLeaseOrForceDecisionUnavailable,
 		decisionReason:    "push operation started",
@@ -61,6 +63,16 @@ func newPushReceiptRecorder(sctx *pipeline.StepContext, pushURL, destinationRef 
 		}
 	}
 	return recorder
+}
+
+func initialPushURL(sctx *pipeline.StepContext) string {
+	if sctx != nil && sctx.Repo != nil {
+		if strings.TrimSpace(sctx.Repo.ForkURL) != "" {
+			return sctx.Repo.ForkURL
+		}
+		return sctx.Repo.UpstreamURL
+	}
+	return ""
 }
 
 func (r *pushReceiptRecorder) enabled() bool {
@@ -137,6 +149,61 @@ func (r *pushReceiptRecorder) recordBinding(generation int64) {
 	r.persistProgress()
 }
 
+func (r *pushReceiptRecorder) setObservedRemoteSHA(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	r.observedRemoteSHA = &value
+	r.persistProgress()
+	return r.progressErr
+}
+
+func (r *pushReceiptRecorder) setTargetURL(pushURL string) error {
+	pushURL = strings.TrimSpace(pushURL)
+	if pushURL == "" {
+		return fmt.Errorf("resolve push target: target URL is empty")
+	}
+	r.targetIdentity = safeurl.Redact(pushURL)
+	r.targetURL = pushURL
+	r.targetFingerprint = branchsync.TargetFingerprint(pushURL)
+	r.persistProgress()
+	return r.progressErr
+}
+
+func (r *pushReceiptRecorder) resolveTargetURL() (string, error) {
+	if r.targetKind == "fork" {
+		return r.targetURL, nil
+	}
+	origin, err := r.runGit("resolve push target", "remote", "get-url", "origin")
+	if err == nil && strings.TrimSpace(origin) != "" {
+		origin = strings.TrimSpace(origin)
+		if r.sctx.Repo == nil || !r.sctx.Repo.URLsVerified || safeurl.Redact(origin) == r.sctx.Repo.UpstreamURL {
+			if err := r.setTargetURL(origin); err != nil {
+				return "", err
+			}
+			return origin, nil
+		}
+	}
+	if r.progressErr != nil {
+		return "", r.progressErr
+	}
+	if err != nil {
+		var exitErr *pushCommandExitError
+		if !errors.As(err, &exitErr) {
+			return "", err
+		}
+	}
+	if r.sctx.Repo == nil {
+		return "", fmt.Errorf("resolve push target: repository is unavailable")
+	}
+	pushURL := r.sctx.Repo.UpstreamURL
+	if err := r.setTargetURL(pushURL); err != nil {
+		return "", err
+	}
+	return pushURL, nil
+}
+
 // runGit routes controller-owned git inspection and transport through the
 // durable command-attempt/artifact seam and records only attempts created by
 // this operation.
@@ -144,10 +211,10 @@ func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...str
 	if r.progressErr != nil {
 		return "", r.progressErr
 	}
-	var onAttemptStarted func(string) error
+	var onAttemptStarted func(db.CommandAttempt) (*db.CommandAttempt, error)
 	if r.enabled() && r.operationID != "" {
-		onAttemptStarted = func(id string) error {
-			return r.sctx.DB.LinkPushOperationCommandAttempt(r.operationID, r.sctx.Run.ID, id)
+		onAttemptStarted = func(attempt db.CommandAttempt) (*db.CommandAttempt, error) {
+			return r.sctx.DB.StartCommandAttemptForPushOperation(attempt, r.operationID)
 		}
 	}
 	result := runStepGitCommandResultWithAttemptHook(r.sctx, command, purpose, onAttemptStarted, args...)
@@ -304,6 +371,11 @@ func boundedPushDiagnostic(value string) []byte {
 	}
 	marker := "\n… [push diagnostic truncated]"
 	return []byte(value[:limit-len(marker)] + marker)
+}
+
+func isExpectedMissingRefError(err error) bool {
+	var exitErr *pushCommandExitError
+	return errors.As(err, &exitErr) && (exitErr.code == 1 || exitErr.code == 128)
 }
 
 func durablePushGitCommand(sctx *pipeline.StepContext, receipt *pushReceiptRecorder, purpose string, args ...string) (string, error) {

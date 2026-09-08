@@ -234,18 +234,22 @@ func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary s
 
 func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding, string) (int64, error)) (pushed bool, runErr error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	pushURL := resolvePushURL(sctx)
+	pushURL := initialPushURL(sctx)
 	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
-	receipt.setPushedSHA(newHeadSHA)
 	if err := receipt.start(); err != nil {
 		return false, err
 	}
-	purpose := pushOperationPurpose(sctx)
 	defer func() {
 		if receiptErr := receipt.finish(runErr); receiptErr != nil {
 			runErr = errors.Join(runErr, receiptErr)
 		}
 	}()
+	purpose := pushOperationPurpose(sctx)
+	pushURL, err := receipt.resolveTargetURL()
+	if err != nil {
+		return false, err
+	}
+	receipt.setPushedSHA(newHeadSHA)
 
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
@@ -258,7 +262,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	}
 	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
 	receipt.persistProgress()
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA, receipt.setObservedRemoteSHA)
 	if err != nil {
 		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
 		var refusal *forcePushWouldDiscardError

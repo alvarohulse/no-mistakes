@@ -19,7 +19,7 @@ type PushStep struct{}
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, runErr error) {
-	pushURL := resolvePushURL(sctx)
+	pushURL := initialPushURL(sctx)
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
 	if err := receipt.start(); err != nil {
@@ -30,10 +30,14 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOu
 			runErr = errors.Join(runErr, receiptErr)
 		}
 	}()
-	return s.execute(sctx, receipt)
+	pushURL, err := receipt.resolveTargetURL()
+	if err != nil {
+		return nil, err
+	}
+	return s.execute(sctx, receipt, pushURL)
 }
 
-func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecorder) (*pipeline.StepOutcome, error) {
+func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecorder, pushURL string) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuityWithRunner(sctx, s.Name(), func(args ...string) (string, error) {
 		return durablePushGitCommand(sctx, receipt, pushOperationPurpose(sctx), args...)
 	}); err != nil {
@@ -100,7 +104,6 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
-	pushURL := resolvePushURL(sctx)
 	pushTarget := "upstream"
 	usingFork := strings.TrimSpace(sctx.Repo.ForkURL) != ""
 	if usingFork {
@@ -142,11 +145,13 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	lastSeen := ""
 	if tracked, trackErr := durablePushGitCommand(sctx, receipt, purpose, "rev-parse", "--verify", "--quiet", trackingRef+"^{commit}"); trackErr == nil {
 		lastSeen = strings.TrimSpace(tracked)
+	} else if !isExpectedMissingRefError(trackErr) {
+		return nil, fmt.Errorf("resolve last-seen remote head: %w", trackErr)
 	}
 	gitRun := func(args ...string) (string, error) {
 		return durablePushGitCommand(sctx, receipt, purpose, args...)
 	}
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA, receipt.setObservedRemoteSHA)
 	if err != nil {
 		receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
 		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)

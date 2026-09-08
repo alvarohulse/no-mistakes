@@ -345,7 +345,7 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 	return runPersistedStepCommandResultWithAttemptHook(sctx, resolved, purpose, definitionSource, sequence, nil, execute)
 }
 
-func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, onAttemptStarted func(string) error, execute func() (runner.Result, error)) persistedStepCommandResult {
+func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, resolved runner.Resolved, purpose, definitionSource string, sequence int, onAttemptStarted func(db.CommandAttempt) (*db.CommandAttempt, error), execute func() (runner.Result, error)) persistedStepCommandResult {
 	var attempt *db.CommandAttempt
 	if sctx.DB != nil && sctx.Run != nil && sctx.StepResultID != "" && sctx.RoundID != "" {
 		definitionResolution := resolved
@@ -389,7 +389,7 @@ func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, re
 				break
 			}
 		}
-		attempt, persistErr = sctx.DB.StartCommandAttempt(db.CommandAttempt{
+		attemptInput := db.CommandAttempt{
 			RunID:               sctx.Run.ID,
 			CommandID:           definition.ID,
 			StepID:              sctx.StepResultID,
@@ -406,14 +406,14 @@ func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, re
 			InputStateID:        inputStateID,
 			RetryOfAttemptID:    retryOf,
 			RetryReason:         retryReason,
-		})
-		if persistErr != nil {
-			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)}
 		}
 		if onAttemptStarted != nil {
-			if hookErr := onAttemptStarted(attempt.ID); hookErr != nil {
-				return persistedStepCommandResult{exitCode: -1, attemptID: attempt.ID, persistenceErr: fmt.Errorf("%w: link command attempt to operation: %w", errCommandPersistence, hookErr)}
-			}
+			attempt, persistErr = onAttemptStarted(attemptInput)
+		} else {
+			attempt, persistErr = sctx.DB.StartCommandAttempt(attemptInput)
+		}
+		if persistErr != nil {
+			return persistedStepCommandResult{exitCode: -1, persistenceErr: fmt.Errorf("%w: persist command attempt start: %w", errCommandPersistence, persistErr)}
 		}
 	}
 
@@ -519,7 +519,7 @@ func runStepGitCommandResult(sctx *pipeline.StepContext, command, purpose string
 	return runStepGitCommandResultWithAttemptHook(sctx, command, purpose, nil, args...)
 }
 
-func runStepGitCommandResultWithAttemptHook(sctx *pipeline.StepContext, command, purpose string, onAttemptStarted func(string) error, args ...string) persistedStepCommandResult {
+func runStepGitCommandResultWithAttemptHook(sctx *pipeline.StepContext, command, purpose string, onAttemptStarted func(db.CommandAttempt) (*db.CommandAttempt, error), args ...string) persistedStepCommandResult {
 	sequence := sctx.NextCommandSequence()
 	gitArgs := append([]string(nil), args...)
 	if git.LooksLikeBareRepository(sctx.WorkDir) {

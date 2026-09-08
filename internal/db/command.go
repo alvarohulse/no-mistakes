@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/runner"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -39,6 +40,7 @@ type CommandDefinition struct {
 	Platform         string
 	RunnerExecutable string
 	RunnerArgs       []string
+	Argv             []string
 }
 
 // CommandAttempt is one controller-observed execution of a command definition.
@@ -80,14 +82,17 @@ type commandIdentity struct {
 	Platform         string   `json:"platform"`
 	RunnerExecutable string   `json:"runner_executable"`
 	RunnerArgs       []string `json:"runner_args"`
+	Argv             []string `json:"argv,omitempty"`
 }
 
 func commandDefinitionID(resolved runner.Resolved) (string, error) {
+	identityArgv := identityArgvForResolved(resolved)
 	identity, err := json.Marshal(commandIdentity{
 		Script:           resolved.Script,
 		Platform:         resolved.Provenance.Platform,
 		RunnerExecutable: resolved.Provenance.Executable,
 		RunnerArgs:       resolved.Provenance.Args,
+		Argv:             identityArgv,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode command definition identity: %w", err)
@@ -108,12 +113,17 @@ func (d *DB) EnsureCommandDefinition(runID string, resolved runner.Resolved) (*C
 	if err != nil {
 		return nil, fmt.Errorf("encode command runner arguments: %w", err)
 	}
+	identityArgv := identityArgvForResolved(resolved)
+	argvJSON, err := json.Marshal(identityArgv)
+	if err != nil {
+		return nil, fmt.Errorf("encode command argv: %w", err)
+	}
 	_, err = d.sql.Exec(
 		`INSERT OR IGNORE INTO command_definitions
-		 (run_id, id, script, platform, runner_executable, runner_args_json)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		 (run_id, id, script, platform, runner_executable, runner_args_json, argv_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		runID, id, resolved.Script, resolved.Provenance.Platform,
-		resolved.Provenance.Executable, string(argsJSON),
+		resolved.Provenance.Executable, string(argsJSON), string(argvJSON),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("ensure command definition: %w", err)
@@ -123,18 +133,21 @@ func (d *DB) EnsureCommandDefinition(runID string, resolved runner.Resolved) (*C
 
 func (d *DB) getCommandDefinition(runID, id string) (*CommandDefinition, error) {
 	definition := &CommandDefinition{}
-	var argsJSON string
+	var argsJSON, argvJSON string
 	if err := d.sql.QueryRow(
-		`SELECT id, run_id, script, platform, runner_executable, runner_args_json
+		`SELECT id, run_id, script, platform, runner_executable, runner_args_json, argv_json
 		 FROM command_definitions WHERE run_id = ? AND id = ?`, runID, id,
 	).Scan(
 		&definition.ID, &definition.RunID, &definition.Script, &definition.Platform,
-		&definition.RunnerExecutable, &argsJSON,
+		&definition.RunnerExecutable, &argsJSON, &argvJSON,
 	); err != nil {
 		return nil, fmt.Errorf("get command definition: %w", err)
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &definition.RunnerArgs); err != nil {
 		return nil, fmt.Errorf("decode command runner arguments: %w", err)
+	}
+	if err := json.Unmarshal([]byte(argvJSON), &definition.Argv); err != nil {
+		return nil, fmt.Errorf("decode command argv: %w", err)
 	}
 	return definition, nil
 }
@@ -142,7 +155,7 @@ func (d *DB) getCommandDefinition(runID, id string) (*CommandDefinition, error) 
 // GetCommandDefinitionsByRun returns definitions in stable identity order.
 func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, error) {
 	rows, err := d.sql.Query(
-		`SELECT id, run_id, script, platform, runner_executable, runner_args_json
+		`SELECT id, run_id, script, platform, runner_executable, runner_args_json, argv_json
 		 FROM command_definitions WHERE run_id = ? ORDER BY id`, runID,
 	)
 	if err != nil {
@@ -152,15 +165,18 @@ func (d *DB) GetCommandDefinitionsByRun(runID string) ([]*CommandDefinition, err
 	var definitions []*CommandDefinition
 	for rows.Next() {
 		definition := &CommandDefinition{}
-		var argsJSON string
+		var argsJSON, argvJSON string
 		if err := rows.Scan(
 			&definition.ID, &definition.RunID, &definition.Script, &definition.Platform,
-			&definition.RunnerExecutable, &argsJSON,
+			&definition.RunnerExecutable, &argsJSON, &argvJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan command definition: %w", err)
 		}
 		if err := json.Unmarshal([]byte(argsJSON), &definition.RunnerArgs); err != nil {
 			return nil, fmt.Errorf("decode command runner arguments: %w", err)
+		}
+		if err := json.Unmarshal([]byte(argvJSON), &definition.Argv); err != nil {
+			return nil, fmt.Errorf("decode command argv: %w", err)
 		}
 		definitions = append(definitions, definition)
 	}
@@ -175,12 +191,45 @@ func (d *DB) StartCommandAttempt(attempt CommandAttempt) (*CommandAttempt, error
 		return nil, fmt.Errorf("start command attempt: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+	started, err := startCommandAttempt(tx, attempt)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("start command attempt: commit: %w", err)
+	}
+	return started, nil
+}
+
+func (d *DB) StartCommandAttemptForPushOperation(attempt CommandAttempt, operationID string) (*CommandAttempt, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return nil, fmt.Errorf("start command attempt for push operation: operation ID is required")
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("start command attempt for push operation: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	started, err := startCommandAttempt(tx, attempt)
+	if err != nil {
+		return nil, err
+	}
+	if err := linkPushOperationCommandAttempt(tx, operationID, started.RunID, started.ID); err != nil {
+		return nil, fmt.Errorf("start command attempt for push operation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("start command attempt for push operation: commit: %w", err)
+	}
+	return started, nil
+}
+
+func startCommandAttempt(tx *sql.Tx, attempt CommandAttempt) (*CommandAttempt, error) {
 	if err := validateCommandAttemptStart(tx, attempt); err != nil {
 		return nil, err
 	}
 	attempt.ID = newID()
 	attempt.StartedAt = time.Now().UnixMilli()
-	_, err = tx.Exec(
+	_, err := tx.Exec(
 		`INSERT INTO command_attempts
 		 (id, run_id, command_id, step_id, round_id, sequence, purpose, observer, trigger_type, before_sha, tested_sha,
 		  command_source, runner_schema_version, runner_source, runner_version, input_state_id, result_state_id,
@@ -195,10 +244,18 @@ func (d *DB) StartCommandAttempt(attempt CommandAttempt) (*CommandAttempt, error
 	if err != nil {
 		return nil, fmt.Errorf("start command attempt: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("start command attempt: commit: %w", err)
-	}
 	return &attempt, nil
+}
+
+func identityArgvForResolved(resolved runner.Resolved) []string {
+	if resolved.Provenance.Source != runner.SourceDirectGit {
+		return []string{}
+	}
+	result := make([]string, len(resolved.Argv))
+	for index, arg := range resolved.Argv {
+		result[index] = safeurl.Redact(arg)
+	}
+	return result
 }
 
 type commandAttemptQuerier interface {
