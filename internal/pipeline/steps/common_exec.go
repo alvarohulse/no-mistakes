@@ -281,10 +281,6 @@ func runStepRunnerCommand(sctx *pipeline.StepContext, command runner.Command, pu
 	return runStepCommand(sctx, command, purpose, "")
 }
 
-func runStepRunnerCommandWithEnv(sctx *pipeline.StepContext, command runner.Command, purpose string, env []string) (string, int, error) {
-	return runStepCommandWithEnv(sctx, command, purpose, "", env)
-}
-
 func runStepPlannedCommand(sctx *pipeline.StepContext, command runner.Command, purpose string) (string, int, error) {
 	return runStepCommand(sctx, command, purpose, db.CommandDefinitionSourcePlanned)
 }
@@ -465,15 +461,14 @@ func runPersistedStepCommandResult(sctx *pipeline.StepContext, resolved runner.R
 			persistenceErr = errors.Join(persistenceErr, resultStateErr)
 		}
 	}
-	commandErr := errors.Join(executionErr, persistenceErr)
 	if resolved.Script != "" {
 		recordedResolution := resolved
 		if definitionSource != "" {
 			recordedResolution.CommandSource = definitionSource
 		}
-		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, commandErr)
+		sctx.RecordResolvedCommandAtSequence(recordedResolution, sequence, recordedExitCode, executionErr)
 	} else {
-		sctx.RecordCommandAtSequence(resolved.Script, sequence, recordedExitCode, commandErr)
+		sctx.RecordCommandAtSequence(resolved.Script, sequence, recordedExitCode, executionErr)
 	}
 	if attempt != nil {
 		if persistenceErr != nil {

@@ -239,8 +239,7 @@ func TestRefreshStep_MergeConflictFixUsesAgent(t *testing.T) {
 		t.Fatalf("merge command evidence = %+v, want only the merge the pipeline itself ran", evidence.Commands)
 	}
 	failed := evidence.Commands[0]
-	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
-	if failed.Command != "git merge --no-edit "+dependencySHA || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
+	if failed.Command != "git merge --no-edit origin/dependency" || failed.Outcome != db.CommandOutcomeFailed || failed.ExitCode == nil || *failed.ExitCode != 1 {
 		t.Fatalf("failed merge evidence = %+v", failed)
 	}
 	// The agent, not the pipeline, ran the continuation, and it may have taken

@@ -205,7 +205,6 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	sctx.Run.StackedOn = "dependency"
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Config.Runner = runner.Spec{Executable: "bash", Args: []string{"-lc"}}
-	dependencySHA := gitCmd(t, dir, "rev-parse", "origin/dependency")
 	sctx.Env = fakeCLIEnv(binDir, map[string]string{
 		"FAKE_CLI_MODE":     "git-require-noninteractive-env",
 		"FAKE_CLI_REAL_GIT": realGit,
@@ -220,7 +219,7 @@ func TestRefreshStepRunsPrimaryGitNoninteractively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(log), "rebase "+dependencySHA) {
+	if !strings.Contains(string(log), "rebase origin/dependency") {
 		t.Fatalf("primary rebase did not use step-scoped git: %q", log)
 	}
 }
@@ -431,6 +430,17 @@ func TestRefreshReceiptPreservesSuccessfulDecisionWhenAttemptCompletionFails(t *
 	}
 	if operations[0].Decision == db.RefreshDecisionError {
 		t.Fatalf("refresh operation misclassified receipt persistence failure: %+v", operations[0])
+	}
+	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := step.Evidence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evidence.Commands) != 1 || evidence.Commands[0].Command != "git rebase origin/dependency" || evidence.Commands[0].Outcome != db.CommandOutcomePassed || evidence.Commands[0].ExitCode == nil || *evidence.Commands[0].ExitCode != 0 {
+		t.Fatalf("successful refresh command evidence = %+v", evidence.Commands)
 	}
 }
 
