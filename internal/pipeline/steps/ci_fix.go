@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -230,9 +231,16 @@ func (s *CIStep) pushCIFixHeadSHA(sctx *pipeline.StepContext, headSHA, summary s
 	})
 }
 
-func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding) error) (bool, error) {
+func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string, persistVerifiedPush func(db.PushBinding) error) (pushed bool, runErr error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	pushURL := resolvePushURL(sctx)
+	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
+	receipt.pushedSHA = newHeadSHA
+	defer func() {
+		if receiptErr := receipt.finish(runErr); receiptErr != nil {
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
 
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
@@ -244,6 +252,15 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
 	if err != nil {
 		return false, err
+	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(sctx.Run.HeadSHA)
+	switch {
+	case decision.newBranch:
+		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
+	case decision.upToDate:
+		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	default:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
 	targetKind := "upstream"
 	if strings.TrimSpace(sctx.Repo.ForkURL) != "" {
@@ -262,6 +279,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 			}
 			return fmt.Errorf("verify successful push: remote head %s does not equal pushed head %s", observed, newHeadSHA)
 		}
+		receipt.remoteAfterSHA = pushReceiptStringPointer(fields[0])
 		binding := db.PushBinding{
 			HeadSHA:           newHeadSHA,
 			TargetKind:        targetKind,
@@ -269,9 +287,14 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 			Ref:               ref,
 		}
 		if persistVerifiedPush != nil {
-			return persistVerifiedPush(binding)
+			if err := persistVerifiedPush(binding); err != nil {
+				return err
+			}
+		} else if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding); err != nil {
+			return err
 		}
-		return sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
+		receipt.bindingUpdated = true
+		return nil
 	}
 	if decision.upToDate {
 		if err := persistBinding(); err != nil {

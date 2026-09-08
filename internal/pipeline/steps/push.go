@@ -18,7 +18,19 @@ type PushStep struct{}
 
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
-func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *PushStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, runErr error) {
+	pushURL := resolvePushURL(sctx)
+	ref := normalizedBranchRef(sctx.Run.Branch)
+	receipt := newPushReceiptRecorder(sctx, pushURL, ref)
+	defer func() {
+		if receiptErr := receipt.finish(runErr); receiptErr != nil {
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
+	return s.execute(sctx, receipt)
+}
+
+func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecorder) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -94,6 +106,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	receipt.pushedSHA = headBeingPushed
+	if sctx.Run.ReviewApprovedHeadSHA != nil {
+		approved := strings.TrimSpace(*sctx.Run.ReviewApprovedHeadSHA)
+		if approved != "" {
+			receipt.reviewApprovedSHA = &approved
+		}
+	}
 	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
 		return nil, err
 	}
@@ -108,7 +127,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	gitRun := func(args ...string) (string, error) { return git.Run(ctx, sctx.WorkDir, args...) }
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
+		receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
+		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), "")
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
+	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
+	switch {
+	case decision.newBranch:
+		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)
+	case decision.upToDate:
+		receipt.setDecision(db.PushLeaseOrForceDecisionAlreadyEqual, "remote already pointed at pushed commit", decision.remoteSHA)
+	default:
+		receipt.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "remote head matched the verified lease anchor", decision.remoteSHA)
 	}
 	pushCommand := fmt.Sprintf("git push %s %s:%s", pushURL, headBeingPushed, ref)
 	pushRan := false
@@ -143,6 +173,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 		return nil, fmt.Errorf("verify successful push to %s: remote head %s does not equal pushed head %s", pushTarget, verifiedRemote, headBeingPushed)
 	}
+	receipt.remoteAfterSHA = pushReceiptStringPointer(verifiedRemote)
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{
 		HeadSHA:           headBeingPushed,
 		TargetKind:        pushTarget,
@@ -151,6 +182,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}); err != nil {
 		return nil, err
 	}
+	receipt.bindingUpdated = true
 
 	if newHeadSHA != "" {
 		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, newHeadSHA); err != nil {
@@ -169,6 +201,14 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 	sctx.Log("pushed successfully")
 	return &pipeline.StepOutcome{}, nil
+}
+
+func pushReceiptStringPointer(value string) *string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead string) error {
