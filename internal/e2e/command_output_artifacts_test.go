@@ -86,6 +86,7 @@ commands:
 	}
 	resolvedReferences := make(map[string]int)
 	foundEmptyOutput := false
+	foundPushAttempt := false
 	for _, attempt := range attempts {
 		if attempt.OutputArtifactID == nil {
 			t.Fatalf("attempt %s (%s) has no output artifact reference", attempt.ID, attempt.Purpose)
@@ -118,16 +119,23 @@ commands:
 			t.Fatalf("integrity-read output artifact %s: %v", registered.ID, err)
 		}
 		step := types.StepName(attempt.Purpose)
-		want, knownStep := wantOutput[step]
-		if !knownStep {
+		want, configuredCommand := wantOutput[step]
+		switch {
+		case configuredCommand:
+			if string(contents) != want {
+				t.Fatalf("output artifact %s contents = %q, want %q", registered.ID, contents, want)
+			}
+		case step == types.StepPush:
+			foundPushAttempt = true
+		default:
 			t.Fatalf("unexpected command attempt %s for step %q", attempt.ID, attempt.Purpose)
-		}
-		if string(contents) != want {
-			t.Fatalf("output artifact %s contents = %q, want %q", registered.ID, contents, want)
 		}
 		if len(contents) == 0 {
 			foundEmptyOutput = true
 		}
+	}
+	if !foundPushAttempt {
+		t.Fatal("whole pipeline recorded no Push command attempts")
 	}
 	if !foundEmptyOutput {
 		t.Fatal("whole pipeline did not retain a zero-byte command output artifact")
