@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -161,6 +162,27 @@ func TestValidateResolvedAgentRoutingRejectsChangedConcreteFallback(t *testing.T
 	cfg.Agents = cfg.Agents[:1]
 	if err := validateResolvedAgentRouting(cfg, &encoded, false); err == nil || !strings.Contains(err.Error(), "differs from launch") {
 		t.Fatalf("validateResolvedAgentRouting() error = %v, want concrete fallback drift refusal", err)
+	}
+}
+
+func TestValidateResolvedAgentRoutingAcceptsLegacyV2Snapshot(t *testing.T) {
+	cfg := resolvedRoutingTestConfig()
+	encoded, err := marshalResolvedAgentRouting(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot resolvedAgentRouting
+	if err := json.Unmarshal([]byte(encoded), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Version = 2
+	legacyEncoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := string(legacyEncoded)
+	if err := validateResolvedAgentRouting(cfg, &legacy, false); err != nil {
+		t.Fatalf("validateResolvedAgentRouting() rejected legacy v2 snapshot: %v", err)
 	}
 }
 

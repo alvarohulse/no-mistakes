@@ -109,10 +109,20 @@ func validateResolvedAgentRouting(cfg *config.Config, persisted *string, demo bo
 	if err != nil {
 		return err
 	}
+	normalizeResolvedAgentRoutingForComparison(expected)
 	if !reflect.DeepEqual(*actual, *expected) {
 		return fmt.Errorf("resolved agent routing differs from launch")
 	}
 	return nil
+}
+
+// Older routing snapshots used the same route shape but a lower schema
+// version. The version is an encoding marker, not launch identity, so current
+// recovery compares those snapshots after upgrading only that marker.
+func normalizeResolvedAgentRoutingForComparison(routing *resolvedAgentRouting) {
+	if routing != nil && routing.Version < resolvedAgentRoutingVersion {
+		routing.Version = resolvedAgentRoutingVersion
+	}
 }
 
 func decodeResolvedAgentRouting(persisted *string) (*resolvedAgentRouting, bool, error) {
