@@ -223,7 +223,11 @@ func (r *pushReceiptRecorder) runGit(purpose string, command string, args ...str
 		return result.output, runErr
 	}
 	if result.exitCode != 0 {
-		return result.output, &pushCommandExitError{command: command, args: append([]string(nil), args...), code: result.exitCode, output: result.output}
+		output := result.output
+		if strings.TrimSpace(result.stderr) != "" {
+			output = strings.TrimSpace(strings.Join([]string{output, result.stderr}, "\n"))
+		}
+		return result.output, &pushCommandExitError{command: command, args: append([]string(nil), args...), code: result.exitCode, output: output}
 	}
 	if r.progressErr != nil {
 		return result.output, r.progressErr

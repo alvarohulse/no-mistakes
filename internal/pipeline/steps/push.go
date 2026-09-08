@@ -148,12 +148,16 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	} else if !isExpectedMissingRefError(trackErr) {
 		return nil, fmt.Errorf("resolve last-seen remote head: %w", trackErr)
 	}
+	receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
+	receipt.persistProgress()
+	if receipt.progressErr != nil {
+		return nil, receipt.progressErr
+	}
 	gitRun := func(args ...string) (string, error) {
 		return durablePushGitCommand(sctx, receipt, purpose, args...)
 	}
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA, receipt.setObservedRemoteSHA)
 	if err != nil {
-		receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
 		receipt.setDecision(db.PushLeaseOrForceDecisionUnavailable, err.Error(), decision.remoteSHA)
 		var refusal *forcePushWouldDiscardError
 		if errors.As(err, &refusal) {
@@ -161,7 +165,6 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 		}
 		return nil, fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
-	receipt.lastSeenSHA = pushReceiptStringPointer(lastSeen)
 	switch {
 	case decision.newBranch:
 		receipt.setDecision(db.PushLeaseOrForceDecisionNewBranch, "remote branch did not exist", decision.remoteSHA)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/artifact"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -58,6 +59,50 @@ func TestRunStepGitCommandResultReturnsPersistedAttemptID(t *testing.T) {
 	}
 	if len(attempts) != 1 || result.attemptID != attempts[0].ID {
 		t.Fatalf("command attempt result = %q, attempts = %+v", result.attemptID, attempts)
+	}
+}
+
+func TestRunStepGitCommandSeparatesStdoutFromStderrAndRedactsArtifact(t *testing.T) {
+	sctx := newPushReceiptTestContext(t)
+	binDir := t.TempDir()
+	gitScript := "#!/bin/sh\nprintf 'https://user:secret@example.com/repo.git\\n'\nprintf 'warning: ssh banner\\n' >&2\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = []string{"PATH=" + binDir}
+
+	result := runStepGitCommandResult(sctx, "git remote get-url origin", "push", "remote", "get-url", "origin")
+	if err := result.err(); err != nil {
+		t.Fatal(err)
+	}
+	if result.output != "https://user:secret@example.com/repo.git\n" {
+		t.Fatalf("stdout = %q", result.output)
+	}
+	if result.stderr != "warning: ssh banner\n" {
+		t.Fatalf("stderr = %q", result.stderr)
+	}
+
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].OutputArtifactID == nil {
+		t.Fatalf("command attempts = %+v", attempts)
+	}
+	stored, err := sctx.DB.GetArtifact(*attempts[0].OutputArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := artifact.NewStore(sctx.Paths, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := store.Read(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(contents), "secret") || !strings.Contains(string(contents), "ssh banner") {
+		t.Fatalf("stored diagnostic = %q", contents)
 	}
 }
 

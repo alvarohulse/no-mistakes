@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -39,6 +40,7 @@ var (
 // even if provenance persistence later fails.
 type persistedStepCommandResult struct {
 	output         string
+	stderr         string
 	exitCode       int
 	executed       bool
 	attemptID      string
@@ -423,7 +425,14 @@ func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, re
 	}
 	output := runnerResult.Output
 	if resolved.Provenance.Source == runner.SourceDirectGit {
-		output = safeurl.RedactText(output)
+		output = runnerResult.Stdout
+		if output == "" && runnerResult.Stderr == "" {
+			output = runnerResult.Output
+		}
+	}
+	artifactOutput := runnerResult.Output
+	if resolved.Provenance.Source == runner.SourceDirectGit {
+		artifactOutput = safeurl.RedactText(artifactOutput)
 	}
 	var recordedExitCode *int
 	if executionErr == nil {
@@ -464,7 +473,7 @@ func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, re
 		if storeErr != nil {
 			persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output store: %w", errCommandPersistence, storeErr))
 		} else {
-			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(output))
+			outputArtifact, artifactErr := store.CreateCommandOutput(sctx.Run.ID, attempt.ID, []byte(artifactOutput))
 			if artifactErr != nil {
 				persistenceErr = errors.Join(persistenceErr, fmt.Errorf("%w: create command output artifact: %w", errCommandPersistence, artifactErr))
 			} else if _, persistErr := completeControllerCommandAttemptWithOutputArtifact(sctx.DB, attempt.ID, attemptOutcome, attemptExitCode, runnerResult.Signal, resultStateID, testedSHA, outputArtifact); persistErr != nil {
@@ -495,6 +504,7 @@ func runPersistedStepCommandResultWithAttemptHook(sctx *pipeline.StepContext, re
 	}
 	result := persistedStepCommandResult{
 		output:         output,
+		stderr:         runnerResult.Stderr,
 		exitCode:       runnerResult.ExitCode,
 		executed:       true,
 		executionErr:   executionErr,
@@ -549,8 +559,16 @@ func executeStepGitCommand(sctx *pipeline.StepContext, args []string) (runner.Re
 		grace = sctx.Config.ProcessTerminationGrace
 	}
 	shellenv.ConfigureShellCommand(cmd, grace)
-	output, err := shellenv.CombinedOutputShellCommand(cmd)
-	result := runner.Result{Output: string(output), ExitCode: 0}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := shellenv.RunShellCommand(cmd)
+	result := runner.Result{
+		Output:   stdout.String() + stderr.String(),
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: 0,
+	}
 	if err == nil {
 		return result, nil
 	}

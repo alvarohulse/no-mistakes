@@ -40,6 +40,8 @@ type ExecuteOptions struct {
 // lifecycle error.
 type Result struct {
 	Output    string
+	Stdout    string
+	Stderr    string
 	ExitCode  int
 	Signal    *string
 	Truncated bool
