@@ -25,6 +25,9 @@ type DB struct {
 }
 
 // Open opens (or creates) the SQLite database at path and runs migrations.
+// It classifies an empty schema under an immediate transaction so new
+// databases receive the complete current schema atomically; existing and
+// partial schemas continue through the compatible migration path.
 func Open(path string) (*DB, error) {
 	return open(path, nil)
 }
