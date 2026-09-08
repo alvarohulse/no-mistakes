@@ -31,7 +31,7 @@ flowchart TD
    - If everything passes, the step completes and the pipeline moves on
 
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
-When Build, Test, or Lint has no configured command, the step first asks its routed agent to select one exact command without running or editing anything. The pipeline executes and records that plan; after a failure, the repair agent fixes the cause and the pipeline reruns the same command.
+When Build, Test, or Lint has no configured command, the step first asks its routed agent to select one exact command without running or editing anything. The pipeline executes and records that plan. The [per-step reference](/no-mistakes/reference/pipeline-steps/#test) owns repair behavior, including Test's narrow correction path for an invalid persisted plan.
 Unresolved documentation findings and command plans that cannot be established pause for approval.
 
 ## Before the agent: deterministic CI reruns
