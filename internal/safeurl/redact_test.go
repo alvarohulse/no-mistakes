@@ -34,3 +34,14 @@ func TestRedactTextHidesCredentialURLsInsideMessages(t *testing.T) {
 		t.Fatalf("RedactText() = %q, want redacted URL", got)
 	}
 }
+
+func TestRedactTextHidesSSHCredentialsInsideMessages(t *testing.T) {
+	input := "fatal: unable to access 'ssh://user:token@example.com/owner/repo.git': rejected"
+	got := RedactText(input)
+	if strings.Contains(got, "token") {
+		t.Fatalf("RedactText() leaked credential: %q", got)
+	}
+	if !strings.Contains(got, "ssh://redacted@example.com/owner/repo.git") {
+		t.Fatalf("RedactText() = %q, want redacted SSH URL", got)
+	}
+}
