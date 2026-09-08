@@ -754,6 +754,47 @@ func TestUpdatePushOperationProgressPersistsResolvedTarget(t *testing.T) {
 	}
 }
 
+func TestUpdateRunHeadAndPushBindingWithGenerationForOperationIsAtomic(t *testing.T) {
+	d := openTestDB(t)
+	receipt, _, _, _ := newPushOperationFixture(t, d)
+	started, err := d.StartPushOperation(PushOperation{
+		RunID: receipt.RunID, StepID: receipt.StepID, RoundID: receipt.RoundID,
+		TargetKind: receipt.TargetKind, TargetFingerprint: receipt.TargetFingerprint,
+		TargetIdentity: receipt.TargetIdentity, DestinationRef: receipt.DestinationRef,
+		StartedAt: receipt.StartedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := "delivered-head"
+	generation, err := d.UpdateRunHeadAndPushBindingWithGenerationForOperation(started.RunID, delivered, PushBinding{
+		HeadSHA:           delivered,
+		TargetKind:        started.TargetKind,
+		TargetFingerprint: started.TargetFingerprint,
+		Ref:               started.DestinationRef,
+	}, started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation != 1 {
+		t.Fatalf("push generation = %d, want 1", generation)
+	}
+	run, err := d.GetRun(started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != delivered || run.LastPushedSHA == nil || *run.LastPushedSHA != delivered {
+		t.Fatalf("run push state = %+v", run)
+	}
+	operations, err := d.GetPushOperationsByRun(started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || !operations[0].BindingUpdated || operations[0].ResultingGeneration == nil || *operations[0].ResultingGeneration != generation {
+		t.Fatalf("push operation = %+v", operations)
+	}
+}
+
 func TestCompletePushOperationWithDiagnosticOwnsArtifactAtomically(t *testing.T) {
 	d := openTestDB(t)
 	receipt, _, _, _ := newPushOperationFixture(t, d)

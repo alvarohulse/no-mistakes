@@ -219,7 +219,7 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	}
 	var generation int64
 	if receipt.enabled() {
-		generation, err = sctx.DB.UpdateRunPushBindingWithGenerationForOperation(sctx.Run.ID, binding, receipt.operationID)
+		generation, err = sctx.DB.UpdateRunHeadAndPushBindingWithGenerationForOperation(sctx.Run.ID, headBeingPushed, binding, receipt.operationID)
 	} else {
 		err = sctx.DB.UpdateRunPushBinding(sctx.Run.ID, binding)
 	}
@@ -240,8 +240,10 @@ func (s *PushStep) execute(sctx *pipeline.StepContext, receipt *pushReceiptRecor
 	// fresh read of mutable worktree HEAD after the push.
 	if headBeingPushed != sctx.Run.HeadSHA {
 		sctx.Run.HeadSHA = headBeingPushed
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
-			return nil, err
+		if !receipt.enabled() {
+			if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
+				return nil, err
+			}
 		}
 	}
 

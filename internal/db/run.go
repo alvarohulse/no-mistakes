@@ -531,7 +531,22 @@ func (d *DB) UpdateRunPushBindingWithGenerationForOperation(id string, binding P
 	return d.updateRunPushBindingWithGeneration(id, binding, operationID)
 }
 
+func (d *DB) UpdateRunHeadAndPushBindingWithGenerationForOperation(id, headSHA string, binding PushBinding, operationID string) (int64, error) {
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" || strings.TrimSpace(operationID) == "" {
+		return 0, fmt.Errorf("update run head and push binding: head SHA and operation ID are required")
+	}
+	if binding.HeadSHA != headSHA {
+		return 0, fmt.Errorf("update run head and push binding: binding head does not match run head")
+	}
+	return d.updateRunHeadAndPushBindingWithGeneration(id, headSHA, binding, operationID)
+}
+
 func (d *DB) updateRunPushBindingWithGeneration(id string, binding PushBinding, operationID string) (int64, error) {
+	return d.updateRunHeadAndPushBindingWithGeneration(id, "", binding, operationID)
+}
+
+func (d *DB) updateRunHeadAndPushBindingWithGeneration(id, headSHA string, binding PushBinding, operationID string) (int64, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return 0, fmt.Errorf("update run push binding: begin transaction: %w", err)
@@ -539,11 +554,23 @@ func (d *DB) updateRunPushBindingWithGeneration(id string, binding PushBinding, 
 	defer tx.Rollback()
 
 	ts := now()
-	if _, err := tx.Exec(
-		`UPDATE runs SET last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
-		binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
-	); err != nil {
+	var result sql.Result
+	if headSHA != "" {
+		result, err = tx.Exec(
+			`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+			headSHA, binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
+		)
+	} else {
+		result, err = tx.Exec(
+			`UPDATE runs SET last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+			binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
+		)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("update run push binding: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return 0, fmt.Errorf("update run push binding: expected one run, updated %d", affected)
 	}
 	var generation sql.NullInt64
 	if err := tx.QueryRow(`SELECT push_generation FROM runs WHERE id = ?`, id).Scan(&generation); err != nil {
