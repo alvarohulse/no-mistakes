@@ -234,7 +234,7 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 			diagnosticErr = fmt.Errorf("create push diagnostic store: %w", storeErr)
 		} else {
 			digest := sha256.Sum256([]byte(r.destinationRef))
-			metadata, createErr := store.CreateOperationDiagnostic(r.sctx.Run.ID, fmt.Sprintf("push-%s-%x", r.sctx.RoundID, digest[:8]), boundedPushDiagnostic(runErr.Error()))
+			metadata, createErr := store.CreateOperationDiagnostic(r.sctx.Run.ID, fmt.Sprintf("push-%s-%s-%x", r.operationID, r.sctx.RoundID, digest[:8]), boundedPushDiagnostic(runErr.Error()))
 			if createErr != nil {
 				diagnosticErr = fmt.Errorf("create push diagnostic: %w", createErr)
 			} else {
@@ -264,6 +264,12 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 		StartedAt: r.startedAt.UnixMilli(), CompletedAt: completedAt.UnixMilli(),
 		DurationMS: maxInt64(0, completedAt.Sub(r.startedAt).Milliseconds()), DiagnosticArtifactID: diagnosticID,
 	}
+	if retryOf, retryReason, retryErr := r.findRetry(operation); retryErr != nil {
+		diagnosticErr = errors.Join(diagnosticErr, fmt.Errorf("find push retry predecessor: %w", retryErr))
+	} else {
+		operation.RetryOfOperationID = retryOf
+		operation.RetryReason = retryReason
+	}
 	if r.bindingUpdated {
 		current, getErr := r.sctx.DB.GetRun(r.sctx.Run.ID)
 		if getErr != nil {
@@ -276,6 +282,31 @@ func (r *pushReceiptRecorder) finish(runErr error) error {
 	}
 	_, completeErr := r.sctx.DB.CompletePushOperation(operation)
 	return errors.Join(diagnosticErr, completeErr)
+}
+
+func (r *pushReceiptRecorder) findRetry(operation db.PushOperation) (*string, *string, error) {
+	if operation.PushedSHA == nil {
+		return nil, nil, nil
+	}
+	operations, err := r.sctx.DB.GetPushOperationsByRun(operation.RunID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for index := len(operations) - 1; index >= 0; index-- {
+		prior := operations[index]
+		if prior.ID == operation.ID || (prior.Outcome != db.PushOperationOutcomeFailed && prior.Outcome != db.PushOperationOutcomeProcessError) {
+			continue
+		}
+		if prior.TargetKind != operation.TargetKind || prior.TargetFingerprint != operation.TargetFingerprint ||
+			prior.TargetIdentity != operation.TargetIdentity || prior.DestinationRef != operation.DestinationRef ||
+			prior.PushedSHA == nil || *prior.PushedSHA != *operation.PushedSHA {
+			continue
+		}
+		id := prior.ID
+		reason := "retrying after prior push operation failure"
+		return &id, &reason, nil
+	}
+	return nil, nil, nil
 }
 
 func errorReason(err error, fallback string) string {

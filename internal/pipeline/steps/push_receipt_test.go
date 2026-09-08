@@ -132,6 +132,50 @@ func TestPushReceiptRecorderRetainsObservedVerificationMismatch(t *testing.T) {
 	}
 }
 
+func TestPushReceiptRecorderLinksRepeatedPushAndUsesUniqueDiagnostics(t *testing.T) {
+	sctx := newPushReceiptTestContext(t)
+	first := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
+	if err := first.start(); err != nil {
+		t.Fatal(err)
+	}
+	first.setPushedSHA(strings.Repeat("f", 40))
+	first.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "transport failed", strings.Repeat("a", 40))
+	if err := first.finish(errors.New("transport failed")); err != nil {
+		t.Fatal(err)
+	}
+
+	second := newPushReceiptRecorder(sctx, "https://example.com/repo", "refs/heads/feature")
+	if err := second.start(); err != nil {
+		t.Fatal(err)
+	}
+	second.setPushedSHA(strings.Repeat("f", 40))
+	second.setDecision(db.PushLeaseOrForceDecisionForceWithLease, "retry transport failed", strings.Repeat("a", 40))
+	if err := second.finish(errors.New("retry transport failed")); err != nil {
+		t.Fatal(err)
+	}
+
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 2 || receipts[1].RetryOfOperationID == nil || *receipts[1].RetryOfOperationID != receipts[0].ID || receipts[1].RetryReason == nil {
+		t.Fatalf("retry linkage = %+v", receipts)
+	}
+	if strings.Contains(*receipts[1].RetryReason, "https://") {
+		t.Fatalf("retry reason leaked URL: %q", *receipts[1].RetryReason)
+	}
+	artifacts, err := sctx.DB.GetArtifactsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 2 {
+		t.Fatalf("diagnostic artifacts = %d, want one per failed attempt", len(artifacts))
+	}
+	if receipts[0].DiagnosticArtifactID == nil || receipts[1].DiagnosticArtifactID == nil || *receipts[0].DiagnosticArtifactID == *receipts[1].DiagnosticArtifactID || artifacts[0].RelativePath == artifacts[1].RelativePath {
+		t.Fatalf("diagnostic linkage/path collision = %+v / %+v", receipts, artifacts)
+	}
+}
+
 func newPushReceiptTestContext(t *testing.T) *pipeline.StepContext {
 	t.Helper()
 	database, err := db.Open(filepath.Join(t.TempDir(), "push-receipt.sqlite"))
