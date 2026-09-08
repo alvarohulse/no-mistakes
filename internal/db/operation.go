@@ -138,6 +138,7 @@ func (d *DB) InsertPushOperation(operation PushOperation) (*PushOperation, error
 	}
 	operation.Kind = OperationKindPush
 	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
+	operation.DecisionReason = safeurl.RedactText(operation.DecisionReason)
 	if err := validatePushOperation(d, operation); err != nil {
 		return nil, err
 	}
