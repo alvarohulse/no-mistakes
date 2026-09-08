@@ -632,6 +632,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.mu.Unlock()
 
 	retainRunOwnership := false
+	terminalSubscribersClosed := false
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
@@ -647,13 +648,17 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			cancel(nil)
-			_ = agents.Close()
 			if retainRunOwnership {
+				_ = agents.Close()
+				m.sweepRunWorktreeProcesses(plan.workDir)
 				slog.Error("retaining run ownership after CI repair durability uncertainty and quarantining daemon", "run_id", plan.run.ID)
 				return
 			}
+			if !terminalSubscribersClosed {
+				m.closeSubscribers(plan.run.ID)
+			}
+			_ = agents.Close()
 			deletePolicyTrustedRef(context.Background(), plan.gateDir, policyTrustedRunRef(plan.run.ID))
-			m.closeSubscribers(plan.run.ID)
 			m.sweepRunWorktreeProcesses(plan.workDir)
 			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
 				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
@@ -683,6 +688,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+		}
+		if !retainRunOwnership {
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before telemetry and all post-run cleanup.
+			m.closeSubscribers(plan.run.ID)
+			terminalSubscribersClosed = true
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -1425,6 +1436,7 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 	bgOwnsWorktree = true
 	policyRefOwnedByRun = true
 	retainRunOwnership := false
+	terminalSubscribersClosed := false
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1458,9 +1470,9 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				}
 			}
 			cancel(nil)
-			_ = agents.Close()
-			m.sweepRunWorktreeProcesses(wtDir)
 			if retainRunOwnership {
+				_ = agents.Close()
+				m.sweepRunWorktreeProcesses(wtDir)
 				// The active database row and its recovery material must remain
 				// together. Startup recovery will fail this run closed after the
 				// daemon is restarted; deleting any part here would make that
@@ -1468,9 +1480,12 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 				slog.Error("retaining unresolved run and quarantining daemon", "run_id", run.ID)
 				return
 			}
+			if !terminalSubscribersClosed {
+				m.closeSubscribers(run.ID)
+			}
+			_ = agents.Close()
+			m.sweepRunWorktreeProcesses(wtDir)
 			resolved.releaseTrustedRef(context.Background())
-			// Close subscriber channels for this run.
-			m.closeSubscribers(run.ID)
 			// Clean up worktree.
 			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
 				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
@@ -1490,11 +1505,17 @@ func (m *RunManager) startRunWithMetadataAndIntentSource(ctx context.Context, re
 		} else {
 			executeErr = executor.Execute(runCtx, run, repo, wtDir)
 		}
+		if executeErr != nil && pipeline.IsCIFixRepairDurabilityError(executeErr) {
+			m.closeRunAdmission()
+			retainRunOwnership = true
+		}
+		if !retainRunOwnership {
+			// A terminal executor result ends the subscription contract. Close
+			// subscribers before telemetry and all post-run cleanup.
+			m.closeSubscribers(run.ID)
+			terminalSubscribersClosed = true
+		}
 		if executeErr != nil {
-			if pipeline.IsCIFixRepairDurabilityError(executeErr) {
-				m.closeRunAdmission()
-				retainRunOwnership = true
-			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,

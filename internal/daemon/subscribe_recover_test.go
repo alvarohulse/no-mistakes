@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -258,6 +259,50 @@ func TestSubscribeToCompletedRunYieldsOneGapThenCloses(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("channel was not closed for completed run")
 	}
+}
+
+func TestRecoveredRunClosesTerminalSubscriptionBeforePostRunCleanup(t *testing.T) {
+	sink := newBlockingFinishedTelemetry()
+	restoreTelemetry := telemetry.SetDefaultForTesting(sink)
+	defer restoreTelemetry()
+	t.Cleanup(sink.releaseTelemetry)
+
+	f := newEvidenceFixture(t)
+	manager := NewRunManager(f.db, f.p, func() []pipeline.Step { return nil })
+	runID := f.seed("recovered-terminal-subscription", types.RunRunning, time.Minute, nil)
+	run, err := f.db.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	subscription, err := manager.Subscribe(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+		t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+	}
+
+	manager.resumeRecoveredRun(recoveredRunPlan{
+		run: run, repo: f.repo, workDir: t.TempDir(), gateDir: t.TempDir(),
+		cfg: evalConfig(true, true), agent: recoveredRunTestAgent{},
+	})
+
+	select {
+	case <-sink.finishedEntered:
+	case <-time.After(testRunTerminalBudget):
+		t.Fatal("recovered run did not reach terminal telemetry")
+	}
+	manager.subMu.Lock()
+	subscriberCount := len(manager.subscribers[runID])
+	manager.subMu.Unlock()
+	if subscriberCount != 0 {
+		t.Fatalf("subscriber count while terminal telemetry is blocked = %d, want 0", subscriberCount)
+	}
+
+	sink.releaseTelemetry()
+	manager.wg.Wait()
 }
 
 func TestRecoverStaleRunsOnStartup(t *testing.T) {

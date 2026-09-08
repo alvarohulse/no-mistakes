@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,136 @@ func TestPushReceivedTracksRunTelemetry(t *testing.T) {
 	if _, ok := finished.fields["duration_ms"]; !ok {
 		t.Fatal("expected duration_ms in run finished telemetry")
 	}
+}
+
+func TestStartRunClosesTerminalSubscriptionBeforeTelemetry(t *testing.T) {
+	t.Setenv("NM_DEMO", "1")
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus types.RunStatus
+	}{
+		{name: "success", wantStatus: types.RunCompleted},
+		{name: "failure", err: errors.New("controlled pipeline failure"), wantStatus: types.RunFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := newBlockingFinishedTelemetry()
+			restoreTelemetry := telemetry.SetDefaultForTesting(sink)
+			defer restoreTelemetry()
+
+			p, database := newRefreshRunFixture(t)
+			repo, head := setupTestGitRepo(t, p, database, "terminal-subscription-"+tc.name)
+			step := newGatedPipelineStep(types.StepTest, tc.err)
+			manager := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+			t.Cleanup(manager.Shutdown)
+			t.Cleanup(step.releaseExecution)
+			t.Cleanup(sink.releaseTelemetry)
+
+			runID, err := manager.startRun(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "terminal subscription", "", "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-step.started:
+			case <-time.After(testRunTerminalBudget):
+				t.Fatal("controlled step did not start")
+			}
+
+			subscription, err := manager.Subscribe(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			if event, ok := subscription.Next(context.Background()); !ok || event.Type != ipc.EventStreamGap {
+				t.Fatalf("initial subscription event = (%+v, %v), want stream gap", event, ok)
+			}
+
+			step.releaseExecution()
+			select {
+			case <-sink.finishedEntered:
+			case <-time.After(testRunTerminalBudget):
+				t.Fatal("run did not reach terminal telemetry")
+			}
+			manager.subMu.Lock()
+			subscriberCount := len(manager.subscribers[runID])
+			manager.subMu.Unlock()
+			if subscriberCount != 0 {
+				t.Fatalf("subscriber count while terminal telemetry is blocked = %d, want 0", subscriberCount)
+			}
+
+			sink.releaseTelemetry()
+			manager.wg.Wait()
+			run, err := database.GetRun(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != tc.wantStatus {
+				t.Fatalf("run status = %s, want %s", run.Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+type gatedPipelineStep struct {
+	name        types.StepName
+	err         error
+	started     chan struct{}
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newGatedPipelineStep(name types.StepName, err error) *gatedPipelineStep {
+	return &gatedPipelineStep{
+		name:    name,
+		err:     err,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (s *gatedPipelineStep) Name() types.StepName { return s.name }
+
+func (s *gatedPipelineStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	close(s.started)
+	<-s.release
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &pipeline.StepOutcome{}, nil
+}
+
+func (s *gatedPipelineStep) releaseExecution() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+type blockingFinishedTelemetry struct {
+	finishedEntered chan struct{}
+	release         chan struct{}
+	enteredOnce     sync.Once
+	releaseOnce     sync.Once
+}
+
+func newBlockingFinishedTelemetry() *blockingFinishedTelemetry {
+	return &blockingFinishedTelemetry{
+		finishedEntered: make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+}
+
+func (s *blockingFinishedTelemetry) Track(name string, fields telemetry.Fields) {
+	if name != "run" || fields["action"] != "finished" {
+		return
+	}
+	s.enteredOnce.Do(func() { close(s.finishedEntered) })
+	<-s.release
+}
+
+func (*blockingFinishedTelemetry) Pageview(string, telemetry.Fields) {}
+
+func (*blockingFinishedTelemetry) Close(context.Context) error { return nil }
+
+func (s *blockingFinishedTelemetry) releaseTelemetry() {
+	s.releaseOnce.Do(func() { close(s.release) })
 }
 
 func TestPushReceivedSkipStepsConfiguresExecutor(t *testing.T) {
