@@ -41,7 +41,10 @@ func TestPushReceiptRecorderRedactsTargetAndPersistsOutcome(t *testing.T) {
 		Config: &config.Config{}, WorkDir: repo.WorkingPath,
 	}
 	recorder := newPushReceiptRecorder(sctx, "https://user:secret@example.com/repo", "refs/heads/feature")
-	recorder.pushedSHA = strings.Repeat("c", 40)
+	if err := recorder.start(); err != nil {
+		t.Fatal(err)
+	}
+	recorder.setPushedSHA(strings.Repeat("c", 40))
 	recorder.setDecision(db.PushLeaseOrForceDecisionNewBranch, "created branch on https://user:secret@example.com/repo", "")
 	if err := recorder.finish(nil); err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCIStep_CommitAndPush(t *testing.T) {
@@ -45,6 +46,17 @@ func TestCIStep_CommitAndPush(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "refs/heads/feature"
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "repair", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "repair"
 	if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{HeadSHA: headSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature"}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +81,40 @@ func TestCIStep_CommitAndPush(t *testing.T) {
 	}
 	if dbRun.LastPushedSHA == nil || *dbRun.LastPushedSHA != upstreamSHA || dbRun.PushGeneration == nil || *dbRun.PushGeneration != 2 {
 		t.Fatalf("later CI push binding = %#v", dbRun)
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("CI push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResult.ID || receipt.RoundID != round.ID || receipt.Kind != db.OperationKindPush {
+		t.Fatalf("CI receipt owner = %+v", receipt)
+	}
+	if receipt.PushedSHA == nil || *receipt.PushedSHA != upstreamSHA {
+		t.Fatalf("CI receipt pushed SHA = %+v, want %s", receipt.PushedSHA, upstreamSHA)
+	}
+	if receipt.Outcome != db.PushOperationOutcomeUpdated || !receipt.BindingUpdated || receipt.ResultingGeneration == nil || *receipt.ResultingGeneration != 2 {
+		t.Fatalf("CI receipt result = %+v", receipt)
+	}
+	if len(receipt.CommandAttemptIDs) == 0 {
+		t.Fatal("CI receipt has no durable command attempts")
+	}
+	attempts, err := sctx.DB.GetCommandAttemptsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]*db.CommandAttempt, len(attempts))
+	for _, attempt := range attempts {
+		byID[attempt.ID] = attempt
+	}
+	for _, attemptID := range receipt.CommandAttemptIDs {
+		attempt, ok := byID[attemptID]
+		if !ok || attempt.StepID != stepResult.ID || attempt.RoundID != round.ID {
+			t.Fatalf("receipt attempt %q is not owned by CI step/round", attemptID)
+		}
 	}
 }
 

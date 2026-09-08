@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestPushStep_RejectsUnattributedAgentChanges(t *testing.T) {
@@ -319,9 +321,20 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, staleHeadSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstream
 	recordReviewApproval(t, sctx, actualHeadSHA)
+	stepResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := sctx.DB.InsertStepRound(stepResult.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = stepResult.ID
+	sctx.RoundID = round.ID
+	sctx.RoundTrigger = "initial"
 
 	step := &PushStep{}
-	_, err := step.Execute(sctx)
+	_, err = step.Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +357,23 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	}
 	if dbRun.PushActive {
 		t.Fatal("push-active marker remained set after successful step")
+	}
+	receipts, err := sctx.DB.GetPushOperationsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("push receipts = %d, want 1", len(receipts))
+	}
+	receipt := receipts[0]
+	if receipt.StepID != stepResult.ID || receipt.RoundID != round.ID || receipt.Outcome != db.PushOperationOutcomeAlreadyEqual || receipt.LeaseOrForceDecision != db.PushLeaseOrForceDecisionAlreadyEqual {
+		t.Fatalf("push receipt = %+v", receipt)
+	}
+	if receipt.PushedSHA == nil || *receipt.PushedSHA != actualHeadSHA || receipt.RemoteAfterSHA == nil || *receipt.RemoteAfterSHA != actualHeadSHA {
+		t.Fatalf("push receipt heads = %+v", receipt)
+	}
+	if len(receipt.CommandAttemptIDs) == 0 {
+		t.Fatal("push receipt has no durable command attempts")
 	}
 }
 
