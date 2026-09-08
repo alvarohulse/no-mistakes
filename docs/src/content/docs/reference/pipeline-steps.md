@@ -208,7 +208,9 @@ Pushes the validated branch to the configured push target.
 - Uses regular push for new branches
 - Updates the run's head SHA in the database to the exact commit delivered
 - Records one indexed Push operation receipt for every controller push decision, including credential-free target identity and fingerprint, destination ref, proposed and observed heads, review/lease safety anchors, force decision and redacted reason, outcome (`created`, `updated`, `already_equal`, `refused`, `failed`, or `process_error`), timing, command-attempt and diagnostic references, and resulting push generation
+- Records refused and failed decisions as well as successful transport, with exact ordered controller Git attempts and an operation-owned diagnostic when needed
 - The receipt collection is immutable operation history. The run's push binding remains the authoritative current custody record used by recovery and branch synchronization; a receipt never replaces or independently grants that binding
+- Receipt history is evidence of what the controller decided and observed, not permission to replay a Push
 
 A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
