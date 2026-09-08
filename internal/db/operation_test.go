@@ -206,6 +206,7 @@ func TestRefreshOperationAuthoritativeBaseSHAIsUnavailableOnlyBeforeResolution(t
 	d := openTestDB(t)
 	receipt, _, _, _ := newRefreshOperationFixture(t, d)
 	receipt.AuthoritativeBaseSHA = nil
+	receipt.DiagnosticArtifactID = nil
 
 	for _, outcome := range []struct {
 		decision RefreshDecision
