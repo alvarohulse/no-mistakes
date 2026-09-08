@@ -30,7 +30,7 @@ You can append extra prompt guidance with global or repo-level [`prompts`](/no-m
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
-- Set a typed per-step `model` when a phase needs a specific model rather than the selected backend's default; always declare its vendor explicitly.
+- Set a typed per-step `model` when a phase needs a specific model rather than the selected backend's default; always declare its vendor explicitly. Set per-step `effort` when that phase needs an explicit reasoning depth.
 - Set explicit `commands.build`, `commands.lint`, and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Leave `commands.build` empty for agent-selected compilation and `commands.test` empty for agent-selected smallest relevant checks. Do not configure a complete-suite walk as local Test - remote CI owns broad regression.
 
 That last point matters: the agent helps fill in gaps, but explicit repo
@@ -121,21 +121,24 @@ Repo config takes precedence over global config.
 agent: [codex, claude]
 ```
 
-### Per-step model and Review candidates
+### Per-step routes and Review candidates
 
 ```yaml
 # .no-mistakes.yaml
 review:
   agent: cursor
   model: {name: gpt-5.6-luna-medium, vendor: openai}
+  effort: high
   candidates:
     - agent: claude
       model: {name: claude-opus-5, vendor: anthropic}
+      effort: high
     - agent: codex
       model: {name: gpt-5.6-sol, vendor: openai}
+      effort: xhigh
 ```
 
-The controller selects one configured candidate for every cold full review and rereview; the ordinary Review route remains the stable fixer. Candidate reviews apply the installed `/review-changes` contract and never share the fixer's durable session. ACP routes with composable target commands accept bare model families; bracketed variants fail before work starts because ACP may silently normalize them.
+The controller selects one configured candidate for every cold full review and rereview; the ordinary Review agent/model/effort route remains the stable fixer. Candidate reviews apply the installed `/review-changes` contract and never share the fixer's durable session. ACP routes with composable target commands accept bare model families but reject explicit effort; bracketed variants fail before work starts because ACP may silently normalize them. The [route reference](/no-mistakes/reference/repo-config/#per-step-agent-model-and-effort-routes) owns exact compatibility and precedence.
 
 ### Optional ACP target
 
@@ -288,7 +291,7 @@ For review-fixer reuse, Claude starts a stream-json session and resumes it with 
 ## Codex
 
 Spawns a `codex` subprocess for each invocation with `exec - --json`, streaming the prompt on stdin so large repair output cannot exceed the OS argument limit. When structured output is requested, no-mistakes also writes a normalized schema file and passes it with `--output-schema`. By default it also adds `--dangerously-bypass-approvals-and-sandbox`, unless you already set your own Codex approval or sandbox flag through `agent_args_override`. Reads JSONL events. Structured output is returned from the final `agent_message` text, with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, then validates the result against the normalized schema.
-Codex model and config overrides, such as `-m gpt-5.4`, `-c service_tier="priority"`, or `-c model_reasoning_effort="low"`, belong in global `agent_args_override.codex`.
+Codex defaults and config overrides, such as `-m gpt-5.4`, `-c service_tier="priority"`, or `-c model_reasoning_effort="low"`, belong in global `agent_args_override.codex`. Use a per-step `model` or `effort` route when a phase needs a specific selection; the first-class route takes precedence over those defaults.
 For review-fixer reuse, Codex resumes the reported thread with `codex exec resume <id> -`, again reading the prompt from stdin.
 That resume command has a narrower flag surface than `codex exec`, so a resume that rejects an override falls back to a fresh fixer session rather than skipping the fix turn.
 
@@ -302,7 +305,7 @@ Cursor automatically loads repo-controlled `AGENTS.md`, `.cursor/rules/*.mdc`, a
 
 Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. Any `agent_args_override.rovodev` flags are inserted before no-mistakes' managed serve flags. Communicates via REST API and SSE streaming. Each invocation creates a session, sends the prompt, streams results, then deletes the session. Structured output is handled by injecting schema instructions into a system prompt, then parsing the final text with fallback parsing that accepts JSON fences, inline fence markers, or a final bare JSON object after prose, and validates the result against the requested schema while allowing `null` for optional fields.
 
-Rovo Dev does not expose a verified model-selection interface for this managed-server path, so a first-class per-step model route fails before launch instead of sending an unverified flag.
+Rovo Dev does not expose a verified model- or effort-selection interface for this managed-server path, so a first-class per-step route fails before launch instead of sending an unverified flag.
 
 ## OpenCode
 
@@ -321,7 +324,7 @@ When structured output is requested, no-mistakes injects the JSON schema into th
 
 Spawns a `copilot` subprocess for each invocation with `-p <prompt> --output-format json`.
 It also adds `--no-color` and `--no-ask-user` so the run is non-interactive, plus `--allow-all-tools` (required for non-interactive mode) unless you already set your own Copilot permission flag through `agent_args_override`.
-Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed flags, so user choices such as `--model` or `--effort` take effect.
+Any `agent_args_override.copilot` flags are inserted before no-mistakes' managed flags. A first-class per-step `model` or `effort` route takes precedence over those defaults.
 Reads JSONL events from stdout, streaming incremental `assistant.message_delta` text to the TUI and capturing the final `assistant.message` content.
 The Copilot CLI has no output-schema flag, so when structured output is requested no-mistakes injects the JSON schema into the prompt and validates the final text response with the same JSON fence and bare-object fallback used by Pi and Rovo Dev.
 

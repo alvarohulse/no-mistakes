@@ -2381,20 +2381,24 @@ agent: auto
 
 # Optional per-step routes. Each agent accepts the same scalar or ordered
 # fallback-list form as the run-wide agent. A model is a typed name plus an
-# explicit lowercase vendor; adapters translate it through their verified
-# interface. OpenCode names use provider/model. Rovo Dev rejects model routes.
-# ACP accepts bare model families but rejects bracketed parameter variants,
-# which ACP servers may silently normalize.
-# Unconfigured steps inherit the run-wide agent and its default model.
+# explicit lowercase vendor; `effort` accepts minimal, low, medium, high,
+# xhigh, or max. Adapters translate both through their verified interfaces.
+# OpenCode names use provider/model. Rovo Dev rejects model and effort routes.
+# ACP accepts bare model families but rejects bracketed parameter variants and
+# explicit effort, which ACP servers may silently normalize or cannot express.
+# Unconfigured steps inherit the run-wide agent and its default model and effort.
 # Supported sections: intent, refresh, review, build, test, document, lint, pr, ci.
 # review:
 #   agent: cursor # stable fixer route
 #   model: {name: gpt-5.6-luna-medium, vendor: openai}
+#   effort: high
 #   candidates:
 #     - agent: claude
 #       model: {name: claude-opus-5, vendor: anthropic}
+#       effort: high
 #     - agent: cursor
 #       model: {name: grok-4.6, vendor: xai}
+#       effort: medium
 #       optional: true
 
 # Optional path to the user-installed acpx binary for acp:<target> agents

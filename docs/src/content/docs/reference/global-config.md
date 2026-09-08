@@ -177,7 +177,7 @@ test:
   agent: pi
 ```
 
-An unconfigured step inherits the run-wide `agent` unless `managed: true` requires an explicit route. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. For Review, `review.agent` and `review.model` are the stable fixer route when a candidate pool is configured.
+An unconfigured step inherits the run-wide `agent` unless `managed: true` requires an explicit route. Repo-level step routes override global step routes. A route is resolved once when the run starts and is used for every invocation in that step, including its fix rounds. For Review, `review.agent`, `review.model`, and `review.effort` are the stable fixer route when a candidate pool is configured.
 The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. `refresh.strategy` is repository-only because branch-history policy comes from trusted default-branch config.
 
 `<step>.model` is an object with required `name` and explicit lowercase `vendor` fields. `<step>.effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; omission uses the selected harness default. Repo model and effort routes override matching global routes. Each supported backend receives the model and effort through its verified interface on every invocation and fix round; the first-class fields win over defaults in `agent_args_override`. `push` has no agent, model, or effort route.
