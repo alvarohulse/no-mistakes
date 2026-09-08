@@ -322,6 +322,25 @@ CREATE TABLE IF NOT EXISTS refresh_operations (
     repair_state            TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
 );
 
+CREATE TABLE IF NOT EXISTS push_operations (
+    operation_id              TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+    target_kind               TEXT NOT NULL,
+    target_fingerprint        TEXT NOT NULL,
+    target_identity            TEXT NOT NULL,
+    destination_ref           TEXT NOT NULL,
+    pushed_sha                TEXT NOT NULL,
+    observed_remote_sha       TEXT,
+    lease_or_force_decision   TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
+    decision_reason            TEXT NOT NULL,
+    outcome                    TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
+    review_approved_head_sha  TEXT,
+    last_seen_sha              TEXT,
+    remote_before_sha         TEXT,
+    remote_after_sha          TEXT,
+    binding_updated            INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
+    resulting_generation       INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS operation_command_attempts (
     operation_id TEXT NOT NULL,
     run_id       TEXT NOT NULL,
@@ -728,6 +747,24 @@ var migrationStatements = []string{
 		resulting_head_sha TEXT,
 		conflict_state TEXT NOT NULL CHECK (conflict_state IN ('none', 'detected', 'resolved')),
 		repair_state TEXT NOT NULL CHECK (repair_state IN ('not_needed', 'not_attempted', 'succeeded', 'failed'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS push_operations (
+		operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
+		target_kind TEXT NOT NULL,
+		target_fingerprint TEXT NOT NULL,
+		target_identity TEXT NOT NULL,
+		destination_ref TEXT NOT NULL,
+		pushed_sha TEXT NOT NULL,
+		observed_remote_sha TEXT,
+		lease_or_force_decision TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
+		decision_reason TEXT NOT NULL,
+		outcome TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
+		review_approved_head_sha TEXT,
+		last_seen_sha TEXT,
+		remote_before_sha TEXT,
+		remote_after_sha TEXT,
+		binding_updated INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
+		resulting_generation INTEGER
 	)`,
 	`CREATE TABLE IF NOT EXISTS operation_command_attempts (
 		operation_id TEXT NOT NULL,

@@ -97,6 +97,60 @@ func TestInsertRefreshOperationOwnsDiagnosticArtifact(t *testing.T) {
 	}
 }
 
+func TestPushOperationsRoundTripOrderedReferences(t *testing.T) {
+	d := openTestDB(t)
+	receipt, firstAttempt, secondAttempt, artifact := newPushOperationFixture(t, d)
+
+	stored, err := d.InsertPushOperation(receipt)
+	if err != nil {
+		t.Fatalf("insert push operation: %v", err)
+	}
+	if stored.ID == "" || stored.RunID != receipt.RunID || stored.Kind != OperationKindPush {
+		t.Fatalf("stored operation identity = %+v", stored)
+	}
+	if stored.TargetKind != "upstream" || stored.TargetFingerprint != "target-fingerprint" || stored.TargetIdentity != "https://github.com/test/repo" || stored.DestinationRef != "refs/heads/feature" || stored.PushedSHA != "pushed-head" || stored.ObservedRemoteSHA == nil || *stored.ObservedRemoteSHA != "remote-before" || stored.LeaseOrForceDecision != PushLeaseOrForceDecisionForceWithLease || stored.Outcome != PushOperationOutcomeUpdated {
+		t.Fatalf("stored push receipt fields = %+v", stored)
+	}
+	if stored.ReviewApprovedHeadSHA == nil || *stored.ReviewApprovedHeadSHA != "review-approved" || stored.LastSeenSHA == nil || *stored.LastSeenSHA != "last-seen" || stored.RemoteBeforeSHA == nil || *stored.RemoteBeforeSHA != "remote-before" || stored.RemoteAfterSHA == nil || *stored.RemoteAfterSHA != "pushed-head" || !stored.BindingUpdated || stored.ResultingGeneration == nil || *stored.ResultingGeneration != 2 {
+		t.Fatalf("stored push safety facts = %+v", stored)
+	}
+	if stored.StartedAt != 100 || stored.CompletedAt != 145 || stored.DurationMS != 45 {
+		t.Fatalf("stored timing = %+v", stored)
+	}
+	if stored.DiagnosticArtifactID == nil || *stored.DiagnosticArtifactID != artifact.ID {
+		t.Fatalf("stored diagnostic artifact = %+v", stored.DiagnosticArtifactID)
+	}
+	if got := strings.Join(stored.CommandAttemptIDs, ","); got != secondAttempt.ID+","+firstAttempt.ID {
+		t.Fatalf("stored command attempt order = %q", got)
+	}
+
+	operations, err := d.GetPushOperationsByRun(receipt.RunID)
+	if err != nil {
+		t.Fatalf("get push operations: %v", err)
+	}
+	if len(operations) != 1 || operations[0].ID != stored.ID || strings.Join(operations[0].CommandAttemptIDs, ",") != secondAttempt.ID+","+firstAttempt.ID {
+		t.Fatalf("round-tripped operations = %+v", operations)
+	}
+
+	if _, err := d.sql.Exec(`DELETE FROM runs WHERE id = ?`, receipt.RunID); err != nil {
+		t.Fatalf("delete run with push receipt: %v", err)
+	}
+	for _, table := range []string{"operations", "push_operations", "operation_command_attempts", "artifacts"} {
+		var count int
+		if err := d.sql.QueryRow(`SELECT count(*) FROM `+table+` WHERE `+map[string]string{"push_operations": "operation_id", "operations": "run_id", "operation_command_attempts": "run_id", "artifacts": "run_id"}[table]+` = ?`, func() string {
+			if table == "push_operations" {
+				return stored.ID
+			}
+			return receipt.RunID
+		}()).Scan(&count); err != nil {
+			t.Fatalf("count %s after run delete: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows after run delete = %d, want 0", table, count)
+		}
+	}
+}
+
 func TestInsertRefreshOperationRejectsInvalidReferencesAndDecisions(t *testing.T) {
 	d := openTestDB(t)
 	receipt, firstAttempt, _, _ := newRefreshOperationFixture(t, d)
@@ -434,6 +488,75 @@ func newRefreshOperationFixture(t *testing.T, d *DB) (RefreshOperation, *Command
 		DiagnosticArtifactID:  &artifact.ID,
 	}, firstAttempt, secondAttempt, artifact
 }
+
+func newPushOperationFixture(t *testing.T, d *DB) (PushOperation, *CommandAttempt, *CommandAttempt, *Artifact) {
+	t.Helper()
+	repo, err := d.InsertRepo("/home/user/push-operation", "git@github.com:user/push-operation.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "pushed-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	round, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := d.EnsureCommandDefinition(run.ID, refreshCommandDefinition())
+	if err != nil {
+		t.Fatal(err)
+	}
+	startAttempt := func(sequence int) *CommandAttempt {
+		t.Helper()
+		attempt, err := d.StartCommandAttempt(CommandAttempt{
+			RunID: run.ID, CommandID: definition.ID, StepID: step.ID, RoundID: round.ID,
+			Sequence: sequence, Purpose: "push", Observer: CommandObserverController, Trigger: "initial", BeforeSHA: "pushed-head",
+			InputStateID: stringPointer("git:pushed-head"), CommandSource: runner.SourceBase, RunnerSchemaVersion: runner.SchemaVersion, RunnerSource: runner.SourceDefault,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	firstAttempt := startAttempt(1)
+	secondAttempt := startAttempt(2)
+	artifact, err := d.RegisterArtifact(operationDiagnosticArtifact(filepath.ToSlash(filepath.Join(run.ID, "diagnostics", "push.txt")), run.ID, step.ID, round.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return PushOperation{
+		RunID:                run.ID,
+		StepID:               step.ID,
+		RoundID:              round.ID,
+		TargetKind:           "upstream",
+		TargetFingerprint:    "target-fingerprint",
+		TargetIdentity:       "https://github.com/test/repo",
+		DestinationRef:       "refs/heads/feature",
+		PushedSHA:            "pushed-head",
+		ObservedRemoteSHA:    stringPointer("remote-before"),
+		LeaseOrForceDecision: PushLeaseOrForceDecisionForceWithLease,
+		DecisionReason:       "remote head was last observed by this run",
+		Outcome:              PushOperationOutcomeUpdated,
+		ReviewApprovedHeadSHA: stringPointer("review-approved"),
+		LastSeenSHA:           stringPointer("last-seen"),
+		RemoteBeforeSHA:       stringPointer("remote-before"),
+		RemoteAfterSHA:        stringPointer("pushed-head"),
+		BindingUpdated:        true,
+		ResultingGeneration:   int64Pointer(2),
+		CommandAttemptIDs:     []string{secondAttempt.ID, firstAttempt.ID},
+		StartedAt:             100,
+		CompletedAt:           145,
+		DurationMS:            45,
+		DiagnosticArtifactID:  &artifact.ID,
+	}, firstAttempt, secondAttempt, artifact
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func refreshCommandDefinition() runner.Resolved {
 	return runner.Resolved{

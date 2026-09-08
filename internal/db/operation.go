@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -71,6 +72,281 @@ type RefreshOperation struct {
 	CompletedAt           int64
 	DurationMS            int64
 	DiagnosticArtifactID  *string
+}
+
+type PushLeaseOrForceDecision string
+
+const (
+	PushLeaseOrForceDecisionNewBranch      PushLeaseOrForceDecision = "new_branch"
+	PushLeaseOrForceDecisionAlreadyEqual   PushLeaseOrForceDecision = "already_equal"
+	PushLeaseOrForceDecisionForceWithLease PushLeaseOrForceDecision = "force_with_lease"
+	PushLeaseOrForceDecisionRefused        PushLeaseOrForceDecision = "refused"
+	PushLeaseOrForceDecisionUnavailable    PushLeaseOrForceDecision = "unavailable"
+)
+
+type PushOperationOutcome string
+
+const (
+	PushOperationOutcomeCreated      PushOperationOutcome = "created"
+	PushOperationOutcomeUpdated      PushOperationOutcome = "updated"
+	PushOperationOutcomeAlreadyEqual PushOperationOutcome = "already_equal"
+	PushOperationOutcomeRefused      PushOperationOutcome = "refused"
+	PushOperationOutcomeFailed       PushOperationOutcome = "failed"
+	PushOperationOutcomeProcessError PushOperationOutcome = "process_error"
+)
+
+// PushOperation records one attempted push safety decision. The run's push
+// binding remains authoritative for current custody; this row is immutable
+// history of what the controller observed and decided.
+type PushOperation struct {
+	ID                    string
+	RunID                 string
+	Kind                  OperationKind
+	StepID                string
+	RoundID               string
+	TargetKind            string
+	TargetFingerprint     string
+	TargetIdentity        string
+	DestinationRef        string
+	PushedSHA             string
+	ObservedRemoteSHA     *string
+	LeaseOrForceDecision  PushLeaseOrForceDecision
+	DecisionReason        string
+	Outcome               PushOperationOutcome
+	ReviewApprovedHeadSHA *string
+	LastSeenSHA           *string
+	RemoteBeforeSHA       *string
+	RemoteAfterSHA        *string
+	BindingUpdated        bool
+	ResultingGeneration   *int64
+	CommandAttemptIDs     []string
+	StartedAt             int64
+	CompletedAt           int64
+	DurationMS            int64
+	DiagnosticArtifactID  *string
+}
+
+// InsertPushOperation atomically records one completed Push receipt and its
+// ordered command-attempt references. Target identity is redacted at the
+// persistence boundary so credentialed remotes cannot enter history.
+func (d *DB) InsertPushOperation(operation PushOperation) (*PushOperation, error) {
+	if operation.ID != "" {
+		return nil, fmt.Errorf("insert push operation: ID is assigned by the database")
+	}
+	if operation.Kind != "" && operation.Kind != OperationKindPush {
+		return nil, fmt.Errorf("insert push operation: kind must be %q", OperationKindPush)
+	}
+	operation.Kind = OperationKindPush
+	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
+	if err := validatePushOperation(d, operation); err != nil {
+		return nil, err
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("insert push operation: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	operation.ID = newID()
+	if _, err := tx.Exec(
+		`INSERT INTO operations
+		 (id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		operation.ID, operation.RunID, operation.Kind, operation.StepID, operation.RoundID,
+		operation.StartedAt, operation.CompletedAt, operation.DurationMS, operation.DiagnosticArtifactID,
+	); err != nil {
+		return nil, fmt.Errorf("insert push operation: insert operation: %w", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO push_operations
+		 (operation_id, target_kind, target_fingerprint, target_identity, destination_ref, pushed_sha,
+		  observed_remote_sha, lease_or_force_decision, decision_reason, outcome,
+		  review_approved_head_sha, last_seen_sha, remote_before_sha, remote_after_sha,
+		  binding_updated, resulting_generation)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		operation.ID, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity,
+		operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA,
+		operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome,
+		operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA,
+		operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration,
+	); err != nil {
+		return nil, fmt.Errorf("insert push operation: insert push receipt: %w", err)
+	}
+	for index, attemptID := range operation.CommandAttemptIDs {
+		if _, err := tx.Exec(
+			`INSERT INTO operation_command_attempts (operation_id, run_id, attempt_id, sequence) VALUES (?, ?, ?, ?)`,
+			operation.ID, operation.RunID, attemptID, index+1,
+		); err != nil {
+			return nil, fmt.Errorf("insert push operation: link command attempt: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("insert push operation: commit: %w", err)
+	}
+	return &operation, nil
+}
+
+func validatePushOperation(d *DB, operation PushOperation) error {
+	if strings.TrimSpace(operation.RunID) == "" || strings.TrimSpace(operation.StepID) == "" || strings.TrimSpace(operation.RoundID) == "" ||
+		strings.TrimSpace(operation.TargetKind) == "" || strings.TrimSpace(operation.TargetFingerprint) == "" ||
+		strings.TrimSpace(operation.TargetIdentity) == "" || strings.TrimSpace(operation.DestinationRef) == "" ||
+		strings.TrimSpace(operation.PushedSHA) == "" || strings.TrimSpace(operation.DecisionReason) == "" {
+		return fmt.Errorf("insert push operation: required receipt identity is incomplete")
+	}
+	if !validPushLeaseOrForceDecision(operation.LeaseOrForceDecision) {
+		return fmt.Errorf("insert push operation: unsupported lease/force decision %q", operation.LeaseOrForceDecision)
+	}
+	if !validPushOperationOutcome(operation.Outcome) {
+		return fmt.Errorf("insert push operation: unsupported outcome %q", operation.Outcome)
+	}
+	if operation.StartedAt <= 0 || operation.CompletedAt < operation.StartedAt || operation.DurationMS < 0 {
+		return fmt.Errorf("insert push operation: timing is invalid")
+	}
+	var scopeCount int
+	if err := d.sql.QueryRow(
+		`SELECT count(*) FROM step_rounds r JOIN step_results s ON s.id = r.step_result_id
+		 WHERE r.id = ? AND s.id = ? AND s.run_id = ? AND s.step_name = ?`,
+		operation.RoundID, operation.StepID, operation.RunID, types.StepPush,
+	).Scan(&scopeCount); err != nil {
+		return fmt.Errorf("insert push operation: validate step and round: %w", err)
+	}
+	if scopeCount != 1 {
+		return fmt.Errorf("insert push operation: push step and round do not belong to run")
+	}
+	seen := make(map[string]struct{}, len(operation.CommandAttemptIDs))
+	for _, attemptID := range operation.CommandAttemptIDs {
+		if strings.TrimSpace(attemptID) == "" {
+			return fmt.Errorf("insert push operation: command attempt reference is empty")
+		}
+		if _, exists := seen[attemptID]; exists {
+			return fmt.Errorf("insert push operation: command attempt references must be unique")
+		}
+		seen[attemptID] = struct{}{}
+		var count int
+		if err := d.sql.QueryRow(
+			`SELECT count(*) FROM command_attempts WHERE id = ? AND run_id = ? AND step_id = ? AND round_id = ?`,
+			attemptID, operation.RunID, operation.StepID, operation.RoundID,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("insert push operation: validate command attempt: %w", err)
+		}
+		if count != 1 {
+			return fmt.Errorf("insert push operation: command attempt does not belong to push receipt")
+		}
+	}
+	if operation.DiagnosticArtifactID == nil {
+		return nil
+	}
+	if strings.TrimSpace(*operation.DiagnosticArtifactID) == "" {
+		return fmt.Errorf("insert push operation: diagnostic artifact reference is empty")
+	}
+	var artifactCount int
+	if err := d.sql.QueryRow(
+		`SELECT count(*) FROM artifacts WHERE id = ? AND run_id = ? AND step_id = ? AND round_id = ?
+		 AND purpose = ? AND kind = ? AND storage_root = ? AND command_attempt_id IS NULL`,
+		*operation.DiagnosticArtifactID, operation.RunID, operation.StepID, operation.RoundID,
+		ArtifactPurposeOperationDiagnostic, ArtifactKindOperationDiagnostic, ArtifactStorageRootRun,
+	).Scan(&artifactCount); err != nil {
+		return fmt.Errorf("insert push operation: validate diagnostic artifact: %w", err)
+	}
+	if artifactCount != 1 {
+		return fmt.Errorf("insert push operation: diagnostic artifact does not belong to push receipt")
+	}
+	return nil
+}
+
+func validPushLeaseOrForceDecision(value PushLeaseOrForceDecision) bool {
+	switch value {
+	case PushLeaseOrForceDecisionNewBranch, PushLeaseOrForceDecisionAlreadyEqual,
+		PushLeaseOrForceDecisionForceWithLease, PushLeaseOrForceDecisionRefused,
+		PushLeaseOrForceDecisionUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+func validPushOperationOutcome(value PushOperationOutcome) bool {
+	switch value {
+	case PushOperationOutcomeCreated, PushOperationOutcomeUpdated, PushOperationOutcomeAlreadyEqual,
+		PushOperationOutcomeRefused, PushOperationOutcomeFailed, PushOperationOutcomeProcessError:
+		return true
+	default:
+		return false
+	}
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// GetPushOperationsByRun returns Push receipts in stable operation order.
+func (d *DB) GetPushOperationsByRun(runID string) ([]*PushOperation, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, fmt.Errorf("get push operations by run: run ID is required")
+	}
+	rows, err := d.sql.Query(
+		`SELECT o.id, o.run_id, o.kind, o.step_id, o.round_id,
+		        po.target_kind, po.target_fingerprint, po.target_identity, po.destination_ref, po.pushed_sha,
+		        po.observed_remote_sha, po.lease_or_force_decision, po.decision_reason, po.outcome,
+		        po.review_approved_head_sha, po.last_seen_sha, po.remote_before_sha, po.remote_after_sha,
+		        po.binding_updated, po.resulting_generation,
+		        o.started_at, o.completed_at, o.duration_ms, o.diagnostic_artifact_id
+		 FROM operations o JOIN push_operations po ON po.operation_id = o.id
+		 WHERE o.run_id = ? AND o.kind = ? ORDER BY o.started_at, o.id`,
+		runID, OperationKindPush,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get push operations by run: %w", err)
+	}
+	defer rows.Close()
+	var operations []*PushOperation
+	for rows.Next() {
+		operation := &PushOperation{}
+		var kind, decision, outcome string
+		var observed, approved, lastSeen, remoteBefore, remoteAfter sql.NullString
+		var binding int
+		if err := rows.Scan(&operation.ID, &operation.RunID, &kind, &operation.StepID, &operation.RoundID,
+			&operation.TargetKind, &operation.TargetFingerprint, &operation.TargetIdentity, &operation.DestinationRef,
+			&operation.PushedSHA, &observed, &decision, &operation.DecisionReason, &outcome,
+			&approved, &lastSeen, &remoteBefore, &remoteAfter, &binding, &operation.ResultingGeneration,
+			&operation.StartedAt, &operation.CompletedAt, &operation.DurationMS, &operation.DiagnosticArtifactID); err != nil {
+			return nil, fmt.Errorf("get push operations by run: scan: %w", err)
+		}
+		operation.Kind = OperationKind(kind)
+		operation.LeaseOrForceDecision = PushLeaseOrForceDecision(decision)
+		operation.Outcome = PushOperationOutcome(outcome)
+		operation.BindingUpdated = binding != 0
+		operation.ObservedRemoteSHA = nullableStringPointer(observed)
+		operation.ReviewApprovedHeadSHA = nullableStringPointer(approved)
+		operation.LastSeenSHA = nullableStringPointer(lastSeen)
+		operation.RemoteBeforeSHA = nullableStringPointer(remoteBefore)
+		operation.RemoteAfterSHA = nullableStringPointer(remoteAfter)
+		operations = append(operations, operation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get push operations by run: iterate rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("get push operations by run: close rows: %w", err)
+	}
+	for _, operation := range operations {
+		attemptIDs, err := d.loadOperationCommandAttemptIDs(operation.ID)
+		if err != nil {
+			return nil, fmt.Errorf("get push operations by run: %w", err)
+		}
+		operation.CommandAttemptIDs = attemptIDs
+	}
+	return operations, nil
+}
+
+func nullableStringPointer(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	result := value.String
+	return &result
 }
 
 // InsertRefreshOperation atomically records a completed Refresh receipt and
@@ -486,23 +762,33 @@ func scanRefreshOperation(row interface{ Scan(...any) error }) (*RefreshOperatio
 }
 
 func (d *DB) populateOperationCommandAttemptIDs(operation *RefreshOperation) error {
+	ids, err := d.loadOperationCommandAttemptIDs(operation.ID)
+	if err != nil {
+		return err
+	}
+	operation.CommandAttemptIDs = ids
+	return nil
+}
+
+func (d *DB) loadOperationCommandAttemptIDs(operationID string) ([]string, error) {
 	rows, err := d.sql.Query(
 		`SELECT attempt_id FROM operation_command_attempts WHERE operation_id = ? ORDER BY sequence`,
-		operation.ID,
+		operationID,
 	)
 	if err != nil {
-		return fmt.Errorf("load operation command attempts: %w", err)
+		return nil, fmt.Errorf("load operation command attempts: %w", err)
 	}
 	defer rows.Close()
+	var ids []string
 	for rows.Next() {
 		var attemptID string
 		if err := rows.Scan(&attemptID); err != nil {
-			return fmt.Errorf("scan operation command attempt: %w", err)
+			return nil, fmt.Errorf("scan operation command attempt: %w", err)
 		}
-		operation.CommandAttemptIDs = append(operation.CommandAttemptIDs, attemptID)
+		ids = append(ids, attemptID)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate operation command attempts: %w", err)
+		return nil, fmt.Errorf("iterate operation command attempts: %w", err)
 	}
-	return nil
+	return ids, nil
 }
