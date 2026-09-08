@@ -1,10 +1,107 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 )
+
+func migrateOperationKinds(sqlDB *sql.DB) (returnErr error) {
+	var createSQL string
+	if err := sqlDB.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operations'`).Scan(&createSQL); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("inspect operation schema: %w", err)
+	}
+	if strings.Contains(strings.ToLower(createSQL), "'push'") {
+		return nil
+	}
+
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("connect for operation migration: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for operation migration: %w", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil && returnErr == nil {
+			returnErr = fmt.Errorf("reenable foreign keys after operation migration: %w", err)
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin operation migration: %w", err)
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`DROP TRIGGER IF EXISTS validate_refresh_operation_scope_insert`,
+		`DROP TRIGGER IF EXISTS validate_refresh_operation_scope_update`,
+		`DROP TRIGGER IF EXISTS validate_push_operation_scope_insert`,
+		`DROP TRIGGER IF EXISTS validate_push_operation_scope_update`,
+		`DROP TRIGGER IF EXISTS validate_refresh_operation_diagnostic_insert`,
+		`DROP TRIGGER IF EXISTS validate_refresh_operation_diagnostic_update`,
+		`DROP TRIGGER IF EXISTS validate_artifact_operation_scope_insert`,
+		`DROP TRIGGER IF EXISTS validate_artifact_operation_scope_update`,
+		`DROP TRIGGER IF EXISTS validate_operation_command_attempt_insert`,
+		`DROP TRIGGER IF EXISTS validate_operation_command_attempt_update`,
+		`CREATE TABLE operations_push_migration (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (kind IN ('refresh', 'push')),
+			step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+			round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+			started_at INTEGER NOT NULL CHECK (started_at > 0),
+			completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+			duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+			diagnostic_artifact_id TEXT,
+			UNIQUE (run_id, id),
+			FOREIGN KEY (run_id, diagnostic_artifact_id) REFERENCES artifacts(run_id, id)
+		)`,
+		`INSERT INTO operations_push_migration
+			(id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id)
+		 SELECT id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id
+		 FROM operations`,
+		`DROP TABLE operations`,
+		`ALTER TABLE operations_push_migration RENAME TO operations`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("rebuild operation schema: %w", err)
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("check operation migration foreign keys: %w", err)
+	}
+	if rows.Next() {
+		var table, parent string
+		var rowID sql.NullInt64
+		var foreignKeyID int
+		if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan operation migration foreign key violation: %w", err)
+		}
+		rows.Close()
+		return fmt.Errorf("operation migration left a foreign key violation in %s referencing %s", table, parent)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate operation migration foreign key check: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close operation migration foreign key check: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit operation migration: %w", err)
+	}
+	return nil
+}
 
 func migrateRefreshOperationSchema(sqlDB *sql.DB) error {
 	var createSQL string

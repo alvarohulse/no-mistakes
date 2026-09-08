@@ -107,6 +107,10 @@ func open(path string, beforeFreshSchemaInstall func() error) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)
 	}
+	if err := migrateOperationKinds(sqlDB); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
+	}
 	for _, stmt := range migrationStatements {
 		if _, err := sqlDB.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
 			sqlDB.Close()

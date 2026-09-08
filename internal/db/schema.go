@@ -293,7 +293,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_run_created_id
 CREATE TABLE IF NOT EXISTS operations (
     id                     TEXT PRIMARY KEY,
     run_id                 TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    kind                   TEXT NOT NULL CHECK (kind IN ('refresh')),
+    kind                   TEXT NOT NULL CHECK (kind IN ('refresh', 'push')),
     step_id                TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
     round_id               TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
     started_at             INTEGER NOT NULL CHECK (started_at > 0),
@@ -324,19 +324,18 @@ CREATE TABLE IF NOT EXISTS refresh_operations (
 
 CREATE TABLE IF NOT EXISTS push_operations (
     operation_id              TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
-    target_kind               TEXT NOT NULL,
+    target_kind               TEXT NOT NULL CHECK (target_kind IN ('upstream', 'fork')),
     target_fingerprint        TEXT NOT NULL,
     target_identity            TEXT NOT NULL,
     destination_ref           TEXT NOT NULL,
     pushed_sha                TEXT,
     observed_remote_sha       TEXT,
+    verified_remote_sha       TEXT,
     lease_or_force_decision   TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
     decision_reason            TEXT NOT NULL,
     outcome                    TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
     review_approved_head_sha  TEXT,
     last_seen_sha              TEXT,
-    remote_before_sha         TEXT,
-    remote_after_sha          TEXT,
     binding_updated            INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
     resulting_generation       INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
     retry_of_operation_id     TEXT REFERENCES operations(id),
@@ -354,6 +353,9 @@ CREATE TABLE IF NOT EXISTS operation_command_attempts (
     FOREIGN KEY (run_id, operation_id) REFERENCES operations(run_id, id) ON DELETE CASCADE,
     FOREIGN KEY (run_id, attempt_id) REFERENCES command_attempts(run_id, id) ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_diagnostic_artifact_id
+    ON operations (diagnostic_artifact_id) WHERE diagnostic_artifact_id IS NOT NULL;
 
 CREATE TRIGGER IF NOT EXISTS validate_refresh_operation_scope_insert
 BEFORE INSERT ON operations
@@ -750,7 +752,7 @@ var migrationStatements = []string{
 	`CREATE TABLE IF NOT EXISTS operations (
 		id TEXT PRIMARY KEY,
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-		kind TEXT NOT NULL CHECK (kind IN ('refresh')),
+		kind TEXT NOT NULL CHECK (kind IN ('refresh', 'push')),
 		step_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
 		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
 		started_at INTEGER NOT NULL CHECK (started_at > 0),
@@ -779,19 +781,18 @@ var migrationStatements = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS push_operations (
 		operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
-		target_kind TEXT NOT NULL,
+		target_kind TEXT NOT NULL CHECK (target_kind IN ('upstream', 'fork')),
 		target_fingerprint TEXT NOT NULL,
 		target_identity TEXT NOT NULL,
 		destination_ref TEXT NOT NULL,
 		pushed_sha TEXT,
 		observed_remote_sha TEXT,
+		verified_remote_sha TEXT,
 		lease_or_force_decision TEXT NOT NULL CHECK (lease_or_force_decision IN ('new_branch', 'already_equal', 'force_with_lease', 'refused', 'unavailable')),
 		decision_reason TEXT NOT NULL,
 		outcome TEXT NOT NULL CHECK (outcome IN ('created', 'updated', 'already_equal', 'refused', 'failed', 'process_error')),
 		review_approved_head_sha TEXT,
 		last_seen_sha TEXT,
-		remote_before_sha TEXT,
-		remote_after_sha TEXT,
 		binding_updated INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
 		resulting_generation INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
 		retry_of_operation_id TEXT REFERENCES operations(id),
@@ -801,6 +802,8 @@ var migrationStatements = []string{
 	`ALTER TABLE push_operations ADD COLUMN retry_of_operation_id TEXT REFERENCES operations(id)`,
 	`ALTER TABLE push_operations ADD COLUMN retry_reason TEXT`,
 	`ALTER TABLE push_operations ADD COLUMN terminalized INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))`,
+	`ALTER TABLE push_operations ADD COLUMN verified_remote_sha TEXT`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_diagnostic_artifact_id ON operations (diagnostic_artifact_id) WHERE diagnostic_artifact_id IS NOT NULL`,
 	`CREATE TABLE IF NOT EXISTS operation_command_attempts (
 		operation_id TEXT NOT NULL,
 		run_id TEXT NOT NULL,
