@@ -165,7 +165,7 @@ Before execution, no-mistakes resolves the binary, records the canonical configu
 | Type    | `{ executable: string, args: [] }`   |
 | Default | `sh -c` (POSIX), `pwsh` (Windows)    |
 
-### Per-step agent and model routes
+### Per-step agent, model, and effort routes
 
 Set `<step>.agent` to route one pipeline step to a different agent or ordered fallback list. Supported steps are `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, and `ci`.
 
@@ -630,7 +630,7 @@ Machine-local per-repository configuration, keyed by repository identity.
 | Type | `map` of `<owner>/<repo>` keys to [repo-config](/no-mistakes/reference/repo-config/)-shaped objects |
 | Default | Empty (no repository is overridden) |
 
-Use an entry here for repo-specific values that cannot be committed to the repository's default branch - for example canonical commands in a repository whose default branch you do not control. This is machine-owner-trusted configuration with the same standing the retired machine-local config file had: it can set code-executing fields (`commands`, `hooks`), the run-wide `agent`, per-step agent/model routes, and per-key `prompts`.
+Use an entry here for repo-specific values that cannot be committed to the repository's default branch - for example canonical commands in a repository whose default branch you do not control. This is machine-owner-trusted configuration with the same standing the retired machine-local config file had: it can set code-executing fields (`commands`, `hooks`), the run-wide `agent`, per-step agent/model/effort routes, and per-key `prompts`.
 
 ```yaml
 overrides:

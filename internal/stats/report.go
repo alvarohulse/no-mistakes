@@ -13,7 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const ReportSchemaVersion = 9
+const ReportSchemaVersion = 10
 
 type Query struct {
 	RunID    string

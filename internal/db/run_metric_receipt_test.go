@@ -205,7 +205,7 @@ func TestOpenDoesNotRelabelUnsupportedMetricReceiptVersions(t *testing.T) {
 		if got.SchemaVersion != expected.SchemaVersion {
 			t.Fatalf("unsupported receipt %q was relabeled from v%d to v%d", runID, expected.SchemaVersion, got.SchemaVersion)
 		}
-		if expected.SchemaVersion >= RunMetricReceiptSchemaVersion {
+		if expected.SchemaVersion == 6 || expected.SchemaVersion >= RunMetricReceiptSchemaVersion {
 			if got.PayloadJSON != expected.PayloadJSON || got.ReceiptSHA256 != expected.ReceiptSHA256 {
 				t.Fatalf("future receipt %q was rewritten:\nwant: %+v\n got: %+v", runID, expected, *got)
 			}

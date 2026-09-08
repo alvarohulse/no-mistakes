@@ -13,7 +13,7 @@ The daemon also reads `refresh.strategy`, `effective_config.publish`, `document.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, and intent settings other than its agent/model route) are still read from the pushed branch. `refresh.strategy` is trusted-only because it controls branch-history mutation.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, and intent settings other than its agent/model/effort route) are still read from the pushed branch. `refresh.strategy` is trusted-only because it controls branch-history mutation.
 
 If you genuinely want per-branch `commands`, `hooks`, `agent`, step routes, and `prompts` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 
@@ -151,7 +151,7 @@ If a pipeline invocation fails because that agent process cannot start or exits 
 Structured findings and schema/output validation problems do not trigger fallback.
 This per-repo `agent` value, including every fallback entry, is still read from the trusted default-branch `.no-mistakes.yaml` unless `allow_repo_commands` is enabled there.
 
-### Per-step agent and model routes
+### Per-step agent, model, and effort routes
 
 Set `<step>.agent` to route `intent`, `refresh`, `review`, `build`, `test`, `document`, `lint`, `pr`, or `ci` to a different agent. The value accepts the same scalar or ordered fallback-list forms as the run-wide `agent`.
 
@@ -209,7 +209,7 @@ Every per-step selector, including effort, is code-executing configuration. It c
 
 ACP targets accept global `agent_args_override` entries and bare first-class step models when their target spawn command is composable. The first-class model replaces any `-m` or `--model` default from `agent_args_override`.
 
-The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent and model routing but cannot select a strategy.
+The legacy top-level `rebase` route is accepted as an alias for `refresh`; setting both sections is rejected as ambiguous. The legacy section accepts agent, model, and effort routing but cannot select a strategy.
 
 ### refresh.strategy
 
@@ -227,7 +227,7 @@ This field is always read from the pinned trusted default-branch config, even wh
 
 ### allow_repo_commands
 
-Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
+Opt in to honoring the code-executing and agent-steering fields (`commands.{build,test,lint,format}`, `hooks.{post_worktree,pr_body}`, `agent`, every per-step agent/model/effort route, the Review candidate pool, and `prompts`) from a contributor's pushed branch instead of the trusted default-branch copy.
 
 | | |
 | --- | --- |
