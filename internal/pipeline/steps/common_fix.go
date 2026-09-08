@@ -20,6 +20,7 @@ type fixExecutionOptions struct {
 	MissingFindingsError    string
 	LogMessage              string
 	Prompt                  string
+	JSONSchema              json.RawMessage
 	ErrorPrefix             string
 	FallbackSummary         string
 	AfterAgentRun           func(*agent.Result) error
@@ -35,8 +36,7 @@ type fixExecutionOptions struct {
 }
 
 type commitSummary struct {
-	Summary            string  `json:"summary"`
-	ReplacementCommand *string `json:"replacement_command,omitempty"`
+	Summary string `json:"summary"`
 }
 
 var errRejectedCommitSummary = errors.New("rejected commit summary")
@@ -53,8 +53,7 @@ var fixCoAuthorByHarness = map[string]string{
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
-		"summary": {"type": "string", "maxLength": %d},
-		"replacement_command": {"type": "string"}
+		"summary": {"type": "string", "maxLength": %d}
 	},
 	"required": ["summary"]
 }`, config.MaxFixMessageSummaryBytes))
@@ -251,27 +250,6 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
-func applyExplicitPlannedCommandReplacement(sctx *pipeline.StepContext, result *agent.Result) error {
-	if result == nil || len(result.Output) == 0 {
-		return nil
-	}
-	var response commitSummary
-	if err := json.Unmarshal(result.Output, &response); err != nil || response.ReplacementCommand == nil {
-		return nil
-	}
-	replacement := strings.TrimSpace(*response.ReplacementCommand)
-	if replacement == "" {
-		return nil
-	}
-	if sctx.DB != nil && sctx.StepResultID != "" {
-		if err := sctx.DB.SetStepPlannedCommand(sctx.StepResultID, replacement); err != nil {
-			return fmt.Errorf("persist replacement planned command: %w", err)
-		}
-	}
-	sctx.PlannedCommand = replacement
-	return nil
-}
-
 // executeFixMode runs the fix agent and commits any resulting changes. It
 // returns the agent's one-line fix summary (empty when the agent returned
 // nothing parseable), which the caller should place on StepOutcome.FixSummary
@@ -293,10 +271,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	runOpts := agent.RunOpts{
 		Prompt:     opts.Prompt,
 		CWD:        sctx.WorkDir,
-		JSONSchema: commitSummarySchema,
+		JSONSchema: opts.JSONSchema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
 		Workload:   opts.Workload,
+	}
+	if len(runOpts.JSONSchema) == 0 {
+		runOpts.JSONSchema = commitSummarySchema
 	}
 	var result *agent.Result
 	var err error
