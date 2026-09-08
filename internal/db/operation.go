@@ -135,6 +135,15 @@ type PushOperation struct {
 	DiagnosticArtifactID  *string
 }
 
+func redactPushOperation(operation *PushOperation) {
+	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
+	operation.DecisionReason = safeurl.RedactText(operation.DecisionReason)
+	if operation.RetryReason != nil {
+		redacted := safeurl.RedactText(*operation.RetryReason)
+		operation.RetryReason = &redacted
+	}
+}
+
 // InsertPushOperation atomically records one completed Push receipt and its
 // ordered command-attempt references. Target identity is redacted at the
 // persistence boundary so credentialed remotes cannot enter history.
@@ -146,8 +155,7 @@ func (d *DB) InsertPushOperation(operation PushOperation) (*PushOperation, error
 		return nil, fmt.Errorf("insert push operation: kind must be %q", OperationKindPush)
 	}
 	operation.Kind = OperationKindPush
-	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
-	operation.DecisionReason = safeurl.RedactText(operation.DecisionReason)
+	redactPushOperation(&operation)
 	operation.ID = newID()
 	if err := validatePushOperation(d, operation); err != nil {
 		return nil, err
@@ -171,14 +179,14 @@ func (d *DB) InsertPushOperation(operation PushOperation) (*PushOperation, error
 		 (operation_id, target_kind, target_fingerprint, target_identity, destination_ref, pushed_sha,
 		  observed_remote_sha, lease_or_force_decision, decision_reason, outcome,
 		  review_approved_head_sha, last_seen_sha, remote_before_sha, remote_after_sha,
-		  binding_updated, resulting_generation, retry_of_operation_id, retry_reason)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			binding_updated, resulting_generation, retry_of_operation_id, retry_reason, terminalized)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		operation.ID, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity,
 		operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA,
 		operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome,
 		operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA,
 		operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration,
-		operation.RetryOfOperationID, operation.RetryReason,
+		operation.RetryOfOperationID, operation.RetryReason, 1,
 	); err != nil {
 		return nil, fmt.Errorf("insert push operation: insert push receipt: %w", err)
 	}
@@ -207,7 +215,7 @@ func (d *DB) StartPushOperation(operation PushOperation) (*PushOperation, error)
 		return nil, fmt.Errorf("start push operation: kind must be %q", OperationKindPush)
 	}
 	operation.Kind = OperationKindPush
-	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
+	redactPushOperation(&operation)
 	operation.LeaseOrForceDecision = PushLeaseOrForceDecisionUnavailable
 	operation.Outcome = PushOperationOutcomeProcessError
 	if strings.TrimSpace(operation.DecisionReason) == "" {
@@ -247,11 +255,14 @@ func (d *DB) CompletePushOperation(operation PushOperation) (*PushOperation, err
 		return nil, fmt.Errorf("complete push operation: kind must be %q", OperationKindPush)
 	}
 	operation.Kind = OperationKindPush
-	operation.TargetIdentity = safeurl.Redact(operation.TargetIdentity)
-	operation.DecisionReason = safeurl.RedactText(operation.DecisionReason)
+	redactPushOperation(&operation)
 	var runID, stepID, roundID string
-	if err := d.sql.QueryRow(`SELECT run_id, step_id, round_id FROM operations WHERE id = ? AND kind = ?`, operation.ID, OperationKindPush).Scan(&runID, &stepID, &roundID); err != nil {
+	var terminalized int
+	if err := d.sql.QueryRow(`SELECT run_id, step_id, round_id, po.terminalized FROM operations o JOIN push_operations po ON po.operation_id = o.id WHERE o.id = ? AND o.kind = ?`, operation.ID, OperationKindPush).Scan(&runID, &stepID, &roundID, &terminalized); err != nil {
 		return nil, fmt.Errorf("complete push operation: load operation: %w", err)
+	}
+	if terminalized != 0 {
+		return nil, fmt.Errorf("complete push operation: operation is already terminal")
 	}
 	if runID != operation.RunID || stepID != operation.StepID || roundID != operation.RoundID {
 		return nil, fmt.Errorf("complete push operation: owner scope cannot change")
@@ -267,8 +278,10 @@ func (d *DB) CompletePushOperation(operation PushOperation) (*PushOperation, err
 	if _, err := tx.Exec(`UPDATE operations SET started_at = ?, completed_at = ?, duration_ms = ?, diagnostic_artifact_id = ? WHERE id = ? AND run_id = ? AND kind = ?`, operation.StartedAt, operation.CompletedAt, operation.DurationMS, operation.DiagnosticArtifactID, operation.ID, operation.RunID, OperationKindPush); err != nil {
 		return nil, fmt.Errorf("complete push operation: update operation: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE push_operations SET target_kind = ?, target_fingerprint = ?, target_identity = ?, destination_ref = ?, pushed_sha = ?, observed_remote_sha = ?, lease_or_force_decision = ?, decision_reason = ?, outcome = ?, review_approved_head_sha = ?, last_seen_sha = ?, remote_before_sha = ?, remote_after_sha = ?, binding_updated = ?, resulting_generation = ?, retry_of_operation_id = ?, retry_reason = ? WHERE operation_id = ?`, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity, operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome, operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA, operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration, operation.RetryOfOperationID, operation.RetryReason, operation.ID); err != nil {
+	if result, err := tx.Exec(`UPDATE push_operations SET target_kind = ?, target_fingerprint = ?, target_identity = ?, destination_ref = ?, pushed_sha = ?, observed_remote_sha = ?, lease_or_force_decision = ?, decision_reason = ?, outcome = ?, review_approved_head_sha = ?, last_seen_sha = ?, remote_before_sha = ?, remote_after_sha = ?, binding_updated = ?, resulting_generation = ?, retry_of_operation_id = ?, retry_reason = ?, terminalized = 1 WHERE operation_id = ? AND terminalized = 0`, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity, operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome, operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA, operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration, operation.RetryOfOperationID, operation.RetryReason, operation.ID); err != nil {
 		return nil, fmt.Errorf("complete push operation: update push receipt: %w", err)
+	} else if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		return nil, fmt.Errorf("complete push operation: operation is already terminal")
 	}
 	if _, err := tx.Exec(`DELETE FROM operation_command_attempts WHERE operation_id = ?`, operation.ID); err != nil {
 		return nil, fmt.Errorf("complete push operation: clear attempt links: %w", err)
@@ -288,7 +301,7 @@ func insertPushOperationRows(tx *sql.Tx, operation PushOperation) error {
 	if _, err := tx.Exec(`INSERT INTO operations (id, run_id, kind, step_id, round_id, started_at, completed_at, duration_ms, diagnostic_artifact_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, operation.RunID, operation.Kind, operation.StepID, operation.RoundID, operation.StartedAt, operation.CompletedAt, operation.DurationMS, operation.DiagnosticArtifactID); err != nil {
 		return fmt.Errorf("insert operation: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO push_operations (operation_id, target_kind, target_fingerprint, target_identity, destination_ref, pushed_sha, observed_remote_sha, lease_or_force_decision, decision_reason, outcome, review_approved_head_sha, last_seen_sha, remote_before_sha, remote_after_sha, binding_updated, resulting_generation, retry_of_operation_id, retry_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity, operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome, operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA, operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration, operation.RetryOfOperationID, operation.RetryReason); err != nil {
+	if _, err := tx.Exec(`INSERT INTO push_operations (operation_id, target_kind, target_fingerprint, target_identity, destination_ref, pushed_sha, observed_remote_sha, lease_or_force_decision, decision_reason, outcome, review_approved_head_sha, last_seen_sha, remote_before_sha, remote_after_sha, binding_updated, resulting_generation, retry_of_operation_id, retry_reason, terminalized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, operation.ID, operation.TargetKind, operation.TargetFingerprint, operation.TargetIdentity, operation.DestinationRef, operation.PushedSHA, operation.ObservedRemoteSHA, operation.LeaseOrForceDecision, operation.DecisionReason, operation.Outcome, operation.ReviewApprovedHeadSHA, operation.LastSeenSHA, operation.RemoteBeforeSHA, operation.RemoteAfterSHA, boolInt(operation.BindingUpdated), operation.ResultingGeneration, operation.RetryOfOperationID, operation.RetryReason, 0); err != nil {
 		return fmt.Errorf("insert push receipt: %w", err)
 	}
 	for index, attemptID := range operation.CommandAttemptIDs {

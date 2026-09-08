@@ -475,10 +475,14 @@ func TestPushOperationRetryValidationAndGenerationBounds(t *testing.T) {
 	}
 	second := receipt
 	second.RetryOfOperationID = &first.ID
-	second.RetryReason = stringPointer("same target after transient process error")
+	second.RetryReason = stringPointer("retry after https://user:secret@example.com/repo transient process error")
 	second.ResultingGeneration = int64Pointer(0)
-	if _, err := d.InsertPushOperation(second); err != nil {
+	storedSecond, err := d.InsertPushOperation(second)
+	if err != nil {
 		t.Fatalf("insert valid retry: %v", err)
+	}
+	if storedSecond.RetryReason == nil || strings.Contains(*storedSecond.RetryReason, "secret") {
+		t.Fatalf("retry reason was not redacted: %+v", storedSecond.RetryReason)
 	}
 	invalidGeneration := receipt
 	invalidGeneration.ResultingGeneration = int64Pointer(-1)
@@ -514,6 +518,9 @@ func TestPushOperationStartsWithStableIDBeforeTerminalUpdate(t *testing.T) {
 	}
 	if finished.ID != started.ID || finished.Outcome != PushOperationOutcomeCreated {
 		t.Fatalf("finished operation = %+v", finished)
+	}
+	if _, err := d.CompletePushOperation(*finished); err == nil || !strings.Contains(err.Error(), "already terminal") {
+		t.Fatalf("second completion error = %v, want already terminal", err)
 	}
 }
 

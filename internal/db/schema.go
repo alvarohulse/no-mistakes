@@ -340,7 +340,8 @@ CREATE TABLE IF NOT EXISTS push_operations (
     binding_updated            INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
     resulting_generation       INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
     retry_of_operation_id     TEXT REFERENCES operations(id),
-    retry_reason              TEXT
+    retry_reason              TEXT,
+    terminalized               INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS operation_command_attempts (
@@ -794,10 +795,12 @@ var migrationStatements = []string{
 		binding_updated INTEGER NOT NULL CHECK (binding_updated IN (0, 1)),
 		resulting_generation INTEGER CHECK (resulting_generation IS NULL OR resulting_generation >= 0),
 		retry_of_operation_id TEXT REFERENCES operations(id),
-		retry_reason TEXT
+		retry_reason TEXT,
+		terminalized INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))
 	)`,
 	`ALTER TABLE push_operations ADD COLUMN retry_of_operation_id TEXT REFERENCES operations(id)`,
 	`ALTER TABLE push_operations ADD COLUMN retry_reason TEXT`,
+	`ALTER TABLE push_operations ADD COLUMN terminalized INTEGER NOT NULL DEFAULT 1 CHECK (terminalized IN (0, 1))`,
 	`CREATE TABLE IF NOT EXISTS operation_command_attempts (
 		operation_id TEXT NOT NULL,
 		run_id TEXT NOT NULL,
