@@ -20,6 +20,9 @@ import (
 func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "analyzer-failure-gate.yaml")
 	content := `actions:
+  - match: "Build or compile this repository's changed production code. Discover and run the smallest relevant build commands yourself.\n\nContext:\n- branch: analyzer-build-malformed-output"
+    text: "build unavailable"
+    structured_raw: '{"summary":123}'
   - match: "Build or compile this repository's changed production code."
     text: "build passed"
     structured:
@@ -98,6 +101,12 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
 		stepError  string
 		changePath string
 	}{
+		{
+			branch:     "analyzer-build-malformed-output",
+			step:       types.StepBuild,
+			stepError:  "validate build analyzer findings",
+			changePath: "build.go",
+		},
 		{
 			branch:     "analyzer-document-malformed-output",
 			step:       types.StepDocument,

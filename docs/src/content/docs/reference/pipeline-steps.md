@@ -141,7 +141,7 @@ Closing sibling sites is the fix; the fixer does not grow it into machinery, pre
 After applying its fixes and before verifying, it re-traces each finding's failing sequence through the edited code and the ordinary path through every changed function and its callers, and removes any alias, branch, parameter, or helper the fix made unreachable.
 It follows the shared removal-first rule described above; the Review-specific guard against reverting the author's intentional code protects only code the intent requires, while genuine doubt about whether the intent requires a path leaves it in place and reports the finding unresolved.
 It applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
-The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
+The dedicated Build, Test, and Lint steps after Review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
 Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
 
 **Default auto-fix limit:** `0`.

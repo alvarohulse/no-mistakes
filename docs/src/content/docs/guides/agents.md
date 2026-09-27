@@ -8,14 +8,14 @@ It is not runner-free.
 Every validation run requires a supported native agent binary, the `agent: cursor` or `agent: devin` ACP alias, or an explicit `acp:<target>` through `acpx`.
 The default `agent: auto` setting picks the first supported native agent or ACP alias available on your system.
 
-The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
+The coding agent that calls `no-mistakes axi` drives approval gates, but it does not automatically become the pipeline agent that performs review, build verification, evidence testing, documentation, combined documentation-and-lint housekeeping, or fixes.
 Those jobs run in the daemon's disposable worktree through the configured pipeline agent.
 A validation-step agent inspects, fixes, and returns only its assigned phase; delivery requirements in user intent remain acceptance context, but the outer executor alone performs the other validation, push, PR, and CI phases.
 If that step attempts pipeline control, no-mistakes returns `error.code: nested_gate_context`; the agent must return control to the outer executor, while read-only `no-mistakes axi status`, `no-mistakes axi logs`, help, and `no-mistakes doctor` remain available.
 
 The agent is responsible for the parts of the gate that benefit from judgment:
-code review, evidence-oriented test validation, test or lint detection when you
-have not configured explicit commands, auto-fixing, and setup-wizard suggestions
+code review, build discovery, evidence-oriented test validation, lint detection
+when you have not configured explicit commands, auto-fixing, and setup-wizard suggestions
 when you leave prompts blank.
 
 Pipeline agent prompts also include a workspace-boundary preamble and an execution-context section with the exact worktree directory and path contract.

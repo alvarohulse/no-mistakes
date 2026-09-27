@@ -517,7 +517,7 @@ questions so a length bound cannot be what drops it.
 
 - A full review pass completes before any question blocks anything. The
   reviewer does not stop at its first question.
-- Test runs after review, document and lint as today.
+- Build and Test still run after Review, followed by Document and Lint.
 - Attestation semantics, the tests-kept gate and the checks-green gate are
   untouched.
 - The in-run fixer path still exists and still works; it is simply no longer
