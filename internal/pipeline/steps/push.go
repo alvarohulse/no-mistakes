@@ -74,7 +74,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
-	// This run's own review/test/document have already completed by now (see
+	// This run's own review/build/test/document/lint have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
 	attestationSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)

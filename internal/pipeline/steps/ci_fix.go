@@ -778,10 +778,10 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // attestation for the head it describes.
 //
 // steps is nil for a CI repair published without revalidation (carry the
-// existing attestation's own step statuses forward, since review/test/
-// document are deliberately not re-run for that repair - see
+// existing attestation's own step statuses forward, since review/build/test/
+// document/lint are deliberately not re-run for that repair - see
 // ciRepairContinuityGap) and the run's own current steps for the ordinary
-// Push step (which always runs after this run's review/test/document have
+// Push step (which always runs after this run's review/build/test/document/lint have
 // already completed).
 //
 // It is a no-op - not an error - when: the provider has no supported raw

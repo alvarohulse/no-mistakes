@@ -62,7 +62,7 @@ Removal-first rule:
 
 // fixerPrompt wraps every shared fix-turn prompt with the two rules that apply
 // to all of them: the removal-first rule and the limit on independently
-// initiated memory-file edits. Review, Test, Lint, and custom-gate fix turns
+// initiated memory-file edits. Review, Build, Test, Lint, and custom-gate fix turns
 // route through executeFixMode, and the Lint agent pass and the CI repair wrap
 // their prompts the same way, so this is the insertion point for fix-turn rules.
 func fixerPrompt(prompt string) string {
@@ -249,8 +249,8 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 // and the directory is removed afterwards, so nothing persists in the
 // repository, the user's configuration, or the daemon's environment.
 //
-// Reach is deliberately narrow. Only commitAgentFixes (Review, Test, Document,
-// Lint, and an operator-authorized repository gate repair) and the Push step's
+// Reach is deliberately narrow. Only commitAgentFixes (Review, Build, Test,
+// Document, Lint, and an operator-authorized repository gate repair) and the Push step's
 // leftover-worktree commit route here. These are the two routes that commit the
 // pipeline's own agent and formatter output.
 // CI repair commits, the generic git runner, and every user-authored commit keep

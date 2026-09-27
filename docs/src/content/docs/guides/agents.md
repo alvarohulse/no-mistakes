@@ -56,13 +56,15 @@ That directory is always outside the worktree and is reaped by no-mistakes on a 
 
 A complete gate never degrades silently when its configured pipeline agent is unavailable.
 The daemon resolves the effective agent before creating pipeline step records, and the run fails immediately with setup guidance if the configured binary cannot run.
-This refusal also applies when deterministic test or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
+This refusal also applies when deterministic build, test, or lint commands are configured because review and documentation always require agent judgment, while rebase, PR, and CI paths may need an agent to resolve conflicts, generate content, or fix failures.
 
 | Surface or capability | Works without a runnable pipeline agent? | Behavior |
 | --- | ---: | --- |
 | Install, `init`, daemon lifecycle, `status`, `runs`, and `doctor` | Yes | Local setup and diagnostics remain available. `doctor` reports that gate validation is unavailable. |
 | Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
 | Review | No | Requires agent judgment and structured findings. |
+| Build with `commands.build` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
+| Build without `commands.build` | No | The agent must discover, run, and report the relevant build commands. |
 | Test with `commands.test` | No, as part of a full gate | The command is deterministic, but the gate refuses before steps start rather than presenting command-only validation as a complete pass. |
 | Test, with or without `commands.test` | No | The optional command is only a baseline; the agent must derive and drive end-user scenarios. |
 | Document | No | Requires the agent to discover and update documentation gaps. |

@@ -186,7 +186,7 @@ func KnownScenarioResults() []string { return slices.Clone(knownScenarioResults)
 // have to name what they accept.
 func KnownTestVerdicts() []string { return slices.Clone(knownTestVerdicts) }
 
-// Finding represents a single review, test, lint, or PR comment finding.
+// Finding represents a single pipeline or PR comment finding.
 type Finding struct {
 	ID               string `json:"id,omitempty"`
 	Severity         string `json:"severity"`

@@ -265,8 +265,8 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 // attestation is present, so callers cannot mint one for a PR that was not
 // raised through no-mistakes.
 //
-// This is the CI-repair-without-revalidation shape: review/test/document are
-// deliberately not re-run for that repair commit (see ciRepairContinuityGap),
+// This is the CI-repair-without-revalidation shape: review/build/test/document/lint
+// are deliberately not re-run for that repair commit (see ciRepairContinuityGap),
 // so the only honest statuses to (re)publish are the ones the last real
 // attestation already carried.
 func rebindPipelineAttestationHead(body, newHeadSHA string) (string, bool) {
