@@ -143,8 +143,11 @@ func runBuildCommand(sctx *pipeline.StepContext, command, source string, before 
 }
 
 func (s *BuildStep) runAgentBuild(sctx *pipeline.StepContext, before buildWorktreeSnapshot) (*pipeline.StepOutcome, error) {
-	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	baseSHA, err := resolveBranchBaseSHA(sctx.Ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	if err != nil {
+		return nil, err
+	}
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 	sctx.Log("no build command configured, asking agent to run the relevant build...")
 	result, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{
 		Prompt: fmt.Sprintf(`Build or compile this repository's changed production code. Discover and run the smallest relevant build commands yourself.
@@ -233,8 +236,11 @@ func buildEvidenceMissingOutcome(description string) *pipeline.StepOutcome {
 }
 
 func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {
-	baseSHA := resolveBranchBaseSHA(sctx.Ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
-	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+	baseSHA, err := resolveBranchBaseSHA(sctx.Ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	if err != nil {
+		return "", err
+	}
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 	configuredCommand := strings.TrimSpace(sctx.Config.Commands.Build)
 	if configuredCommand == "" {
 		configuredCommand = "not configured; the Build agent will discover and run the relevant build after the repair"
