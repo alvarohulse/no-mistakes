@@ -108,16 +108,20 @@ jobs:
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git and steps shards; the workflow
       # tests resolve every shard through `go list` and fail if they drift or
-      # overlap. pipeline/steps is its own shard (~10 min) so it runs in
-      # parallel with the remaining git-heavy packages instead of setting a
-      # ~21 min serial floor.
+      # overlap. pipeline/steps is its own shard so it runs in parallel with
+      # the remaining git-heavy packages instead of setting a ~21 min serial
+      # floor. Its Build tests run separately so adding the first-class Build
+      # stage does not consume the pre-existing package's 15-minute hang budget.
       - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
         run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
 
       - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
-        run: go test -v -timeout=15m ./internal/pipeline/steps/...
+        run: |
+          go test -v -timeout=15m -run=^TestBuildStep ./internal/pipeline/steps
+          go test -v -timeout=15m -skip=^TestBuildStep ./internal/pipeline/steps
+          go test -v -timeout=15m ./internal/pipeline/steps/citest ./internal/pipeline/steps/internal/stepstest
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

@@ -262,8 +262,8 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if coreCommand.name == "" {
 		t.Fatal("Windows tests must keep a go-list remainder shard")
 	}
-	if len(explicit) != 2 {
-		t.Fatalf("Windows tests must list exactly two explicit package shards (git-heavy remainder and pipeline/steps), got %d", len(explicit))
+	if len(explicit) != 4 {
+		t.Fatalf("Windows tests must list the git-heavy shard plus the split pipeline/steps commands, got %d", len(explicit))
 	}
 	for _, shard := range wantWindowsShards {
 		if _, ok := stepShards[shard]; !ok {
@@ -277,30 +277,29 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	}
 
 	stepsWant := goListPackages(t, "./internal/pipeline/steps/...")
-	var stepsCommand, gitCommand workflowCommand
-	var stepsFromArgs, gitFromArgs []string
+	var gitCommand workflowCommand
+	var gitFromArgs []string
+	var stepsCommands []workflowCommand
 	for _, command := range explicit {
-		pkgs := goListPackages(t, goTestPackagePatterns(command)...)
-		if slices.Equal(pkgs, stepsWant) {
-			if stepsCommand.name != "" {
-				t.Fatal("multiple Windows shards list only pipeline/steps packages")
-			}
-			stepsCommand = command
-			stepsFromArgs = pkgs
+		if matrixShardCondition(job.Steps[command.step].If) == "steps" {
+			stepsCommands = append(stepsCommands, command)
 			continue
 		}
+		pkgs := goListPackages(t, goTestPackagePatterns(command)...)
 		if gitCommand.name != "" {
 			t.Fatalf("extra explicit Windows shard packages %v; want one git-heavy remainder besides pipeline/steps", pkgs)
 		}
 		gitCommand = command
 		gitFromArgs = pkgs
 	}
-	if stepsCommand.name == "" {
-		t.Fatal("Windows tests must run ./internal/pipeline/steps/... on its own shard")
+	if len(stepsCommands) != 3 {
+		t.Fatalf("Windows steps shard must run Build, the remaining root-package tests, and subpackages separately, got %d commands", len(stepsCommands))
 	}
 	if gitCommand.name == "" {
 		t.Fatal("Windows tests must keep a git-heavy remainder shard besides pipeline/steps")
 	}
+	assertWindowsStepsCommands(t, stepsCommands)
+	stepsFromArgs := stepsWant
 	if overlap := packagesOverlap(stepsFromArgs, gitFromArgs); len(overlap) > 0 {
 		t.Fatalf("git and steps shards must not overlap, also ran %v", overlap)
 	}
@@ -353,6 +352,32 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
 		t.Fatalf("Windows shards must cover every package exactly once: union %v, go list ./... %v", union, all)
+	}
+}
+
+func assertWindowsStepsCommands(t *testing.T, commands []workflowCommand) {
+	t.Helper()
+	rootPackage := []string{"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"}
+	subpackages := goListPackages(t,
+		"./internal/pipeline/steps/citest",
+		"./internal/pipeline/steps/internal/stepstest",
+	)
+	var build, remainder, children bool
+	for _, command := range commands {
+		packages := goListPackages(t, goTestPackagePatterns(command)...)
+		switch {
+		case slices.Equal(packages, rootPackage) && command.hasArg("-run=^TestBuildStep"):
+			build = true
+		case slices.Equal(packages, rootPackage) && command.hasArg("-skip=^TestBuildStep"):
+			remainder = true
+		case slices.Equal(packages, subpackages):
+			children = true
+		default:
+			t.Fatalf("unexpected Windows steps command: %#v", command.args)
+		}
+	}
+	if !build || !remainder || !children {
+		t.Fatalf("Windows steps commands must cover Build (%t), the root-package remainder (%t), and subpackages (%t)", build, remainder, children)
 	}
 }
 
