@@ -40,8 +40,8 @@ func TestMatchRecoveredStepsPreservesLegacyRunWithoutBuild(t *testing.T) {
 	current := []Step{
 		newPassStep(types.StepIntent),
 		newPassStep(types.StepRebase),
-		newPassStep(types.StepBuild),
 		newPassStep(types.StepReview),
+		newPassStep(types.StepBuild),
 		newPassStep(types.StepTest),
 		newPassStep(types.StepDocument),
 		newPassStep(types.StepLint),

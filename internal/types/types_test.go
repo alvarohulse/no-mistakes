@@ -26,7 +26,7 @@ func TestAllStepsOrder(t *testing.T) {
 		t.Fatalf("expected 10 steps, got %d", len(steps))
 	}
 
-	expected := []StepName{StepIntent, StepRebase, StepBuild, StepReview, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
+	expected := []StepName{StepIntent, StepRebase, StepReview, StepBuild, StepTest, StepDocument, StepLint, StepPush, StepPR, StepCI}
 	for i, s := range steps {
 		if s != expected[i] {
 			t.Errorf("step[%d] = %q, want %q", i, s, expected[i])
@@ -41,8 +41,8 @@ func TestStepNameOrder(t *testing.T) {
 	}{
 		{StepIntent, 1},
 		{StepRebase, 2},
-		{StepBuild, 3},
-		{StepReview, 4},
+		{StepReview, 3},
+		{StepBuild, 4},
 		{StepTest, 5},
 		{StepDocument, 6},
 		{StepLint, 7},

@@ -281,7 +281,7 @@ func TestBuildStepFixModeRepairsThenRebuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.NeedsApproval || outcome.ExitCode != 0 || outcome.FixSummary != "fix compile syntax" {
+	if outcome.NeedsApproval || outcome.ExitCode != 0 || outcome.FixSummary != changesAppliedSummary {
 		t.Fatalf("outcome = %#v, want repaired successful build", outcome)
 	}
 	if len(ag.calls) != 1 {
