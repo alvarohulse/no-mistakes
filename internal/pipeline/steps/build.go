@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -182,12 +183,12 @@ Rules:
 		return nil, unchangedErr
 	}
 	if result.Output == nil {
-		return buildEvidenceMissingOutcome("build agent returned no structured result"), nil
+		return nil, errors.New("build analyzer returned no structured findings")
 	}
 
 	var findings Findings
 	if err := unmarshalRequiredBuildFindings(result.Output, &findings); err != nil {
-		return buildEvidenceMissingOutcome("build agent returned an invalid structured result"), nil
+		return nil, fmt.Errorf("validate build analyzer findings: %w", err)
 	}
 	if !hasExecutedBuildEvidence(findings.Tested) {
 		for i := range findings.Items {
@@ -222,19 +223,6 @@ func hasExecutedBuildEvidence(tested []string) bool {
 		}
 	}
 	return false
-}
-
-func buildEvidenceMissingOutcome(description string) *pipeline.StepOutcome {
-	findings := Findings{
-		Items: []Finding{{
-			Severity:    "error",
-			Description: description,
-			Action:      types.ActionAskUser,
-		}},
-		Summary: description,
-	}
-	findingsJSON, _ := json.Marshal(findings)
-	return &pipeline.StepOutcome{NeedsApproval: true, AutoFixable: false, Findings: string(findingsJSON)}
 }
 
 func (s *BuildStep) executeFix(sctx *pipeline.StepContext) (string, error) {

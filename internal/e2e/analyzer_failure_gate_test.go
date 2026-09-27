@@ -20,6 +20,13 @@ import (
 func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "analyzer-failure-gate.yaml")
 	content := `actions:
+  - match: "Build or compile this repository's changed production code."
+    text: "build passed"
+    structured:
+      findings: []
+      summary: "build passed"
+      tested:
+        - "fakeagent: simulated build"
   - match: "report only what you could not resolve.\n\nContext:\n- branch: analyzer-document-malformed-output"
     text: "documentation unavailable"
     structured_raw: '{"summary":123}'

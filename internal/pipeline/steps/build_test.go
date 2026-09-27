@@ -104,7 +104,23 @@ func TestBuildStepBlankOnlyEvidenceParksInsteadOfPassing(t *testing.T) {
 	}
 }
 
-func TestBuildStepInvalidStructuredOutputParksInsteadOfPassing(t *testing.T) {
+func TestBuildStepMissingStructuredOutputFails(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "builder",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{}, nil
+		},
+	}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&BuildStep{}).Execute(sctx)
+	if outcome != nil || err == nil || !strings.Contains(err.Error(), "build analyzer returned no structured findings") {
+		t.Fatalf("Execute() = (%#v, %v), want missing structured findings error", outcome, err)
+	}
+}
+
+func TestBuildStepInvalidStructuredOutputFails(t *testing.T) {
 	tests := []struct {
 		name   string
 		output string
@@ -132,18 +148,8 @@ func TestBuildStepInvalidStructuredOutputParksInsteadOfPassing(t *testing.T) {
 			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 			outcome, err := (&BuildStep{}).Execute(sctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !outcome.NeedsApproval || outcome.AutoFixable {
-				t.Fatalf("outcome = %#v, want ask-user gate", outcome)
-			}
-			findings, err := types.ParseFindingsJSON(outcome.Findings)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser || findings.Items[0].Description != "build agent returned an invalid structured result" {
-				t.Fatalf("findings = %#v, want invalid-result finding", findings.Items)
+			if outcome != nil || err == nil || !strings.Contains(err.Error(), "validate build analyzer findings:") {
+				t.Fatalf("Execute() = (%#v, %v), want invalid structured findings error", outcome, err)
 			}
 		})
 	}

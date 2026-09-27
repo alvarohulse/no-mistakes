@@ -60,6 +60,12 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 				// Only Test receives the scenario verdict. Other agent phases
 				// complete without findings, exactly as in the clean control.
 				data := `actions:
+  - match: "Build or compile this repository's changed production code."
+    text: "build passed"
+    structured:
+      findings: []
+      summary: "build passed"
+      tested: ["fakeagent: simulated build"]
   - match: "You are validating a code change by driving the product itself."
     text: "synthetic scenario"
     structured:
