@@ -132,7 +132,7 @@ The [`agent` field reference](/no-mistakes/reference/global-config/#agent) owns 
 Changing agents most directly affects:
 
 - review quality and tone
-- test evidence collection, plus test and lint detection when commands are not configured
+- build and lint detection when commands are not configured, plus test evidence collection
 - how good auto-fix attempts are for your stack
 - branch name and commit subject suggestions in the setup wizard
 

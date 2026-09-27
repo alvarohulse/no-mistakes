@@ -25,7 +25,7 @@ import (
 // PR-drafting turns (prDraftIntentPromptSection), because a PR title or body
 // drafted with the intent in context can paraphrase it into the public text,
 // and there is deliberately no output filter or prose scanner to catch that.
-// Review, test, document, lint, and CI-fix prompts keep the full intent
+// Review, build, test, document, lint, and CI-fix prompts keep the full intent
 // under either signal.
 func publicPRIntent(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {

@@ -11,7 +11,7 @@ The goal is not to make you configure a mini CI system. The default path should
 work. Config exists for the parts that genuinely vary by machine or repo:
 
 - which agent or ordered fallback list you prefer
-- which test or lint commands are the canonical ones for this repo
+- which build, test, or lint commands are the canonical ones for this repo
 - which extra review rules apply to which paths
 - where test evidence artifacts should be stored
 - how aggressive the auto-fix loop should be
@@ -46,7 +46,7 @@ local.
 
 If you are not sure where to start, configure these in this order:
 
-1. Set `commands.lint` (and a **targeted** `commands.test` only when you want a deterministic local baseline - not a full CI suite) so the gate runs the exact local checks your repo expects.
+1. Set `commands.build`, `commands.lint`, and a **targeted** `commands.test` when you want deterministic local baselines (not a full CI suite) so the gate runs the exact local checks your repo expects.
 2. Override `agent` per repo only when one codebase clearly works better with a different tool or fallback order.
 3. Tune `auto_fix` after you have seen how much automation you actually want.
 
