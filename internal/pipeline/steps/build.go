@@ -11,7 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// BuildStep verifies that the change compiles before review and testing.
+// BuildStep verifies that the reviewed change compiles before testing.
 type BuildStep struct{}
 
 func (s *BuildStep) Name() types.StepName { return types.StepBuild }
