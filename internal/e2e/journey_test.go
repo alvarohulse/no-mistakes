@@ -2282,7 +2282,7 @@ func assertBuildCommandAutoFixRun(t *testing.T, h *Harness) {
 		t.Fatalf("build auto-fix run status = %s, error=%v", completed.Status, completed.Error)
 	}
 	buildStep, ok := findStep(completed.Steps, types.StepBuild)
-	if !ok || buildStep.Status != types.StepStatusCompleted || len(buildStep.FixSummaries) == 0 || buildStep.FixSummaries[0] != "fix build input" {
+	if !ok || buildStep.Status != types.StepStatusCompleted || len(buildStep.FixSummaries) == 0 || buildStep.FixSummaries[0] != "changes applied" {
 		t.Fatalf("auto-fixed build step = %+v", buildStep)
 	}
 	content, err := h.runGit(context.Background(), h.UpstreamDir, "show", "refs/heads/build-command-autofix:build-input.txt")
