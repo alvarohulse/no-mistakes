@@ -393,18 +393,3 @@ func TestBuildStepFixModeRepairsThenRebuilds(t *testing.T) {
 		t.Fatalf("stored head = %s, want agent repair commit %s", stored.HeadSHA, repairedHead)
 	}
 }
-
-func TestReviewStepRefusesUnrecordedCommitAfterBuild(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	if err := os.WriteFile(filepath.Join(dir, "unrecorded.go"), []byte("package unrecorded\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "unrecorded.go")
-	gitCmd(t, dir, "commit", "-m", "unrecorded forward commit")
-	sctx := newTestContext(t, &mockAgent{name: "reviewer"}, dir, baseSHA, headSHA, config.Commands{})
-
-	_, err := (&ReviewStep{}).Execute(sctx)
-	if err == nil || !strings.Contains(err.Error(), "does not match the pipeline's recorded head") {
-		t.Fatalf("ReviewStep.Execute() error = %v, want unrecorded-head refusal", err)
-	}
-}

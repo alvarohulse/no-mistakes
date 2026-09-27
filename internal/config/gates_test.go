@@ -27,6 +27,7 @@ func TestValidateGates_RejectsMalformedEntries(t *testing.T) {
 		{"uppercase name", Gate{Name: "Mutation", After: types.StepTest, Command: "x"}, "lowercase"},
 		{"trailing hyphen", Gate{Name: "mutation-", After: types.StepTest, Command: "x"}, "lowercase"},
 		{"core step name", Gate{Name: "review", After: types.StepTest, Command: "x"}, "core step"},
+		{"build core step name", Gate{Name: "build", After: types.StepReview, Command: "x"}, "core step"},
 		{"missing anchor", Gate{Name: "g", Command: "x"}, "must name the core step"},
 		{"unknown anchor", Gate{Name: "g", After: types.StepName("nope"), Command: "x"}, "not an anchorable core step"},
 		{"missing command", Gate{Name: "g", After: types.StepTest}, ".command must not be empty"},

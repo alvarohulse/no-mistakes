@@ -43,7 +43,7 @@ gates:
 // carries defaultBranchYAML, plus a run parked at an approval gate whose step
 // rows are exactly the sequence pinnedGates produces. It returns the run
 // manager, the parked run, and the step names the run actually recorded.
-func gatePinFixture(t *testing.T, defaultBranchYAML string, pinnedGates []config.Gate) (*RunManager, *db.Run, []types.StepName) {
+func gatePinFixture(t *testing.T, defaultBranchYAML string, pinnedGates []config.Gate, sequence []pipeline.Step) (*RunManager, *db.Run, []types.StepName) {
 	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -79,7 +79,10 @@ func gatePinFixture(t *testing.T, defaultBranchYAML string, pinnedGates []config
 		t.Fatal(err)
 	}
 
-	recorded := parkRunAtReviewGate(t, d, run.ID, steps.WithCustomGates(steps.AllSteps(), pinnedGates))
+	if sequence == nil {
+		sequence = steps.WithCustomGates(steps.AllSteps(), pinnedGates)
+	}
+	recorded := parkRunAtReviewGate(t, d, run.ID, sequence)
 	stored, err := d.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +153,7 @@ func planStepNames(plan *recoveredRunPlan) []types.StepName {
 // otherwise healthy parked run as a crash.
 func TestPrepareRecoveredRun_ResumesWithTheGatesTheRunPinned(t *testing.T) {
 	pinned := []config.Gate{{Name: "arch-fitness", After: types.StepReview, Command: "true"}}
-	m, run, recorded := gatePinFixture(t, oneGateYAML, pinned)
+	m, run, recorded := gatePinFixture(t, oneGateYAML, pinned, nil)
 
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -177,7 +180,7 @@ func TestPrepareRecoveredRun_ResumesWithTheGatesTheRunPinned(t *testing.T) {
 // pipeline, never "re-resolve from the current config", which is the drift the
 // pin exists to prevent.
 func TestPrepareRecoveredRun_UnpinnedRunRecoversAsTheCorePipeline(t *testing.T) {
-	m, run, recorded := gatePinFixture(t, oneGateYAML, nil)
+	m, run, recorded := gatePinFixture(t, oneGateYAML, nil, nil)
 	if payload, err := m.db.GetRunGates(run.ID); err != nil || payload != "" {
 		t.Fatalf("fixture pinned %q (err %v), want the pre-upgrade empty pin", payload, err)
 	}
@@ -201,7 +204,7 @@ func TestPrepareRecoveredRun_UnpinnedRunRecoversAsTheCorePipeline(t *testing.T) 
 // run to a shorter pipeline than the one it recorded.
 func TestPrepareRecoveredRun_UnusableGatePinFailsClosed(t *testing.T) {
 	pinned := []config.Gate{{Name: "arch-fitness", After: types.StepReview, Command: "true"}}
-	m, run, _ := gatePinFixture(t, oneGateYAML, pinned)
+	m, run, _ := gatePinFixture(t, oneGateYAML, pinned, nil)
 	if err := m.db.SetRunGates(run.ID, `[{"name":"arch-fitness","after":"push","command":"true"}]`); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +215,26 @@ func TestPrepareRecoveredRun_UnusableGatePinFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "pinned gates") {
 		t.Errorf("recovery error = %q, want it to name the pinned gates", err)
+	}
+}
+
+func TestPrepareRecoveredRun_PreBuildRunWithBuildNamedGateRecovers(t *testing.T) {
+	pinned := []config.Gate{{Name: "build", After: types.StepReview, Command: "true"}}
+	legacyCore := make([]pipeline.Step, 0, len(steps.AllSteps())-1)
+	for _, step := range steps.AllSteps() {
+		if step.Name() != types.StepBuild {
+			legacyCore = append(legacyCore, step)
+		}
+	}
+	legacySteps := steps.WithCustomGates(legacyCore, pinned)
+	m, run, recorded := gatePinFixture(t, oneGateYAML, pinned, legacySteps)
+
+	plan, err := m.prepareRecoveredRun(context.Background(), run)
+	if err != nil {
+		t.Fatalf("pre-Build run with a build-named gate must recover: %v", err)
+	}
+	if got := planStepNames(plan); !stepNamesEqual(got, recorded) {
+		t.Errorf("recovered step sequence = %v, want the historical sequence %v", got, recorded)
 	}
 }
 

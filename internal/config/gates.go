@@ -97,6 +97,10 @@ func validGateName(name string) error {
 // while Gate.StepName kept the raw spelling, putting a padded name into the
 // step tables, the attestation, and every command an operator has to type.
 func validateGates(gates []Gate) error {
+	return validateGatesAllowingLegacyBuild(gates, false)
+}
+
+func validateGatesAllowingLegacyBuild(gates []Gate, allowLegacyBuild bool) error {
 	if len(gates) > MaxGates {
 		return fmt.Errorf("gates has %d entries, at most %d are allowed", len(gates), MaxGates)
 	}
@@ -108,7 +112,7 @@ func validateGates(gates []Gate) error {
 		if err := validGateName(name); err != nil {
 			return fmt.Errorf("gates[%d].name %q %w", i, raw, err)
 		}
-		if types.IsCoreStepName(types.StepName(name)) {
+		if types.IsCoreStepName(types.StepName(name)) && !(allowLegacyBuild && name == string(types.StepBuild)) {
 			return fmt.Errorf("gates[%d].name %q is a core step name; an extra gate must not shadow a core step", i, name)
 		}
 		if first, dup := seen[name]; dup {
@@ -171,7 +175,7 @@ func ParseGates(payload string) ([]Gate, error) {
 	if err := json.Unmarshal([]byte(payload), &gates); err != nil {
 		return nil, fmt.Errorf("decode gates: %w", err)
 	}
-	if err := validateGates(gates); err != nil {
+	if err := validateGatesAllowingLegacyBuild(gates, true); err != nil {
 		return nil, err
 	}
 	return gates, nil
