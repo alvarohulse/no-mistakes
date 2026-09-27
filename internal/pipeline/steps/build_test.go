@@ -15,6 +15,8 @@ import (
 )
 
 func TestBuildStepRunsUnconfiguredBuildThroughAgent(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	marker := filepath.Join(dir, ".git", "agent-build-ran")
 	ag := &mockAgent{
@@ -53,6 +55,8 @@ func TestBuildStepRunsUnconfiguredBuildThroughAgent(t *testing.T) {
 }
 
 func TestBuildStepWithoutCommandParksWhenAgentCannotRunBuild(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -79,6 +83,8 @@ func TestBuildStepWithoutCommandParksWhenAgentCannotRunBuild(t *testing.T) {
 }
 
 func TestBuildStepBlankOnlyEvidenceParksInsteadOfPassing(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -105,6 +111,8 @@ func TestBuildStepBlankOnlyEvidenceParksInsteadOfPassing(t *testing.T) {
 }
 
 func TestBuildStepMissingStructuredOutputFails(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -121,6 +129,8 @@ func TestBuildStepMissingStructuredOutputFails(t *testing.T) {
 }
 
 func TestBuildStepInvalidStructuredOutputFails(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name   string
 		output string
@@ -138,6 +148,8 @@ func TestBuildStepInvalidStructuredOutputFails(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			ag := &mockAgent{
 				name: "builder",
@@ -156,6 +168,8 @@ func TestBuildStepInvalidStructuredOutputFails(t *testing.T) {
 }
 
 func TestBuildStepAgentReportedFailureIsAutoFixable(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -182,8 +196,12 @@ func TestBuildStepAgentReportedFailureIsAutoFixable(t *testing.T) {
 }
 
 func TestBuildStepInformationalActionsRequireApproval(t *testing.T) {
+	t.Parallel()
+
 	for _, action := range []string{types.ActionAutoFix, types.ActionAskUser, types.ActionNoOp} {
 		t.Run(action, func(t *testing.T) {
+			t.Parallel()
+
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			ag := &mockAgent{
 				name: "builder",
@@ -209,6 +227,8 @@ func TestBuildStepInformationalActionsRequireApproval(t *testing.T) {
 }
 
 func TestBuildStepMissingExecutionEvidenceIsNotAutoFixable(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -235,6 +255,8 @@ func TestBuildStepMissingExecutionEvidenceIsNotAutoFixable(t *testing.T) {
 }
 
 func TestBuildStepRefusesAgentBuildSideEffects(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "builder",
@@ -254,6 +276,8 @@ func TestBuildStepRefusesAgentBuildSideEffects(t *testing.T) {
 }
 
 func TestBuildStepConfiguredCommandRunsWithoutAgent(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	command := "go env GOVERSION"
 	ag := &mockAgent{name: "unused"}
@@ -277,6 +301,8 @@ func TestBuildStepConfiguredCommandRunsWithoutAgent(t *testing.T) {
 }
 
 func TestBuildStepConfiguredCommandRunsAfterPreparation(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	sctx := newPreparationTestContext(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{
@@ -298,6 +324,8 @@ func TestBuildStepConfiguredCommandRunsAfterPreparation(t *testing.T) {
 }
 
 func TestBuildStepConfiguredCommandRefusesSideEffectsEvenOnFailure(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContext(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{
 		Build: "go env GOVERSION > build-output.txt && exit 17",
@@ -310,6 +338,8 @@ func TestBuildStepConfiguredCommandRefusesSideEffectsEvenOnFailure(t *testing.T)
 }
 
 func TestBuildStepConfiguredCommandAllowsIgnoredOutput(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, _ := setupGitRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("build-output.txt\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -334,6 +364,8 @@ func TestBuildStepConfiguredCommandAllowsIgnoredOutput(t *testing.T) {
 }
 
 func TestBuildStepConfiguredCommandFailureIsActionable(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContext(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{
 		Build: "go env GOVERSION && exit 17",
@@ -356,6 +388,8 @@ func TestBuildStepConfiguredCommandFailureIsActionable(t *testing.T) {
 }
 
 func TestBuildStepFixModeRepairsThenRebuilds(t *testing.T) {
+	t.Parallel()
+
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/buildtest\n\ngo 1.25\n"), 0o644); err != nil {
 		t.Fatal(err)
