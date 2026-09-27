@@ -205,7 +205,7 @@ Rules:
 
 	findingsJSON, _ := json.Marshal(findings)
 	return &pipeline.StepOutcome{
-		NeedsApproval: hasBlockingFindings(findings.Items),
+		NeedsApproval: hasBlockingFindings(findings.Items) || types.HasActionableFindings(findings),
 		AutoFixable:   len(types.AutoFixableFindings(findings).Items) > 0,
 		Findings:      string(findingsJSON),
 	}, nil
