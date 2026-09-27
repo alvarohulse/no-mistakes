@@ -1,13 +1,13 @@
 ---
 name: no-mistakes
-description: Validate your code changes through the no-mistakes pipeline - automated build, code review, tests, lint, docs, push, PR, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
+description: Validate your code changes through the no-mistakes pipeline - automated code review, build, tests, lint, docs, push, PR, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes.
 user-invocable: true
 ---
 
 # no-mistakes
 
 `no-mistakes` is a local gate that validates your code changes through a pipeline
-(intent, rebase, build, review, test, document, lint, push, PR, CI) before they reach
+(intent, rebase, review, build, test, document, lint, push, PR, CI) before they reach
 the configured push target. You drive it through the `no-mistakes axi` command family, which prints
 machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
 
@@ -144,7 +144,7 @@ Run the pipeline and decide on its findings as they come up:
    ```sh
    no-mistakes axi run --intent "<what the user set out to accomplish>"
    ```
-   `axi run` and every `axi respond` block synchronously - the build, review, test,
+   `axi run` and every `axi respond` block synchronously - the review, build, test,
    and CI steps can each take **several minutes**, so a single call may not
    return for a while. That is normal; do not cancel or re-issue the command
    because it seems slow. Both commands default to `--wait 8m` so a harness

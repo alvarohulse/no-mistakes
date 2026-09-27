@@ -6,7 +6,7 @@ description: The ten steps that run on every gated push.
 The pipeline has a fixed, opinionated sequence of nine core steps. Their order is not configurable. What each core step runs is.
 
 ```
-intent → rebase → build → review → test → document → lint → push → pr → ci
+intent → rebase → review → build → test → document → lint → push → pr → ci
 ```
 
 ```mermaid
@@ -23,7 +23,7 @@ flowchart LR
   ci["CI"]
   action["Approve / fix / skip / abort"]
 
-  intent --> rebase --> build --> review --> test --> document --> lint --> push --> pr --> ci
+  intent --> rebase --> review --> build --> test --> document --> lint --> push --> pr --> ci
   build -. findings .-> action
   review -. findings .-> action
   test -. findings .-> action
@@ -41,7 +41,7 @@ A repository can add to this sequence but never subtract from it: [`gates`](/no-
 The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
-- build, review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
+- review, build, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
 - every repository-declared gate ran at its configured point before Push, unless the operator explicitly skipped it after a failure
 - the human stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
@@ -53,8 +53,8 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
 | 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
-| 3 | **Build** | Run the configured build command or have the agent discover and run the relevant build | `3` |
-| 4 | **Review** | AI code review of your diff | `0` (requires approval) |
+| 3 | **Review** | AI code review of your diff | `0` (requires approval) |
+| 4 | **Build** | Run the configured build command or have the agent discover and run the relevant build | `3` |
 | 5 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
 | 6 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
 | 7 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
@@ -68,9 +68,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after the rebase, the pipeline skips the rest.
-- **Build before review and test** so the pipeline proves the rebased tree compiles and Review certifies any build repairs.
-- **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
+- **Review before build and test** so the agent reads the submitted code before build or test repairs.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
+- **Build before test** so the reviewed tree compiles before targeted tests run.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.

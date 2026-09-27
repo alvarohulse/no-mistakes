@@ -6,7 +6,7 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```text
-intent → rebase → build → review → test → document → lint → push → pr → ci
+intent → rebase → review → build → test → document → lint → push → pr → ci
 ```
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Every step that scopes its work to the branch's changes (Review, Test, Document, Lint, PR drafting, CI repair, and repository gate fixes) first fetches the base branch's live remote tip and computes the branch base against it; if that fetch fails, the step fails instead of falling back to a possibly stale cached base ref. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
@@ -19,7 +19,7 @@ This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the run's managed evidence directory, plus incidental temp or cache writes from normal development tools.
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
 When configured Build, Test, Lint, or repository gate command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
-Commits created by the shared Build, Review, Test, Document, Lint, and operator-authorized repository gate fix path, plus CI repair commits, use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
+Commits created by the shared Review, Build, Test, Document, Lint, and operator-authorized repository gate fix path, plus CI repair commits, use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
 Correction and CI repair handoffs inspect the staged index after staging. An empty index succeeds without creating a commit, even if an earlier worktree status reported changes; a real `git commit` failure still fails the attempt. If the agent already advanced `HEAD`, the handoff still records or publishes that head through the existing review and publication guards. [Private mirror reconciliation](/no-mistakes/concepts/gate-model/#private-mirror-reconciliation) owns the shared-ref preservation rules for that recording.
 Review, Test, Lint, and operator-authorized repository gate repair agents, including Lint's safe-fix pass when no command is configured, share a removal-first rule with the CI repair agent: when a problem can be resolved by removing a code path the intent does not strictly require, they remove it instead of validating, hardening, or documenting it. They judge necessity against user intent when present and otherwise against the change's stated purpose, subject to the later human decisions described under [Finding decision history](#finding-decision-history).
 Pipeline agent prompts prohibit independently initiated edits to `AGENTS.md` and `CLAUDE.md`, not review of memory-file changes already in the diff. Reviewers assess those changes like any other file: being changed is not itself a finding, but inaccurate content can be. A fix agent may edit memory-file content in the change under validation to address a finding or recorded human fix decision, without making unrelated edits. This is a prompt contract, not a file guard or a restriction on configured shell commands. Rebase and merge conflict resolvers may resolve conflicts in those files but make no unrelated edits; the document step's own documentation work has the correction-only rule described under [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions).
@@ -34,7 +34,7 @@ Review flags every newly added violation and requires same-pattern tests encount
 
 When a human resolves a findings gate with Approve, Skip, or Abort without selecting a fix, no-mistakes records that the round's findings were declined. A gate with no findings records no decision. When the human selects only some findings to fix, the unselected complement is recorded as declined; findings merely left out by automatic filtering remain undecided.
 
-Build, Review, Test, Document, Lint, CI, and repository gate fix agent prompts receive a sanitized history containing the current step's earlier rounds, decisions from other steps in the same run, and a bounded window of decisions from earlier runs on the same branch. A recorded decision takes precedence over conflicting user-intent wording, and later decisions about the same concern supersede earlier ones. The history instructs agents to respect every recorded decision - never implementing what a human declined and never reverting, undoing, or working around what a human chose to fix - and to report a genuine conflict rather than resolve it themselves. Completing Review does not clear branch decisions.
+Review, Build, Test, Document, Lint, CI, and repository gate fix agent prompts receive a sanitized history containing the current step's earlier rounds, decisions from other steps in the same run, and a bounded window of decisions from earlier runs on the same branch. A recorded decision takes precedence over conflicting user-intent wording, and later decisions about the same concern supersede earlier ones. The history instructs agents to respect every recorded decision - never implementing what a human declined and never reverting, undoing, or working around what a human chose to fix - and to report a genuine conflict rather than resolve it themselves. Completing Review does not clear branch decisions.
 
 This context is advisory and fails open. It tells agents not to implement or re-report a declined finding unless the current code introduces a materially different problem, but it does not block a step or commit and is not a reversion detector. Rebase fix prompts do not receive this decision history.
 
@@ -81,21 +81,6 @@ The integration branch used below is the [PR base branch](/no-mistakes/reference
 - Bounds the conflict-repair agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
 
 **Auto-fix:** when enabled, the agent resolves conflict markers, stages files, and runs `git rebase --continue` (or, under `rebase.strategy: merge`, `git commit --no-edit`) in a non-interactive Git environment so Git accepts the existing commit message instead of opening an editor. The prompt includes user intent when available. Manual fix rounds also include any per-conflict user notes, any selected user-authored findings from the TUI or AXI interface, and sanitized prior-round history in the prompt. The Rebase step does not synthesize a fix commit subject; `git rebase --continue` preserves the rebased commits' subjects. Under `rebase.strategy: merge` the resolver prompt additionally requires an **additive** resolution - keep both sides' introduced content, never delete what one side introduced merely to make the merge apply - because the resulting merge commit is what makes that claim checkable afterwards. The step does not synthesize a merge subject either; `--no-edit` keeps Git's own `Merge remote-tracking branch ...` message.
-
-**Default auto-fix limit:** `3`.
-
-## Build
-
-Verifies that the changed production code builds or compiles before review and targeted tests run.
-
-**Behavior:**
-- If `commands.build` is configured, runs it once through the platform shell and completes without invoking an agent when it succeeds
-- Otherwise asks the run-wide agent to discover and run the smallest relevant build or compile commands directly, following the same agent-driven fallback model as Test and Lint
-- Requires the agent to report the exact commands it ran; missing execution evidence parks for a decision instead of passing
-- Requires a clean managed worktree and preserves `HEAD` plus tracked and unignored content; Build-created mutations fail the step, while ignored build artifacts are allowed
-- Records bounded compiler output from configured commands and routes agent-reported build failures through the normal approval or repair loop
-
-**Auto-fix:** the repair agent edits only the build root cause. The outer Build step reruns verification after the fix commit, and the following Review step certifies the repaired code.
 
 **Default auto-fix limit:** `3`.
 
@@ -164,6 +149,22 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 ### Pipeline HEAD continuity
 
 At entry to every repository gate and every core step from Test through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
+
+## Build
+
+Verifies that the changed production code builds or compiles after Review and before targeted tests run.
+
+**Behavior:**
+
+- If `commands.build` is configured, runs it once through the platform shell and completes without invoking an agent when it succeeds
+- Otherwise asks the run-wide agent to discover and run the smallest relevant build or compile commands directly, following the same agent-driven fallback model as Test and Lint
+- Requires the agent to report the exact commands it ran; missing execution evidence parks for a decision instead of passing
+- Requires a clean managed worktree and preserves `HEAD` plus tracked and unignored content; Build-created mutations fail the step, while ignored build artifacts are allowed
+- Records bounded compiler output from configured commands and routes agent-reported build failures through the normal approval or repair loop
+
+**Auto-fix:** the repair agent edits only the build root cause. The outer Build step reruns verification after the fix commit, before the pipeline advances to Test.
+
+**Default auto-fix limit:** `3`.
 
 ## Test
 
@@ -261,7 +262,7 @@ A remote branch can move without being rejected when all remote commits are alre
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
-This step never requires approval - it runs automatically after build, review, test, document, and lint pass.
+This step never requires approval - it runs automatically after review, build, test, document, and lint pass.
 
 ## PR
 
@@ -313,7 +314,7 @@ The `v1` payload is compact JSON with these required fields:
 - `head_sha`: the exact git commit SHA recorded for the run when no-mistakes writes the PR body
 - `steps`: the ordered pipeline step snapshot; every item has the required fields below and may carry the optional Test override field described afterward
 
-- `step`: the raw pipeline step name, such as `intent`, `rebase`, `build`, `review`, `test`, `document`, `lint`, `push`, `pr`, or `ci`; a repository-declared [gate](/no-mistakes/reference/repo-config/#gates) appears as `gate.<anchor>.<name>`
+- `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `build`, `test`, `document`, `lint`, `push`, `pr`, or `ci`; a repository-declared [gate](/no-mistakes/reference/repo-config/#gates) appears as `gate.<anchor>.<name>`
 - `status`: the raw [step status](#step-statuses) recorded for that step, such as `completed`, `skipped`, or `failed`
 
 When the Test step validated the same `head_sha`, the payload also includes `live_validation` with `verdict`, `live` (the number of scenarios driven live), and `total`. The field is omitted for pre-contract findings and whenever a later Document, Lint, Push, or repair commit changes the head without validating that new commit. Consumers therefore never receive a previous head's live-validation verdict as a claim about the current head.
