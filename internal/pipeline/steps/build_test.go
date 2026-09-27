@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -100,6 +101,51 @@ func TestBuildStepBlankOnlyEvidenceParksInsteadOfPassing(t *testing.T) {
 	}
 	if !types.HasAskUserFindings(findings) || len(types.AutoFixableFindings(findings).Items) != 0 {
 		t.Fatalf("findings = %#v, want only ask-user actions", findings.Items)
+	}
+}
+
+func TestBuildStepInvalidStructuredOutputParksInsteadOfPassing(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "missing findings", output: `{"summary":"build passed","tested":["npm run build"]}`},
+		{name: "items alias", output: `{"items":[],"summary":"build passed","tested":["npm run build"]}`},
+		{name: "missing summary", output: `{"findings":[],"tested":["npm run build"]}`},
+		{name: "missing tested", output: `{"findings":[],"summary":"build passed"}`},
+		{name: "missing severity", output: `{"findings":[{"description":"compile failed","action":"auto-fix"}],"summary":"build failed","tested":["npm run build"]}`},
+		{name: "missing description", output: `{"findings":[{"severity":"error","action":"auto-fix"}],"summary":"build failed","tested":["npm run build"]}`},
+		{name: "missing action", output: `{"findings":[{"severity":"error","description":"compile failed"}],"summary":"build failed","tested":["npm run build"]}`},
+		{name: "invalid severity", output: `{"findings":[{"severity":"critical","description":"compile failed","action":"auto-fix"}],"summary":"build failed","tested":["npm run build"]}`},
+		{name: "invalid action", output: `{"findings":[{"severity":"error","description":"compile failed","action":"retry"}],"summary":"build failed","tested":["npm run build"]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{
+				name: "builder",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: json.RawMessage(tt.output)}, nil
+				},
+			}
+			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&BuildStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome = %#v, want ask-user gate", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser || findings.Items[0].Description != "build agent returned an invalid structured result" {
+				t.Fatalf("findings = %#v, want invalid-result finding", findings.Items)
+			}
+		})
 	}
 }
 
@@ -194,6 +240,27 @@ func TestBuildStepConfiguredCommandRunsWithoutAgent(t *testing.T) {
 	}
 	if len(ag.calls) != 0 {
 		t.Fatalf("agent calls = %d, want 0", len(ag.calls))
+	}
+}
+
+func TestBuildStepConfiguredCommandRunsAfterPreparation(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ignoreTestDependencies(t, dir)
+	sctx := newPreparationTestContext(t, &mockAgent{name: "unused"}, dir, baseSHA, headSHA, config.Commands{
+		Prepare: preparationCommand(),
+		Build:   dependencyExistsCommand(),
+	})
+	sctx.Shared = &pipeline.RunShared{}
+
+	outcome, err := (&BuildStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("outcome = %#v, want successful prepared build", outcome)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".deps", "count")); err != nil {
+		t.Fatalf("prepared dependencies unavailable to build: %v", err)
 	}
 }
 

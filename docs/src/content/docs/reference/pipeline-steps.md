@@ -148,7 +148,7 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 
 ### Pipeline HEAD continuity
 
-At entry to every repository gate and every core step from Test through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
+At entry to every repository gate and every core step from Build through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
 
 ## Build
 
@@ -306,7 +306,7 @@ Stores the PR URL in the database and streams it to the TUI.
 Immediately after the existing `Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)` signature, no-mistakes writes one stable HTML comment:
 
 ```html
-<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"0123456789abcdef0123456789abcdef01234567","steps":[{"step":"build","status":"completed"},{"step":"review","status":"completed"}]} -->
+<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"0123456789abcdef0123456789abcdef01234567","steps":[{"step":"review","status":"completed"},{"step":"build","status":"completed"}]} -->
 ```
 
 The `v1` payload is compact JSON with these required fields:

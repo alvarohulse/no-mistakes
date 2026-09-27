@@ -3,7 +3,7 @@ title: Pipeline
 description: The ten steps that run on every gated push.
 ---
 
-The pipeline has a fixed, opinionated sequence of nine core steps. Their order is not configurable. What each core step runs is.
+The pipeline has a fixed, opinionated sequence of ten core steps. Their order is not configurable. What each core step runs is.
 
 ```
 intent → rebase → review → build → test → document → lint → push → pr → ci

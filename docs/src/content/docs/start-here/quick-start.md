@@ -123,8 +123,8 @@ The pipeline runs these steps in order:
 
 1. **Intent** - use agent-supplied intent when present, otherwise infer author intent from recent local agent transcripts
 2. **Rebase** - onto the latest upstream and pushed-branch target
-3. **Build** - build the change (configured command or agent-detected)
-4. **Review** - AI code review of your diff
+3. **Review** - AI code review of your diff
+4. **Build** - build the reviewed change (configured command or agent-detected)
 5. **Test** - baseline tests plus evidence checks when intent is known
 6. **Document** - updates docs and reports unresolved gaps
 7. **Lint** - your linters (configured command or agent-detected)

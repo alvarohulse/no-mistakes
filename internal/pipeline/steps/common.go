@@ -57,6 +57,23 @@ func unmarshalRequiredFindings(raw []byte, findings *Findings, requireNonEmptySu
 	return nil
 }
 
+func unmarshalRequiredBuildFindings(raw []byte, findings *Findings) error {
+	var payload struct {
+		Findings *[]json.RawMessage `json:"findings"`
+		Tested   *[]string          `json:"tested"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
+	}
+	if payload.Findings == nil {
+		return fmt.Errorf("missing findings array")
+	}
+	if payload.Tested == nil {
+		return fmt.Errorf("missing tested array")
+	}
+	return unmarshalRequiredFindings(raw, findings, false)
+}
+
 func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 	if err := unmarshalRequiredFindings(raw, findings, false); err != nil {
 		return err

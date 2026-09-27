@@ -34,6 +34,8 @@ func (s *BuildStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 	source := "configured build command"
 	if command == "" {
 		source = "agent-driven build"
+	} else if err := ensurePrepared(sctx, s.Name()); err != nil {
+		return nil, fmt.Errorf("prepare build dependencies: %w", err)
 	}
 	before, err := snapshotCleanBuildWorktree(sctx, source)
 	if err != nil {
@@ -184,7 +186,7 @@ Rules:
 	}
 
 	var findings Findings
-	if err := json.Unmarshal(result.Output, &findings); err != nil {
+	if err := unmarshalRequiredBuildFindings(result.Output, &findings); err != nil {
 		return buildEvidenceMissingOutcome("build agent returned an invalid structured result"), nil
 	}
 	if !hasExecutedBuildEvidence(findings.Tested) {
