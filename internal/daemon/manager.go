@@ -234,7 +234,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
 	}
-	repoCfg, err := config.LoadRepo(workDir)
+	repoCfg, err := config.LoadRepoForRecovery(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
@@ -252,10 +252,10 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	}
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, workDir, repo.DefaultBranch, trustedSHA); err != nil {
+	if err := assertGateTrustedConfigReadableForRecovery(ctx, workDir, repo.DefaultBranch, trustedSHA); err != nil {
 		return nil, err
 	}
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
+	trustedRepoCfg := loadTrustedRepoConfigForRecovery(ctx, workDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
@@ -735,6 +735,14 @@ func branchFromRef(ref string) string {
 // assertGateTrustedConfigReadable; returning nil here remains defensive and
 // ensures EffectiveRepoConfig never uses pushed gate-control fields.
 func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
+	return loadTrustedRepoConfigWith(ctx, wtDir, trustedSHA, runID, config.LoadRepoFromBytes)
+}
+
+func loadTrustedRepoConfigForRecovery(ctx context.Context, wtDir, trustedSHA, runID string) *config.RepoConfig {
+	return loadTrustedRepoConfigWith(ctx, wtDir, trustedSHA, runID, config.LoadRepoFromBytesForRecovery)
+}
+
+func loadTrustedRepoConfigWith(ctx context.Context, wtDir, trustedSHA, runID string, parse func([]byte) (*config.RepoConfig, error)) *config.RepoConfig {
 	if trustedSHA == "" {
 		// No trusted SHA means no freshly-fetched default-branch commit to
 		// read from. Return nil so EffectiveRepoConfig forces empty
@@ -751,7 +759,7 @@ func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string)
 		slog.Debug("trusted repo config: not present on default branch", "run_id", runID, "sha", trustedSHA, "error", err)
 		return nil
 	}
-	trusted, err := config.LoadRepoFromBytes([]byte(content))
+	trusted, err := parse([]byte(content))
 	if err != nil {
 		slog.Warn("trusted repo config: parse failed; commands/agent from pushed branch will be disabled", "run_id", runID, "sha", trustedSHA, "error", err)
 		return nil
@@ -776,6 +784,14 @@ func loadTrustedRepoConfig(ctx context.Context, wtDir, trustedSHA, runID string)
 //   - the pinned commit or tree is not readable (missing object / partial fetch),
 //   - the trusted .no-mistakes.yaml is present but unreadable or unparseable.
 func assertGateTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, trustedSHA string) error {
+	return assertGateTrustedConfigReadableWith(ctx, wtDir, defaultBranch, trustedSHA, config.LoadRepoFromBytes)
+}
+
+func assertGateTrustedConfigReadableForRecovery(ctx context.Context, wtDir, defaultBranch, trustedSHA string) error {
+	return assertGateTrustedConfigReadableWith(ctx, wtDir, defaultBranch, trustedSHA, config.LoadRepoFromBytesForRecovery)
+}
+
+func assertGateTrustedConfigReadableWith(ctx context.Context, wtDir, defaultBranch, trustedSHA string, parse func([]byte) (*config.RepoConfig, error)) error {
 	if defaultBranch == "" {
 		return fmt.Errorf("cannot evaluate disable_project_settings: repository has no known default branch to read trusted config from")
 	}
@@ -796,7 +812,7 @@ func assertGateTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, 
 	if err != nil {
 		return fmt.Errorf("cannot evaluate disable_project_settings: trusted .no-mistakes.yaml at %s is present but not readable: %w", trustedSHA, err)
 	}
-	if _, err := config.LoadRepoFromBytes([]byte(content)); err != nil {
+	if _, err := parse([]byte(content)); err != nil {
 		return fmt.Errorf("cannot evaluate disable_project_settings: trusted .no-mistakes.yaml at %s is present but unparseable: %w", trustedSHA, err)
 	}
 	return nil

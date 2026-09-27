@@ -37,6 +37,16 @@ gates:
     after: test
     command: "true"
 `
+	legacyBuildGateYAML = `auto_fix:
+  lint: 0
+  test: 0
+  review: 0
+disable_project_settings: true
+gates:
+  - name: build
+    after: review
+    command: "true"
+`
 )
 
 // gatePinFixture builds a daemon root whose repository's trusted default branch
@@ -227,7 +237,7 @@ func TestPrepareRecoveredRun_PreBuildRunWithBuildNamedGateRecovers(t *testing.T)
 		}
 	}
 	legacySteps := steps.WithCustomGates(legacyCore, pinned)
-	m, run, recorded := gatePinFixture(t, oneGateYAML, pinned, legacySteps)
+	m, run, recorded := gatePinFixture(t, legacyBuildGateYAML, pinned, legacySteps)
 
 	plan, err := m.prepareRecoveredRun(context.Background(), run)
 	if err != nil {
@@ -235,6 +245,12 @@ func TestPrepareRecoveredRun_PreBuildRunWithBuildNamedGateRecovers(t *testing.T)
 	}
 	if got := planStepNames(plan); !stepNamesEqual(got, recorded) {
 		t.Errorf("recovered step sequence = %v, want the historical sequence %v", got, recorded)
+	}
+	if len(plan.cfg.Gates) != 1 || plan.cfg.Gates[0].Name != "build" {
+		t.Errorf("recovered gates = %v, want the exact pinned build gate", plan.cfg.Gates)
+	}
+	if !plan.cfg.DisableProjectSettings {
+		t.Error("recovered config did not retain the trusted default branch's disable_project_settings")
 	}
 }
 

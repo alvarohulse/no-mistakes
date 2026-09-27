@@ -2411,6 +2411,16 @@ func parsePositiveDuration(name, value string) (time.Duration, error) {
 // LoadRepo reads per-repo config from dir/.no-mistakes.yaml.
 // Returns zero-value config if file doesn't exist.
 func LoadRepo(dir string) (*RepoConfig, error) {
+	return loadRepo(dir, parseRepoConfig)
+}
+
+// LoadRepoForRecovery accepts the one historical gate name that became a core
+// step after a run was recorded. New runs must continue to use LoadRepo.
+func LoadRepoForRecovery(dir string) (*RepoConfig, error) {
+	return loadRepo(dir, parseRepoConfigForRecovery)
+}
+
+func loadRepo(dir string, parse func([]byte) (*RepoConfig, error)) (*RepoConfig, error) {
 	cfg := &RepoConfig{}
 
 	path := filepath.Join(dir, ".no-mistakes.yaml")
@@ -2422,7 +2432,7 @@ func LoadRepo(dir string) (*RepoConfig, error) {
 		return nil, fmt.Errorf("read repo config: %w", err)
 	}
 
-	return parseRepoConfig(data)
+	return parse(data)
 }
 
 // LoadRepoFromBytes parses per-repo config from raw YAML bytes. It is the
@@ -2433,7 +2443,22 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 	return parseRepoConfig(data)
 }
 
+// LoadRepoFromBytesForRecovery is the trusted-config counterpart to
+// LoadRepoForRecovery. It preserves strict validation except for the legacy
+// build-named gate carried by runs recorded before Build became a core step.
+func LoadRepoFromBytesForRecovery(data []byte) (*RepoConfig, error) {
+	return parseRepoConfigForRecovery(data)
+}
+
 func parseRepoConfig(data []byte) (*RepoConfig, error) {
+	return parseRepoConfigAllowingLegacyBuild(data, false)
+}
+
+func parseRepoConfigForRecovery(data []byte) (*RepoConfig, error) {
+	return parseRepoConfigAllowingLegacyBuild(data, true)
+}
+
+func parseRepoConfigAllowingLegacyBuild(data []byte, allowLegacyBuild bool) (*RepoConfig, error) {
 	cfg := &RepoConfig{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
@@ -2457,7 +2482,7 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
-	if err := validateGates(cfg.Gates); err != nil {
+	if err := validateGatesAllowingLegacyBuild(cfg.Gates, allowLegacyBuild); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	if err := validateRebaseRaw(cfg.Rebase); err != nil {
