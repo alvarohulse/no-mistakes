@@ -175,6 +175,33 @@ func TestBuildStepAgentReportedFailureIsAutoFixable(t *testing.T) {
 	}
 }
 
+func TestBuildStepInformationalActionsRequireApproval(t *testing.T) {
+	for _, action := range []string{types.ActionAutoFix, types.ActionAskUser, types.ActionNoOp} {
+		t.Run(action, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{
+				name: "builder",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					output, err := json.Marshal(Findings{
+						Items:   []Finding{{Severity: "info", Description: "build observation", Action: action}},
+						Summary: "build result",
+						Tested:  []string{"npm run build"},
+					})
+					return &agent.Result{Output: output}, err
+				},
+			}
+			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			outcome, err := (&BuildStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome.NeedsApproval != (action != types.ActionNoOp) || outcome.AutoFixable != (action == types.ActionAutoFix) {
+				t.Fatalf("outcome = %#v, want approval for actionable findings and automatic repair only for auto-fix", outcome)
+			}
+		})
+	}
+}
+
 func TestBuildStepMissingExecutionEvidenceIsNotAutoFixable(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
